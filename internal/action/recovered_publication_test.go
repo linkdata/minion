@@ -37,6 +37,9 @@ func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, s
 		t.Fatal(err)
 	}
 	record := AcceptedResultRecord{Accepted: *accepted, Job: job, Result: result}
+	if job.Action == command.Fix && len(result.Changes) != 0 {
+		record.FixDestination = &FixDestination{RepositoryID: job.Identity.RepositoryID, DefaultBranch: "main", Visibility: "public", ForkID: 4, ForkFullName: "bot/r"}
+	}
 	if err := record.Validate(); err != nil {
 		t.Fatalf("invalid saved recovery fixture: %v", err)
 	}
@@ -413,5 +416,54 @@ func TestPublishRecoveredFixRejectsUnrecordedBranchSHA(t *testing.T) {
 	err := orchestrator.PublishRecovered(t.Context(), request)
 	if err == nil || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes != 0 {
 		t.Fatalf("foreign branch was reused: writes=%d error=%v", writes, err)
+	}
+}
+
+func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		defaultBranch string
+		forkID        int64
+	}{
+		{name: "default branch", defaultBranch: "release", forkID: 4},
+		{name: "fork identity", defaultBranch: "main", forkID: 5},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			job := testJob(command.Fix)
+			job.Identity.JobID = strings.Repeat("a", 64)
+			job.Identity.Repository = "o/r"
+			result := completedRecoveryResult(job)
+			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var writes int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet {
+					writes++
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+					_, _ = fmt.Fprint(w, `[]`)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+					_, _ = fmt.Fprintf(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":%q,"visibility":"public"}`, test.defaultBranch)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+					_, _ = fmt.Fprintf(w, `{"id":%d,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`, test.forkID)
+				case serveFixFlowFixture(t, w, r):
+				default:
+					t.Errorf("unexpected request after destination drift: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			t.Setenv("PATH", t.TempDir()) // A destination mismatch must stop before Git publication.
+			orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}}
+			err := orchestrator.PublishRecovered(t.Context(), request)
+			if err == nil || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes != 0 {
+				t.Fatalf("changed destination was used: writes=%d error=%v", writes, err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("destination drift lost accepted result: present=%t error=%v", present, err)
+			}
+		})
 	}
 }

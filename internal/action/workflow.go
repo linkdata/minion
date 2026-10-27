@@ -61,14 +61,17 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		}
 		checkpoints := newExecutionCheckpoints(e, prepared.job)
 		checkpoints.assignmentContext, checkpoints.assignmentRequest = ctx, prepared.request
+		if prepared.job.Action == command.Fix {
+			checkpoints.fixDestination = originalFixDestination(prepared.repository, prepared.fork)
+		}
 		result, err = executor.Execute(ctx, prepared.job, checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {
 			evidence := checkpoints.failureEvidence()
-			err = errors.Join(err, e.retainWorkerDiagnostics(prepared.job, result, err))
+			err = errors.Join(err, e.retentionForSavedResult(prepared.job, e.retainWorkerDiagnostics(prepared.job, result, err)))
 			e.logResult(prepared.job, evidence)
 			if len(evidence.Calls) != 0 {
-				err = errors.Join(err, e.retainReviewEvidence(prepared.job, evidence))
+				err = errors.Join(err, e.retentionForSavedResult(prepared.job, e.retainReviewEvidence(prepared.job, evidence)))
 			}
 			err = errors.Join(err, e.retainIncompleteAudit(prepared, result))
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {
@@ -241,10 +244,14 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 
 func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction, result Result) (publication, error) {
 	if err := e.retainWorkerDiagnostics(p.job, result, nil); err != nil {
-		return publication{}, err
+		return publication{}, e.retentionForSavedResult(p.job, err)
 	}
 	e.logResult(p.job, result)
 	if err := e.retainReviewEvidence(p.job, result); err != nil {
+		err = e.retentionForSavedResult(p.job, err)
+		if errors.Is(err, monitor.ErrPostModelPublication) && !errors.Is(err, monitor.ErrTerminalJob) {
+			return publication{}, err
+		}
 		return publication{}, errors.Join(err, e.retainIncompleteAudit(p, result))
 	}
 	if err := result.validate(p.job, true); err != nil {
@@ -274,13 +281,39 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return publication{}, ctxErr
 			}
-			return publication{}, fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
+			return publication{}, e.retentionForSavedResult(p.job, retainedRecordFailure("retain completed audit", err))
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return publication{}, err
 	}
 	return published, nil
+}
+
+// A post-model storage fault can replay publication only after the complete
+// accepted result has been durably saved for this action. Other attempts cannot
+// rerun paid work to recover a missing private record.
+func (e *Orchestrator) retentionForSavedResult(job Job, err error) error {
+	if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) {
+		return err
+	}
+	var saved bool
+	if e.Store != nil {
+		if inspectErr := e.Store.WithLock(func() error {
+			if accepted := e.Store.Data.Accepted; accepted != nil && jobMatchesAccepted(job, *accepted) {
+				var checkErr error
+				saved, checkErr = e.Store.HasAcceptedResult()
+				return checkErr
+			}
+			return nil
+		}); inspectErr != nil {
+			return errors.Join(err, fmt.Errorf("%w: inspect saved result after retention failure: %w", monitor.ErrAcceptanceState, inspectErr))
+		}
+	}
+	if !saved {
+		return errors.Join(err, monitor.ErrTerminalJob)
+	}
+	return err
 }
 
 func rejectConfiguredKeyPublication(published publication, changes []workspace.Change, keys ...string) error {

@@ -64,6 +64,7 @@ type executionCheckpoints struct {
 	assigned          bool
 	assignmentContext context.Context
 	assignmentRequest monitor.Job
+	fixDestination    *FixDestination
 }
 
 func newExecutionCheckpoints(owner *Orchestrator, job Job) *executionCheckpoints {

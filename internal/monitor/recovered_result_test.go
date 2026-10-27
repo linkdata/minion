@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/github"
@@ -17,6 +19,30 @@ type recoveredResultHandler struct {
 	publications int
 	execute      func(Job) error
 	publish      func(Job) error
+}
+
+// fakeGitHub counts these reads without locking; recovery and terminal controls run concurrently.
+type synchronizedRecoveryGitHub struct {
+	*fakeGitHub
+	mu sync.Mutex
+}
+
+func (g *synchronizedRecoveryGitHub) Repository(ctx context.Context, name string) (github.Repository, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fakeGitHub.Repository(ctx, name)
+}
+
+func (g *synchronizedRecoveryGitHub) CurrentItem(ctx context.Context, item github.Item) (github.Item, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fakeGitHub.CurrentItem(ctx, item)
+}
+
+func (g *synchronizedRecoveryGitHub) Permission(ctx context.Context, repo, login string) (github.Permission, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fakeGitHub.Permission(ctx, repo, login)
 }
 
 func (h *recoveredResultHandler) Execute(_ context.Context, job Job) error {
@@ -216,6 +242,141 @@ func TestStoredResultRecoveryPublishesAfterAcceptedDeadline(t *testing.T) {
 	if present, err := reopened.HasAcceptedResult(); err != nil || present {
 		t.Fatalf("completed result kept receipt: present=%t err=%v", present, err)
 	}
+}
+
+func TestStoredResultRecoveryServicesInvitationWhileRecoveryIsHeld(t *testing.T) {
+	for _, phase := range []string{"validation", "publication"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, monitor := storedRecoveryFixtureAt(t, now)
+				monitor.Now = time.Now
+				store.Data.NextInviteCheckAt = now.Add(time.Minute)
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				checked := make(chan struct{}, 1)
+				gh.beforeList = func() { checked <- struct{}{} }
+				entered, release := make(chan struct{}, 1), make(chan struct{})
+				released := false
+				defer func() {
+					if !released {
+						close(release)
+					}
+				}()
+				handler := &recoveredResultHandler{}
+				if phase == "validation" {
+					gh.beforeRepository = func() {
+						entered <- struct{}{}
+						<-release
+					}
+				} else {
+					handler.publish = func(Job) error {
+						entered <- struct{}{}
+						<-release
+						return nil
+					}
+				}
+				monitor.Handler = handler
+				finished := make(chan error, 1)
+				go func() { _, err := monitor.RunOnce(t.Context(), store); finished <- err }()
+				select {
+				case <-entered:
+				case err := <-finished:
+					t.Fatalf("%s did not start: %v", phase, err)
+				}
+				time.Sleep(time.Minute)
+				synctest.Wait()
+				select {
+				case <-checked:
+				default:
+					t.Fatalf("due invitation was not checked during held %s", phase)
+				}
+				select {
+				case err := <-finished:
+					t.Fatalf("held %s returned before release: %v", phase, err)
+				default:
+				}
+				close(release)
+				released = true
+				if err := <-finished; err != nil || handler.executions != 0 || handler.publications != 1 ||
+					store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+					t.Fatalf("held %s did not finish: err=%v handler=%+v state=%+v", phase, err, handler, store.Data)
+				}
+			})
+		})
+	}
+}
+
+func TestStoredResultRecoveryServicesTerminalReplyWhilePublicationIsHeld(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, monitor := storedRecoveryFixtureAt(t, now)
+		monitor.Now = time.Now
+		sibling := selectedItem(now.Add(-time.Second))
+		sibling.Key, sibling.NodeID = "comment:2", "node:2"
+		sibling.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-2"
+		notice := testNotification(sibling.UpdatedAt)
+		key := notificationKey(notice)
+		store.Data.PendingNotifications[key] = state.PendingNotification{
+			Repository: notice.Repository.FullName, RepositoryID: accepted.RepositoryID, OwnerID: accepted.OwnerID,
+			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL, Since: now.Add(-time.Minute), UpdatedAt: notice.UpdatedAt,
+		}
+		store.Data.JobFailures[jobID(sibling.Key, "review")] = state.JobFailure{
+			Attempts: 1, AcceptedAt: now.Add(-time.Minute), Deadline: now.Add(time.Minute), NotificationKey: key,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.items = []github.Item{sibling}
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == sibling.Key {
+				return sibling, nil
+			}
+			return selectedItem(now), nil
+		}
+		monitor.GitHub = &synchronizedRecoveryGitHub{fakeGitHub: gh}
+		commented := make(chan struct{}, 1)
+		gh.beforeComment = func() { commented <- struct{}{} }
+		entered, release := make(chan struct{}, 1), make(chan struct{})
+		released := false
+		defer func() {
+			if !released {
+				close(release)
+			}
+		}()
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			entered <- struct{}{}
+			<-release
+			return nil
+		}}
+		monitor.Handler = handler
+		finished := make(chan error, 1)
+		go func() { _, err := monitor.RunOnce(t.Context(), store); finished <- err }()
+		select {
+		case <-entered:
+		case err := <-finished:
+			t.Fatalf("publication did not start: %v", err)
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		select {
+		case <-commented:
+		default:
+			t.Fatal("due terminal reply was not posted during held publication")
+		}
+		select {
+		case err := <-finished:
+			t.Fatalf("held publication returned before release: %v", err)
+		default:
+		}
+		close(release)
+		released = true
+		if err := <-finished; err != nil || handler.executions != 0 || handler.publications != 1 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 1 {
+			t.Fatalf("terminal reply or publication failed: err=%v handler=%+v state=%+v comments=%v", err, handler, store.Data, gh.comments)
+		}
+	})
 }
 
 func TestStoredResultRecoveryRetriesPublicationWithoutExecution(t *testing.T) {

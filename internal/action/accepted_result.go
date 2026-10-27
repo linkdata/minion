@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 // AcceptedResultMaxBytes bounds the original Job and complete Result plus
@@ -21,9 +23,39 @@ const acceptedResultMetadataBytes = 1<<20 - 4096
 // AcceptedResultRecord retains the complete supplied input and validated output
 // for publication after a process restart. Accepted is the save-time identity.
 type AcceptedResultRecord struct {
-	Accepted state.AcceptedAction `json:"accepted"`
-	Job      Job                  `json:"job"`
-	Result   Result               `json:"result"`
+	Accepted       state.AcceptedAction `json:"accepted"`
+	Job            Job                  `json:"job"`
+	Result         Result               `json:"result"`
+	FixDestination *FixDestination      `json:"fix_destination,omitempty"`
+}
+
+// FixDestination pins only the GitHub facts used to approve a fix push.
+type FixDestination struct {
+	RepositoryID  int64  `json:"repository_id"`
+	DefaultBranch string `json:"default_branch"`
+	Private       bool   `json:"private"`
+	Visibility    string `json:"visibility"`
+	ForkID        int64  `json:"fork_id"`
+	ForkFullName  string `json:"fork_full_name"`
+}
+
+func originalFixDestination(repository, fork github.Repository) *FixDestination {
+	return &FixDestination{
+		RepositoryID: repository.ID, DefaultBranch: repository.DefaultBranch,
+		Private: repository.Private, Visibility: repository.Visibility,
+		ForkID: fork.ID, ForkFullName: fork.FullName,
+	}
+}
+
+func (d *FixDestination) valid(accepted state.AcceptedAction) bool {
+	return d != nil && d.RepositoryID == accepted.RepositoryID && d.RepositoryID > 0 &&
+		d.DefaultBranch != "" && d.Visibility != "" && d.ForkID > 0 && workspace.ValidRepository(d.ForkFullName)
+}
+
+func (d *FixDestination) matches(repository, fork github.Repository) bool {
+	return d != nil && d.RepositoryID == repository.ID && d.DefaultBranch == repository.DefaultBranch &&
+		d.Private == repository.Private && d.Visibility == repository.Visibility &&
+		d.ForkID == fork.ID && strings.EqualFold(d.ForkFullName, fork.FullName)
 }
 
 // MatchesAccepted compares immutable selected-action facts. Scheduler flags
@@ -51,6 +83,13 @@ func (r AcceptedResultRecord) Validate() error {
 	}
 	if err := r.Result.Validate(r.Job); err != nil {
 		return err
+	}
+	if r.Job.Action == command.Fix && len(r.Result.Changes) != 0 {
+		if !r.FixDestination.valid(r.Accepted) {
+			return errors.New("changed fix result has no valid original destination")
+		}
+	} else if r.FixDestination != nil {
+		return errors.New("fix destination is present without changed fix result")
 	}
 	return httpResultShape(r.Result)
 }
@@ -138,6 +177,9 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 		return err
 	}
 	record := AcceptedResultRecord{Accepted: accepted, Job: c.job, Result: result}
+	if c.job.Action == command.Fix && len(result.Changes) != 0 {
+		record.FixDestination = c.fixDestination
+	}
 	if err := record.Validate(); err != nil {
 		return c.fail(fmt.Errorf("%w: accepted result record: %w", monitor.ErrTerminalJob, err))
 	}

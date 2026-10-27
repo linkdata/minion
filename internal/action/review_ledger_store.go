@@ -3,13 +3,11 @@ package action
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"slices"
 
-	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -35,7 +33,7 @@ func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
 		return nil
 	}
 	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger, e.Runner.secretValues()...); err != nil {
-		return fmt.Errorf("%w: retain private review evidence: %w", monitor.ErrTerminalJob, err)
+		return retainedRecordFailure("retain private review evidence", err)
 	}
 	return nil
 }

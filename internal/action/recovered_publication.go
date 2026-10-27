@@ -65,10 +65,10 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	if p.job.Action != command.Fix {
 		return e.publish(ctx, p, record.Result)
 	}
-	return e.publishRecoveredFix(ctx, p, record.Result)
+	return e.publishRecoveredFix(ctx, p, record.Result, record.FixDestination)
 }
 
-func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedAction, result Result) error {
+func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedAction, result Result, original *FixDestination) error {
 	request := p.request
 	if len(request.ID) < 12 {
 		return fmt.Errorf("%w: fix job has an invalid ID", monitor.ErrAcceptanceState)
@@ -84,6 +84,9 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 	p.repository, p.fork, err = e.fixFork(ctx, request.Repository)
 	if err != nil {
 		return err
+	}
+	if !original.matches(p.repository, p.fork) {
+		return errors.New("fix destination changed since accepted result; refusing to publish")
 	}
 	p.branch = fmt.Sprintf("minion/fix-%d-%s", request.Number, request.ID[:12])
 	p.existing, err = e.GitHub.FindPullRequestByHead(ctx, p.repository.FullName, p.repository.DefaultBranch, e.BotLogin+":"+p.branch)

@@ -1524,27 +1524,37 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 	if !ok {
 		return fmt.Errorf("%w: stored result publisher is unavailable", ErrAcceptanceState)
 	}
-	repo, current, valid, err := m.validateAcceptedSource(ctx, accepted, false)
-	if err != nil {
-		return fmt.Errorf("revalidate saved result source: %w", err)
-	}
-	if !valid {
-		m.logf("discard accepted %s: source or requester is no longer valid before publication", itemLocation(job.Source))
-		if err := discardAccepted(store); err != nil {
-			return err
-		}
-		return ErrAcceptedDiscarded
-	}
-	job.Repository, job.Source = repo, current
-	job.Source.HTMLURL = accepted.SourceURL
-	job.Source.UpdatedAt = accepted.SourceUpdatedAt // Publication markers use the original command timestamp.
-	if err := publisher.PublishRecovered(ctx, job); err != nil {
-		if errors.Is(err, ErrAcceptanceState) {
-			return err
-		}
-		return m.completeSelected(ctx, store, job, m.now().UTC(), fmt.Errorf("publish stored result: %w", err))
-	}
-	return m.completeSelected(ctx, store, job, m.now().UTC(), nil)
+	// Invitation handling may append repositories while the remote validation runs.
+	validator := *m
+	validator.Config.Repositories = slices.Clone(m.Config.Repositories)
+	invalidSource := errors.New("saved result source is no longer valid")
+	m.logf("recover publication of %s from %s", job.Command.Action, itemLocation(job.Source))
+	return m.runSelectedWithControls(ctx, store, job, "", nil,
+		func(runCtx context.Context, job Job) error {
+			repo, current, valid, err := validator.validateAcceptedSource(runCtx, accepted, false)
+			if err != nil {
+				return fmt.Errorf("revalidate saved result source: %w", err)
+			}
+			if !valid {
+				return invalidSource
+			}
+			job.Repository, job.Source = repo, current
+			job.Source.HTMLURL = accepted.SourceURL
+			job.Source.UpdatedAt = accepted.SourceUpdatedAt // Publication markers use the original command timestamp.
+			return publisher.PublishRecovered(runCtx, job)
+		}, func(err error) error {
+			if errors.Is(err, invalidSource) {
+				m.logf("discard accepted %s: source or requester is no longer valid before publication", itemLocation(job.Source))
+				if err := discardAccepted(store); err != nil {
+					return err
+				}
+				return ErrAcceptedDiscarded
+			}
+			if err != nil && !errors.Is(err, ErrAcceptanceState) {
+				err = fmt.Errorf("recover saved result: %w", err)
+			}
+			return m.completeSelected(ctx, store, job, m.now().UTC(), err)
+		})
 }
 
 func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job Job, at time.Time) error {
@@ -1555,6 +1565,13 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 // No other action is discovered or assigned until this execution has finished.
 func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.Store, job Job, at time.Time,
 	cachedKey string, cachedItems []github.Item) error {
+	m.logf("run %s from @%s in %s #%d", job.Command.Action, job.Source.Author.Login, job.Repository.Name, job.Number)
+	return m.runSelectedWithControls(ctx, store, job, cachedKey, cachedItems, m.Handler.Execute,
+		func(err error) error { return m.completeSelected(ctx, store, job, at, err) })
+}
+
+func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Store, job Job,
+	cachedKey string, cachedItems []github.Item, run func(context.Context, Job) error, finish func(error) error) error {
 	checks, _ := terminalControlChecks(store, job.ID)
 	terminalChecks := make(map[string]time.Time, len(checks))
 	for key, check := range checks {
@@ -1569,13 +1586,11 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 	actionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan error, 1)
-	m.logf("run %s from @%s in %s #%d", job.Command.Action, job.Source.Author.Login, job.Repository.Name, job.Number)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() { done <- result }()
-		result = m.Handler.Execute(actionCtx, job)
+		result = run(actionCtx, job)
 	}()
-	finish := func(err error) error { return m.completeSelected(ctx, store, job, at, err) }
 	var result error
 	completed := false
 	readDone := func() {

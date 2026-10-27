@@ -43,7 +43,7 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 	}
 	root, err := privateRecordsDir(e.WorkRoot, "worker-diagnostics")
 	if err != nil {
-		return fmt.Errorf("%w: prepare private worker diagnostics: %w", monitor.ErrTerminalJob, err)
+		return retainedRecordFailure("prepare private worker diagnostics", err)
 	}
 	record := retainedWorkerDiagnostics{Identity: job.Identity, SourceRef: job.Source.Head, WorkerReportedDiagnostics: diagnostics}
 	if failure != nil {
@@ -59,14 +59,14 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 	path := filepath.Join(root, job.Identity.AttemptID+".json")
 	previous, err := workspace.ReadRegular(path, workspace.MaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%w: read private worker diagnostics: %w", monitor.ErrTerminalJob, err)
+		return retainedRecordFailure("read private worker diagnostics", err)
 	}
 	if err == nil {
 		if !bytes.Equal(previous, data) {
 			return fmt.Errorf("%w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob)
 		}
 	} else if err := workspace.WriteAtomic(path, data, filepath.Dir(root)); err != nil {
-		return fmt.Errorf("%w: save private worker diagnostics: %w", monitor.ErrTerminalJob, err)
+		return retainedRecordFailure("save private worker diagnostics", err)
 	}
 	id := job.Identity
 	e.logf("action worker diagnostics job=%s attempt=%s executor=%s count=%d worker_reported_failure=%t private_path=%q cleanup_unverified=%t", id.JobID, id.AttemptID, id.ExecutorID, len(diagnostics), failure != nil, path, cleanupUnverified)

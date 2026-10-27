@@ -17,11 +17,36 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestChangedFixResultRequiresOriginalDestination(t *testing.T) {
+	job := testJob(command.Fix)
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("changed\n")}}
+	accepted := acceptedForJob(job)
+	accepted.Assigned = true
+	record := AcceptedResultRecord{Accepted: *accepted, Job: job, Result: result}
+	if err := record.Validate(); err == nil {
+		t.Fatal("changed fix result accepted without original destination")
+	}
+	record.FixDestination = &FixDestination{RepositoryID: accepted.RepositoryID, DefaultBranch: "main", Visibility: "public", ForkID: 4, ForkFullName: "bot/repo"}
+	if err := record.Validate(); err != nil {
+		t.Fatalf("valid original destination: %v", err)
+	}
+	record.FixDestination.RepositoryID++
+	if err := record.Validate(); err == nil {
+		t.Fatal("original destination accepted with wrong repository ID")
+	}
+}
+
 func selectedHTTPResultFixture(t *testing.T, wrap func(http.Handler) http.Handler) (*httpServerTest, *state.Store, string) {
+	return selectedHTTPResultFixtureForJob(t, testJob(command.Comment), wrap)
+}
+
+func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handler) http.Handler) (*httpServerTest, *state.Store, string) {
 	t.Helper()
-	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	f := newExecutionAdapterFixture(t, job)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, time.Now())
 	if err != nil {
@@ -53,6 +78,19 @@ func selectedHTTPResultFixture(t *testing.T, wrap func(http.Handler) http.Handle
 		t.Fatalf("selected HTTP fixture request differs from accepted action: request=%+v accepted=%+v", f.sink.assignmentRequest, store.Data.Accepted)
 	}
 	return httpFixture, store, path
+}
+
+func TestSelectedFixOutcomePersistsOriginalDestination(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixtureForJob(t, testJob(command.Fix), nil)
+	original := &FixDestination{RepositoryID: f.job.Identity.RepositoryID, DefaultBranch: "main", Visibility: "public", ForkID: 4, ForkFullName: "bot/repo"}
+	f.tx.sink.(*executionCheckpoints).fixDestination = original
+	outcome := completeHTTPResult(t, f)
+	outcome.Result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("changed\n")}}
+	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	record, err := readSavedResult(store)
+	if err != nil || !reflect.DeepEqual(record.FixDestination, original) {
+		t.Fatalf("saved fix destination differs: got=%+v want=%+v error=%v", record.FixDestination, original, err)
+	}
 }
 
 func completeHTTPResult(t *testing.T, f *httpServerTest) httpOutcome {
