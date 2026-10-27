@@ -35,10 +35,11 @@ type HTTPExecutor struct {
 }
 
 type httpTransaction struct {
-	mu          sync.Mutex
-	mutation    sync.Mutex
-	observation sync.Mutex
-	handlers    sync.WaitGroup
+	mu           sync.Mutex
+	mutation     sync.Mutex
+	observation  sync.Mutex
+	handlers     sync.WaitGroup
+	requiredACKs sync.WaitGroup
 
 	job            Job
 	credentials    WorkerCredentials
@@ -736,6 +737,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					if !hasReceiver {
 						return fmt.Errorf("%w: selected HTTP outcome receiver is missing", monitor.ErrAcceptanceState)
 					}
+					// Earlier callbacks release mutation ownership before their ACK writes.
+					// Their delivery must be known before a complete result is saved.
+					tx.requiredACKs.Wait()
 					tx.mu.Lock()
 					prior := errors.Join(tx.checkpointErr, tx.requiredControlErr)
 					tx.mu.Unlock()
@@ -805,6 +809,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		tx.phaseCeiling = max(tx.phaseCeiling, phaseProof)
 		tx.uploadReady = tx.uploadReady || allowUpload
 		tx.mu.Unlock()
+	}
+	if kind != "outcome" {
+		// Add while mutation is held, before a later outcome can begin waiting.
+		tx.requiredACKs.Add(1)
+		defer tx.requiredACKs.Done()
 	}
 	// Release mutation ownership before ACK bytes can let a sequential client send its next request.
 	tx.mutation.Unlock()

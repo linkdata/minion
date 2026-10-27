@@ -262,6 +262,12 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 	}
 	if p.job.Action == command.SecurityAudit {
 		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
+			if errors.Is(err, errAuditPublicationUnavailable) {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return publication{}, errors.Join(ctxErr, e.retainIncompleteAudit(p, result))
+				}
+				return publication{}, fmt.Errorf("%w: audit validation unavailable: %w", monitor.ErrPostModelPublication, err)
+			}
 			return publication{}, errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 		}
 		if err := e.retainAudit(ctx, p, published.artifacts, true); err != nil {
