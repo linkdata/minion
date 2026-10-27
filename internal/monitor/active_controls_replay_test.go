@@ -539,11 +539,16 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 				missingID, fixID := jobID(missing.Key, missingCommand), jobID(fix.Key, "fix")
 				store := openState(t, now.Add(-5*time.Minute))
 				for _, notice := range []github.Notification{missingNotice, fixNotice} {
-					store.Data.PendingNotifications[notificationKey(notice)] = state.PendingNotification{
+					key := notificationKey(notice)
+					pending := state.PendingNotification{
 						Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
 						SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
 						Since: now.Add(-4 * time.Minute), UpdatedAt: notice.UpdatedAt,
 					}
+					if key == missingKey {
+						pending.RetryAt = now.Add(time.Second)
+					}
+					store.Data.PendingNotifications[key] = pending
 				}
 				store.Data.JobFailures[missingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: missingKey}
 				store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: fixKey}
@@ -572,6 +577,9 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 							fixFetches.Add(1)
 							return []github.Item{fix}, nil
 						case 8:
+							if missingFetches.Load() != 0 || !store.Data.Processed[missingID].IsZero() {
+								t.Errorf("missing source was handled before selected Execute")
+							}
 							return []github.Item{selected}, nil
 						default:
 							return nil, fmt.Errorf("unexpected thread #%d", number)
@@ -898,7 +906,7 @@ func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
 			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
 			Since: now.Add(-time.Minute), UpdatedAt: notice.UpdatedAt, RetryAt: now.Add(time.Minute),
 		}
-		store.Data.JobFailures[terminalID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: key}
+		store.Data.JobFailures[terminalID] = state.JobFailure{Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key}
 		store.Data.NextInviteCheckAt = now.Add(time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -947,6 +955,9 @@ func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
 			t.Fatalf("RunOnce returned before Execute: %v", err)
 		}
 		synctest.Wait()
+		if len(gh.comments) != 0 {
+			t.Fatalf("terminal reply posted before its retry time: %v", gh.comments)
+		}
 		clock = now.Add(time.Minute)
 		close(release)
 		released = true
