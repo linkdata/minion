@@ -487,6 +487,15 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				jobFailure.Attempts++
 				store.Data.JobFailures[job.ID] = jobFailure
 				store.Data.Accepted = accepted
+				for _, unaccepted := range scans[scanIndex:] {
+					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
+						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
+						pending.UpdatedAt = unaccepted.notification.UpdatedAt
+						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
+						store.Data.PendingNotifications[unaccepted.key] = pending
+					}
+					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
+				}
 				if err := saveAcceptanceState(store); err != nil {
 					return stop(err)
 				}
@@ -538,18 +547,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 			}
 			if selected {
-				for _, unaccepted := range scans[scanIndex:] {
-					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
-						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
-						pending.UpdatedAt = unaccepted.notification.UpdatedAt
-						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
-						store.Data.PendingNotifications[unaccepted.key] = pending
-					}
-					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
-				}
-				if err := saveAcceptanceState(store); err != nil {
-					return stop(err)
-				}
 				if err := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items); err != nil {
 					if errors.Is(err, ErrAcceptedDiscarded) {
 						return stop() // The refused assignment retired this worker.
@@ -1009,12 +1006,7 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 			return config.Repository{}, github.Item{}, false, fmt.Errorf("selected command %q is unavailable", accepted.CommandName)
 		}
 	} else {
-		commands = make(map[string]command.Action, len(repo.Actions))
-		for _, name := range repo.Actions {
-			if mapping, ok := m.Config.Commands[name]; ok {
-				commands[name] = command.Action(mapping.Action)
-			}
-		}
+		commands = m.controlCommands(repo)
 	}
 	liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -1235,9 +1227,24 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 // No other action is discovered or assigned until this execution has finished.
 func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.Store, job Job, at time.Time,
 	cachedKey string, cachedItems []github.Item) error {
-	commandSets := make(map[string]map[string]command.Action, len(m.Config.Repositories))
-	for _, configured := range m.Config.Repositories {
-		commandSets[configured.Name] = m.controlCommands(configured)
+	var terminalControls bool
+	_ = store.WithLock(func() error {
+		for id, failure := range store.Data.JobFailures {
+			if id == job.ID || !store.Data.Processed[id].IsZero() {
+				continue
+			}
+			if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero() {
+				terminalControls = true
+				break
+			}
+		}
+		return nil
+	})
+	commandSets := make(map[string]map[string]command.Action)
+	if terminalControls {
+		for _, configured := range m.Config.Repositories {
+			commandSets[configured.Name] = m.controlCommands(configured)
+		}
 	}
 	actionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1271,6 +1278,9 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 		var due []notificationScan
 		_ = store.WithLock(func() error {
 			next = store.Data.NextInviteCheckAt
+			if !terminalControls {
+				return nil
+			}
 			for key, pending := range store.Data.PendingNotifications {
 				checkAt := pending.RetryAt
 				if previous, checked := nextCheck[key]; checked {
@@ -1310,6 +1320,9 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 			nextCheck[entry.key] = checkAt
 			if !checkAt.IsZero() && (next.IsZero() || checkAt.Before(next)) {
 				next = checkAt
+			}
+			if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+				return abort(err)
 			}
 		}
 		if err := ctx.Err(); err != nil {

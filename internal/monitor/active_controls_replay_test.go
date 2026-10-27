@@ -70,8 +70,8 @@ func TestSelectedCancellationReplaysFetchedThreadsWithoutNotifications(t *testin
 			t.Fatalf("RunOnce returned before Execute: %v", err)
 		}
 		synctest.Wait()
-		if fetched[7] == 0 || fetched[8] == 0 || held.executions.Load() != 1 {
-			t.Fatalf("threads were not fetched while Execute was blocked: fetched=%v executions=%d", fetched, held.executions.Load())
+		if fetched[7] != 1 || fetched[8] != 0 || held.executions.Load() != 1 {
+			t.Fatalf("unaccepted thread was fetched while Execute was blocked: fetched=%v executions=%d", fetched, held.executions.Load())
 		}
 		bytes, err := os.ReadFile(path)
 		if err != nil {
@@ -127,6 +127,9 @@ func TestSelectedCancellationReplaysFetchedThreadsWithoutNotifications(t *testin
 		}
 		if !slices.Equal(got, want) || len(reopened.Data.PendingNotifications) != 0 {
 			t.Fatalf("unaccepted commands did not replay once: jobs=%v want=%v pending=%+v", got, want, reopened.Data.PendingNotifications)
+		}
+		if fetched[8] == 0 {
+			t.Fatal("later thread was not fetched on replay")
 		}
 		for _, id := range want {
 			if reopened.Data.Processed[id].IsZero() {
@@ -400,6 +403,153 @@ func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
 			len(gh.reactions) != 1 || gh.reactions[0] != selected.NodeID {
 			t.Fatalf("terminal fix was dispatched or missed: comments=%v processed=%v executions=%d accepted=%+v reactions=%v",
 				gh.comments, store.Data.Processed[fixID], held.executions.Load(), store.Data.Accepted, gh.reactions)
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}
+
+func TestSelectedReactionRecoveryServicesTerminalSibling(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		sibling := selectedItem(now.Add(-time.Second))
+		sibling.Key, sibling.NodeID = "comment:2", "node:2"
+		sibling.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-2"
+		siblingID := jobID(sibling.Key, "review")
+		initial := now.Add(-time.Minute)
+		path := filepath.Join(t.TempDir(), "state.json")
+		store := openStateAt(t, path, initial)
+		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		reactionErr := errors.New("reaction unavailable")
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+			items:         []github.Item{selected, sibling},
+			permission:    github.Permission{Permission: "write"},
+			reactionErr:   reactionErr,
+			currentItem: func(seed github.Item) (github.Item, error) {
+				switch seed.Key {
+				case selected.Key:
+					return selected, nil
+				case sibling.Key:
+					return sibling, nil
+				default:
+					return github.Item{}, fmt.Errorf("unexpected source %q", seed.Key)
+				}
+			},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) {
+			t.Fatalf("first run did not fail after acceptance: %v", err)
+		}
+		accepted := store.Data.Accepted
+		if accepted == nil || accepted.JobID != jobID(selected.Key, "review") || held.executions.Load() != 0 ||
+			len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[notificationKey(gh.notifications[0])].SubjectURL != gh.notifications[0].Subject.URL {
+			t.Fatalf("reaction failure lost accepted action or sibling thread: accepted=%+v pending=%+v executions=%d",
+				accepted, store.Data.PendingNotifications, held.executions.Load())
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened := openStateAt(t, path, initial)
+		gh.reactionErr = nil
+		gh.notifications = nil
+		time.Sleep(time.Minute + time.Second)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, reopened); result <- err }()
+		select {
+		case job := <-held.entered:
+			if job.ID != accepted.JobID || job.AttemptID != accepted.AttemptID {
+				t.Fatalf("recovery replaced accepted action: job=%+v accepted=%+v", job, accepted)
+			}
+		case err := <-result:
+			t.Fatalf("recovery returned before Execute: %v", err)
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+siblingID+" -->") ||
+			reopened.Data.Processed[siblingID].IsZero() || held.executions.Load() != 1 ||
+			reopened.Data.Accepted == nil || reopened.Data.Accepted.AttemptID != accepted.AttemptID || len(gh.notificationCalls) != 1 {
+			t.Fatalf("recovered Execute missed terminal sibling: comments=%v processed=%v accepted=%+v executions=%d polls=%d",
+				gh.comments, reopened.Data.Processed[siblingID], reopened.Data.Accepted, held.executions.Load(), len(gh.notificationCalls))
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("recovery returned while Execute was blocked: %v", err)
+		default:
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("recovery after cancellation: %v", err)
+		}
+	})
+}
+
+func TestSelectedActionSkipsIrrelevantPendingBacklogWhileCheckingInvitations(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		store := openState(t, now.Add(-time.Minute))
+		for number := 100; number < 164; number++ {
+			notice := testNotification(now.Add(-time.Second))
+			notice.Subject.URL = fmt.Sprintf("https://api.github.com/repos/example-owner/example-repo/pulls/%d", number)
+			store.Data.PendingNotifications[notificationKey(notice)] = state.PendingNotification{
+				Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+				SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+				Since: now.Add(-time.Minute), UpdatedAt: notice.UpdatedAt,
+			}
+		}
+		store.Data.NextInviteCheckAt = now.Add(time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+			items:         []github.Item{selected},
+			permission:    github.Permission{Permission: "write"},
+			invitations: []github.Invitation{{ID: 41, Repository: github.Repository{
+				FullName: "example-owner/example-repo", ID: 1,
+				Owner: github.User{Login: "example-owner", ID: 2},
+			}, Permissions: "write"}},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if gh.repoChecks != 1 || gh.threadCalls != 1 || !slices.Equal(gh.accepted, []int64{41}) ||
+			held.executions.Load() != 1 || store.Data.Accepted == nil || len(store.Data.PendingNotifications) != 65 {
+			t.Fatalf("irrelevant backlog caused sweeps or blocked invitation: repository calls=%d thread calls=%d invitations=%v executions=%d accepted=%+v pending=%d",
+				gh.repoChecks, gh.threadCalls, gh.accepted, held.executions.Load(), store.Data.Accepted, len(store.Data.PendingNotifications))
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("RunOnce returned while Execute was blocked: %v", err)
+		default:
 		}
 		cancel()
 		synctest.Wait()
