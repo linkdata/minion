@@ -728,6 +728,30 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
+			// A successful outcome is acknowledged only after its optional parent
+			// receiver has validated and saved the complete selected attempt.
+			if !failedOutcome {
+				receiver, hasReceiver := tx.sink.(interface{ ReceiveCompletedResult(Result) error })
+				if selected, ok := tx.sink.(assignmentCheckpoint); ok && selected.AssignmentRequired() {
+					if !hasReceiver {
+						return fmt.Errorf("%w: selected HTTP outcome receiver is missing", monitor.ErrAcceptanceState)
+					}
+					tx.mu.Lock()
+					prior := errors.Join(tx.checkpointErr, tx.requiredControlErr)
+					tx.mu.Unlock()
+					if sequenceGap || prior != nil {
+						return errors.Join(monitor.ErrAcceptanceState, prior)
+					}
+					if err := httpExecutionContextError(tx.budget); err != nil {
+						return err
+					}
+				}
+				if hasReceiver {
+					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
+						return err
+					}
+				}
+			}
 			tx.mu.Lock()
 			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr)
 			for _, diagnostic := range outcome.Result.Diagnostics {

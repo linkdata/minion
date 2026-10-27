@@ -210,35 +210,8 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		}
 		return nil
 	}
-	if err := e.retainWorkerDiagnostics(p.job, result, nil); err != nil {
-		return err
-	}
-	e.logResult(p.job, result)
-	if err := e.retainReviewEvidence(p.job, result); err != nil {
-		return errors.Join(err, e.retainIncompleteAudit(p, result))
-	}
-	if err := result.validate(p.job, true); err != nil {
-		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
-	}
-	published, err := projectPublication(p.job, result)
+	published, err := e.preparePublication(ctx, p, result)
 	if err != nil {
-		return errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
-	}
-	if err := rejectConfiguredKeyPublication(published, result.Changes, e.Runner.secretValues()...); err != nil {
-		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
-	}
-	if err := rejectPublishedRefutations(p.job, result, published); err != nil {
-		return errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
-	}
-	if p.job.Action == command.SecurityAudit {
-		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
-			return errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
-		}
-		if err := e.retainAudit(p, published.artifacts, true); err != nil {
-			return fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
-		}
-	}
-	if err := ctx.Err(); err != nil {
 		return err
 	}
 	request := p.request
@@ -262,6 +235,41 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
 	}
 	return nil
+}
+
+func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction, result Result) (publication, error) {
+	if err := e.retainWorkerDiagnostics(p.job, result, nil); err != nil {
+		return publication{}, err
+	}
+	e.logResult(p.job, result)
+	if err := e.retainReviewEvidence(p.job, result); err != nil {
+		return publication{}, errors.Join(err, e.retainIncompleteAudit(p, result))
+	}
+	if err := result.validate(p.job, true); err != nil {
+		return publication{}, errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
+	published, err := projectPublication(p.job, result)
+	if err != nil {
+		return publication{}, errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
+	if err := rejectConfiguredKeyPublication(published, result.Changes, e.Runner.secretValues()...); err != nil {
+		return publication{}, errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
+	if err := rejectPublishedRefutations(p.job, result, published); err != nil {
+		return publication{}, errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+	}
+	if p.job.Action == command.SecurityAudit {
+		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
+			return publication{}, errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
+		}
+		if err := e.retainAudit(p, published.artifacts, true); err != nil {
+			return publication{}, fmt.Errorf("%w: retain completed audit: %w", monitor.ErrTerminalJob, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return publication{}, err
+	}
+	return published, nil
 }
 
 func rejectConfiguredKeyPublication(published publication, changes []workspace.Change, keys ...string) error {

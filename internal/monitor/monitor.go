@@ -77,6 +77,12 @@ type ActionHandler interface {
 	Execute(context.Context, Job) error
 }
 
+// StoredResultPublisher publishes a previously accepted worker result without
+// starting another executor. Only the orchestrator implements this optional path.
+type StoredResultPublisher interface {
+	PublishRecovered(context.Context, Job) error
+}
+
 type Job struct {
 	Repository  config.Repository
 	SubjectType string
@@ -149,7 +155,7 @@ func InertLogText(s string) string {
 // Failed threads remain queued for retries without blocking other repositories.
 // Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
 // Legacy executions reporting parent cancellation refund their attempt unless a model call began, publication began, or the execution outcome is unknown.
-// A selected worker assignment is terminal even when execution returns cancellation.
+// A selected worker assignment without a stored result is terminal even when execution returns cancellation.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
 	selectedMode := m.SelectedExecutorID != ""
 	if err := ctx.Err(); err != nil {
@@ -160,6 +166,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return m.terminalControlWake(store), err
 		}
 		return store.Data.NextPollAt, err
+	}
+	if store.Data.Accepted == nil {
+		// A completed attempt may leave its sidecar after a crash or failed unlink.
+		// Remove it before a different attempt can write the fixed sidecar path.
+		if present, err := store.HasAcceptedResult(); err != nil {
+			return store.Data.NextPollAt, fmt.Errorf("%w: inspect completed result: %w", ErrAcceptanceState, err)
+		} else if present {
+			if err := store.ClearAcceptedResult(); err != nil {
+				return store.Data.NextPollAt, fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
+			}
+		}
 	}
 	now := m.now
 	wake := func(next time.Time, service bool) time.Time {
@@ -1237,6 +1254,9 @@ func discardAccepted(store *state.Store) error {
 		store.Data.Accepted = accepted
 		return err
 	}
+	if err := store.ClearAcceptedResult(); err != nil {
+		return fmt.Errorf("%w: clear discarded result: %w", ErrAcceptanceState, err)
+	}
 	return nil
 }
 
@@ -1442,6 +1462,13 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	} else if !failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
 		return fmt.Errorf("%w: accepted action deadline differs from its first acceptance", ErrAcceptanceState)
 	}
+	stored, err := store.HasAcceptedResult()
+	if err != nil {
+		return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
+	}
+	if stored {
+		return m.recoverStoredResult(ctx, store, job, *accepted)
+	}
 	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
@@ -1490,6 +1517,34 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	return m.executeSelected(resumeCtx, store, job, time.Now().UTC())
+}
+
+func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, job Job, accepted state.AcceptedAction) error {
+	publisher, ok := m.Handler.(StoredResultPublisher)
+	if !ok {
+		return fmt.Errorf("%w: stored result publisher is unavailable", ErrAcceptanceState)
+	}
+	repo, current, valid, err := m.validateAcceptedSource(ctx, accepted, false)
+	if err != nil {
+		return fmt.Errorf("revalidate saved result source: %w", err)
+	}
+	if !valid {
+		m.logf("discard accepted %s: source or requester is no longer valid before publication", itemLocation(job.Source))
+		if err := discardAccepted(store); err != nil {
+			return err
+		}
+		return ErrAcceptedDiscarded
+	}
+	job.Repository, job.Source = repo, current
+	job.Source.HTMLURL = accepted.SourceURL
+	job.Source.UpdatedAt = accepted.SourceUpdatedAt // Publication markers use the original command timestamp.
+	if err := publisher.PublishRecovered(ctx, job); err != nil {
+		if errors.Is(err, ErrAcceptanceState) {
+			return err
+		}
+		return fmt.Errorf("%w: publish stored result: %w", ErrPostModelPublication, err)
+	}
+	return m.completeSelected(ctx, store, job, m.now().UTC(), nil)
 }
 
 func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job Job, at time.Time) error {
@@ -1855,14 +1910,37 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		return err // RunOnce preserves this attempt for recovery with its original deadline.
 	}
 	if err == nil {
+		previousProcessed, hadProcessed := store.Data.Processed[job.ID]
+		previousFix, hadFix := store.Data.PendingFixes[job.ID]
 		store.Data.Processed[job.ID] = at
 		delete(store.Data.JobFailures, job.ID)
 		delete(store.Data.PendingFixes, job.ID)
 		store.Data.Accepted = nil
 		if err := saveAcceptanceState(store); err != nil {
+			if hadProcessed {
+				store.Data.Processed[job.ID] = previousProcessed
+			} else {
+				delete(store.Data.Processed, job.ID)
+			}
+			store.Data.JobFailures[job.ID] = failure
+			if hadFix {
+				store.Data.PendingFixes[job.ID] = previousFix
+			}
+			store.Data.Accepted = accepted
 			return err
 		}
+		if err := store.ClearAcceptedResult(); err != nil {
+			return fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
+		}
 		return ctx.Err()
+	}
+	stored, receiptErr := store.HasAcceptedResult()
+	if receiptErr != nil {
+		return fmt.Errorf("%w: inspect stored result after execution: %w", ErrAcceptanceState, receiptErr)
+	}
+	if stored {
+		// The worker finished. Only publication may be retried from its durable receipt.
+		return fmt.Errorf("%w: %w", ErrPostModelPublication, err)
 	}
 	failureErr := fmt.Errorf("%s from %s: %w", job.Command.Action, itemLocation(job.Source), err)
 	publicationFailure := errors.Is(err, ErrPostModelPublication)
