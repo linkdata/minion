@@ -29,6 +29,24 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestCurrentFixIssueRefusesUnknownSourceTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Issue","bodyText":"unchanged","lastEditedAt":null}}}`)
+	}))
+	t.Cleanup(server.Close)
+	orchestrator := &Orchestrator{GitHub: testGitHub(server, "token")}
+	_, err := orchestrator.currentFixIssue(t.Context(), &preparedAction{issueNodeID: "issue-node", request: monitor.Job{}})
+	if !errors.Is(err, errFixIssueChanged) {
+		t.Fatalf("unknown source time passed issue edit guard: %v", err)
+	}
+}
+
 func TestPerformRetainsWorkerRecoveryAfterWorkRootBecomesReadOnly(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("requires effective POSIX directory permissions and a non-root user")

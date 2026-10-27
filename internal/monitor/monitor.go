@@ -476,15 +476,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stop(err)
 				}
 				job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
-				updatedAt := item.UpdatedAt
-				if updatedAt.IsZero() {
-					updatedAt = job.AcceptedAt
-				}
 				accepted := &state.AcceptedAction{
 					JobID: job.ID, AttemptID: job.AttemptID, ExecutorID: m.SelectedExecutorID,
 					Repository: repo.Name, RepositoryID: repo.ID, OwnerID: repo.OwnerID,
 					SubjectType: job.SubjectType, SubjectNumber: number,
-					SourceKey: item.Key, SourceNodeID: item.NodeID, SourceURL: item.HTMLURL, SourceUpdatedAt: updatedAt,
+					SourceKey: item.Key, SourceNodeID: item.NodeID, SourceURL: item.HTMLURL, SourceUpdatedAt: item.UpdatedAt,
 					Requester: item.Author.Login, RequesterID: item.Author.ID,
 					CommandName: cmd.Name, Action: string(cmd.Action), AcceptedAt: job.AcceptedAt, Deadline: job.Deadline,
 				}

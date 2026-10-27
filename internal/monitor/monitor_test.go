@@ -60,6 +60,7 @@ type fakeGitHub struct {
 	threadCalls        int
 	reviewReplies      []github.Item
 	verifiedCalls      []bool
+	verifiedSince      []time.Time
 	beforeVerify       func(context.Context, bool) error
 	rawIDs             bool
 	liveRepo           *github.Repository
@@ -178,6 +179,7 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 
 func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
 	f.verifiedCalls = append(f.verifiedCalls, includeReviews)
+	f.verifiedSince = append(f.verifiedSince, since)
 	if f.beforeVerify != nil {
 		if err := f.beforeVerify(ctx, includeReviews); err != nil {
 			return false, err

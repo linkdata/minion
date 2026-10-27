@@ -8,15 +8,18 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -122,6 +125,150 @@ func TestLocalWorkerCanceledHTTPSPullCannotSupplyCapacity(t *testing.T) {
 	}
 	if w.cmd.ProcessState == nil || w.reuse.Load() != workerRetired {
 		t.Fatalf("canceled pull left child or capacity live: process=%v state=%d", w.cmd.ProcessState, w.reuse.Load())
+	}
+}
+
+func TestLocalWorkerReleasesSavedUndeliveredAssignment(t *testing.T) {
+	job := testJob(command.Comment)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	accepted := acceptedForJob(job)
+	store.Data.Accepted = accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	owner := &Orchestrator{Store: store, assignmentRequired: true}
+	sink := newExecutionCheckpoints(owner, job)
+	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := ListenLocalExecution(executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	close(exited) // The test owns the HTTP pull; no child process is needed.
+	worker := &localWorker{executor: executor, endpoint: endpoint, exited: exited, cancel: func() {}, stopGrace: time.Millisecond}
+	worker.reuse.Store(workerReusable)
+	t.Cleanup(func() { _ = worker.Close() })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := worker.Execute(ctx, job, sink)
+		done <- err
+	}()
+
+	wait, stopWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stopWait()
+	var tx *httpTransaction
+	for {
+		executor.mu.Lock()
+		candidate, changed := executor.active, executor.changed
+		ready := false
+		if candidate != nil {
+			candidate.mu.Lock()
+			ready = candidate.ready
+			candidate.mu.Unlock()
+		}
+		executor.mu.Unlock()
+		if ready {
+			tx = candidate
+			break
+		}
+		select {
+		case <-changed:
+		case <-wait.Done():
+			t.Fatal("local worker did not admit the test assignment")
+		}
+	}
+	saved, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	tx.mu.Lock()
+	beforeDelivery := tx.beforeDelivery
+	tx.beforeDelivery = func(job Job) error {
+		if err := beforeDelivery(job); err != nil {
+			return err
+		}
+		close(saved)
+		<-release
+		return nil
+	}
+	tx.mu.Unlock()
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pullCtx, cancelPull := context.WithCancel(t.Context())
+	defer cancelPull()
+	request := httptest.NewRequestWithContext(pullCtx, http.MethodPost, "/next", bytes.NewReader(pull))
+	request.Header.Set("Content-Type", "application/json")
+	response := &httpRepullRecorder{httptest.NewRecorder()}
+	pullDone := make(chan struct{})
+	go func() {
+		executor.ServeHTTP(response, request)
+		close(pullDone)
+	}()
+	select {
+	case <-saved:
+	case <-wait.Done():
+		t.Fatal("assignment save did not finish")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk state.Data
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Accepted == nil || !onDisk.Accepted.Assigned || onDisk.Accepted.AttemptID != accepted.AttemptID ||
+		!onDisk.Accepted.Deadline.Equal(accepted.Deadline) || response.Body.Len() != 0 {
+		t.Fatalf("assignment was not saved before delivery: accepted=%+v bytes=%d", onDisk.Accepted, response.Body.Len())
+	}
+	cancelPull()
+	cancel()
+	unblock()
+	select {
+	case <-pullDone:
+	case <-wait.Done():
+		t.Fatal("canceled pull did not finish")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrAcceptanceState) {
+			t.Fatalf("undelivered assignment returned %v", err)
+		}
+	case <-wait.Done():
+		t.Fatal("local worker did not release the undelivered assignment")
+	}
+	tx.mu.Lock()
+	delivered := tx.delivered
+	tx.mu.Unlock()
+	if delivered || response.Body.Len() != 0 {
+		t.Fatalf("canceled pull delivered assignment: delivered=%t bytes=%d", delivered, response.Body.Len())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	failure := reopened.Data.JobFailures[accepted.JobID]
+	if reopened.Data.Accepted == nil || reopened.Data.Accepted.Assigned || reopened.Data.Accepted.AttemptID != accepted.AttemptID ||
+		!reopened.Data.Accepted.Deadline.Equal(accepted.Deadline) || failure.Attempts != 1 ||
+		!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
+		t.Fatalf("restart lost released assignment or original attempt: accepted=%+v failure=%+v", reopened.Data.Accepted, failure)
 	}
 }
 

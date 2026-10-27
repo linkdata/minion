@@ -74,6 +74,47 @@ func selectedMonitor(t *testing.T, at time.Time, gh GitHub, handler ActionHandle
 	return &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return at }, SelectedExecutorID: "local"}
 }
 
+func TestSelectedFixRestartPreservesUnknownSourceTimestamp(t *testing.T) {
+	at := time.Now().UTC()
+	item := selectedItem(time.Time{})
+	item.Body = "@linkdataminion fix"
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	reactionErr := errors.New("reaction unavailable")
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("failed reaction dispatched fix")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) || store.Data.Accepted == nil ||
+		!store.Data.Accepted.SourceUpdatedAt.IsZero() {
+		t.Fatalf("first acceptance invented a source timestamp: err=%v accepted=%+v", err, store.Data.Accepted)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.SourceUpdatedAt.IsZero() {
+		t.Fatalf("restart invented a source timestamp: %+v", reopened.Data.Accepted)
+	}
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh.reactionErr = nil
+	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+	m.Handler = selectedHandler(func(job Job) error {
+		if !job.Source.UpdatedAt.IsZero() || job.Command.Name != "fix" {
+			t.Fatalf("recovered fix changed its unknown timestamp: %+v", job)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("fix recovery failed: err=%v state=%+v", err, reopened.Data)
+	}
+}
+
 func TestSelectedAcceptanceSavedBeforeReactionAndCarriesFixedIdentity(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -810,6 +851,42 @@ func TestSelectedTerminalRecoveryKeepsExistingVerifiedReply(t *testing.T) {
 	if _, err := m.RunOnce(t.Context(), store); err != nil || gh.commentCalls != 0 ||
 		store.Data.Accepted != nil || len(store.Data.Processed) != 1 {
 		t.Fatalf("existing verified reply was ignored: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedTerminalRestartWithUnknownSourceTimeFindsExistingReply(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	accepted.SourceUpdatedAt = time.Time{}
+	accepted.Assigned = true
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	reply := github.Item{Key: "review:published", NodeID: "reply-node", Body: "Complete.\n\n" + (Job{ID: accepted.JobID}).Marker(),
+		Author: github.User{Login: "linkdataminion"}, UpdatedAt: at.Add(-time.Minute)}
+	gh := &fakeGitHub{reviewReplies: []github.Item{reply}, permission: github.Permission{Permission: "write"},
+		currentItem: func(seed github.Item) (github.Item, error) {
+			if seed.Key == reply.Key {
+				return reply, nil
+			}
+			return selectedItem(time.Time{}), nil
+		}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("terminal action redispatched")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(gh.verifiedSince) != 1 ||
+		!gh.verifiedSince[0].IsZero() || gh.commentCalls != 0 || reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("unknown source time missed existing reply: err=%v since=%v comments=%d state=%+v",
+			err, gh.verifiedSince, gh.commentCalls, reopened.Data)
 	}
 }
 

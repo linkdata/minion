@@ -68,7 +68,7 @@ func (a AcceptedAction) Validate() error {
 		(a.SubjectType != "Issue" && a.SubjectType != "PullRequest") {
 		return errors.New("accepted action repository or requester identity is invalid")
 	}
-	if a.SourceKey == "" || a.SourceNodeID == "" || a.SourceUpdatedAt.IsZero() {
+	if a.SourceKey == "" || a.SourceNodeID == "" {
 		return errors.New("accepted action source is missing")
 	}
 	switch a.Action {

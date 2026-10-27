@@ -75,6 +75,7 @@ func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 		}
 		store.Data.Processed["job"] = initial
 		accepted := acceptedActionFixture()
+		accepted.SourceUpdatedAt = time.Time{} // Unknown source time must stay unknown after restart.
 		store.Data.Accepted = &accepted
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -97,6 +98,7 @@ func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 		}
 	}()
 	want := acceptedActionFixture()
+	want.SourceUpdatedAt = time.Time{}
 	if !store.Data.Cursor.Equal(initial) || !store.Data.Processed["job"].Equal(initial) || !reflect.DeepEqual(store.Data.Accepted, &want) {
 		t.Fatalf("state lost after process exit: %+v", store.Data)
 	}
@@ -130,7 +132,6 @@ func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 		{"missing subject number", func(a *AcceptedAction) { a.SubjectNumber = 0 }},
 		{"missing source key", func(a *AcceptedAction) { a.SourceKey = "" }},
 		{"missing source node ID", func(a *AcceptedAction) { a.SourceNodeID = "" }},
-		{"missing source timestamp", func(a *AcceptedAction) { a.SourceUpdatedAt = time.Time{} }},
 		{"missing requester", func(a *AcceptedAction) { a.Requester = "" }},
 		{"missing requester ID", func(a *AcceptedAction) { a.RequesterID = 0 }},
 		{"missing command", func(a *AcceptedAction) { a.CommandName = "" }},
