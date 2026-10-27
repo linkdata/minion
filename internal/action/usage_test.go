@@ -21,24 +21,47 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestSelectedUsageKeepsOriginalAttemptStartAcrossRecovery(t *testing.T) {
+func TestSelectedUsageStartsEachRetryOnItsOwnDayAndKeepsRecoveryStart(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	tracked := attemptFixture(&Orchestrator{Usage: store})
 	job := usageJob()
 	job.AttemptID = tracked.attemptID
 	job.AcceptedAt = time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Second)
-	for range 2 {
-		finish, err := tracked.trackUsage(job)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := finish(errors.New("preparation failed before a model call")); err == nil {
-			t.Fatal("missing preparation error")
-		}
+	finish, err := tracked.trackUsage(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(errors.New("preparation failed before a model call")); err == nil {
+		t.Fatal("missing preparation error")
+	}
+	first, found, err := store.Load(job.AttemptID)
+	if err != nil || !found {
+		t.Fatalf("first attempt: found=%t error=%v", found, err)
+	}
+	first.StartedAt = job.AcceptedAt
+	if err := store.Save(first); err != nil {
+		t.Fatal(err)
+	}
+	finish, err = tracked.trackUsage(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := finish(errors.New("preparation failed before a model call")); err == nil {
+		t.Fatal("missing preparation error")
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 || !records[0].StartedAt.Equal(job.AcceptedAt) || records[0].ID != job.AttemptID {
-		t.Fatalf("recovery moved the accepted attempt to a new reporting day: records=%+v error=%v", records, err)
+		t.Fatalf("recovery moved the same attempt to a new reporting day: records=%+v error=%v", records, err)
+	}
+	retry := attemptFixture(&Orchestrator{Usage: store})
+	retry.attemptID = strings.Repeat("b", 32)
+	job.AttemptID = retry.attemptID
+	started := time.Now().UTC()
+	if _, err := retry.trackUsage(job); err != nil {
+		t.Fatal(err)
+	}
+	if got := retry.usageCheckpoint.record.StartedAt; got.Before(started) || got.After(time.Now().UTC()) || got.UTC().Format("2006-01-02") == first.StartedAt.UTC().Format("2006-01-02") {
+		t.Fatalf("retry used original attempt's reporting day: started=%s original=%s", got, first.StartedAt)
 	}
 	legacy := usageJob()
 	legacy.AcceptedAt = job.AcceptedAt
@@ -48,6 +71,28 @@ func TestSelectedUsageKeepsOriginalAttemptStartAcrossRecovery(t *testing.T) {
 	}
 	if !other.usageCheckpoint.record.StartedAt.After(legacy.AcceptedAt.Add(time.Hour)) {
 		t.Fatalf("legacy attempt reused original acceptance time: started=%s", other.usageCheckpoint.record.StartedAt)
+	}
+}
+
+func TestSelectedUsageDoesNotOverwriteStartedModelCall(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	tracked := attemptFixture(&Orchestrator{Usage: store})
+	job := usageJob()
+	job.AttemptID = tracked.attemptID
+	prior := usage.Record{
+		ID: job.AttemptID, JobID: job.ID, Repo: job.Repository.Name, User: job.Source.Author.Login,
+		Action: string(job.Command.Action), Provider: "codex", Model: "default", StartedAt: time.Now().UTC().Add(-time.Hour),
+		Status: "running", ExecutorID: "local", SourceRef: strings.Repeat("a", 40), CodexCalls: 1,
+	}
+	if err := store.Save(prior); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tracked.trackUsage(job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("existing model call was overwritten: %v", err)
+	}
+	got, found, err := store.Load(job.AttemptID)
+	if err != nil || !found || got.CodexCalls != 1 || !got.StartedAt.Equal(prior.StartedAt) {
+		t.Fatalf("existing checkpoint changed: %+v found=%t err=%v", got, found, err)
 	}
 }
 

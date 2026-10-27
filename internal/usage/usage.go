@@ -131,6 +131,34 @@ func (r Record) validate() error {
 
 type Store struct{ Dir string }
 
+// Load reads one attempt, returning false when its record does not exist.
+func (s Store) Load(id string) (Record, bool, error) {
+	if !validID.MatchString(id) {
+		return Record{}, false, fmt.Errorf("invalid usage record ID %q", id)
+	}
+	root, err := os.OpenRoot(s.Dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, err
+	}
+	defer root.Close()
+	name := id + ".json"
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return Record{}, false, fmt.Errorf("invalid usage file %q", name)
+	}
+	record, err := readRecord(root, name)
+	return record, err == nil, err
+}
+
 // Save atomically replaces one attempt and syncs its directory and parent on Unix.
 //
 // The caller serializes updates to an ID. An error after replacement can leave
@@ -173,30 +201,9 @@ func ReadAll(dir string) ([]Record, error) {
 		if !entry.Type().IsRegular() || !validID.MatchString(strings.TrimSuffix(entry.Name(), ".json")) {
 			return nil, fmt.Errorf("invalid usage file %q", entry.Name())
 		}
-		// Root.Open shares delete access on Windows, allowing Save to replace open records.
-		f, err := root.Open(entry.Name())
+		record, err := readRecord(root, entry.Name())
 		if err != nil {
 			return nil, err
-		}
-		var record Record
-		decoder := json.NewDecoder(f)
-		decoder.DisallowUnknownFields()
-		err = decoder.Decode(&record)
-		if err == nil {
-			var trailing any
-			if decoder.Decode(&trailing) != io.EOF {
-				err = fmt.Errorf("trailing data")
-			}
-		}
-		err = errors.Join(err, f.Close())
-		if err == nil {
-			err = record.validate()
-		}
-		if err == nil && entry.Name() != record.ID+".json" {
-			err = fmt.Errorf("record ID does not match filename")
-		}
-		if err != nil {
-			return nil, fmt.Errorf("read usage file %q: %w", entry.Name(), err)
 		}
 		records = append(records, record)
 	}
@@ -207,6 +214,35 @@ func ReadAll(dir string) ([]Record, error) {
 		return records[i].StartedAt.Before(records[j].StartedAt)
 	})
 	return records, nil
+}
+
+func readRecord(root *os.Root, name string) (Record, error) {
+	// Root.Open shares delete access on Windows, allowing Save to replace open records.
+	f, err := root.Open(name)
+	if err != nil {
+		return Record{}, err
+	}
+	var record Record
+	decoder := json.NewDecoder(f)
+	decoder.DisallowUnknownFields()
+	err = decoder.Decode(&record)
+	if err == nil {
+		var trailing any
+		if decoder.Decode(&trailing) != io.EOF {
+			err = fmt.Errorf("trailing data")
+		}
+	}
+	err = errors.Join(err, f.Close())
+	if err == nil {
+		err = record.validate()
+	}
+	if err == nil && name != record.ID+".json" {
+		err = fmt.Errorf("record ID does not match filename")
+	}
+	if err != nil {
+		return Record{}, fmt.Errorf("read usage file %q: %w", name, err)
+	}
+	return record, nil
 }
 
 type Filter struct {

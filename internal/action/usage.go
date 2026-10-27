@@ -50,8 +50,17 @@ func (c *usageCheckpoint) afterCall(call CallUsage) error {
 // trackUsage adds accounting checkpoints to this attempt-scoped receiver.
 func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	startedAt := time.Now().UTC()
-	if job.AttemptID != "" && !job.AcceptedAt.IsZero() {
-		startedAt = job.AcceptedAt.UTC()
+	if job.AttemptID != "" {
+		previous, found, err := e.Usage.Load(job.AttemptID)
+		if err != nil {
+			return nil, fmt.Errorf("load action usage %s: %w", job.AttemptID, err)
+		}
+		if found {
+			if previous.JobID != job.ID || previous.CodexCalls != 0 || previous.ClaudeCalls != 0 {
+				return nil, fmt.Errorf("%w: attempt %s already has model usage or a different job", monitor.ErrTerminalJob, job.AttemptID)
+			}
+			startedAt = previous.StartedAt
+		}
 	}
 	checkpoint := &usageCheckpoint{logf: e.logf, record: usage.Record{
 		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,

@@ -1099,7 +1099,8 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	}
 	if !replied {
 		if accepted := store.Data.Accepted; accepted != nil {
-			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			// Revalidation can require five serial GitHub reads, including the source-thread fallback.
+			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 50*time.Second)
 			configured, current, valid, verifyErr := m.validateAcceptedSource(verifyCtx, *accepted, false)
 			if verifyErr == nil {
 				verifyErr = verifyCtx.Err()
@@ -1114,15 +1115,20 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 			}
 			job.Repository, job.Source = configured, current
 		}
-		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancel()
-		repo, err := m.GitHub.Repository(replyCtx, job.Repository.Name)
+		repoCtx, cancelRepo := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		repo, err := m.GitHub.Repository(repoCtx, job.Repository.Name)
+		if err == nil {
+			err = repoCtx.Err()
+		}
+		cancelRepo()
 		if err != nil {
 			return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)
 		}
 		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
 			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
 		}
+		replyCtx, cancelReply := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelReply()
 		_, err = m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
 		if err != nil {
 			failure.ReplyAttempts++

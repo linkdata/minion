@@ -44,6 +44,41 @@ func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
 	})
 }
 
+func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := selectedAcceptance(t, now)
+	accepted.SubjectType = "Issue"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	accepted.CommandName, accepted.Action = "audit", "comment"
+	accepted.JobID = jobID(accepted.SourceKey, accepted.CommandName)
+	current := selectedItem(now)
+	current.Body = "@linkdataminion audit"
+	current.HTMLURL = accepted.SourceURL
+	gh := &fakeGitHub{
+		beforeRepository: func() { time.Sleep(4 * time.Second) },
+		permission:       github.Permission{Permission: "write"},
+		issueDetails: func(_ string, number int) (github.Issue, error) {
+			time.Sleep(4 * time.Second)
+			return github.Issue{Number: number}, nil
+		},
+		currentItem: func(github.Item) (github.Item, error) {
+			time.Sleep(4 * time.Second)
+			return current, nil
+		},
+	}
+	m := selectedMonitor(t, now, gh, nil)
+	store := openState(t, now)
+	store.Data.Accepted = &accepted
+	synctest.Test(t, func(t *testing.T) {
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), now, state.JobFailure{}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil {
+		t.Fatalf("successful source checks did not finish the fixed reply: comments=%d state=%+v", len(gh.comments), store.Data)
+	}
+}
+
 func TestSelectedRecoveryReleasesDeletedSource(t *testing.T) {
 	at := time.Now().UTC()
 	accepted := selectedAcceptance(t, at)

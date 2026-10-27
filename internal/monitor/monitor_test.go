@@ -56,6 +56,7 @@ type fakeGitHub struct {
 	currentChecks      int
 	currentItem        func(github.Item) (github.Item, error)
 	commentErr         error
+	beforeComment      func()
 	commentCalls       int
 	comments           []github.Comment
 	threadItems        func(string, int, time.Time) ([]github.Item, error)
@@ -243,6 +244,9 @@ func (f *fakeGitHub) ReactEyes(_ context.Context, nodeID string) error {
 
 func (f *fakeGitHub) CreateIssueComment(ctx context.Context, _ string, _ int, body string) (github.Comment, error) {
 	f.commentCalls++
+	if f.beforeComment != nil {
+		f.beforeComment()
+	}
 	if err := ctx.Err(); err != nil {
 		return github.Comment{}, err
 	}
@@ -716,7 +720,8 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 				time.Sleep(9 * time.Second)
 				return nil
 			},
-			beforeRepository: func() { time.Sleep(2 * time.Second) },
+			beforeRepository: func() { time.Sleep(8 * time.Second) },
+			beforeComment:    func() { time.Sleep(4 * time.Second) },
 		}
 		store := openState(t, now)
 		job := Job{
