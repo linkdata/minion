@@ -320,6 +320,10 @@ func TestStateDirectorySyncsSymlinkTargetParent(t *testing.T) {
 	if err := os.Symlink(realParent, link); err != nil {
 		t.Fatal(err)
 	}
+	resolvedRealParent, err := filepath.EvalSymlinks(realParent)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var synced []string
 	if err := prepareStateDirectory(filepath.Join(link, "new"), func(parents ...string) error {
 		synced = append(synced, parents...)
@@ -327,7 +331,7 @@ func TestStateDirectorySyncsSymlinkTargetParent(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(synced, aliasParent) || !slices.Contains(synced, realParent) {
+	if !slices.Contains(synced, aliasParent) || !slices.Contains(synced, resolvedRealParent) {
 		t.Fatalf("state path parents not both synced: %v", synced)
 	}
 }
