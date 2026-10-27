@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -158,6 +159,47 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	}
 	if got := readPrivateReview(t, e.WorkRoot); len(got.Refutations) != 1 || got.Refutations[0].Text != "PRIVATE_MAIN_REFUTATION" {
 		t.Fatalf("saved prefix was lost: %+v", got)
+	}
+}
+
+func TestPrivateReviewRetrySyncsIdenticalRecord(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	root, err := workspace.CanonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{WorkRoot: root}
+	if err := e.retainReviewEvidence(job, result); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "reviews", job.Identity.AttemptID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The replacement exists even though the final directory sync failed.
+	writeErr := workspace.WriteAtomic(path, data, filepath.Join(root, "missing"))
+	if runtime.GOOS != "windows" && !errors.Is(writeErr, os.ErrNotExist) || runtime.GOOS == "windows" && writeErr != nil {
+		t.Fatalf("expected failure after replacement: %v", writeErr)
+	}
+	originalSync := syncPrivateRecordDirectories
+	t.Cleanup(func() { syncPrivateRecordDirectories = originalSync })
+	calls := 0
+	syncPrivateRecordDirectories = func(dirs ...string) error {
+		calls++
+		if len(dirs) != 2 || dirs[0] != filepath.Dir(path) || dirs[1] != root {
+			t.Errorf("wrong directories synced: %q", dirs)
+		}
+		return syscall.EIO
+	}
+	if err := e.retainReviewEvidence(job, result); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, syscall.EIO) || calls != 1 {
+		t.Fatalf("identical record skipped failed sync: calls=%d error=%v", calls, err)
+	}
+	syncPrivateRecordDirectories = originalSync
+	if err := e.retainReviewEvidence(job, result); err != nil {
+		t.Fatalf("retry did not sync retained record: %v", err)
 	}
 }
 

@@ -14,7 +14,19 @@ import (
 // WriteAcceptedResult atomically replaces the accepted result sidecar.
 // The caller serializes this operation with any active action callbacks.
 func (s *Store) WriteAcceptedResult(data []byte) error {
+	if s.syncDir != "" {
+		return workspace.WriteAtomic(s.path+".result", data, s.syncDir)
+	}
 	return workspace.WriteAtomic(s.path+".result", data)
+}
+
+// A visible sidecar is not a durable receipt until its directory entry has
+// been synced. WriteAtomic can leave the renamed file present on sync failure.
+func (s *Store) syncAcceptedResultDir() error {
+	if s.syncDir != "" {
+		return workspace.SyncDirectories(filepath.Dir(s.path), s.syncDir)
+	}
+	return workspace.SyncDirectories(filepath.Dir(s.path))
 }
 
 // ReadAcceptedResult reads a bounded accepted result, returning [os.ErrNotExist] when absent.
@@ -41,6 +53,9 @@ func (s *Store) ReadAcceptedResult(maxBytes int64) ([]byte, error) {
 	if int64(len(data)) > maxBytes {
 		return nil, fmt.Errorf("accepted result exceeds %d bytes", maxBytes)
 	}
+	if err := s.syncAcceptedResultDir(); err != nil {
+		return nil, fmt.Errorf("sync accepted result directory: %w", err)
+	}
 	return data, nil
 }
 
@@ -56,6 +71,9 @@ func (s *Store) HasAcceptedResult() (bool, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return false, errors.New("accepted result is not a regular file")
+	}
+	if err := s.syncAcceptedResultDir(); err != nil {
+		return false, fmt.Errorf("sync accepted result directory: %w", err)
 	}
 	return true, nil
 }

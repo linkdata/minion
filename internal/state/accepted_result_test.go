@@ -2,8 +2,10 @@ package state
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -78,5 +80,41 @@ func TestAcceptedResultSidecarLifecycle(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(filepath.Dir(path)); err != nil || len(entries) != 2 {
 		t.Fatalf("sidecar or temporary files retained: %v, %v", entries, err)
+	}
+}
+
+func TestVisibleAcceptedResultWaitsForDirectorySync(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory sync is a no-op")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store, err := Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	result := []byte(`{"result":"saved"}`)
+	store.syncDir = filepath.Join(dir, "blocked-sync")
+	if err := store.WriteAcceptedResult(result); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-rename sync failure = %v, want missing sync directory", err)
+	}
+	if got, err := os.ReadFile(path + ".result"); err != nil || !bytes.Equal(got, result) {
+		t.Fatalf("post-rename sidecar is not visible: got=%q error=%v", got, err)
+	}
+	if present, err := store.HasAcceptedResult(); present || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sidecar with reported sync failure was treated as durable: present=%t error=%v", present, err)
+	}
+	if got, err := store.ReadAcceptedResult(int64(len(result))); got != nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("direct sidecar read bypassed sync: got=%q error=%v", got, err)
+	}
+	if err := os.Mkdir(store.syncDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := store.HasAcceptedResult(); !present || err != nil {
+		t.Fatalf("restored sync did not expose sidecar: present=%t error=%v", present, err)
+	}
+	if got, err := store.ReadAcceptedResult(int64(len(result))); err != nil || !bytes.Equal(got, result) {
+		t.Fatalf("restored sync did not return sidecar: got=%q error=%v", got, err)
 	}
 }

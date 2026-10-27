@@ -65,6 +65,9 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 		if !bytes.Equal(previous, data) {
 			return fmt.Errorf("%w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob)
 		}
+		if err := syncPrivateRecordDirectories(filepath.Dir(path), filepath.Dir(root)); err != nil {
+			return retainedRecordFailure("sync private worker diagnostics", err)
+		}
 	} else if err := workspace.WriteAtomic(path, data, filepath.Dir(root)); err != nil {
 		return retainedRecordFailure("save private worker diagnostics", err)
 	}

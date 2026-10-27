@@ -26,6 +26,8 @@ type retainedReview struct {
 
 const executorClaimOrigin = "executor_reported"
 
+var syncPrivateRecordDirectories = workspace.SyncDirectories
+
 // retainReviewEvidence validates and saves private review history for an accepted Job.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
 func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
@@ -108,7 +110,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 			return errors.New("review evidence changed or discarded a saved prefix")
 		}
 		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
-			return nil
+			return syncPrivateRecordDirectories(filepath.Dir(path), filepath.Dir(root))
 		}
 	}
 	data, err := json.Marshal(record)
