@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,23 @@ type heldSelectedAction struct {
 	entered    chan Job
 	release    chan struct{}
 	executions atomic.Int32
+}
+
+type exitedSelectedAction struct {
+	selectedHandler
+	exited <-chan struct{}
+	loss   error
+	waits  atomic.Int32
+}
+
+func (h *exitedSelectedAction) WaitCapacity(context.Context) error {
+	h.waits.Add(1)
+	select {
+	case <-h.exited:
+		return h.loss
+	default:
+		return nil
+	}
 }
 
 func (*heldSelectedAction) WaitCapacity(context.Context) error { return nil }
@@ -185,6 +203,10 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 		sibling.Key, sibling.NodeID = "comment:2", "node:2"
 		sibling.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-2"
 		siblingID := jobID(sibling.Key, "review")
+		later := selectedItem(now)
+		later.Key, later.NodeID = "comment:3", "node:3"
+		later.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-3"
+		laterID := jobID(later.Key, "review")
 		statePath := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, statePath, now.Add(-time.Minute))
 		store.Data.JobFailures[siblingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: notificationKey(testNotification(selected.UpdatedAt))}
@@ -208,22 +230,26 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 
 		var executions atomic.Int32
 		entered := make(chan Job, 1)
-		release := make(chan struct{})
-		released := false
+		workerExited := make(chan struct{})
+		exited := false
 		defer func() {
-			if !released {
-				close(release)
+			if !exited {
+				close(workerExited)
 			}
 		}()
-		handler := selectedHandler(func(job Job) error {
-			executions.Add(1)
-			entered <- job
-			<-release
-			return ErrExecutionOutcomeUnknown
-		})
+		loss := errors.New("selected worker exited")
+		handler := &exitedSelectedAction{
+			exited: workerExited, loss: loss,
+			selectedHandler: func(job Job) error {
+				executions.Add(1)
+				entered <- job
+				<-workerExited
+				return ErrExecutionOutcomeUnknown
+			},
+		}
 		gh := &fakeGitHub{
 			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
-			items:         []github.Item{selected, sibling},
+			items:         []github.Item{selected, sibling, later},
 			permission:    github.Permission{Permission: "write"},
 			currentItem: func(item github.Item) (github.Item, error) {
 				if item.Key == selected.Key {
@@ -263,11 +289,34 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 			t.Fatalf("RunOnce returned while Execute was held: %v", err)
 		default:
 		}
-		close(release)
-		released = true
+		stateBytes, err := os.ReadFile(statePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved state.Data
+		if err := json.Unmarshal(stateBytes, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if saved.Accepted == nil || *saved.Accepted != accepted || saved.Processed[siblingID].IsZero() {
+			t.Fatalf("controls were not durable before worker exit: accepted=%+v sibling=%v", saved.Accepted, saved.Processed[siblingID])
+		}
+		savedConfig, err := config.Load(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := savedConfig.Repository("example-owner/new-repo"); !ok {
+			t.Fatal("accepted invitation was not durable before worker exit")
+		}
+		close(workerExited)
+		exited = true
 		synctest.Wait()
-		if err := <-result; err != nil {
-			t.Fatalf("unknown worker outcome: %v", err)
+		if err := <-result; !errors.Is(err, loss) {
+			t.Fatalf("worker loss did not stop later acceptance: %v", err)
+		}
+		if handler.waits.Load() != 2 || executions.Load() != 1 || store.Data.Accepted != nil ||
+			!store.Data.Processed[laterID].IsZero() || store.Data.JobFailures[laterID].Attempts != 0 {
+			t.Fatalf("later action was accepted after worker loss: waits=%d executions=%d accepted=%+v later=%v failures=%+v",
+				handler.waits.Load(), executions.Load(), store.Data.Accepted, store.Data.Processed[laterID], store.Data.JobFailures[laterID])
 		}
 		if gh.commentCalls != 2 || len(gh.comments) != 2 ||
 			!strings.HasSuffix(gh.comments[1].Body, "\n\n"+job.Marker()) {
@@ -290,8 +339,10 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 			t.Fatalf("completed work was not durable: %+v", reopened.Data)
 		}
 		m.Config = loaded
-		m.Handler = selectedHandler(func(Job) error {
+		var restarted []string
+		m.Handler = selectedHandler(func(job Job) error {
 			executions.Add(1)
+			restarted = append(restarted, job.ID)
 			return nil
 		})
 		gh.invitations = nil // GitHub no longer lists an accepted invitation.
@@ -300,12 +351,12 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 		if _, err := m.RunOnce(t.Context(), reopened); err != nil {
 			t.Fatalf("monitor after restart: %v", err)
 		}
-		if len(gh.notificationCalls) <= polls || executions.Load() != 1 ||
+		if len(gh.notificationCalls) <= polls || executions.Load() != 2 || !slices.Equal(restarted, []string{laterID}) ||
 			!slices.Equal(gh.accepted, []int64{41}) || gh.commentCalls != 2 ||
 			len(gh.comments) != 2 || !strings.HasSuffix(gh.comments[1].Body, "\n\n"+job.Marker()) ||
-			reopened.Data.Accepted != nil || reopened.Data.Processed[siblingID].IsZero() {
-			t.Fatalf("restart repeated or lost work: executions=%d invitations=%v replies=%v state=%+v",
-				executions.Load(), gh.accepted, gh.comments, reopened.Data)
+			reopened.Data.Accepted != nil || reopened.Data.Processed[siblingID].IsZero() || reopened.Data.Processed[laterID].IsZero() {
+			t.Fatalf("restart repeated or lost work: executions=%d restarted=%v invitations=%v replies=%v state=%+v",
+				executions.Load(), restarted, gh.accepted, gh.comments, reopened.Data)
 		}
 	})
 }
