@@ -498,6 +498,159 @@ func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
 	})
 }
 
+func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.T) {
+	for _, test := range []struct {
+		name             string
+		removedInFetch   bool
+		removedInCurrent bool
+		transientCurrent bool
+	}{
+		{name: "deleted source"},
+		{name: "command removed from fetched source", removedInFetch: true},
+		{name: "fetched fix edited before reply", removedInCurrent: true},
+		{name: "transient source lookup", transientCurrent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				missing := selectedItem(now.Add(-3 * time.Minute))
+				missing.Key, missing.NodeID = "comment:missing", "node:missing"
+				missing.HTMLURL = "https://github.com/example-owner/example-repo/pull/6#issuecomment-missing"
+				missingCommand := "review"
+				if test.removedInCurrent || test.transientCurrent {
+					missing.Body, missingCommand = "@linkdataminion fix", "fix"
+				}
+				fix := selectedItem(now.Add(-2 * time.Minute))
+				fix.Key, fix.NodeID, fix.Body = "comment:fix", "node:fix", "@linkdataminion fix"
+				selected := selectedItem(now.Add(-time.Second))
+				selected.Key, selected.NodeID = "comment:selected", "node:selected"
+				selected.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-selected"
+
+				missingNotice := testNotification(missing.UpdatedAt)
+				missingNotice.ID = "thread-6"
+				missingNotice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/6"
+				fixNotice := testNotification(fix.UpdatedAt)
+				fixNotice.ID = "thread-7"
+				selectedNotice := testNotification(selected.UpdatedAt)
+				selectedNotice.ID = "thread-8"
+				selectedNotice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
+				missingKey, fixKey := notificationKey(missingNotice), notificationKey(fixNotice)
+				missingID, fixID := jobID(missing.Key, missingCommand), jobID(fix.Key, "fix")
+				store := openState(t, now.Add(-5*time.Minute))
+				for _, notice := range []github.Notification{missingNotice, fixNotice} {
+					store.Data.PendingNotifications[notificationKey(notice)] = state.PendingNotification{
+						Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+						SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+						Since: now.Add(-4 * time.Minute), UpdatedAt: notice.UpdatedAt,
+					}
+				}
+				store.Data.JobFailures[missingID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: missingKey}
+				store.Data.JobFailures[fixID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: fixKey}
+				store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+
+				var missingFetches, fixFetches atomic.Int32
+				gh := &fakeGitHub{
+					notifications: []github.Notification{selectedNotice},
+					permission:    github.Permission{Permission: "write"},
+					threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+						switch number {
+						case 6:
+							missingFetches.Add(1)
+							if test.removedInFetch {
+								missing.Body, missing.Edited = "ordinary comment", true
+								return []github.Item{missing}, nil
+							}
+							if test.removedInCurrent || test.transientCurrent {
+								return []github.Item{missing}, nil
+							}
+							return nil, nil
+						case 7:
+							fixFetches.Add(1)
+							return []github.Item{fix}, nil
+						case 8:
+							return []github.Item{selected}, nil
+						default:
+							return nil, fmt.Errorf("unexpected thread #%d", number)
+						}
+					},
+					currentItem: func(item github.Item) (github.Item, error) {
+						if test.transientCurrent && item.Key == missing.Key {
+							return github.Item{}, errors.New("temporary missing source lookup failure")
+						}
+						if test.removedInCurrent && item.Key == missing.Key {
+							item.Body, item.Edited = "ordinary comment", true
+							return item, nil
+						}
+						if item.Key == fix.Key {
+							return github.Item{}, errors.New("temporary fix source lookup failure")
+						}
+						return item, nil
+					},
+				}
+				held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+				cfg := testConfig(t)
+				cfg.MaxRuntimeMinutes = 7
+				m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+					SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				result := make(chan error, 1)
+				go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+				select {
+				case job := <-held.entered:
+					if job.ID != jobID(selected.Key, "review") {
+						t.Fatalf("unexpected selected action: %+v", job)
+					}
+				case err := <-result:
+					t.Fatalf("selected review did not start: %v", err)
+				}
+				synctest.Wait()
+				if missingFetches.Load() == 0 || fixFetches.Load() < 2 {
+					t.Fatalf("terminal sources were not checked while review ran: missing=%d fix=%d",
+						missingFetches.Load(), fixFetches.Load())
+				}
+				_, missingFailure := store.Data.JobFailures[missingID]
+				if test.transientCurrent {
+					if !store.Data.Processed[missingID].IsZero() || !missingFailure ||
+						store.Data.PendingNotifications[missingKey].Repository == "" {
+						t.Fatalf("transient lookup retired the failed job: processed=%v failures=%+v pending=%+v",
+							store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications)
+					}
+				} else if store.Data.Processed[missingID].IsZero() || missingFailure {
+					t.Fatalf("missing source was not retired: processed=%v failures=%+v",
+						store.Data.Processed, store.Data.JobFailures)
+				}
+				if !store.Data.Processed[fixID].IsZero() || store.Data.JobFailures[fixID].Attempts != maxJobAttempts ||
+					store.Data.PendingNotifications[fixKey].Repository == "" || gh.commentCalls != 0 || held.executions.Load() != 1 {
+					t.Fatalf("valid fix was lost during review: processed=%v failures=%+v pending=%+v comments=%d executions=%d",
+						store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications, gh.commentCalls, held.executions.Load())
+				}
+				close(held.release)
+				synctest.Wait()
+				if err := <-result; err != nil {
+					t.Fatalf("RunOnce after selected review: %v", err)
+				}
+				gh.notifications = nil
+				time.Sleep(time.Minute)
+				if _, err := m.RunOnce(t.Context(), store); err != nil {
+					t.Fatalf("follow-up poll: %v", err)
+				}
+				if _, pending := store.Data.PendingNotifications[missingKey]; pending != test.transientCurrent {
+					t.Fatalf("missing source pending state after follow-up poll: pending=%t want=%t entries=%+v",
+						pending, test.transientCurrent, store.Data.PendingNotifications)
+				}
+				if store.Data.PendingNotifications[fixKey].Repository == "" || store.Data.JobFailures[fixID].Attempts != maxJobAttempts {
+					t.Fatalf("valid unsupported fix was lost after follow-up poll: failures=%+v pending=%+v",
+						store.Data.JobFailures, store.Data.PendingNotifications)
+				}
+			})
+		})
+	}
+}
+
 func TestSelectedReactionRecoveryServicesTerminalSibling(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

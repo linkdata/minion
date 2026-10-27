@@ -656,11 +656,19 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.deferNotification(store, entry.key, notification, entry.since, started); err != nil {
 				return stop(err)
 			}
-		} else if _, pending := store.Data.PendingNotifications[entry.key]; pending &&
-			(!selectedMode || !hasTerminalReplay(store, entry.key)) {
-			delete(store.Data.PendingNotifications, entry.key)
-			if err := store.Save(); err != nil {
-				return stop(err)
+		} else {
+			if _, pending := store.Data.PendingNotifications[entry.key]; selectedMode && pending {
+				if err := m.retireMissingTerminalFailures(store, entry.key, items, m.controlCommands(repo), nil, started); err != nil {
+					return stop(err)
+				}
+			}
+			if pending, exists := store.Data.PendingNotifications[entry.key]; exists &&
+				(!selectedMode || !hasTerminalReplay(store, entry.key, "")) {
+				delete(store.Data.PendingNotifications, entry.key)
+				if err := store.Save(); err != nil {
+					store.Data.PendingNotifications[entry.key] = pending
+					return stop(err)
+				}
 			}
 		}
 	}
@@ -888,14 +896,62 @@ func rememberNotification(store *state.Store, key string, notification github.No
 	}
 }
 
-func hasTerminalReplay(store *state.Store, key string) bool {
+func hasTerminalReplay(store *state.Store, key, exceptID string) bool {
 	for id, failure := range store.Data.JobFailures {
-		if (failure.NotificationKey == "" || failure.NotificationKey == key) && store.Data.Processed[id].IsZero() &&
+		if id != exceptID && (failure.NotificationKey == "" || failure.NotificationKey == key) && store.Data.Processed[id].IsZero() &&
 			(failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero()) {
 			return true
 		}
 	}
 	return false
+}
+
+// A linked failure was first found in the pending notification's scan window.
+// A completed replay of that window can therefore prove its command is gone.
+func (m *Monitor) retireMissingTerminalFailures(store *state.Store, key string, items []github.Item,
+	commands map[string]command.Action, invalid []string, at time.Time) error {
+	present := make(map[string]bool, len(items))
+	for _, item := range items {
+		parsed, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commands)
+		if err != nil {
+			if !errors.Is(err, command.ErrNoCommand) {
+				// A malformed command may still contain the failed command.
+				for name := range commands {
+					present[jobID(item.Key, name)] = true
+				}
+			}
+			continue
+		}
+		present[jobID(item.Key, parsed.Name)] = true
+	}
+	for _, id := range invalid {
+		delete(present, id)
+	}
+	return store.WithLock(func() error {
+		retired := make(map[string]state.JobFailure)
+		for id, failure := range store.Data.JobFailures {
+			if failure.NotificationKey != key || !store.Data.Processed[id].IsZero() || present[id] ||
+				store.Data.Accepted != nil && store.Data.Accepted.JobID == id ||
+				(failure.Attempts < maxJobAttempts && !failure.ModelCallStarted &&
+					(failure.Deadline.IsZero() || time.Now().Before(failure.Deadline))) {
+				continue
+			}
+			retired[id] = failure
+			store.Data.Processed[id] = at
+			delete(store.Data.JobFailures, id)
+		}
+		if len(retired) == 0 {
+			return nil
+		}
+		if err := store.Save(); err != nil {
+			for id, failure := range retired {
+				store.Data.JobFailures[id] = failure
+				delete(store.Data.Processed, id)
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 func infrastructureFailure(err error) bool {
@@ -1388,6 +1444,12 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 			}
 			checkAt := m.processTerminalNotification(ctx, store, job.ID, entry, commandSets, items)
 			nextCheck[entry.key] = checkAt
+			_ = store.WithLock(func() error {
+				if !hasTerminalReplay(store, entry.key, job.ID) {
+					delete(terminalChecks, entry.key)
+				}
+				return nil
+			})
 			if !checkAt.IsZero() && (next.IsZero() || checkAt.Before(next)) {
 				next = checkAt
 			}
@@ -1458,6 +1520,8 @@ func (m *Monitor) processTerminalNotification(ctx context.Context, store *state.
 func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, activeJobID string, entry notificationScan,
 	repo config.Repository, subjectType string, number int, items []github.Item, commands map[string]command.Action) time.Time {
 	var next time.Time
+	var invalid []string
+	uncertain := false
 	wake := func(at time.Time) {
 		if next.IsZero() || at.Before(next) {
 			next = at
@@ -1502,7 +1566,12 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		}
 		current, err := m.GitHub.CurrentItem(ctx, item)
 		if err != nil {
+			uncertain = true
 			wake(m.now().UTC().Add(time.Minute))
+			continue
+		}
+		if current.Edited && current.Key == item.Key && current.NodeID == item.NodeID {
+			invalid = append(invalid, id)
 			continue
 		}
 		if item.Author.ID <= 0 || current.Author.ID != item.Author.ID ||
@@ -1512,10 +1581,15 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		parsed, err = command.ParseForLoginCommands(current.Body, m.Config.BotLogin, commands)
 		if err != nil || jobID(current.Key, parsed.Name) != id || !repo.AllowsAction(parsed.Name) ||
 			!repo.AllowsActor(current.Author.Login, current.Author.ID) {
+			if current.Key == item.Key && current.NodeID == item.NodeID &&
+				(errors.Is(err, command.ErrNoCommand) || err == nil && jobID(current.Key, parsed.Name) != id) {
+				invalid = append(invalid, id)
+			}
 			continue
 		}
 		permission, err := m.GitHub.Permission(ctx, repo.Name, current.Author.Login)
 		if err != nil {
+			uncertain = true
 			wake(m.now().UTC().Add(time.Minute))
 			continue
 		}
@@ -1542,6 +1616,12 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 				wake(retryAt)
 				continue
 			}
+			wake(m.now().UTC().Add(time.Minute))
+		}
+	}
+	if ctx.Err() == nil && !uncertain {
+		if err := m.retireMissingTerminalFailures(store, entry.key, items, commands, invalid, m.now().UTC()); err != nil {
+			m.logf("retire terminal controls in %s #%d: %v", repo.Name, number, err)
 			wake(m.now().UTC().Add(time.Minute))
 		}
 	}
