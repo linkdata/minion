@@ -1053,10 +1053,26 @@ func discardAccepted(store *state.Store) error {
 	if accepted == nil {
 		return fmt.Errorf("%w: cannot discard a missing accepted action", ErrAcceptanceState)
 	}
+	processed, hadProcessed := store.Data.Processed[accepted.JobID]
+	failure, hadFailure := store.Data.JobFailures[accepted.JobID]
 	store.Data.Processed[accepted.JobID] = time.Now().UTC()
 	delete(store.Data.JobFailures, accepted.JobID)
 	store.Data.Accepted = nil
-	return saveAcceptanceState(store)
+	if err := saveAcceptanceState(store); err != nil {
+		if hadProcessed {
+			store.Data.Processed[accepted.JobID] = processed
+		} else {
+			delete(store.Data.Processed, accepted.JobID)
+		}
+		if hadFailure {
+			store.Data.JobFailures[accepted.JobID] = failure
+		} else {
+			delete(store.Data.JobFailures, accepted.JobID)
+		}
+		store.Data.Accepted = accepted
+		return err
+	}
+	return nil
 }
 
 func (m *Monitor) acceptedRepository(accepted state.AcceptedAction) (config.Repository, bool) {
@@ -1510,6 +1526,12 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 	var next time.Time
 	var invalid []string
 	uncertain := false
+	passStarted := m.now().UTC()
+	var replyRetryAt time.Time
+	_ = store.WithLock(func() error {
+		replyRetryAt = store.Data.PendingNotifications[entry.key].RetryAt
+		return nil
+	})
 	wake := func(at time.Time) {
 		if next.IsZero() || at.Before(next) {
 			next = at
@@ -1524,6 +1546,30 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		}
 		parsed, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commands)
 		if err != nil {
+			if !errors.Is(err, command.ErrNoCommand) {
+				var linked bool
+				_ = store.WithLock(func() error {
+					for name := range commands {
+						if failure, ok := store.Data.JobFailures[jobID(item.Key, name)]; ok && failure.NotificationKey == entry.key {
+							linked = true
+							break
+						}
+					}
+					return nil
+				})
+				if linked {
+					current, currentErr := m.GitHub.CurrentItem(ctx, item)
+					if currentErr == nil && current.Key == item.Key && item.NodeID != "" &&
+						current.NodeID == item.NodeID && current.Edited {
+						for name := range commands {
+							invalid = append(invalid, jobID(item.Key, name))
+						}
+					} else {
+						uncertain = true
+						wake(m.now().UTC().Add(time.Minute))
+					}
+				}
+			}
 			continue
 		}
 		id := jobID(item.Key, parsed.Name)
@@ -1533,11 +1579,9 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		var terminal bool
 		var failure state.JobFailure
 		var processed bool
-		var replyRetryAt time.Time
 		_ = store.WithLock(func() error {
 			_, processed = store.Data.Processed[id]
 			failure = store.Data.JobFailures[id]
-			replyRetryAt = store.Data.PendingNotifications[entry.key].RetryAt
 			terminal = !processed && (failure.Attempts >= maxJobAttempts || failure.ModelCallStarted ||
 				!failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline))
 			return nil
@@ -1548,7 +1592,7 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			}
 			continue
 		}
-		if failure.ReplyAttempts > 0 && m.now().UTC().Before(replyRetryAt) {
+		if failure.ReplyAttempts > 0 && passStarted.Before(replyRetryAt) {
 			wake(replyRetryAt)
 			continue
 		}
@@ -1570,7 +1614,9 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		if err != nil || jobID(current.Key, parsed.Name) != id || !repo.AllowsAction(parsed.Name) ||
 			!repo.AllowsActor(current.Author.Login, current.Author.ID) {
 			if current.Key == item.Key && current.NodeID == item.NodeID &&
-				(errors.Is(err, command.ErrNoCommand) || err == nil && jobID(current.Key, parsed.Name) != id) {
+				(errors.Is(err, command.ErrNoCommand) || err == nil &&
+					(jobID(current.Key, parsed.Name) != id || !repo.AllowsAction(parsed.Name) ||
+						!repo.AllowsActor(current.Author.Login, current.Author.ID))) {
 				invalid = append(invalid, id)
 			}
 			continue
@@ -1581,9 +1627,11 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			wake(m.now().UTC().Add(time.Minute))
 			continue
 		}
-		if permission.User.ID != current.Author.ID ||
-			!strings.EqualFold(permission.User.Login, current.Author.Login) ||
-			(permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain") {
+		if permission.User.ID != current.Author.ID || !strings.EqualFold(permission.User.Login, current.Author.Login) {
+			continue
+		}
+		if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
+			invalid = append(invalid, id)
 			continue
 		}
 		job := Job{Repository: repo, SubjectType: subjectType, Number: number, Source: current, Command: parsed, ID: id}
@@ -1775,11 +1823,32 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			if failure.ReplyAttempts < maxFailureReplyAttempts {
 				var pending state.PendingNotification
 				if saveErr := store.WithLock(func() error {
+					previousFailure, hadFailure := store.Data.JobFailures[job.ID]
+					var previousPending state.PendingNotification
+					var hadPending bool
+					if replyRetry != nil {
+						previousPending, hadPending = store.Data.PendingNotifications[replyRetry.key]
+					}
 					store.Data.JobFailures[job.ID] = failure
 					if replyRetry != nil {
 						pending = deferNotificationState(store, replyRetry.key, replyRetry.notification, replyRetry.since, m.now().UTC())
 					}
-					return saveJobResult(store, accepted != nil)
+					if saveErr := saveJobResult(store, accepted != nil); saveErr != nil {
+						if hadFailure {
+							store.Data.JobFailures[job.ID] = previousFailure
+						} else {
+							delete(store.Data.JobFailures, job.ID)
+						}
+						if replyRetry != nil {
+							if hadPending {
+								store.Data.PendingNotifications[replyRetry.key] = previousPending
+							} else {
+								delete(store.Data.PendingNotifications, replyRetry.key)
+							}
+						}
+						return saveErr
+					}
+					return nil
 				}); saveErr != nil {
 					return errors.Join(err, saveErr)
 				}
@@ -1791,15 +1860,35 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			m.logf("could not post failure reply to %s after %d attempts: %v", itemLocation(job.Source), failure.ReplyAttempts, err)
 		}
 	}
-	m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
-	return store.WithLock(func() error {
+	err = store.WithLock(func() error {
+		processed, hadProcessed := store.Data.Processed[job.ID]
+		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
+		previousAccepted := store.Data.Accepted
 		store.Data.Processed[job.ID] = at
 		delete(store.Data.JobFailures, job.ID)
 		if accepted != nil {
 			store.Data.Accepted = nil
 		}
-		return saveJobResult(store, accepted != nil)
+		if err := saveJobResult(store, accepted != nil); err != nil {
+			if hadProcessed {
+				store.Data.Processed[job.ID] = processed
+			} else {
+				delete(store.Data.Processed, job.ID)
+			}
+			if hadFailure {
+				store.Data.JobFailures[job.ID] = previousFailure
+			} else {
+				delete(store.Data.JobFailures, job.ID)
+			}
+			store.Data.Accepted = previousAccepted
+			return err
+		}
+		return nil
 	})
+	if err == nil {
+		m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
+	}
+	return err
 }
 
 func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, error) {
