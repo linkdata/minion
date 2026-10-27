@@ -558,7 +558,7 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 }
 
 func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
-	const scanLimit = 1000
+	const scanLimit = 129 // Cross the 128-entry ReadDir batch boundary.
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.cache\n")}})
 	marker := filepath.Join(t.TempDir(), "add-ran")
 	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"

@@ -520,7 +520,7 @@ func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 }
 
 func TestWalkBoundsEntries(t *testing.T) {
-	const scanLimit = 1000
+	const scanLimit = 129 // Cross the 128-entry ReadDir batch boundary.
 	root := t.TempDir()
 	for i := 0; i <= scanLimit; i++ {
 		if err := os.WriteFile(filepath.Join(root, strconv.Itoa(i)), nil, 0600); err != nil {

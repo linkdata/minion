@@ -250,7 +250,7 @@ func TestUnchangedUsageRolloutRespectsExactRemainingBudget(t *testing.T) {
 }
 
 func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
-	const walkLimit = 1000
+	const walkLimit = 257 // Cross the 256-entry ReadDir batch boundary.
 	home := t.TempDir()
 	sessions := filepath.Join(home, "sessions")
 	if err := os.Mkdir(sessions, 0700); err != nil {
