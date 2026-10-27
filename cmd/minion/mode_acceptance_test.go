@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
@@ -22,6 +25,19 @@ import (
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/testsupport"
 )
+
+type cancelAfterReactionGitHub struct {
+	monitor.GitHub
+	cancel context.CancelFunc
+}
+
+func (g cancelAfterReactionGitHub) ReactEyes(ctx context.Context, nodeID string) error {
+	if err := g.GitHub.ReactEyes(ctx, nodeID); err != nil {
+		return err
+	}
+	g.cancel()
+	return nil
+}
 
 // The parent supplies a GitHub command and repository, then publishes the
 // answer returned by a real, separately spawned public execute-mode child.
@@ -41,6 +57,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	modelCalls := filepath.Join(base, "model-calls")
 	offlineModeCodex(t, modelCalls)
+	statePath := filepath.Join(base, "state.json")
 	now := time.Date(2026, 10, 9, 8, 1, 0, 0, time.UTC)
 	requestAt := now.Add(-time.Second)
 	request := github.Comment{ID: 42, NodeID: "request-node", Body: "@linkdataminion comment",
@@ -48,6 +65,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		HTMLURL: "https://github.com/o/r/issues/7#issuecomment-42"}
 	var mu sync.Mutex
 	var published []github.Comment
+	var publicationStates []state.Data
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer offline-token" {
 			t.Errorf("unexpected authorization for %s %s", r.Method, r.URL.Path)
@@ -88,7 +106,18 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 			if !strings.Contains(input.Body, "No findings.") || !strings.Contains(input.Body, "<!-- linkdataminion:") {
 				t.Errorf("publication lacks model answer or marker: %q", input.Body)
 			}
+			data, err := os.ReadFile(statePath)
+			if err != nil {
+				t.Errorf("read acceptance during publication: %v", err)
+			}
+			var checkpoint state.Data
+			if err == nil {
+				if err := json.Unmarshal(data, &checkpoint); err != nil {
+					t.Errorf("decode acceptance during publication: %v", err)
+				}
+			}
 			mu.Lock()
+			publicationStates = append(publicationStates, checkpoint)
 			published = append(published, github.Comment{ID: 99, NodeID: "reply-node", Body: input.Body,
 				User: github.User{ID: 8, Login: "linkdataminion"}, CreatedAt: requestAt, UpdatedAt: requestAt})
 			mu.Unlock()
@@ -141,7 +170,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	client := github.New("offline-token")
 	client.HTTPClient, client.BaseURL = server.Client(), server.URL
 	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
-	cfg := config.Config{WorkRoot: filepath.Join(base, "work"), StatePath: filepath.Join(base, "state.json"),
+	cfg := config.Config{WorkRoot: filepath.Join(base, "work"), StatePath: statePath,
 		BotLogin: "linkdataminion", Main: "codex", Codex: config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
 		PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},
@@ -174,8 +203,49 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 			t.Fatalf("orchestrate poll returned %d: %s", code, logs.String())
 		}
 	}
+	// Stop after the persisted acceptance and successful reaction, before any
+	// worker assignment. A restarted service must resume this same attempt.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := &monitor.Monitor{Config: cfg, GitHub: cancelAfterReactionGitHub{GitHub: client, cancel: cancel},
+		Handler: newOrchestrator(cfg, client, store, log.New(&bytes.Buffer{}, "", 0), nil),
+		Now:     func() time.Time { return now }, SelectedExecutorID: action.LocalExecutorID,
+		SelectedCommands: map[string]bool{"comment": true}}
+	if _, err := first.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first poll did not stop after reaction: %v", err)
+	}
+	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.Accepted.AttemptID == "" ||
+		!store.Data.Accepted.Deadline.After(store.Data.Accepted.AcceptedAt) ||
+		store.Data.JobFailures[store.Data.Accepted.JobID].Attempts != 1 {
+		t.Fatalf("first poll did not retain one unassigned acceptance: %+v", store.Data)
+	}
+	accepted := *store.Data.Accepted
+	if _, err := os.Stat(modelCalls); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canceled poll reached model: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(cfg.StatePath, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.Accepted == nil || store.Data.Accepted.AttemptID != accepted.AttemptID ||
+		!store.Data.Accepted.AcceptedAt.Equal(accepted.AcceptedAt) ||
+		!store.Data.Accepted.Deadline.Equal(accepted.Deadline) || store.Data.Accepted.Assigned {
+		t.Fatalf("restart changed accepted action: got=%+v want=%+v", store.Data.Accepted, accepted)
+	}
 	runPoll(now)
 	assertOfflineModeCounts(t, modelCalls, &mu, &published, 1)
+	mu.Lock()
+	checkpoint := publicationStates[0]
+	mu.Unlock()
+	if checkpoint.Accepted == nil || checkpoint.Accepted.AttemptID != accepted.AttemptID ||
+		!checkpoint.Accepted.AcceptedAt.Equal(accepted.AcceptedAt) ||
+		!checkpoint.Accepted.Deadline.Equal(accepted.Deadline) || !checkpoint.Accepted.Assigned ||
+		checkpoint.JobFailures[accepted.JobID].Attempts != 1 {
+		t.Fatalf("publication did not use original accepted assignment: %+v", checkpoint)
+	}
 	if len(store.Data.Processed) != 1 {
 		t.Fatalf("first poll processed = %v", store.Data.Processed)
 	}

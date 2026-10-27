@@ -142,7 +142,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return store.Data.NextPollAt, err
 	}
 	if store.Data.Accepted != nil {
-		return store.Data.NextPollAt, m.recoverAccepted(ctx, store)
+		err := m.recoverAccepted(ctx, store)
+		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
+			retryAt := time.Now().UTC().Add(m.pollInterval())
+			if retryAt.After(store.Data.NextPollAt) {
+				store.Data.NextPollAt = retryAt
+				if saveErr := saveAcceptanceState(store); saveErr != nil {
+					err = errors.Join(err, saveErr)
+				}
+			}
+		}
+		return store.Data.NextPollAt, err
 	}
 	if err := m.waitCapacity(ctx); err != nil {
 		return store.Data.NextPollAt, err
@@ -180,10 +190,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if started.Before(store.Data.NextPollAt) {
 		return store.Data.NextPollAt, nil
 	}
-	minInterval := time.Duration(m.Config.PollIntervalSeconds) * time.Second
-	if minInterval < time.Minute {
-		minInterval = time.Minute
-	}
+	minInterval := m.pollInterval()
 	next := started.Add(minInterval)
 	store.Data.NextPollAt = next
 	if store.Data.RepositoryCursors == nil {
@@ -444,10 +451,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			if selected && !jobFailure.Deadline.IsZero() && !time.Now().Before(jobFailure.Deadline) {
+			if !jobFailure.Deadline.IsZero() && !time.Now().Before(jobFailure.Deadline) {
 				jobFailure.Attempts = maxJobAttempts
 				store.Data.JobFailures[job.ID] = jobFailure
-				if err := saveAcceptanceState(store); err != nil {
+				if err := saveJobResult(store, selected); err != nil {
 					return stop(err)
 				}
 				if err := m.finishFailedJob(ctx, store, job, started, jobFailure); err != nil {
@@ -716,6 +723,14 @@ func (m *Monitor) actionRuntime() time.Duration {
 	return runtime
 }
 
+func (m *Monitor) pollInterval() time.Duration {
+	interval := time.Duration(m.Config.PollIntervalSeconds) * time.Second
+	if interval < time.Minute {
+		return time.Minute
+	}
+	return interval
+}
+
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {
 	if err := failure.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
@@ -763,16 +778,78 @@ func (m *Monitor) terminalAccepted(ctx context.Context, store *state.Store, job 
 	return m.finishFailedJob(ctx, store, job, time.Now().UTC(), failure)
 }
 
-func discardUnassignedAccepted(store *state.Store) error {
+func discardAccepted(store *state.Store) error {
 	accepted := store.Data.Accepted
-	if accepted == nil || accepted.Assigned || store.Data.JobFailures[accepted.JobID].ModelCallStarted {
-		return fmt.Errorf("%w: cannot discard an assigned or missing action", ErrAcceptanceState)
+	if accepted == nil {
+		return fmt.Errorf("%w: cannot discard a missing accepted action", ErrAcceptanceState)
 	}
 	store.Data.Processed[accepted.JobID] = time.Now().UTC()
 	delete(store.Data.JobFailures, accepted.JobID)
 	delete(store.Data.PendingFixes, accepted.JobID)
 	store.Data.Accepted = nil
 	return saveAcceptanceState(store)
+}
+
+func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.AcceptedAction, requireInstalled bool) (config.Repository, github.Item, bool, error) {
+	repo, ok := m.Config.Repository(accepted.Repository)
+	if !ok || !repo.MatchesIdentity(accepted.RepositoryID, accepted.OwnerID) ||
+		!repo.AllowsAction(accepted.CommandName) || !repo.AllowsActor(accepted.Requester, accepted.RequesterID) {
+		return config.Repository{}, github.Item{}, false, nil
+	}
+	var commands map[string]command.Action
+	if requireInstalled {
+		commands = m.availableCommands(repo)
+		if commands[accepted.CommandName] != command.Action(accepted.Action) {
+			return config.Repository{}, github.Item{}, false, fmt.Errorf("selected command %q is unavailable", accepted.CommandName)
+		}
+	} else {
+		commands = make(map[string]command.Action, len(repo.Actions))
+		for _, name := range repo.Actions {
+			if mapping, ok := m.Config.Commands[name]; ok {
+				commands[name] = command.Action(mapping.Action)
+			}
+		}
+		if commands[accepted.CommandName] != command.Action(accepted.Action) {
+			return config.Repository{}, github.Item{}, false, nil
+		}
+	}
+	liveRepo, err := m.GitHub.Repository(ctx, repo.Name)
+	if err != nil {
+		return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted repository identity: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return config.Repository{}, github.Item{}, false, err
+	}
+	if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
+		return config.Repository{}, github.Item{}, false, nil
+	}
+	current, err := m.GitHub.CurrentItem(ctx, jobFromAccepted(accepted).Source)
+	if err != nil {
+		return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted source: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return config.Repository{}, github.Item{}, false, err
+	}
+	if current.Key != accepted.SourceKey || current.NodeID != accepted.SourceNodeID || current.Edited ||
+		current.Author.ID != accepted.RequesterID || !strings.EqualFold(current.Author.Login, accepted.Requester) {
+		return config.Repository{}, github.Item{}, false, nil
+	}
+	parsed, err := command.ParseForLoginCommands(current.Body, m.Config.BotLogin, commands)
+	if err != nil || parsed.Name != accepted.CommandName || parsed.Action != command.Action(accepted.Action) {
+		return config.Repository{}, github.Item{}, false, nil
+	}
+	permission, err := m.GitHub.Permission(ctx, repo.Name, accepted.Requester)
+	if err != nil {
+		return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted requester permission: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return config.Repository{}, github.Item{}, false, err
+	}
+	if permission.User.ID != accepted.RequesterID || !strings.EqualFold(permission.User.Login, accepted.Requester) ||
+		(permission.Permission != "write" && permission.Permission != "maintain" && permission.Permission != "admin") {
+		return config.Repository{}, github.Item{}, false, nil
+	}
+	return repo, current, true, nil
 }
 
 func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error {
@@ -800,15 +877,6 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
 		return fmt.Errorf("%w: selected executor changed before recovery", ErrAcceptanceState)
 	}
-	repo, ok := m.Config.Repository(accepted.Repository)
-	if !ok || !repo.MatchesIdentity(accepted.RepositoryID, accepted.OwnerID) ||
-		!repo.AllowsAction(accepted.CommandName) || !repo.AllowsActor(accepted.Requester, accepted.RequesterID) {
-		return discardUnassignedAccepted(store)
-	}
-	available := m.availableCommands(repo)
-	if available[accepted.CommandName] != command.Action(accepted.Action) {
-		return fmt.Errorf("recover %s: selected command is unavailable", itemLocation(job.Source))
-	}
 	resumeCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
 	failed := func(location string, err error) error {
@@ -829,43 +897,17 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if err := checkContext("resume accepted action capacity"); err != nil {
 		return err
 	}
-	liveRepo, err := m.GitHub.Repository(resumeCtx, repo.Name)
+	repo, current, valid, err := m.validateAcceptedSource(resumeCtx, *accepted, true)
 	if err != nil {
-		return failed("verify accepted repository identity", err)
+		return failed("revalidate accepted source", err)
 	}
-	if err := checkContext("verify accepted repository identity"); err != nil {
+	if err := checkContext("revalidate accepted source"); err != nil {
 		return err
 	}
-	if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
-		return discardUnassignedAccepted(store)
+	if !valid {
+		return discardAccepted(store)
 	}
-	current, err := m.GitHub.CurrentItem(resumeCtx, job.Source)
-	if err != nil {
-		return failed("verify accepted source", err)
-	}
-	if err := checkContext("verify accepted source"); err != nil {
-		return err
-	}
-	if current.Key != accepted.SourceKey || current.NodeID != accepted.SourceNodeID || current.Edited ||
-		current.Author.ID != accepted.RequesterID || !strings.EqualFold(current.Author.Login, accepted.Requester) {
-		return discardUnassignedAccepted(store)
-	}
-	parsed, err := command.ParseForLoginCommands(current.Body, m.Config.BotLogin, available)
-	if err != nil || parsed.Name != accepted.CommandName || parsed.Action != command.Action(accepted.Action) {
-		return discardUnassignedAccepted(store)
-	}
-	permission, err := m.GitHub.Permission(resumeCtx, repo.Name, accepted.Requester)
-	if err != nil {
-		return failed("verify accepted requester permission", err)
-	}
-	if err := checkContext("verify accepted requester permission"); err != nil {
-		return err
-	}
-	if permission.User.ID != accepted.RequesterID || !strings.EqualFold(permission.User.Login, accepted.Requester) ||
-		(permission.Permission != "write" && permission.Permission != "maintain" && permission.Permission != "admin") {
-		return discardUnassignedAccepted(store)
-	}
-	job.Source = current
+	job.Repository, job.Source = repo, current
 	if err := m.GitHub.ReactEyes(resumeCtx, accepted.SourceNodeID); err != nil {
 		return failed("react to accepted source", err)
 	}
@@ -946,6 +988,21 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 	}
 	if !replied {
+		if accepted := store.Data.Accepted; accepted != nil {
+			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			configured, current, valid, verifyErr := m.validateAcceptedSource(verifyCtx, *accepted, false)
+			if verifyErr == nil {
+				verifyErr = verifyCtx.Err()
+			}
+			cancel()
+			if verifyErr != nil {
+				return fmt.Errorf("revalidate %s before failure reply: %w", itemLocation(job.Source), verifyErr)
+			}
+			if !valid {
+				return discardAccepted(store)
+			}
+			job.Repository, job.Source = configured, current
+		}
 		replyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		repo, err := m.GitHub.Repository(replyCtx, job.Repository.Name)

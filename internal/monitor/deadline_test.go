@@ -43,7 +43,7 @@ func TestLegacyExpiredRetryStopsBeforeExecution(t *testing.T) {
 	scanAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := selectedItem(scanAt)
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(scanAt)}, items: []github.Item{item},
-		permission: github.Permission{Permission: "write"}}
+		permission: github.Permission{Permission: "write"}, reactionErr: errors.New("reaction unavailable")}
 	store := openState(t, scanAt.Add(-time.Minute))
 	firstAt := time.Now().UTC().Add(-9 * time.Minute)
 	id := jobID(item.Key, "review")
@@ -55,7 +55,7 @@ func TestLegacyExpiredRetryStopsBeforeExecution(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.MaxRuntimeMinutes = 7
 	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return scanAt }}
-	if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.comments) != 1 ||
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.reactions) != 0 || len(gh.comments) != 1 ||
 		len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || len(handler.jobs) != 0 {
 		t.Fatalf("expired legacy retry renewed runtime: err=%v comments=%+v state=%+v", err, gh.comments, store.Data)
 	}

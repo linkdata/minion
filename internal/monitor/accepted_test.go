@@ -140,6 +140,8 @@ func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testin
 		permission: github.Permission{Permission: "write"},
 	}, afterReaction: cancel}
 	m := selectedMonitor(t, scanAt, gh, selectedHandler(func(Job) error { t.Fatal("canceled scan dispatched work"); return nil }))
+	m.Config.Repositories[0].AllowedActors = []string{"writer"}
+	m.Config.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
 		t.Fatalf("post-reaction cancellation = %v", err)
 	}
@@ -162,7 +164,9 @@ func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testin
 	m.Handler = selectedHandler(func(job Job) error {
 		executions++
 		if job.AttemptID != original.AttemptID || !job.AcceptedAt.Equal(original.AcceptedAt) || !job.Deadline.Equal(original.Deadline) ||
-			reopened.Data.Accepted == nil || reopened.Data.JobFailures[job.ID].Attempts != 1 {
+			reopened.Data.Accepted == nil || reopened.Data.JobFailures[job.ID].Attempts != 1 ||
+			!job.Repository.AllowsAction(job.Command.Name) || !job.Repository.AllowsActor("writer", 7) ||
+			len(job.Repository.Actions) == 0 || len(job.Repository.AllowedActors) == 0 {
 			t.Fatalf("restart minted another acceptance: job=%+v original=%+v state=%+v", job, original, reopened.Data)
 		}
 		return nil
@@ -251,6 +255,7 @@ func TestSelectedExpiredOriginalDeadlineNeverReaccepts(t *testing.T) {
 			item := selectedItem(scanAt)
 			gh := &fakeGitHub{notifications: []github.Notification{testNotification(scanAt)}, items: []github.Item{item},
 				permission: github.Permission{Permission: "write"}}
+			gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(firstAt), nil }
 			store := openState(t, scanAt.Add(-time.Minute))
 			id := jobID(item.Key, "review")
 			store.Data.JobFailures[id] = state.JobFailure{AcceptedAt: firstAt, Deadline: firstAt.Add(7 * time.Minute)}
@@ -285,7 +290,9 @@ func TestSelectedPreassignmentDeadlineErrorFinishesOriginalReply(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	gh := &fakeGitHub{}
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+		return selectedItem(firstAt), nil
+	}}
 	m := selectedMonitor(t, firstAt, gh, selectedHandler(func(Job) error { return context.DeadlineExceeded }))
 	if err := m.executeSelected(t.Context(), store, jobFromAccepted(accepted), time.Now().UTC()); err != nil ||
 		len(gh.comments) != 1 || store.Data.Accepted != nil || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
@@ -335,6 +342,7 @@ func TestSelectedAssignedFailureIsTerminal(t *testing.T) {
 	item := selectedItem(at)
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
 		permission: github.Permission{Permission: "write"}}
+	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
 	store := openState(t, at.Add(-time.Minute))
 	workerErr := errors.New("worker failed")
 	m := selectedMonitor(t, at, gh, selectedHandler(func(job Job) error {
@@ -363,6 +371,12 @@ func TestSelectedFailedReplyStopsBeforeAnotherAcceptance(t *testing.T) {
 	replyErr := errors.New("failure reply unavailable")
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{first, second},
 		permission: github.Permission{Permission: "write"}, commentErr: replyErr}
+	gh.currentItem = func(seed github.Item) (github.Item, error) {
+		if seed.Key == first.Key {
+			return first, nil
+		}
+		return second, nil
+	}
 	store := openState(t, at.Add(-time.Minute))
 	var executions int
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
@@ -508,7 +522,8 @@ func TestSelectedAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
-	gh := &fakeGitHub{beforeList: func() { t.Fatal("invitation scan preceded recovery") }}
+	gh := &fakeGitHub{beforeList: func() { t.Fatal("invitation scan preceded recovery") },
+		permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil }}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("assigned action redispatched"); return nil }))
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil {
 		t.Fatal(err)
@@ -533,7 +548,9 @@ func TestSelectedUnassignedModelMarkerRecoversAsTerminal(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	gh := &fakeGitHub{}
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+		return selectedItem(at), nil
+	}}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("model marker redispatched work"); return nil }))
 	if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.comments) != 1 ||
 		store.Data.Accepted != nil || len(store.Data.Processed) != 1 {
@@ -555,8 +572,123 @@ func TestSelectedAssignedRecoveryChecksRepositoryIdentityBeforeReply(t *testing.
 	wrong.ID++
 	gh := &fakeGitHub{liveRepo: &wrong}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("assigned action redispatched"); return nil }))
-	if _, err := m.RunOnce(t.Context(), store); err == nil || len(gh.comments) != 0 || store.Data.Accepted == nil {
-		t.Fatalf("repository mismatch published or released accepted action: err=%v state=%+v", err, store.Data)
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.comments) != 0 || store.Data.Accepted != nil || len(store.Data.Processed) != 1 {
+		t.Fatalf("repository mismatch published failure reply: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedTerminalRecoveryRechecksSourceAndAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		assigned     bool
+		modelStarted bool
+		expired      bool
+		changeItem   func(*github.Item)
+		changeGH     func(*fakeGitHub)
+	}{
+		{name: "assigned edited source", assigned: true, changeItem: func(item *github.Item) { item.Edited = true }},
+		{name: "model started revoked permission", modelStarted: true, changeGH: func(gh *fakeGitHub) {
+			gh.permission.Permission = "read"
+		}},
+		{name: "expired changed command", expired: true, changeItem: func(item *github.Item) {
+			item.Body = "@linkdataminion fix"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			if test.expired {
+				at = at.Add(-9 * time.Minute)
+			}
+			accepted := selectedAcceptance(t, at)
+			accepted.Assigned = test.assigned
+			store := openState(t, at.Add(-time.Minute))
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, ModelCallStarted: test.modelStarted,
+				AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{permission: github.Permission{Permission: "write"}}
+			if test.changeGH != nil {
+				test.changeGH(gh)
+			}
+			gh.currentItem = func(github.Item) (github.Item, error) {
+				item := selectedItem(at)
+				if test.changeItem != nil {
+					test.changeItem(&item)
+				}
+				return item, nil
+			}
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("terminal action redispatched"); return nil }))
+			if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.comments) != 0 ||
+				store.Data.Accepted != nil || len(store.Data.Processed) != 1 {
+				t.Fatalf("changed terminal source received failure reply: err=%v state=%+v", err, store.Data)
+			}
+		})
+	}
+}
+
+func TestSelectedTerminalRecoveryRetainsTransientLookupAndSchedulesRetry(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	accepted.Assigned = true
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	store.Data.NextPollAt = at.Add(-time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	lookupErr := errors.New("source lookup unavailable")
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+		return github.Item{}, lookupErr
+	}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("terminal action redispatched"); return nil }))
+	for attempt := 0; attempt < 2; attempt++ {
+		before := time.Now().UTC()
+		prior := store.Data.NextPollAt
+		next, err := m.RunOnce(t.Context(), store)
+		if !errors.Is(err, lookupErr) || next.Before(before.Add(time.Minute-time.Second)) || next.Before(prior) ||
+			store.Data.Accepted == nil || !store.Data.Accepted.Deadline.Equal(accepted.Deadline) || len(gh.comments) != 0 {
+			t.Fatalf("transient terminal lookup spun or cleared reservation: next=%s err=%v state=%+v", next, err, store.Data)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	if reopened.Data.Accepted == nil || !reopened.Data.NextPollAt.Equal(store.Data.NextPollAt) {
+		t.Fatalf("retry schedule was not durable: %+v", reopened.Data)
+	}
+	gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(at), nil }
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(gh.comments) != 1 || reopened.Data.Accepted != nil {
+		t.Fatalf("terminal lookup retry did not finish: err=%v state=%+v", err, reopened.Data)
+	}
+}
+
+func TestSelectedTerminalRecoveryKeepsExistingVerifiedReply(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	accepted.Assigned = true
+	store := openState(t, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	reply := github.Item{Key: "review:published", Body: "Complete.\n\n" + (Job{ID: accepted.JobID}).Marker(),
+		Author: github.User{Login: "linkdataminion"}, UpdatedAt: at}
+	gh := &fakeGitHub{reviewReplies: []github.Item{reply}, currentItem: func(seed github.Item) (github.Item, error) {
+		if seed.Key != reply.Key {
+			return github.Item{}, errors.New("source is no longer available")
+		}
+		return reply, nil
+	}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("completed action redispatched"); return nil }))
+	if _, err := m.RunOnce(t.Context(), store); err != nil || gh.commentCalls != 0 ||
+		store.Data.Accepted != nil || len(store.Data.Processed) != 1 {
+		t.Fatalf("existing verified reply was ignored: err=%v state=%+v", err, store.Data)
 	}
 }
 
