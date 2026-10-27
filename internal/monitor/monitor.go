@@ -148,6 +148,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if err := ctx.Err(); err != nil {
 		return store.Data.NextPollAt, err
 	}
+	now := m.now
+	selectedMode := m.SelectedExecutorID != ""
 	if store.Data.Accepted != nil {
 		if retryAt := store.Data.Accepted.RetryAt; time.Now().Before(retryAt) {
 			return retryAt, nil
@@ -162,37 +164,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return store.Data.NextPollAt, err
 	}
-	if err := m.waitCapacity(ctx); err != nil {
-		return store.Data.NextPollAt, err
+	var capacityErr error
+	if selectedMode {
+		capacityErr = m.waitCapacityWithInvitations(ctx, store)
+	} else if capacityErr = m.checkDueInvitations(ctx, store, now().UTC()); capacityErr == nil {
+		capacityErr = m.waitCapacity(ctx)
 	}
-	now := time.Now
-	if m.Now != nil {
-		now = m.Now
-	}
-	if !now().UTC().Before(store.Data.NextInviteCheckAt) {
-		deferred, err := m.acceptWhitelistedInvitations(ctx)
-		if err != nil {
-			// Invitation failures should be visible, but should not stop scans of
-			// repositories for which this account already has access.
-			m.logf("invitation check: %v", err)
-		}
-		if err := ctx.Err(); err != nil {
-			return store.Data.NextPollAt, err
-		}
-		if len(deferred) != 0 {
-			if store.Data.RepositoryCursors == nil {
-				store.Data.RepositoryCursors = make(map[string]time.Time)
-			}
-			for _, name := range deferred {
-				if _, exists := store.Data.RepositoryCursors[name]; !exists {
-					store.Data.RepositoryCursors[name] = store.Data.Cursor
-				}
-			}
-		}
-		store.Data.NextInviteCheckAt = now().UTC().Add(15 * time.Minute)
-		if err := store.Save(); err != nil {
-			return store.Data.NextPollAt, err
-		}
+	if capacityErr != nil {
+		return store.Data.NextPollAt, capacityErr
 	}
 	started := now().UTC()
 	if started.Before(store.Data.NextPollAt) {
@@ -453,7 +432,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			selected := m.SelectedExecutorID != ""
+			selected := selectedMode
 			jobFailure := store.Data.JobFailures[job.ID]
 			if jobFailure.ModelCallStarted {
 				jobFailure.Attempts = maxJobAttempts
@@ -617,8 +596,18 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					}
 				}
 			}
-			if err := m.waitCapacity(ctx); err != nil {
-				if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
+			var capacityErr error
+			if selected {
+				capacityErr = m.waitCapacityWithInvitations(ctx, store)
+			} else {
+				capacityErr = m.waitCapacity(ctx)
+			}
+			if err := capacityErr; err != nil {
+				if len(failures) != firstFailure {
+					if saveErr := m.deferNotification(store, entry.key, notification, entry.since, started); saveErr != nil {
+						return stop(err, saveErr)
+					}
+				} else if saveErr := rememberNotification(store, entry.key, notification, entry.since); saveErr != nil {
 					return stop(err, saveErr)
 				}
 				return stop(err)
@@ -653,6 +642,99 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return stop(err)
 	}
 	return stop()
+}
+
+func (m *Monitor) now() time.Time {
+	if m.Now != nil {
+		return m.Now()
+	}
+	return time.Now()
+}
+
+func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
+	if at.Before(store.Data.NextInviteCheckAt) {
+		return nil
+	}
+	deferred, err := m.acceptWhitelistedInvitations(ctx)
+	if err != nil {
+		// Invitation failures should be visible, but should not stop scans of
+		// repositories for which this account already has access.
+		m.logf("invitation check: %v", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(deferred) != 0 {
+		if store.Data.RepositoryCursors == nil {
+			store.Data.RepositoryCursors = make(map[string]time.Time)
+		}
+		for _, name := range deferred {
+			if _, exists := store.Data.RepositoryCursors[name]; !exists {
+				store.Data.RepositoryCursors[name] = store.Data.Cursor
+			}
+		}
+	}
+	if checkedAt := m.now().UTC(); checkedAt.After(at) {
+		at = checkedAt
+	}
+	store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
+	return store.Save()
+}
+
+// Keep the one capacity wait live while the monitor services invitation deadlines.
+func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.Store) error {
+	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+		return err
+	}
+	if _, ok := m.Handler.(interface{ WaitCapacity(context.Context) error }); !ok {
+		return ctx.Err()
+	}
+	waitCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- m.waitCapacity(waitCtx) }()
+	waiting := true
+	finish := func(err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return m.checkDueInvitations(ctx, store, m.now().UTC())
+	}
+	defer func() {
+		cancel()
+		if waiting {
+			<-done
+		}
+	}()
+	for {
+		due := store.Data.NextInviteCheckAt
+		timer := time.NewTimer(due.Sub(m.now().UTC()))
+		select {
+		case err := <-done:
+			timer.Stop()
+			waiting = false
+			return finish(err)
+		case <-timer.C:
+			select {
+			case err := <-done:
+				waiting = false
+				return finish(err)
+			default:
+			}
+			at := m.now().UTC()
+			if at.Before(due) {
+				at = due
+			}
+			if err := m.checkDueInvitations(ctx, store, at); err != nil {
+				return err
+			}
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
 }
 
 func (m *Monitor) waitCapacity(ctx context.Context) error {
@@ -718,6 +800,22 @@ func (m *Monitor) deferNotification(store *state.Store, key string, notification
 	}
 	m.logf("retry %s %s after %s (failure %d)", pending.Repository, pending.SubjectURL, pending.RetryAt.Format(time.RFC3339), pending.Failures)
 	return nil
+}
+
+// rememberNotification retains the thread for replay without counting capacity loss as a failure.
+func rememberNotification(store *state.Store, key string, notification github.Notification, since time.Time) error {
+	if _, exists := store.Data.PendingNotifications[key]; exists {
+		return nil
+	}
+	if store.Data.PendingNotifications == nil {
+		store.Data.PendingNotifications = make(map[string]state.PendingNotification)
+	}
+	store.Data.PendingNotifications[key] = state.PendingNotification{
+		Repository: notification.Repository.FullName, RepositoryID: notification.Repository.ID,
+		OwnerID: notification.Repository.Owner.ID, SubjectType: notification.Subject.Type,
+		SubjectURL: notification.Subject.URL, Since: since, UpdatedAt: notification.UpdatedAt,
+	}
+	return store.Save()
 }
 
 func infrastructureFailure(err error) bool {
@@ -1306,10 +1404,8 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			continue
 		}
 		if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
-			if m.SelectedCommands != nil {
-				// Preserve the cursor even if the config write reports an ambiguous failure.
-				deferred = append(deferred, strings.ToLower(fullName))
-			}
+			// Preserve the cursor even if the config write reports an ambiguous failure.
+			deferred = append(deferred, strings.ToLower(fullName))
 			actions := m.Config.CommandNames()
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
 			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})

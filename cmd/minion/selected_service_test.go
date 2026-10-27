@@ -313,8 +313,8 @@ func (*unavailableSelectedHandler) Execute(context.Context, monitor.Job) error {
 
 func TestSelectedLocalServiceStopsAfterWorkerLoss(t *testing.T) {
 	handler := &unavailableSelectedHandler{}
-	watcher := &monitor.Monitor{Handler: handler}
-	store := &state.Store{}
+	watcher := &monitor.Monitor{Handler: handler, SelectedExecutorID: action.LocalExecutorID}
+	store := &state.Store{Data: state.Data{NextInviteCheckAt: time.Now().Add(time.Hour)}}
 	var logs bytes.Buffer
 	closed := 0
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

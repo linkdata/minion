@@ -96,7 +96,7 @@ type CriticCap struct {
 	FullApproved bool `json:"full_approved"`
 }
 
-// PendingNotification retains a failed thread after its repository cursor advances.
+// PendingNotification retains a failed or capacity-deferred thread for replay.
 type PendingNotification struct {
 	Repository   string    `json:"repository"`
 	RepositoryID int64     `json:"repository_id"`
