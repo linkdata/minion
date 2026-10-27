@@ -60,7 +60,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			watcher := &monitor.Monitor{Config: cfg, Logger: logger}
 			done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
 			if mode == "reject-before-pull" {
-				if err == nil || done != nil || closeWorker != nil || owner.Executor != nil || watcher.Handler != nil || watcher.SelectedCommands != nil {
+				if err == nil || done != nil || closeWorker != nil || owner.Executor != nil || watcher.Handler != nil || watcher.SelectedCommands != nil || watcher.SelectedExecutorID != "" {
 					t.Fatalf("failed preflight exposed a worker or discovery: done=%v close=%v owner=%v handler=%v commands=%v error=%v", done != nil, closeWorker != nil, owner.Executor, watcher.Handler, watcher.SelectedCommands, err)
 				}
 				return
@@ -72,7 +72,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 				t.Fatal("attached child has no exit signal")
 			}
 			t.Cleanup(func() { _ = closeWorker() })
-			if watcher.Handler != owner || len(watcher.SelectedCommands) != 1 || !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
+			if watcher.Handler != owner || watcher.SelectedExecutorID != action.LocalExecutorID || len(watcher.SelectedCommands) != 1 || !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
 				t.Fatalf("monitor did not receive exact frozen selection: handler=%v commands=%v", watcher.Handler, watcher.SelectedCommands)
 			}
 			data, err := os.ReadFile(report)
@@ -172,6 +172,14 @@ func TestSelectedLocalServiceStopsAfterWorkerLoss(t *testing.T) {
 	code := runSelectedLocalService(ctx, watcher, store, true, done, log.New(&logs, "", 0), func() error { closed++; return nil })
 	if code != 1 || handler.waits != 1 || closed != 1 || ctx.Err() != nil {
 		t.Fatalf("retired worker was retried or not closed: code=%d waits=%d closed=%d context=%v logs=%q", code, handler.waits, closed, ctx.Err(), logs.String())
+	}
+}
+
+func TestRunMonitorLoopStopsOnUncertainAcceptanceState(t *testing.T) {
+	store := &state.Store{Data: state.Data{Accepted: &state.AcceptedAction{}}}
+	var logs bytes.Buffer
+	if code := runMonitorLoop(t.Context(), &monitor.Monitor{}, store, true, nil, log.New(&logs, "", 0)); code != 1 {
+		t.Fatalf("uncertain acceptance kept polling: code=%d logs=%q", code, logs.String())
 	}
 }
 

@@ -276,7 +276,7 @@ func TestRunOnceCanceledExecutionPreservesEarlierFailure(t *testing.T) {
 			}
 			_, processed := store.Data.Processed[id]
 			failure, remains := store.Data.JobFailures[id]
-			if processed != test.processed || remains != (!test.processed && test.attempts != 0) || failure.Attempts != test.attempts {
+			if processed != test.processed || remains != !test.processed || failure.Attempts != test.attempts {
 				t.Fatalf("cancellation changed completion/attempt policy: processed=%t failure=%+v remains=%t", processed, failure, remains)
 			}
 			if test.saveFails {

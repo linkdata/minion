@@ -25,7 +25,8 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 		t.Fatalf("second writer got %v, want ErrLocked", err)
 	}
 	store.Data.Processed["job"] = initial
-	store.Data.JobFailures["failed"] = JobFailure{Attempts: 2, ReplyAttempts: 1, ModelCallStarted: true}
+	failure := JobFailure{Attempts: 2, ReplyAttempts: 1, ModelCallStarted: true, AcceptedAt: initial, Deadline: initial.Add(time.Hour)}
+	store.Data.JobFailures["failed"] = failure
 	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
 	store.Data.RepositoryCursors["owner/repo"] = initial.Add(time.Minute)
 	store.Data.NextPollAt = initial.Add(2 * time.Minute)
@@ -50,7 +51,7 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 		}
 	}()
 	got := reopened.Data
-	if _, ok := got.Processed["job"]; !ok || got.JobFailures["failed"] != (JobFailure{Attempts: 2, ReplyAttempts: 1, ModelCallStarted: true}) || !got.Cursor.Equal(initial) ||
+	if _, ok := got.Processed["job"]; !ok || got.JobFailures["failed"] != failure || !got.Cursor.Equal(initial) ||
 		!got.RepositoryCursors["owner/repo"].Equal(initial.Add(time.Minute)) || !got.NextPollAt.Equal(initial.Add(2*time.Minute)) || !got.NextInviteCheckAt.Equal(initial.Add(time.Hour)) ||
 		got.PendingNotifications["thread"] != (PendingNotification{Repository: "owner/repo", Since: initial}) || !reflect.DeepEqual(got.PendingFixes["fix-job"], pending) ||
 		got.PendingFixes["normal-fix"] != (PendingFix{SHA: "normal-sha"}) {
@@ -134,8 +135,6 @@ func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 		{"missing requester ID", func(a *AcceptedAction) { a.RequesterID = 0 }},
 		{"missing command", func(a *AcceptedAction) { a.CommandName = "" }},
 		{"unsupported action", func(a *AcceptedAction) { a.Action = "unknown" }},
-		{"wrong review subject", func(a *AcceptedAction) { a.SubjectType = "Issue" }},
-		{"wrong fix subject", func(a *AcceptedAction) { a.Action = "fix" }},
 		{"missing accepted time", func(a *AcceptedAction) { a.AcceptedAt = time.Time{} }},
 		{"nonpositive deadline", func(a *AcceptedAction) { a.Deadline = a.AcceptedAt }},
 	}
@@ -173,6 +172,92 @@ func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 	}
 }
 
+func TestOpenAcceptsFixedReplyActionSubjectPairs(t *testing.T) {
+	for _, test := range []struct {
+		name, action, subject string
+	}{
+		{"review on issue", "review", "Issue"},
+		{"fix on pull request", "fix", "PullRequest"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			accepted := acceptedActionFixture()
+			accepted.Action, accepted.CommandName, accepted.SubjectType = test.action, test.action, test.subject
+			accepted.SourceURL = ""
+			accepted.Assigned = false
+			path := filepath.Join(t.TempDir(), "state.json")
+			store, err := Open(path, accepted.AcceptedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.Data.Accepted = &accepted
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := reopened.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			if !reflect.DeepEqual(reopened.Data.Accepted, &accepted) {
+				t.Fatalf("fixed reply acceptance lost: %+v", reopened.Data.Accepted)
+			}
+		})
+	}
+}
+
+func TestJobFailureOmitsUnsetOriginalDeadline(t *testing.T) {
+	data, err := json.Marshal(JobFailure{Attempts: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"attempts":1}` {
+		t.Fatalf("unset deadline encoded as %s", data)
+	}
+}
+
+func TestSaveReportsPostRenameSyncFailureWithAcceptedRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows skips directory sync")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	accepted := acceptedActionFixture()
+	store, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = &accepted
+	store.syncDir = filepath.Join(dir, "missing")
+	if err := store.Save(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Save() = %v; want post-rename sync-directory error", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if !reflect.DeepEqual(reopened.Data.Accepted, &accepted) || !reopened.Data.Accepted.Assigned {
+		t.Fatalf("post-rename error lost accepted assignment: %+v", reopened.Data.Accepted)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {
+		t.Fatalf("temporary state file retained after sync error: %v, %v", entries, err)
+	}
+}
+
 func TestOpenFailureReleasesLock(t *testing.T) {
 	for name, content := range map[string]string{
 		"malformed":         "{",
@@ -181,6 +266,9 @@ func TestOpenFailureReleasesLock(t *testing.T) {
 		"unknown field":     `{"cursor":"2026-10-09T08:00:00Z","unsupported":true}`,
 		"old pending fix":   `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":"old-sha"}}`,
 		"unknown cap field": `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":{"sha":"sha","cap":{"max_rounds":3,"unsupported":true}}}}`,
+		"missing deadline":  `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z"}}}`,
+		"missing accepted":  `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"deadline":"2026-10-09T09:00:00Z"}}}`,
+		"reversed deadline": `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z","deadline":"2026-10-09T07:00:00Z"}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")

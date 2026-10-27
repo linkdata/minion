@@ -20,13 +20,18 @@ func (f selectedHandler) Execute(_ context.Context, job Job) error { return f(jo
 type reactionProbeGitHub struct {
 	*fakeGitHub
 	beforeReaction func()
+	afterReaction  func()
 }
 
 func (g *reactionProbeGitHub) ReactEyes(ctx context.Context, nodeID string) error {
 	if g.beforeReaction != nil {
 		g.beforeReaction()
 	}
-	return g.fakeGitHub.ReactEyes(ctx, nodeID)
+	err := g.fakeGitHub.ReactEyes(ctx, nodeID)
+	if g.afterReaction != nil {
+		g.afterReaction()
+	}
+	return err
 }
 
 type permissionBreakGitHub struct {
@@ -123,7 +128,55 @@ func TestSelectedAcceptanceSavedBeforeReactionAndCarriesFixedIdentity(t *testing
 	}
 }
 
-func TestSelectedReactionFailureReleasesUnusedAcceptance(t *testing.T) {
+func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testing.T) {
+	scanAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	item := selectedItem(scanAt)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, scanAt.Add(-time.Minute))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	gh := &reactionProbeGitHub{fakeGitHub: &fakeGitHub{
+		notifications: []github.Notification{testNotification(scanAt)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"},
+	}, afterReaction: cancel}
+	m := selectedMonitor(t, scanAt, gh, selectedHandler(func(Job) error { t.Fatal("canceled scan dispatched work"); return nil }))
+	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
+		t.Fatalf("post-reaction cancellation = %v", err)
+	}
+	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.JobFailures[store.Data.Accepted.JobID].Attempts != 1 {
+		t.Fatalf("crash point lost unassigned acceptance: %+v", store.Data)
+	}
+	original := *store.Data.Accepted
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, scanAt.Add(-time.Minute))
+	gh.afterReaction = nil
+	gh.currentItem = func(seed github.Item) (github.Item, error) {
+		if seed.Key != original.SourceKey || seed.NodeID != original.SourceNodeID {
+			t.Fatalf("restart read another source: %+v", seed)
+		}
+		return item, nil
+	}
+	var executions int
+	m.Handler = selectedHandler(func(job Job) error {
+		executions++
+		if job.AttemptID != original.AttemptID || !job.AcceptedAt.Equal(original.AcceptedAt) || !job.Deadline.Equal(original.Deadline) ||
+			reopened.Data.Accepted == nil || reopened.Data.JobFailures[job.ID].Attempts != 1 {
+			t.Fatalf("restart minted another acceptance: job=%+v original=%+v state=%+v", job, original, reopened.Data)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if executions != 1 || len(gh.reactions) != 2 || len(gh.notificationCalls) != 1 ||
+		len(reopened.Data.Processed) != 1 || reopened.Data.Accepted != nil {
+		t.Fatalf("restart discovered or dispatched duplicate work: executions=%d reactions=%v scans=%v state=%+v", executions, gh.reactions, gh.notificationCalls, reopened.Data)
+	}
+}
+
+func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := selectedItem(at)
 	reactionErr := errors.New("reaction unavailable")
@@ -134,8 +187,20 @@ func TestSelectedReactionFailureReleasesUnusedAcceptance(t *testing.T) {
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) {
 		t.Fatalf("reaction error = %v", err)
 	}
-	if store.Data.Accepted != nil || len(store.Data.JobFailures) != 0 || len(store.Data.Processed) != 0 {
-		t.Fatalf("unused acceptance remained reserved: %+v", store.Data)
+	accepted := store.Data.Accepted
+	if accepted == nil || store.Data.JobFailures[accepted.JobID].Attempts != 1 || len(store.Data.Processed) != 0 {
+		t.Fatalf("reaction failure lost original acceptance: %+v", store.Data)
+	}
+	gh.reactionErr = nil
+	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+	m.Handler = selectedHandler(func(job Job) error {
+		if job.AttemptID != accepted.AttemptID || !job.Deadline.Equal(accepted.Deadline) {
+			t.Fatalf("reaction retry renewed acceptance: job=%+v original=%+v", job, accepted)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.reactions) != 2 || len(store.Data.Processed) != 1 {
+		t.Fatalf("reaction retry failed to resume same action: err=%v reactions=%v state=%+v", err, gh.reactions, store.Data)
 	}
 }
 
@@ -146,7 +211,9 @@ func TestSelectedPreparationFailureReleasesUnusedAcceptance(t *testing.T) {
 		permission: github.Permission{Permission: "write"}}
 	store := openState(t, at.Add(-time.Minute))
 	preparationErr := errors.New("preparation unavailable")
+	var firstAttempt string
 	m := selectedMonitor(t, at, gh, selectedHandler(func(job Job) error {
+		firstAttempt = job.AttemptID
 		if store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID || store.Data.Accepted.Assigned {
 			t.Fatalf("preparation did not see its unassigned reservation: %+v", store.Data.Accepted)
 		}
@@ -155,8 +222,111 @@ func TestSelectedPreparationFailureReleasesUnusedAcceptance(t *testing.T) {
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, preparationErr) {
 		t.Fatalf("preparation error = %v", err)
 	}
-	if store.Data.Accepted != nil || len(store.Data.JobFailures) != 0 || len(store.Data.Processed) != 0 {
+	failure := store.Data.JobFailures[jobID(item.Key, "review")]
+	if store.Data.Accepted != nil || failure.Attempts != 0 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() || len(store.Data.Processed) != 0 {
 		t.Fatalf("unused preparation retained acceptance: %+v", store.Data)
+	}
+	retryAt := advanceToRetry(at, store)
+	m.Now = func() time.Time { return retryAt }
+	m.Handler = selectedHandler(func(job Job) error {
+		if job.AttemptID == firstAttempt || !job.AcceptedAt.Equal(failure.AcceptedAt) || !job.Deadline.Equal(failure.Deadline) {
+			t.Fatalf("preparation retry renewed original deadline: job=%+v first=%+v", job, failure)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.Processed) != 1 {
+		t.Fatalf("preparation retry failed: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedExpiredOriginalDeadlineNeverReaccepts(t *testing.T) {
+	for _, held := range []bool{false, true} {
+		name := "released preparation"
+		if held {
+			name = "unassigned restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			scanAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			firstAt := time.Now().UTC().Add(-9 * time.Minute)
+			item := selectedItem(scanAt)
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(scanAt)}, items: []github.Item{item},
+				permission: github.Permission{Permission: "write"}}
+			store := openState(t, scanAt.Add(-time.Minute))
+			id := jobID(item.Key, "review")
+			store.Data.JobFailures[id] = state.JobFailure{AcceptedAt: firstAt, Deadline: firstAt.Add(7 * time.Minute)}
+			if held {
+				accepted := selectedAcceptance(t, firstAt)
+				store.Data.Accepted = &accepted
+				failure := store.Data.JobFailures[id]
+				failure.Attempts = 1
+				store.Data.JobFailures[id] = failure
+			}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			m := selectedMonitor(t, scanAt, gh, selectedHandler(func(Job) error { t.Fatal("expired action dispatched"); return nil }))
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			if len(gh.reactions) != 0 || len(gh.comments) != 1 || store.Data.Accepted != nil ||
+				len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+				t.Fatalf("expired deadline renewed: reactions=%v comments=%+v state=%+v", gh.reactions, gh.comments, store.Data)
+			}
+		})
+	}
+}
+
+func TestSelectedPreassignmentDeadlineErrorFinishesOriginalReply(t *testing.T) {
+	firstAt := time.Now().UTC().Add(-9 * time.Minute)
+	accepted := selectedAcceptance(t, firstAt)
+	store := openState(t, firstAt.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: firstAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{}
+	m := selectedMonitor(t, firstAt, gh, selectedHandler(func(Job) error { return context.DeadlineExceeded }))
+	if err := m.executeSelected(t.Context(), store, jobFromAccepted(accepted), time.Now().UTC()); err != nil ||
+		len(gh.comments) != 1 || store.Data.Accepted != nil || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("expired preparation renewed or lost original reply: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedFixedReplyCommandShapesReachHandler(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		subjectType string
+		commandName string
+	}{
+		{name: "review on issue", subjectType: "Issue", commandName: "review"},
+		{name: "fix on pull request", subjectType: "PullRequest", commandName: "fix"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			notification := testNotification(at)
+			notification.Subject.Type = test.subjectType
+			if test.subjectType == "Issue" {
+				notification.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/issues/7"
+			}
+			item := selectedItem(at)
+			item.Body = "@linkdataminion " + test.commandName
+			gh := &fakeGitHub{notifications: []github.Notification{notification}, items: []github.Item{item},
+				permission: github.Permission{Permission: "write"}}
+			store := openState(t, at.Add(-time.Minute))
+			var executions int
+			m := selectedMonitor(t, at, gh, selectedHandler(func(job Job) error {
+				executions++
+				if job.SubjectType != test.subjectType || job.Command.Name != test.commandName || job.ID != jobID(item.Key, test.commandName) {
+					t.Fatalf("fixed reply changed accepted command: %+v", job)
+				}
+				return nil
+			}))
+			if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 1 ||
+				len(store.Data.Processed) != 1 || store.Data.Accepted != nil {
+				t.Fatalf("fixed reply was rejected: err=%v executions=%d state=%+v", err, executions, store.Data)
+			}
+		})
 	}
 }
 
@@ -216,13 +386,13 @@ func TestSelectedFailedReplyStopsBeforeAnotherAcceptance(t *testing.T) {
 	}
 }
 
-func TestSelectedUnassignedRecoveryReleasesBeforeCapacity(t *testing.T) {
-	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+func TestSelectedUnassignedRecoveryKeepsAcceptanceWithoutCapacity(t *testing.T) {
+	at := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	accepted := selectedAcceptance(t, at)
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 2}
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 2, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -236,8 +406,88 @@ func TestSelectedUnassignedRecoveryReleasesBeforeCapacity(t *testing.T) {
 	if _, err := m.RunOnce(t.Context(), reopened); !errors.Is(err, unavailable) {
 		t.Fatalf("capacity error = %v", err)
 	}
-	if reopened.Data.Accepted != nil || reopened.Data.JobFailures[accepted.JobID].Attempts != 1 || len(handler.jobs) != 0 {
-		t.Fatalf("unassigned recovery did not release exactly one attempt: %+v", reopened.Data)
+	if reopened.Data.Accepted == nil || reopened.Data.Accepted.AttemptID != accepted.AttemptID ||
+		reopened.Data.JobFailures[accepted.JobID].Attempts != 2 || len(handler.jobs) != 0 {
+		t.Fatalf("capacity failure renewed or released original acceptance: %+v", reopened.Data)
+	}
+}
+
+func TestSelectedRecoveryRejectsChangedSourceOrAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		changeItem func(*github.Item)
+		changeGH   func(*fakeGitHub)
+	}{
+		{name: "edited", changeItem: func(item *github.Item) { item.Edited = true }},
+		{name: "author", changeItem: func(item *github.Item) { item.Author.ID++ }},
+		{name: "command", changeItem: func(item *github.Item) { item.Body = "@linkdataminion fix" }},
+		{name: "source", changeItem: func(item *github.Item) { item.NodeID = "other-node" }},
+		{name: "permission", changeGH: func(gh *fakeGitHub) { gh.permission.User.ID = 99 }},
+		{name: "repository", changeGH: func(gh *fakeGitHub) {
+			repo := fixtureRepository(github.Repository{FullName: "example-owner/example-repo"})
+			repo.ID++
+			gh.liveRepo = &repo
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			store := openState(t, at.Add(-time.Minute))
+			accepted := selectedAcceptance(t, at)
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{permission: github.Permission{Permission: "write"}}
+			if test.changeGH != nil {
+				test.changeGH(gh)
+			}
+			gh.currentItem = func(github.Item) (github.Item, error) {
+				item := selectedItem(at)
+				if test.changeItem != nil {
+					test.changeItem(&item)
+				}
+				return item, nil
+			}
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("changed action dispatched"); return nil }))
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			if store.Data.Accepted != nil || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 ||
+				len(gh.reactions) != 0 || len(gh.comments) != 0 {
+				t.Fatalf("changed source or authority was not discarded: %+v", store.Data)
+			}
+		})
+	}
+}
+
+func TestSelectedRecoveryKeepsReservationOnTransientSourceError(t *testing.T) {
+	at := time.Now().UTC()
+	store := openState(t, at.Add(-time.Minute))
+	accepted := selectedAcceptance(t, at)
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	lookupErr := errors.New("GitHub unavailable")
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+		return github.Item{}, lookupErr
+	}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("lookup error dispatched"); return nil }))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, lookupErr) || store.Data.Accepted == nil ||
+		store.Data.Accepted.AttemptID != accepted.AttemptID || store.Data.JobFailures[accepted.JobID].Attempts != 1 {
+		t.Fatalf("transient lookup released original acceptance: err=%v state=%+v", err, store.Data)
+	}
+	gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(at), nil }
+	m.Handler = selectedHandler(func(job Job) error {
+		if job.AttemptID != accepted.AttemptID || !job.Deadline.Equal(accepted.Deadline) {
+			t.Fatalf("retry renewed original acceptance: %+v", job)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.Processed) != 1 {
+		t.Fatalf("transient lookup did not resume original action: err=%v state=%+v", err, store.Data)
 	}
 }
 

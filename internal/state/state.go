@@ -70,15 +70,7 @@ func (a AcceptedAction) Validate() error {
 		return errors.New("accepted action source is missing")
 	}
 	switch a.Action {
-	case "review":
-		if a.SubjectType != "PullRequest" {
-			return errors.New("accepted review requires a pull request")
-		}
-	case "fix":
-		if a.SubjectType != "Issue" {
-			return errors.New("accepted fix requires an issue")
-		}
-	case "comment", "security-audit":
+	case "review", "fix", "comment", "security-audit":
 	default:
 		return errors.New("accepted action is unsupported")
 	}
@@ -115,15 +107,26 @@ type PendingNotification struct {
 }
 
 type JobFailure struct {
-	Attempts         int  `json:"attempts"`
-	ReplyAttempts    int  `json:"reply_attempts,omitempty"`
-	ModelCallStarted bool `json:"model_call_started,omitempty"`
+	Attempts         int       `json:"attempts"`
+	ReplyAttempts    int       `json:"reply_attempts,omitempty"`
+	ModelCallStarted bool      `json:"model_call_started,omitempty"`
+	AcceptedAt       time.Time `json:"accepted_at,omitempty,omitzero"`
+	Deadline         time.Time `json:"deadline,omitempty,omitzero"`
+}
+
+// Validate checks the optional original action deadline.
+func (f JobFailure) Validate() error {
+	if f.AcceptedAt.IsZero() != f.Deadline.IsZero() || !f.Deadline.IsZero() && !f.Deadline.After(f.AcceptedAt) {
+		return errors.New("job failure deadline is invalid")
+	}
+	return nil
 }
 
 type Store struct {
-	path string
-	lock *os.File
-	Data Data
+	path    string
+	lock    *os.File
+	syncDir string // Test-only extra directory for a post-rename sync failure.
+	Data    Data
 }
 
 // Open loads state while holding an exclusive lock until [Store.Close].
@@ -175,6 +178,11 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 			return nil, errors.Join(fmt.Errorf("invalid accepted action: %w", err), store.Close())
 		}
 	}
+	for jobID, failure := range store.Data.JobFailures {
+		if err := failure.Validate(); err != nil {
+			return nil, errors.Join(fmt.Errorf("invalid job failure %q: %w", jobID, err), store.Close())
+		}
+	}
 	if store.Data.Processed == nil {
 		store.Data.Processed = map[string]time.Time{}
 	}
@@ -200,6 +208,9 @@ func (s *Store) Save() error {
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(s.Data); err != nil {
 		return err
+	}
+	if s.syncDir != "" {
+		return workspace.WriteAtomic(s.path, data.Bytes(), s.syncDir)
 	}
 	return workspace.WriteAtomic(s.path, data.Bytes())
 }
