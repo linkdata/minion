@@ -19,6 +19,8 @@ type selectedHandler func(Job) error
 
 func (f selectedHandler) Execute(_ context.Context, job Job) error { return f(job) }
 
+func (selectedHandler) WaitCapacity(context.Context) error { return nil }
+
 type reactionProbeGitHub struct {
 	*fakeGitHub
 	beforeReaction func()
@@ -236,11 +238,11 @@ func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
 		t.Fatalf("reaction error = %v", err)
 	}
 	accepted := store.Data.Accepted
-	if accepted == nil || !next.Equal(accepted.RetryAt) || !time.Now().Before(accepted.RetryAt) ||
+	if accepted == nil || !next.Equal(store.Data.NextInviteCheckAt) || !time.Now().Before(accepted.RetryAt) ||
 		store.Data.JobFailures[accepted.JobID].Attempts != 1 || len(store.Data.Processed) != 0 {
 		t.Fatalf("reaction failure lost original acceptance: %+v", store.Data)
 	}
-	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(accepted.RetryAt) || len(gh.reactions) != 1 {
+	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(store.Data.NextInviteCheckAt) || len(gh.reactions) != 1 {
 		t.Fatalf("reaction retried before durable schedule: next=%s err=%v reactions=%v", next, err, gh.reactions)
 	}
 	gh.reactionErr = nil

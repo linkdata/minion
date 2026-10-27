@@ -513,6 +513,101 @@ func TestRunOnceTerminalAcceptedReplyDoesNotWaitForCapacity(t *testing.T) {
 	}
 }
 
+func TestRunOnceWakesForInvitationsBeforePollOrAcceptedRetry(t *testing.T) {
+	now := time.Now().UTC()
+	t.Run("long poll", func(t *testing.T) {
+		cfg := testConfig(t)
+		cfg.PollIntervalSeconds = 30 * 60
+		store := openState(t, now.Add(-time.Minute))
+		m := &Monitor{Config: cfg, GitHub: &fakeGitHub{}, Handler: &capacityHandler{}, Now: func() time.Time { return now }}
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.Equal(now.Add(15*time.Minute)) || !store.Data.NextPollAt.Equal(now.Add(30*time.Minute)) {
+			t.Fatalf("long poll missed invitation wake: next=%s poll=%s err=%v", next, store.Data.NextPollAt, err)
+		}
+	})
+	t.Run("accepted backoff", func(t *testing.T) {
+		accepted := selectedAcceptance(t, now)
+		accepted.RetryAt = now.Add(30 * time.Minute)
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.Accepted = &accepted
+		store.Data.NextInviteCheckAt = now.Add(-time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{invitations: []github.Invitation{{ID: 41, Repository: github.Repository{
+			FullName: "example-owner/example-repo", ID: 1, Owner: github.User{Login: "example-owner", ID: 2},
+		}, Permissions: "write"}}}
+		m := selectedMonitor(t, now, gh, selectedHandler(func(Job) error {
+			t.Fatal("accepted backoff dispatched work")
+			return nil
+		}))
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.Equal(now.Add(15*time.Minute)) || !slices.Equal(gh.accepted, []int64{41}) ||
+			len(gh.notificationCalls) != 0 || store.Data.Accepted == nil || store.Data.Accepted.JobID != accepted.JobID {
+			t.Fatalf("accepted backoff missed invitation or scanned new work: next=%s err=%v accepted=%v calls=%v state=%+v",
+				next, err, gh.accepted, gh.notificationCalls, store.Data)
+		}
+	})
+}
+
+func TestRunOnceSelectedModeRequiresReadinessCheck(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now.Add(-time.Minute))
+	store.Data.NextInviteCheckAt = now.Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}}
+	m := selectedMonitor(t, now, gh, &fakeHandler{onExecute: func() {
+		t.Fatal("selected action ran without a readiness check")
+	}})
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrAcceptanceState) ||
+		len(gh.notificationCalls) != 0 || len(store.Data.Processed) != 0 || !store.Data.NextPollAt.IsZero() {
+		t.Fatalf("selected mode discovered work without readiness: calls=%v state=%+v err=%v",
+			gh.notificationCalls, store.Data, err)
+	}
+}
+
+func TestRunOnceSelectedCapacityLossReplaysSiblingAfterRestart(t *testing.T) {
+	now := time.Now().UTC()
+	initial := now.Add(-time.Minute)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, initial)
+	first := selectedItem(now)
+	second := selectedItem(now.Add(time.Second))
+	second.Key, second.NodeID = "comment:2", "node:2"
+	second.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-2"
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{first, second},
+		permission: github.Permission{Permission: "write"}}
+	unavailable := errors.New("worker capacity lost")
+	handler := &capacityHandler{failAt: 2, err: unavailable}
+	clock := now
+	m := selectedMonitor(t, now, gh, handler)
+	m.Now = func() time.Time { return clock }
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, unavailable) {
+		t.Fatalf("selected capacity loss = %v", err)
+	}
+	if len(handler.jobs) != 1 || handler.jobs[0].Source.Key != first.Key || len(store.Data.Processed) != 1 ||
+		store.Data.Accepted != nil || len(store.Data.PendingNotifications) != 1 ||
+		!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors["example-owner/example-repo"].Equal(initial) {
+		t.Fatalf("selected capacity loss consumed sibling or advanced cursor: jobs=%v state=%+v", handler.jobs, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, initial)
+	gh.notifications = nil
+	handler.failAt = 0
+	clock = now.Add(time.Minute)
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatalf("selected sibling replay after restart: %v", err)
+	}
+	if len(handler.jobs) != 2 || handler.jobs[1].Source.Key != second.Key || len(store.Data.Processed) != 2 ||
+		len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("selected sibling was lost or first was duplicated: jobs=%v state=%+v", handler.jobs, store.Data)
+	}
+}
+
 func TestSelectedCommandsDoNotExpandWhenSkillAppears(t *testing.T) {
 	cfg := testConfig(t)
 	fixSkill := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "fix", "SKILL.md")

@@ -152,17 +152,20 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	selectedMode := m.SelectedExecutorID != ""
 	if store.Data.Accepted != nil {
 		if retryAt := store.Data.Accepted.RetryAt; time.Now().Before(retryAt) {
-			return retryAt, nil
+			if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
+				return retryAt, err
+			}
+			return earlierWake(retryAt, store.Data.NextInviteCheckAt), nil
 		}
 		err := m.recoverAccepted(ctx, store)
 		if errors.Is(err, ErrAcceptedDiscarded) {
-			return store.Data.NextPollAt, nil
+			return earlierWake(store.Data.NextPollAt, store.Data.NextInviteCheckAt), nil
 		}
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)
-			return retryAt, errors.Join(err, saveErr)
+			return earlierWake(retryAt, store.Data.NextInviteCheckAt), errors.Join(err, saveErr)
 		}
-		return store.Data.NextPollAt, err
+		return earlierWake(store.Data.NextPollAt, store.Data.NextInviteCheckAt), err
 	}
 	var capacityErr error
 	if selectedMode {
@@ -175,7 +178,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	started := now().UTC()
 	if started.Before(store.Data.NextPollAt) {
-		return store.Data.NextPollAt, nil
+		return earlierWake(store.Data.NextPollAt, store.Data.NextInviteCheckAt), nil
 	}
 	minInterval := m.pollInterval()
 	next := started.Add(minInterval)
@@ -212,9 +215,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)
-			return retryAt, errors.Join(err, saveErr)
+			return earlierWake(retryAt, store.Data.NextInviteCheckAt), errors.Join(err, saveErr)
 		}
-		return next, err
+		return earlierWake(next, store.Data.NextInviteCheckAt), err
 	}
 	stopAt := func(location string, err error) (time.Time, error) {
 		if err == nil {
@@ -651,6 +654,13 @@ func (m *Monitor) now() time.Time {
 	return time.Now()
 }
 
+func earlierWake(next, invitation time.Time) time.Time {
+	if !invitation.IsZero() && invitation.Before(next) {
+		return invitation
+	}
+	return next
+}
+
 func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
 	if at.Before(store.Data.NextInviteCheckAt) {
 		return nil
@@ -687,7 +697,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		return err
 	}
 	if _, ok := m.Handler.(interface{ WaitCapacity(context.Context) error }); !ok {
-		return ctx.Err()
+		return fmt.Errorf("%w: selected worker has no readiness check", ErrAcceptanceState)
 	}
 	waitCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
