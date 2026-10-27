@@ -27,6 +27,10 @@ func runExecuteMode() int {
 }
 
 func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) int {
+	if err := store.SyncPathAncestors(); err != nil {
+		logger.Printf("sync selected state path: %s", monitor.InertLogText(err.Error()))
+		return 1
+	}
 	done, closeWorker, err := attachSelectedLocalWorker(ctx, owner, watcher, path, []string{"-mode=execute"}, readyTimeout)
 	if err != nil {
 		logger.Printf("start selected worker: %s", monitor.InertLogText(err.Error()))

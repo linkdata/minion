@@ -135,7 +135,7 @@ type Store struct {
 //
 // The lock prevents overlapping cron invocations from executing the same command.
 func Open(path string, initialCursor time.Time) (*Store, error) {
-	if err := prepareStateDirectory(filepath.Dir(path), workspace.SyncDirectories); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
@@ -203,7 +203,13 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	return store, nil
 }
 
-// prepareStateDirectory persists the path to state before it can be accepted.
+// SyncPathAncestors syncs a selected worker's state path entries before it can
+// accept work on Unix. Windows provides process-restart recovery only.
+func (s *Store) SyncPathAncestors() error {
+	return prepareStateDirectory(filepath.Dir(s.path), workspace.SyncDirectories)
+}
+
+// prepareStateDirectory persists the path to selected state before acceptance.
 // Syncing every ancestor also repairs a previous startup whose sync failed
 // after creating a directory. SyncDirectories is a no-op on Windows.
 func prepareStateDirectory(dir string, syncDirectories func(...string) error) error {

@@ -747,7 +747,11 @@ func (m *Monitor) scheduleAcceptedRetry(store *state.Store) (time.Time, error) {
 		retryAt = accepted.Deadline
 	}
 	accepted.RetryAt = retryAt
-	return retryAt, saveAcceptanceState(store)
+	if err := saveAcceptanceState(store); err != nil {
+		return retryAt, err
+	}
+	m.logf("accepted %s #%d recovery deferred until %s; new action discovery remains paused", accepted.Repository, accepted.SubjectNumber, retryAt.Format(time.RFC3339))
+	return retryAt, nil
 }
 
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {
