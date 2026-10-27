@@ -108,6 +108,40 @@ func TestSelectedExecutionKeepsSavedResultAfterPublicationError(t *testing.T) {
 	}
 }
 
+func TestSelectedExecutionEndsPermanentSavedResult(t *testing.T) {
+	at := time.Now().UTC()
+	store := openState(t, at.Add(-time.Minute))
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(at)},
+		items:         []github.Item{selectedItem(at)},
+		permission:    github.Permission{Permission: "write"},
+		currentItem:   func(github.Item) (github.Item, error) { return selectedItem(at), nil },
+	}
+	handler := &recoveredResultHandler{execute: func(job Job) error {
+		if err := store.WithLock(func() error {
+			store.Data.Accepted.Assigned = true
+			if err := store.Save(); err != nil {
+				return err
+			}
+			return store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`))
+		}); err != nil {
+			return err
+		}
+		return errors.Join(ErrTerminalJob, ErrPostModelPublication, errors.New("reviewed fix has no changes"))
+	}}
+	monitor := selectedMonitor(t, at, gh, handler)
+	if _, err := monitor.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if handler.executions != 1 || handler.publications != 0 || store.Data.Accepted != nil ||
+		len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || len(gh.comments) != 1 {
+		t.Fatalf("permanent result kept retrying: handler=%+v state=%+v comments=%v", handler, store.Data, gh.comments)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("permanent result kept receipt: present=%t err=%v", present, err)
+	}
+}
+
 func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.T) {
 	store, path, accepted, gh, monitor := storedRecoveryFixture(t)
 	if err := store.Close(); err != nil {
@@ -230,6 +264,46 @@ func TestStoredResultRecoveryRetriesPublicationWithoutExecution(t *testing.T) {
 	}
 	if present, err := reopened.HasAcceptedResult(); err != nil || present {
 		t.Fatalf("successful retry kept sidecar: present=%t err=%v", present, err)
+	}
+}
+
+func TestStoredResultRecoveryEndsPermanentPublicationFailure(t *testing.T) {
+	store, path, accepted, gh, monitor := storedRecoveryFixture(t)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+	handler := &recoveredResultHandler{publish: func(Job) error {
+		return errors.Join(ErrTerminalJob, ErrPostModelPublication, errors.New("reviewed fix has no changes"))
+	}}
+	monitor.Handler = handler
+	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if handler.executions != 0 || handler.publications != 1 || reopened.Data.Accepted != nil ||
+		reopened.Data.Processed[accepted.JobID].IsZero() || len(reopened.Data.JobFailures) != 0 || len(gh.comments) != 1 {
+		t.Fatalf("permanent saved result kept retrying: handler=%+v state=%+v comments=%v", handler, reopened.Data, gh.comments)
+	}
+	if present, err := reopened.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("permanent saved result kept receipt: present=%t err=%v", present, err)
+	}
+}
+
+func TestStoredResultRecoveryRetainsReceiptOnPublicationDeadline(t *testing.T) {
+	at := time.Now().UTC().Add(-8 * time.Minute)
+	store, _, accepted, _, monitor := storedRecoveryFixtureAt(t, at)
+	handler := &recoveredResultHandler{publish: func(Job) error {
+		return errors.Join(ErrTerminalJob, ErrPostModelPublication, context.DeadlineExceeded)
+	}}
+	monitor.Handler = handler
+	next, err := monitor.RunOnce(t.Context(), store)
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrPostModelPublication) ||
+		store.Data.Accepted == nil || !next.Equal(store.Data.Accepted.RetryAt) ||
+		store.Data.JobFailures[accepted.JobID].Attempts != 1 || handler.executions != 0 || handler.publications != 1 {
+		t.Fatalf("publication timeout lost receipt: next=%s err=%v state=%+v handler=%+v", next, err, store.Data, handler)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("publication timeout lost receipt: present=%t err=%v", present, err)
 	}
 }
 

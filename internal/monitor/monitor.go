@@ -1542,7 +1542,7 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 		if errors.Is(err, ErrAcceptanceState) {
 			return err
 		}
-		return fmt.Errorf("%w: publish stored result: %w", ErrPostModelPublication, err)
+		return m.completeSelected(ctx, store, job, m.now().UTC(), fmt.Errorf("publish stored result: %w", err))
 	}
 	return m.completeSelected(ctx, store, job, m.now().UTC(), nil)
 }
@@ -1939,8 +1939,15 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		return fmt.Errorf("%w: inspect stored result after execution: %w", ErrAcceptanceState, receiptErr)
 	}
 	if stored {
-		// The worker finished. Only publication may be retried from its durable receipt.
-		return fmt.Errorf("%w: %w", ErrPostModelPublication, err)
+		if !errors.Is(err, ErrTerminalJob) || errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			// The worker finished. Only publication may be retried from its durable receipt.
+			return fmt.Errorf("%w: %w", ErrPostModelPublication, err)
+		}
+		// Terminal validation/import failure cannot become publishable on replay.
+		if clearErr := store.ClearAcceptedResult(); clearErr != nil {
+			return fmt.Errorf("%w: clear unpublishable result: %w", ErrAcceptanceState, clearErr)
+		}
 	}
 	failureErr := fmt.Errorf("%s from %s: %w", job.Command.Action, itemLocation(job.Source), err)
 	publicationFailure := errors.Is(err, ErrPostModelPublication)

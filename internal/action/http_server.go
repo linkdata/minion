@@ -739,7 +739,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					tx.mu.Lock()
 					prior := errors.Join(tx.checkpointErr, tx.requiredControlErr)
 					tx.mu.Unlock()
-					if sequenceGap || prior != nil {
+					if prior != nil {
 						return errors.Join(monitor.ErrAcceptanceState, prior)
 					}
 					if err := httpExecutionContextError(tx.budget); err != nil {

@@ -118,30 +118,19 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
 	if expected.SHA != "" {
-		if err := e.Store.WithLock(func() error {
-			delete(e.Store.Data.PendingFixes, request.ID)
-			if err := e.Store.Save(); err != nil {
-				e.Store.Data.PendingFixes[request.ID] = expected
-				return err
-			}
-			return nil
-		}); err != nil {
-			return fmt.Errorf("clear failed fork push checkpoint: %w", err)
-		}
+		return fmt.Errorf("branch %s is unavailable with recorded bot commit %s; refusing to replace the checkpoint", p.branch, expected.SHA)
 	}
-	if len(result.Changes) != 0 {
-		p.checkout, err = gitwork.RestoreCheckout(ctx, e.WorkRoot, p.job.Source)
-		if err != nil {
-			return err
+	p.checkout, err = gitwork.RestoreCheckout(ctx, e.WorkRoot, p.job.Source)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := p.checkout.Close(); err != nil {
+			e.logf("close restored action: %v", err)
 		}
-		defer func() {
-			if err := p.checkout.Close(); err != nil {
-				e.logf("close restored action: %v", err)
-			}
-		}()
-		if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
-			return err
-		}
+	}()
+	if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
+		return err
 	}
 	return e.publish(ctx, p, result)
 }

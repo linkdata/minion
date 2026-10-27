@@ -169,9 +169,13 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		returned = true
 		return resultErr
 	}
-	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+	deadlineErr := ctx.Err()
+	if resultErr != nil && (errors.Is(deadlineErr, context.DeadlineExceeded) ||
 		errors.Is(resultErr, gitwork.ErrTooManyFiles) ||
 		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
+		if errors.Is(deadlineErr, context.DeadlineExceeded) && !errors.Is(resultErr, context.DeadlineExceeded) {
+			resultErr = errors.Join(resultErr, deadlineErr)
+		}
 		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 	}
 	returned = true

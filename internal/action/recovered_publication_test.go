@@ -301,7 +301,7 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 	}
 }
 
-func TestPublishRecoveredFixReusesMatchingPendingBranchAfterRestart(t *testing.T) {
+func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)
 	job.Identity.Repository = "o/r"
@@ -322,7 +322,7 @@ func TestPublishRecoveredFixReusesMatchingPendingBranchAfterRestart(t *testing.T
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	var comment string
-	var replies int
+	var replies, branchLookups int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -337,6 +337,11 @@ func TestPublishRecoveredFixReusesMatchingPendingBranchAfterRestart(t *testing.T
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
+			branchLookups++
+			if branchLookups == 1 {
+				http.NotFound(w, r)
+				return
+			}
 			_, _ = fmt.Fprintf(w, `{"name":"minion/fix-7-aaaaaaaaaaaa","commit":{"sha":%q}}`, sha)
 		case captureComment(t, w, r, &comment):
 			replies++
@@ -346,12 +351,24 @@ func TestPublishRecoveredFixReusesMatchingPendingBranchAfterRestart(t *testing.T
 		}
 	}))
 	defer server.Close()
-	t.Setenv("PATH", t.TempDir()) // A second push needs Git and must fail this test.
+	t.Setenv("PATH", t.TempDir()) // An unexpected rebuild needs Git and must fail this test.
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
+	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || !strings.Contains(err.Error(), "refusing to replace the checkpoint") ||
+		replies != 0 || branchLookups != 1 || store.Data.PendingFixes[request.ID].SHA != sha {
+		t.Fatalf("missing branch lookup lost checkpoint: replies=%d checkpoint=%+v error=%v", replies, store.Data.PendingFixes[request.ID], err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.Store = store
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies != 1 ||
-		!strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
-		t.Fatalf("matching checkpoint was not reused: replies=%d comment=%q checkpoint=%+v error=%v", replies, comment, store.Data.PendingFixes[request.ID], err)
+		branchLookups != 2 || !strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
+		t.Fatalf("matching checkpoint was not reused: branch_lookups=%d replies=%d comment=%q checkpoint=%+v error=%v", branchLookups, replies, comment, store.Data.PendingFixes[request.ID], err)
 	}
 }
 
