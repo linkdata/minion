@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/linkdata/minion/internal/monitor"
 )
@@ -53,15 +54,17 @@ type ReviewCheckpoint struct {
 
 // executionCheckpoints binds local persistence and acknowledgements to one attempt.
 type executionCheckpoints struct {
-	job      Job
-	owner    *Orchestrator
-	pending  *CallUsage
-	returned *CallUsage
-	calls    []CallUsage
-	review   ReviewCheckpoint
-	reviewed bool
-	failure  error
-	assigned bool
+	job               Job
+	owner             *Orchestrator
+	pending           *CallUsage
+	returned          *CallUsage
+	calls             []CallUsage
+	review            ReviewCheckpoint
+	reviewed          bool
+	failure           error
+	assigned          bool
+	assignmentContext context.Context
+	assignmentRequest monitor.Job
 }
 
 func newExecutionCheckpoints(owner *Orchestrator, job Job) *executionCheckpoints {
@@ -115,6 +118,32 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 	if !c.acceptedAssignment(job) {
 		return c.fail(fmt.Errorf("%w: worker assignment differs from accepted action", monitor.ErrAcceptanceState))
 	}
+	if c.AssignmentRequired() {
+		if c.owner.ValidateAssignment == nil || c.assignmentContext == nil {
+			return c.fail(fmt.Errorf("%w: assignment revalidation is unavailable", monitor.ErrAcceptanceState))
+		}
+		if err := c.owner.ValidateAssignment(c.assignmentContext, c.assignmentRequest); err != nil {
+			if errors.Is(err, monitor.ErrAcceptedDiscarded) {
+				c.assigned = false // The accepted record and its marker were durably removed.
+			}
+			if errors.Is(err, monitor.ErrAcceptedRetry) {
+				return err // A prior undelivered marker may need its release callback.
+			}
+			return c.fail(err)
+		}
+		if err := c.assignmentContext.Err(); err != nil {
+			if time.Now().Before(c.assignmentRequest.Deadline) {
+				return fmt.Errorf("%w: %w", monitor.ErrAcceptedRetry, err)
+			}
+			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
+		}
+		if !time.Now().Before(c.assignmentRequest.Deadline) {
+			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
+		}
+		if !c.acceptedAssignment(job) {
+			return c.fail(fmt.Errorf("%w: accepted action changed during assignment revalidation", monitor.ErrAcceptanceState))
+		}
+	}
 	if c.assigned {
 		if !c.owner.Store.Data.Accepted.Assigned {
 			return c.fail(fmt.Errorf("%w: assigned action marker changed before re-pull", monitor.ErrAcceptanceState))
@@ -133,11 +162,8 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 }
 
 func (c *executionCheckpoints) AssignmentNotDelivered() error {
-	if c.failure != nil {
-		return c.failure
-	}
 	if !c.assigned {
-		return nil
+		return c.failure
 	}
 	if !c.acceptedAssignment(c.job) || !c.owner.Store.Data.Accepted.Assigned {
 		return c.fail(fmt.Errorf("%w: accepted assignment changed before delivery", monitor.ErrAcceptanceState))
@@ -147,7 +173,7 @@ func (c *executionCheckpoints) AssignmentNotDelivered() error {
 		return c.fail(fmt.Errorf("%w: release undelivered assignment: %w", monitor.ErrAcceptanceState, err))
 	}
 	c.assigned = false
-	return nil
+	return c.failure
 }
 
 func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {

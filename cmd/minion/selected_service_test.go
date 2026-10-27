@@ -39,7 +39,7 @@ func (g *terminalRecoveryGitHub) CurrentItem(context.Context, github.Item) (gith
 }
 
 func (g *terminalRecoveryGitHub) Repository(context.Context, string) (github.Repository, error) {
-	return github.Repository{ID: 1, Owner: github.User{ID: 2}}, nil
+	return github.Repository{ID: 1, Owner: github.User{ID: 2}, DefaultBranch: "main"}, nil
 }
 
 func (g *terminalRecoveryGitHub) Permission(context.Context, string, string) (github.Permission, error) {

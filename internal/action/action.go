@@ -58,6 +58,8 @@ type Orchestrator struct {
 	//
 	// A nil function disables these checks.
 	CheckWorkRoot func() error
+	// ValidateAssignment rechecks an accepted action immediately before worker delivery.
+	ValidateAssignment func(context.Context, monitor.Job) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.

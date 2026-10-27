@@ -271,7 +271,7 @@ func TestPreflightFailureRecoversAcceptanceWhoseDeadlinePassed(t *testing.T) {
 				case "GET /user":
 					_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
 				case "GET /repos/owner/repo":
-					_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","owner":{"id":2}}`)
+					_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","default_branch":"main","owner":{"id":2}}`)
 				case "GET /repos/owner/repo/issues/7/comments":
 					_, _ = recorder.WriteString(`[]`)
 				case "POST /graphql":

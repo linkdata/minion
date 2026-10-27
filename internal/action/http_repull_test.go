@@ -3,6 +3,7 @@ package action
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 type httpRepullRecorder struct{ *httptest.ResponseRecorder }
@@ -22,6 +24,59 @@ type httpPausedAssignmentWriter struct {
 	http.ResponseWriter
 	flushed chan struct{}
 	resume  <-chan struct{}
+}
+
+func TestHTTPExecutorCanceledPullRechecksBeforeRepull(t *testing.T) {
+	f := newHTTPServerTestInMemory(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{})
+	entered, release, firstDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	f.tx.mu.Lock()
+	f.tx.beforeDelivery = func(Job) error {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+			return nil
+		}
+		return monitor.ErrAcceptedRetry
+	}
+	f.tx.mu.Unlock()
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/next", bytes.NewReader(pull))
+	request.Header.Set("Content-Type", "application/json")
+	firstResponse := &httpRepullRecorder{httptest.NewRecorder()}
+	go func() {
+		f.executor.serveNext(firstResponse, request)
+		close(firstDone)
+	}()
+	wait, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	select {
+	case <-entered:
+	case <-wait.Done():
+		t.Fatal("first pull did not reach assignment validation")
+	}
+	cancel()
+	close(release)
+	select {
+	case <-firstDone:
+	case <-wait.Done():
+		t.Fatal("canceled pull kept the slot")
+	}
+	if firstResponse.Body.Len() != 0 || f.tx.delivered {
+		t.Fatalf("canceled pull received job bytes: bytes=%d delivered=%t", firstResponse.Body.Len(), f.tx.delivered)
+	}
+	reply := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
+	if reply.err != nil || reply.status != http.StatusInternalServerError || reply.ack.Failure == nil || f.tx.delivered || calls.Load() != 2 {
+		t.Fatalf("repull skipped final validation or delivered bytes: reply=%+v delivered=%t calls=%d", reply, f.tx.delivered, calls.Load())
+	}
+	if got := f.result(t); !errors.Is(got.err, monitor.ErrAcceptedRetry) {
+		t.Fatalf("repull lost transient refusal: %v", got.err)
+	}
 }
 
 func (w *httpPausedAssignmentWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

@@ -2,6 +2,7 @@ package action
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -160,6 +161,93 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 	t.Cleanup(func() { _ = store.Close() })
 	if store.Data.Accepted == nil || store.Data.Accepted.Assigned {
 		t.Fatalf("known undelivered assignment remained reserved: %+v", store.Data.Accepted)
+	}
+}
+
+func TestExecutionAssignmentRevalidatesRepullBeforeDelivery(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	accepted := acceptedForJob(f.job)
+	store.Data.Accepted = accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store, f.owner.assignmentRequired = store, true
+	f.sink.assignmentContext = t.Context()
+	f.sink.assignmentRequest = monitor.Job{Deadline: accepted.Deadline}
+	checks := 0
+	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error {
+		checks++
+		if checks == 2 {
+			return monitor.ErrAcceptedRetry
+		}
+		return nil
+	}
+	if err := f.sink.BeforeAssignment(f.job); err != nil || !store.Data.Accepted.Assigned {
+		t.Fatalf("first assignment was not saved: assigned=%v error=%v", store.Data.Accepted.Assigned, err)
+	}
+	if err := f.sink.BeforeAssignment(f.job); !errors.Is(err, monitor.ErrAcceptedRetry) || checks != 2 {
+		t.Fatalf("repull reused stale approval: checks=%d error=%v", checks, err)
+	}
+	if err := f.sink.AssignmentNotDelivered(); err != nil || store.Data.Accepted.Assigned || f.sink.assigned {
+		t.Fatalf("transient repull kept undelivered marker: accepted=%+v assigned=%t error=%v", store.Data.Accepted, f.sink.assigned, err)
+	}
+}
+
+func TestExecutionAssignmentRepullDiscardDoesNotReleaseMissingMarker(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := acceptedForJob(f.job)
+	store.Data.Accepted = accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store, f.owner.assignmentRequired = store, true
+	f.sink.assignmentContext = t.Context()
+	f.sink.assignmentRequest = monitor.Job{Deadline: accepted.Deadline}
+	checks := 0
+	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error {
+		checks++
+		if checks == 1 {
+			return nil
+		}
+		store.Data.Processed[accepted.JobID] = time.Now()
+		delete(store.Data.JobFailures, accepted.JobID)
+		store.Data.Accepted = nil
+		if err := store.Save(); err != nil {
+			return err
+		}
+		return monitor.ErrAcceptedDiscarded
+	}
+	if err := f.sink.BeforeAssignment(f.job); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sink.BeforeAssignment(f.job); !errors.Is(err, monitor.ErrAcceptedDiscarded) || errors.Is(err, monitor.ErrAcceptanceState) {
+		t.Fatalf("repull did not discard the saved assignment: %v", err)
+	}
+	if err := f.sink.AssignmentNotDelivered(); !errors.Is(err, monitor.ErrAcceptedDiscarded) || errors.Is(err, monitor.ErrAcceptanceState) || f.sink.assigned {
+		t.Fatalf("discard tried to release a removed marker: assigned=%t error=%v", f.sink.assigned, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() {
+		t.Fatalf("repull discard was not durable: %+v", reopened.Data)
 	}
 }
 

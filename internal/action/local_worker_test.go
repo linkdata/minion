@@ -142,8 +142,10 @@ func TestLocalWorkerReleasesSavedUndeliveredAssignment(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	owner := &Orchestrator{Store: store, assignmentRequired: true}
+	owner := &Orchestrator{Store: store, assignmentRequired: true,
+		ValidateAssignment: func(ctx context.Context, _ monitor.Job) error { return ctx.Err() }}
 	sink := newExecutionCheckpoints(owner, job)
+	sink.assignmentContext, sink.assignmentRequest = t.Context(), monitor.Job{Deadline: accepted.Deadline}
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
 		t.Fatal(err)

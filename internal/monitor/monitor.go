@@ -60,6 +60,12 @@ var ErrPostModelPublication = errors.New("post-model publication failure")
 // The caller must stop before another action can be dispatched.
 var ErrAcceptanceState = errors.New("action acceptance state failure")
 
+// ErrAcceptedDiscarded means final assignment validation durably resolved an invalid request.
+var ErrAcceptedDiscarded = errors.New("accepted action discarded before assignment")
+
+// ErrAcceptedRetry means final assignment validation could not establish current validity.
+var ErrAcceptedRetry = errors.New("accepted action assignment validation deferred")
+
 const (
 	maxJobAttempts          = 3
 	maxFailureReplyAttempts = 3
@@ -147,6 +153,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return retryAt, nil
 		}
 		err := m.recoverAccepted(ctx, store)
+		if errors.Is(err, ErrAcceptedDiscarded) {
+			return store.Data.NextPollAt, nil
+		}
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)
 			return retryAt, errors.Join(err, saveErr)
@@ -547,6 +556,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			if selected {
 				if err := m.executeSelected(ctx, store, job, started); err != nil {
+					if errors.Is(err, ErrAcceptedDiscarded) {
+						return stop() // The refused assignment retired this worker.
+					}
 					if errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || ctx.Err() != nil {
 						return stop(err)
 					}
@@ -869,7 +881,7 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 	if err != nil {
 		return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted repository identity: %w", err)
 	}
-	if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
+	if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) || liveRepo.Archived || liveRepo.DefaultBranch == "" {
 		return config.Repository{}, github.Item{}, false, nil
 	}
 	if present, err := m.acceptedIssuePresent(ctx, accepted); err != nil || !present {
@@ -925,6 +937,67 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 		return config.Repository{}, github.Item{}, false, nil
 	}
 	return repo, current, true, nil
+}
+
+func assignmentMatchesAccepted(job Job, accepted state.AcceptedAction) bool {
+	return job.ID == accepted.JobID && job.AttemptID == accepted.AttemptID &&
+		job.Repository.Name == accepted.Repository && job.Repository.ID == accepted.RepositoryID &&
+		job.Repository.OwnerID == accepted.OwnerID && job.SubjectType == accepted.SubjectType &&
+		job.Number == accepted.SubjectNumber && job.Source.Key == accepted.SourceKey &&
+		job.Source.NodeID == accepted.SourceNodeID && job.Source.HTMLURL == accepted.SourceURL &&
+		job.Source.UpdatedAt.Equal(accepted.SourceUpdatedAt) &&
+		strings.EqualFold(job.Source.Author.Login, accepted.Requester) && job.Source.Author.ID == accepted.RequesterID &&
+		job.Command.Name == accepted.CommandName && string(job.Command.Action) == accepted.Action &&
+		job.AcceptedAt.Equal(accepted.AcceptedAt) && job.Deadline.Equal(accepted.Deadline)
+}
+
+// RevalidateAssignment checks a prepared action against its saved reservation and live GitHub state.
+// The caller must finish this check before saving Assigned or sending the worker any assignment bytes.
+func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, job Job) error {
+	if m == nil || store == nil || store.Data.Accepted == nil {
+		return fmt.Errorf("%w: missing accepted action before assignment", ErrAcceptanceState)
+	}
+	accepted := *store.Data.Accepted
+	failure, ok := store.Data.JobFailures[accepted.JobID]
+	if err := accepted.Validate(); err != nil || !assignmentMatchesAccepted(job, accepted) ||
+		m.SelectedExecutorID != accepted.ExecutorID || accepted.Terminal ||
+		!ok || failure.Attempts <= 0 || failure.ModelCallStarted ||
+		!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
+		return fmt.Errorf("%w: accepted action changed before assignment", ErrAcceptanceState)
+	}
+	if err := ctx.Err(); err != nil {
+		if time.Now().Before(accepted.Deadline) {
+			return fmt.Errorf("%w: %w", ErrAcceptedRetry, err)
+		}
+		return context.DeadlineExceeded
+	}
+	if !time.Now().Before(accepted.Deadline) {
+		return context.DeadlineExceeded
+	}
+	_, _, valid, err := m.validateAcceptedSource(ctx, accepted, true)
+	if store.Data.Accepted == nil || *store.Data.Accepted != accepted || store.Data.JobFailures[accepted.JobID] != failure {
+		return fmt.Errorf("%w: accepted action changed during assignment validation", ErrAcceptanceState)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if time.Now().Before(accepted.Deadline) {
+			return fmt.Errorf("%w: %w", ErrAcceptedRetry, ctxErr)
+		}
+		return context.DeadlineExceeded
+	}
+	if !time.Now().Before(accepted.Deadline) {
+		return context.DeadlineExceeded
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrAcceptedRetry, err)
+	}
+	if !valid {
+		m.logf("discard accepted %s: source or requester is no longer valid before assignment", itemLocation(job.Source))
+		if err := discardAccepted(store); err != nil {
+			return err
+		}
+		return ErrAcceptedDiscarded
+	}
+	return nil
 }
 
 func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error {
@@ -1002,6 +1075,12 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 	if errors.Is(err, ErrAcceptanceState) {
 		return err
 	}
+	if errors.Is(err, ErrAcceptedDiscarded) {
+		if store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() {
+			return fmt.Errorf("%w: invalid accepted action was not durably resolved", ErrAcceptanceState)
+		}
+		return ErrAcceptedDiscarded
+	}
 	accepted := store.Data.Accepted
 	if accepted == nil || accepted.JobID != job.ID || accepted.AttemptID != job.AttemptID {
 		return fmt.Errorf("%w: selected action reservation changed during execution", ErrAcceptanceState)
@@ -1009,6 +1088,12 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 	failure, exists := store.Data.JobFailures[job.ID]
 	if !exists || failure.Attempts <= 0 || !failure.AcceptedAt.Equal(job.AcceptedAt) || !failure.Deadline.Equal(job.Deadline) {
 		return fmt.Errorf("%w: selected action attempt or deadline changed during execution", ErrAcceptanceState)
+	}
+	if errors.Is(err, ErrAcceptedRetry) {
+		if accepted.Assigned || failure.ModelCallStarted {
+			return fmt.Errorf("%w: deferred assignment was already delivered", ErrAcceptanceState)
+		}
+		return err // RunOnce preserves this attempt for recovery with its original deadline.
 	}
 	if err == nil {
 		store.Data.Processed[job.ID] = at
