@@ -19,6 +19,8 @@ type selectedHandler func(Job) error
 
 func (f selectedHandler) Execute(_ context.Context, job Job) error { return f(job) }
 
+func (selectedHandler) WaitCapacity(context.Context) error { return nil }
+
 type reactionProbeGitHub struct {
 	*fakeGitHub
 	beforeReaction func()
@@ -224,7 +226,7 @@ func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testin
 }
 
 func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
-	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	at := time.Now().UTC()
 	item := selectedItem(at)
 	reactionErr := errors.New("reaction unavailable")
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
@@ -581,6 +583,7 @@ func TestSelectedUnassignedRecoveryKeepsAcceptanceWithoutCapacity(t *testing.T) 
 	accepted := selectedAcceptance(t, at)
 	store.Data.Accepted = &accepted
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 2, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.NextInviteCheckAt = at.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -590,7 +593,7 @@ func TestSelectedUnassignedRecoveryKeepsAcceptanceWithoutCapacity(t *testing.T) 
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
 	unavailable := errors.New("capacity unavailable")
 	handler := &capacityHandler{failAt: 1, err: unavailable}
-	m := selectedMonitor(t, at, &fakeGitHub{beforeList: func() { t.Fatal("discovered before recovery") }}, handler)
+	m := selectedMonitor(t, at, &fakeGitHub{beforeList: func() { t.Fatal("invitation checked before due time") }}, handler)
 	if _, err := m.RunOnce(t.Context(), reopened); !errors.Is(err, unavailable) {
 		t.Fatalf("capacity error = %v", err)
 	}
