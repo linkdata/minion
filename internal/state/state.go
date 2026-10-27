@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -216,14 +217,26 @@ func prepareStateDirectory(dir string, syncDirectories func(...string) error) er
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	var parents []string
-	for current := dir; ; {
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
+	paths := []string{dir}
+	if runtime.GOOS != "windows" {
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return err
 		}
-		parents = append(parents, parent)
-		current = parent
+		if resolved != dir {
+			paths = append(paths, resolved)
+		}
+	}
+	var parents []string
+	for _, path := range paths {
+		for current := path; ; {
+			parent := filepath.Dir(current)
+			if parent == current {
+				break
+			}
+			parents = append(parents, parent)
+			current = parent
+		}
 	}
 	return syncDirectories(parents...)
 }

@@ -1099,8 +1099,8 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	}
 	if !replied {
 		if accepted := store.Data.Accepted; accepted != nil {
-			// Revalidation can require five serial GitHub reads, including the source-thread fallback.
-			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 50*time.Second)
+			// Allow several slow GitHub reads without renewing the budget indefinitely.
+			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
 			configured, current, valid, verifyErr := m.validateAcceptedSource(verifyCtx, *accepted, false)
 			if verifyErr == nil {
 				verifyErr = verifyCtx.Err()

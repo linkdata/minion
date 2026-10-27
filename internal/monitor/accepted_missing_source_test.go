@@ -54,15 +54,24 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 	current := selectedItem(now)
 	current.Body = "@linkdataminion audit"
 	current.HTMLURL = accepted.SourceURL
+	repositoryCalls, issueCalls := 0, 0
 	gh := &fakeGitHub{
-		beforeRepository: func() { time.Sleep(4 * time.Second) },
-		permission:       github.Permission{Permission: "write"},
+		beforeRepository: func() {
+			repositoryCalls++
+			if repositoryCalls == 1 {
+				time.Sleep(25 * time.Second)
+			}
+		},
+		permission: github.Permission{Permission: "write"},
 		issueDetails: func(_ string, number int) (github.Issue, error) {
-			time.Sleep(4 * time.Second)
+			issueCalls++
+			if issueCalls == 2 {
+				time.Sleep(25 * time.Second)
+			}
 			return github.Issue{Number: number}, nil
 		},
 		currentItem: func(github.Item) (github.Item, error) {
-			time.Sleep(4 * time.Second)
+			time.Sleep(25 * time.Second)
 			return current, nil
 		},
 	}
@@ -74,8 +83,8 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil {
-		t.Fatalf("successful source checks did not finish the fixed reply: comments=%d state=%+v", len(gh.comments), store.Data)
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil || repositoryCalls != 2 || issueCalls != 2 {
+		t.Fatalf("successful source checks did not finish the fixed reply: comments=%d repo=%d issue=%d state=%+v", len(gh.comments), repositoryCalls, issueCalls, store.Data)
 	}
 }
 

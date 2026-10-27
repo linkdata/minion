@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -300,6 +301,34 @@ func TestStateDirectorySyncFailureRequiresRetry(t *testing.T) {
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStateDirectorySyncsSymlinkTargetParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows supports process-restart recovery only")
+	}
+	root := t.TempDir()
+	aliasParent := filepath.Join(root, "alias")
+	realParent := filepath.Join(root, "real")
+	for _, dir := range []string{aliasParent, realParent} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(aliasParent, "link")
+	if err := os.Symlink(realParent, link); err != nil {
+		t.Fatal(err)
+	}
+	var synced []string
+	if err := prepareStateDirectory(filepath.Join(link, "new"), func(parents ...string) error {
+		synced = append(synced, parents...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(synced, aliasParent) || !slices.Contains(synced, realParent) {
+		t.Fatalf("state path parents not both synced: %v", synced)
 	}
 }
 

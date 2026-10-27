@@ -69,7 +69,7 @@ Before acknowledging a model-call start, the orchestrator saves a no-repeat mark
 
 Before an acknowledged model call, when the service context is canceled and execution returns `context.Canceled`, that interruption refunds the attempt even if the error also carries `ErrTerminalJob`, unless execution has an unknown outcome. An action-only timeout or internal cancellation still consumes an attempt. After default signal handling is restored, another signal can terminate shutdown immediately; normal crash/hard-kill accounting then applies.
 
-Minion posts a fixed reply after terminal failure or exhausted attempts. Its repository identity check and comment post share one fresh 10-second budget. After three failed comment posts, it logs the request URL and moves on. Repository lookup or identity-verification failures retry without consuming that reply-post budget. Post a new command after fixing the cause.
+Minion posts a fixed reply after terminal failure or exhausted attempts. For a selected action, source and requester revalidation has a 150-second budget before a new reply. Repository identity lookup and comment posting each get a separate 10-second budget. After three failed comment posts, it logs the request URL and moves on. Repository lookup or identity-verification failures retry without consuming the comment-post budget. Post a new command after fixing the cause.
 
 ## Setup
 
