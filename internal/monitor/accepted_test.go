@@ -296,6 +296,81 @@ func TestSelectedPreparationFailureConsumesAttemptAndReleasesAcceptance(t *testi
 	}
 }
 
+func TestSelectedMissingSkillAfterAcceptanceRetainsAttemptAcrossRestart(t *testing.T) {
+	at := time.Now().UTC()
+	item := selectedItem(at)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	m := selectedMonitor(t, at, gh, nil)
+	skillPath := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "review", "SKILL.md")
+	skillText, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillErr := errors.New("required skill is not installed")
+	var original state.AcceptedAction
+	m.Handler = selectedHandler(func(job Job) error {
+		if store.Data.Accepted == nil || store.Data.Accepted.AttemptID != job.AttemptID {
+			t.Fatalf("handler started without saved acceptance: %+v", store.Data.Accepted)
+		}
+		original = *store.Data.Accepted
+		if err := os.Remove(skillPath); err != nil {
+			t.Fatal(err)
+		}
+		return skillErr
+	})
+	next, err := m.RunOnce(t.Context(), store)
+	if !errors.Is(err, skillErr) || store.Data.Accepted == nil || !next.Equal(store.Data.Accepted.RetryAt) ||
+		store.Data.Accepted.AttemptID != original.AttemptID || !store.Data.Accepted.AcceptedAt.Equal(original.AcceptedAt) ||
+		!store.Data.Accepted.Deadline.Equal(original.Deadline) || store.Data.Accepted.Assigned || store.Data.Accepted.Terminal ||
+		store.Data.JobFailures[original.JobID].Attempts != 1 || store.Data.JobFailures[original.JobID].ModelCallStarted ||
+		len(store.Data.Processed) != 0 || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("missing skill released accepted attempt: next=%s err=%v state=%+v", next, err, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	if reopened.Data.Accepted == nil || reopened.Data.Accepted.AttemptID != original.AttemptID ||
+		!reopened.Data.Accepted.AcceptedAt.Equal(original.AcceptedAt) || !reopened.Data.Accepted.Deadline.Equal(original.Deadline) ||
+		reopened.Data.JobFailures[original.JobID].Attempts != 1 {
+		t.Fatalf("restart lost accepted attempt: %+v", reopened.Data)
+	}
+	m.Handler = selectedHandler(func(Job) error { t.Fatal("missing skill reached handler after restart"); return nil })
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RunOnce(t.Context(), reopened); err == nil || reopened.Data.Accepted == nil ||
+		reopened.Data.Accepted.AttemptID != original.AttemptID || reopened.Data.JobFailures[original.JobID].Attempts != 1 {
+		t.Fatalf("missing skill did not keep reservation after restart: err=%v state=%+v", err, reopened.Data)
+	}
+	if err := os.WriteFile(skillPath, skillText, 0600); err != nil {
+		t.Fatal(err)
+	}
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+	var resumed int
+	m.Handler = selectedHandler(func(job Job) error {
+		resumed++
+		if job.AttemptID != original.AttemptID || !job.AcceptedAt.Equal(original.AcceptedAt) ||
+			!job.Deadline.Equal(original.Deadline) || reopened.Data.JobFailures[job.ID].Attempts != 1 ||
+			reopened.Data.Accepted == nil || reopened.Data.Accepted.Assigned {
+			t.Fatalf("restored skill minted a new attempt: job=%+v state=%+v", job, reopened.Data)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || resumed != 1 ||
+		len(gh.notificationCalls) != 1 || reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("restored skill did not resume original attempt: err=%v resumed=%d state=%+v", err, resumed, reopened.Data)
+	}
+}
+
 func TestSelectedInfrastructureFailureRefundsUnassignedAttempt(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := selectedItem(at)

@@ -184,6 +184,68 @@ func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T)
 	}
 }
 
+func TestOrchestrateModeAttachesAfterExpiredAcceptanceRecovery(t *testing.T) {
+	for _, loop := range []bool{false, true} {
+		name := "one shot"
+		if loop {
+			name = "loop"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := selectedServiceTestConfig(t)
+			cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = 1, 2
+			cfg.Repositories[0].AllowedActors = []string{"writer"}
+			cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+			at := time.Now().UTC().Add(-time.Minute)
+			accepted := state.AcceptedAction{
+				JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
+				Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+				SubjectType: "PullRequest", SubjectNumber: 7,
+				SourceKey: "comment:1", SourceNodeID: "source-node", SourceURL: "https://github.com/owner/repo/pull/7#issuecomment-1",
+				Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+				AcceptedAt: at, Deadline: at.Add(2 * time.Minute),
+			}
+			store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), at.Add(-time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			if terminalRecoveryPending(store) {
+				t.Fatal("acceptance was already terminal before startup preflight")
+			}
+			// Model the deadline crossing after main's initial recovery check.
+			accepted.Deadline = time.Now().UTC().Add(-time.Second)
+			failure := store.Data.JobFailures[accepted.JobID]
+			failure.Deadline = accepted.Deadline
+			store.Data.JobFailures[accepted.JobID] = failure
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if !terminalRecoveryPending(store) {
+				t.Fatal("acceptance did not become terminal after startup preflight")
+			}
+			gh := &terminalRecoveryGitHub{item: github.Item{
+				Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL,
+				Body: "@bot comment", Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID},
+			}}
+			var logs bytes.Buffer
+			logger := log.New(&logs, "", 0)
+			owner := newOrchestrator(cfg, nil, store, logger, nil)
+			watcher := &monitor.Monitor{Config: cfg, GitHub: gh, Logger: logger}
+			code := runOrchestrateMode(t.Context(), owner, watcher, store, loop, logger,
+				filepath.Join(t.TempDir(), "missing-worker"), time.Second)
+			attempted := strings.Contains(logs.String(), "start selected worker: start local worker:")
+			if loop && (code != 1 || !attempted) || !loop && (code != 0 || attempted) {
+				t.Fatalf("worker attach after recovery: loop=%t code=%d attempted=%t logs=%q", loop, code, attempted, logs.String())
+			}
+			if gh.reply == "" || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(store.Data.JobFailures) != 0 {
+				t.Fatalf("deadline recovery did not finish before worker attach: reply=%q state=%+v", gh.reply, store.Data)
+			}
+		})
+	}
+}
+
 func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

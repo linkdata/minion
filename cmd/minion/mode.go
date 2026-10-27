@@ -28,7 +28,10 @@ func runExecuteMode() int {
 
 func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) int {
 	if terminalRecoveryPending(store) {
-		return recoverTerminalService(ctx, watcher, store, loop, logger)
+		code := recoverTerminalService(ctx, watcher, store, loop, logger)
+		if code != 0 || !loop || ctx.Err() != nil {
+			return code
+		}
 	}
 	if err := store.SyncPathAncestors(); err != nil {
 		logger.Printf("sync selected state path: %s", monitor.InertLogText(err.Error()))

@@ -1023,6 +1023,13 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 	failureErr := fmt.Errorf("%s from %s: %w", job.Command.Action, itemLocation(job.Source), err)
 	publicationFailure := errors.Is(err, ErrPostModelPublication)
 	outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
+	if !accepted.Assigned && !failure.ModelCallStarted && !outcomeUnknown && !publicationFailure &&
+		!errors.Is(err, ErrTerminalJob) && time.Now().Before(job.Deadline) {
+		installed, _ := m.Config.CommandInstalled(job.Command.Name)
+		if !installed {
+			return failureErr // The reserved attempt resumes when its required skill returns.
+		}
+	}
 	interrupted := !accepted.Assigned && !failure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
 	switch {
 	case interrupted:

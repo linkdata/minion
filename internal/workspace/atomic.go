@@ -22,7 +22,11 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 			}
 		}
 	}()
-	_, writeErr := file.Write(data)
+	// CreateTemp honors umask; retain owner read access for the saved record.
+	writeErr := file.Chmod(0o600)
+	if writeErr == nil {
+		_, writeErr = file.Write(data)
+	}
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
