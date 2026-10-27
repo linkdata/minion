@@ -305,6 +305,49 @@ func TestHTTPExecutorBeforeDeliveryFailureSendsNoAssignment(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorAssignmentRevalidationFailureSendsNoJobBytes(t *testing.T) {
+	for _, cause := range []error{monitor.ErrAcceptedDiscarded, monitor.ErrAcceptedRetry} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+			f.tx.mu.Lock()
+			f.tx.beforeDelivery = func(Job) error { return cause }
+			f.tx.mu.Unlock()
+			reply := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
+			if reply.err != nil || reply.status != http.StatusInternalServerError || reply.ack.Kind != "next" || reply.ack.Failure == nil || f.tx.delivered {
+				t.Fatalf("failed final check sent assignment: reply=%+v delivered=%t", reply, f.tx.delivered)
+			}
+			if got := f.result(t); !errors.Is(got.err, cause) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("pre-delivery refusal changed cause or claimed model work: %v", got.err)
+			}
+		})
+	}
+}
+
+func TestHTTPExecutorChargesRuntimeForAssignmentRevalidation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		job.RuntimeBudget = 5 * time.Second
+		f := newHTTPServerTestInMemory(t, t.Context(), job, runnerExecutionCheckpoints{})
+		f.tx.mu.Lock()
+		f.tx.beforeDelivery = func(Job) error {
+			time.Sleep(2 * time.Second)
+			return nil
+		}
+		f.tx.mu.Unlock()
+		pullStarted := time.Now()
+		assignment := f.pull(t)
+		transit := time.Since(pullStarted) - assignment.HeldFor
+		remaining := assignment.Job.RuntimeBudget - transit
+		if remaining > 3*time.Second || remaining <= 0 {
+			t.Fatalf("final check did not consume the original runtime: budget=%s transit=%s remaining=%s", assignment.Job.RuntimeBudget, transit, remaining)
+		}
+		f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+		if result := f.result(t); result.err != nil {
+			t.Fatal(result.err)
+		}
+	})
+}
+
 func TestHTTPExecutorStopBeforeAssignmentCannotSucceed(t *testing.T) {
 	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	f.tx.forceStop()

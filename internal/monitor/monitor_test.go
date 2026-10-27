@@ -89,6 +89,9 @@ func (f *fakeGitHub) ListRepositoryNotifications(_ context.Context, repo string,
 }
 
 func fixtureRepository(repo github.Repository) github.Repository {
+	if repo.DefaultBranch == "" {
+		repo.DefaultBranch = "main"
+	}
 	if repo.ID == 0 {
 		repo.ID = 1
 	}

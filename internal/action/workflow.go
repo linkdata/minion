@@ -58,6 +58,7 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			executor = &runner
 		}
 		checkpoints := newExecutionCheckpoints(e, prepared.job)
+		checkpoints.assignmentContext, checkpoints.assignmentRequest = ctx, prepared.request
 		result, err = executor.Execute(ctx, prepared.job, checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {

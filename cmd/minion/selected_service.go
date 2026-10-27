@@ -37,6 +37,12 @@ func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, 
 	if err != nil {
 		return nil, nil, err
 	}
+	owner.ValidateAssignment = func(ctx context.Context, job monitor.Job) error {
+		if owner.Store == nil {
+			return fmt.Errorf("%w: accepted state store is unavailable", monitor.ErrAcceptanceState)
+		}
+		return watcher.RevalidateAssignment(ctx, owner.Store, job)
+	}
 	watcher.Handler = owner
 	watcher.SelectedExecutorID = action.LocalExecutorID
 	watcher.SelectedCommands = make(map[string]bool, len(selected.Commands))
