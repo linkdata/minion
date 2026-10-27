@@ -163,8 +163,23 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 	}
 }
 
+func TestExecutionAssignmentAllowsCaseOnlyRequesterChange(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := openState(t, time.Now())
+	f.owner.Store = store
+	accepted := acceptedForJob(f.job)
+	accepted.Requester = strings.ToUpper(accepted.Requester)
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sink.BeforeAssignment(f.job); err != nil || !store.Data.Accepted.Assigned {
+		t.Fatalf("case-only login change rejected: assigned=%t error=%v", store.Data.Accepted.Assigned, err)
+	}
+}
+
 func TestExecutionAssignmentRejectsMismatchAndSaveFailure(t *testing.T) {
-	for _, scenario := range []string{"mismatch", "save failure"} {
+	for _, scenario := range []string{"mismatch", "requester ID", "save failure"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, testJob(command.Comment))
 			store := openState(t, time.Now())
@@ -173,9 +188,12 @@ func TestExecutionAssignmentRejectsMismatchAndSaveFailure(t *testing.T) {
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
-			if scenario == "mismatch" {
+			switch scenario {
+			case "mismatch":
 				store.Data.Accepted.AttemptID = "foreign"
-			} else {
+			case "requester ID":
+				store.Data.Accepted.RequesterID++
+			default:
 				store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 			}
 			err := f.sink.BeforeAssignment(f.job)

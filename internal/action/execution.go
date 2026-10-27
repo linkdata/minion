@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/linkdata/minion/internal/monitor"
 )
@@ -102,7 +103,7 @@ func (c *executionCheckpoints) acceptedAssignment(job Job) bool {
 	i := job.Identity
 	return a.JobID == i.JobID && a.AttemptID == i.AttemptID && a.ExecutorID == i.ExecutorID &&
 		a.Repository == i.Repository && a.RepositoryID == i.RepositoryID && a.OwnerID == i.OwnerID &&
-		a.Requester == i.Requester && a.RequesterID == i.RequesterID &&
+		strings.EqualFold(a.Requester, i.Requester) && a.RequesterID == i.RequesterID &&
 		a.SubjectNumber == i.Number && a.SubjectType == i.SubjectType &&
 		a.CommandName == job.Command && a.Action == string(job.Action)
 }
