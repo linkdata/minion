@@ -1228,25 +1228,36 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 // No other action is discovered or assigned until this execution has finished.
 func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.Store, job Job, at time.Time,
 	cachedKey string, cachedItems []github.Item) error {
-	terminalKeys := make(map[string]bool)
+	terminalChecks := make(map[string]time.Time)
 	var unknownTerminalKey bool
+	var unknownTerminalCheck time.Time
 	_ = store.WithLock(func() error {
 		for id, failure := range store.Data.JobFailures {
 			if id == job.ID || !store.Data.Processed[id].IsZero() {
 				continue
 			}
 			if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero() {
+				checkAt := failure.Deadline
+				if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted {
+					checkAt = time.Time{}
+				}
 				if failure.NotificationKey == "" {
+					if !unknownTerminalKey || checkAt.Before(unknownTerminalCheck) {
+						unknownTerminalCheck = checkAt
+					}
 					unknownTerminalKey = true
 				} else {
-					terminalKeys[failure.NotificationKey] = true
+					previous, exists := terminalChecks[failure.NotificationKey]
+					if !exists || checkAt.Before(previous) {
+						terminalChecks[failure.NotificationKey] = checkAt
+					}
 				}
 			}
 		}
 		return nil
 	})
 	commandSets := make(map[string]map[string]command.Action)
-	if unknownTerminalKey || len(terminalKeys) != 0 {
+	if unknownTerminalKey || len(terminalChecks) != 0 {
 		for _, configured := range m.Config.Repositories {
 			commandSets[configured.Name] = m.controlCommands(configured)
 		}
@@ -1261,36 +1272,57 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 		result = m.Handler.Execute(actionCtx, job)
 	}()
 	finish := func(err error) error { return m.completeSelected(ctx, store, job, at, err) }
+	var result error
+	completed := false
+	readDone := func() {
+		if !completed {
+			select {
+			case result = <-done:
+				completed = true
+			default:
+			}
+		}
+	}
 	abort := func(err error) error {
+		readDone()
+		if completed {
+			if ctx.Err() != nil {
+				return finish(result)
+			}
+			return errors.Join(finish(result), fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err))
+		}
 		cancel()
-		result := <-done // The state lock and store must outlive Execute.
+		result = <-done // The state lock and store must outlive Execute.
 		if ctx.Err() != nil {
 			return finish(result)
 		}
 		return fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err)
 	}
-	select {
-	case err := <-done:
-		return finish(err)
-	default:
-	}
-	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
-		return abort(err)
-	}
 	nextCheck := make(map[string]time.Time)
 	for {
+		readDone()
+		completedAtStart := completed
+		if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+			return abort(err)
+		}
 		var next time.Time
 		var due []notificationScan
 		_ = store.WithLock(func() error {
 			next = store.Data.NextInviteCheckAt
-			if !unknownTerminalKey && len(terminalKeys) == 0 {
+			if !unknownTerminalKey && len(terminalChecks) == 0 {
 				return nil
 			}
 			for key, pending := range store.Data.PendingNotifications {
-				if !unknownTerminalKey && !terminalKeys[key] {
+				checkAt, relevant := terminalChecks[key]
+				if !unknownTerminalKey && !relevant {
 					continue
 				}
-				checkAt := pending.RetryAt
+				if unknownTerminalKey && (!relevant || unknownTerminalCheck.Before(checkAt)) {
+					checkAt = unknownTerminalCheck
+				}
+				if !checkAt.IsZero() && (pending.RetryAt.IsZero() || pending.RetryAt.Before(checkAt)) {
+					checkAt = pending.RetryAt
+				}
 				if previous, checked := nextCheck[key]; checked {
 					if previous.IsZero() {
 						continue
@@ -1314,11 +1346,6 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 			return nil
 		})
 		for _, entry := range due {
-			select {
-			case err := <-done:
-				return finish(err)
-			default:
-			}
 			var items []github.Item
 			if entry.key == cachedKey {
 				items = cachedItems
@@ -1334,28 +1361,30 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 			}
 		}
 		if err := ctx.Err(); err != nil {
-			return finish(<-done)
+			if !completed {
+				result = <-done
+			}
+			return finish(result)
 		}
-		select {
-		case err := <-done:
-			return finish(err)
-		default:
+		readDone()
+		if completed {
+			if completedAtStart && len(due) == 0 {
+				return finish(result)
+			}
+			continue
 		}
 		if next.IsZero() {
 			next = m.now().UTC().Add(15 * time.Minute)
 		}
 		timer := time.NewTimer(next.Sub(m.now().UTC()))
 		select {
-		case err := <-done:
+		case result = <-done:
 			timer.Stop()
-			return finish(err)
+			completed = true
 		case <-timer.C:
-			if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
-				return abort(err)
-			}
 		case <-ctx.Done():
 			timer.Stop()
-			return finish(<-done)
+			return abort(ctx.Err())
 		}
 	}
 }

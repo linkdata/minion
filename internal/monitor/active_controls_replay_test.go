@@ -200,6 +200,85 @@ func TestSelectedActionChecksSiblingAtJobDeadline(t *testing.T) {
 	})
 }
 
+func TestSelectedActionChecksTerminalDeadlineBeforePendingRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		terminal := selectedItem(now.Add(-time.Second))
+		terminal.Key, terminal.NodeID = "comment:2", "node:2"
+		terminal.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-2"
+		terminalID := jobID(terminal.Key, "review")
+		notice := testNotification(terminal.UpdatedAt)
+		notice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
+		key := notificationKey(notice)
+		deadline := now.Add(time.Minute)
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.PendingNotifications[key] = state.PendingNotification{
+			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+			Since: now.Add(-time.Minute), UpdatedAt: notice.UpdatedAt, RetryAt: now.Add(5 * time.Minute),
+		}
+		store.Data.JobFailures[terminalID] = state.JobFailure{
+			Attempts: 1, AcceptedAt: now.Add(-time.Minute), Deadline: deadline, NotificationKey: key,
+		}
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+			permission:    github.Permission{Permission: "write"},
+			beforeComment: func() {
+				if time.Now().After(deadline) {
+					t.Error("terminal reply missed its deadline")
+				}
+			},
+			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+				switch number {
+				case 7:
+					return []github.Item{selected}, nil
+				case 8:
+					return []github.Item{terminal}, nil
+				default:
+					return nil, fmt.Errorf("unexpected thread #%d", number)
+				}
+			},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if len(gh.comments) != 1 || !strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+terminalID+" -->") ||
+			store.Data.Processed[terminalID].IsZero() {
+			t.Fatalf("terminal deadline was masked by notification retry: comments=%v processed=%v executions=%d accepted=%+v",
+				gh.comments, store.Data.Processed[terminalID], held.executions.Load(), store.Data.Accepted)
+		}
+		time.Sleep(time.Minute + time.Second)
+		synctest.Wait()
+		if len(gh.comments) != 1 || held.executions.Load() != 1 || store.Data.Accepted == nil {
+			t.Fatalf("selected Execute did not remain held past two minutes: comments=%v executions=%d accepted=%+v",
+				gh.comments, held.executions.Load(), store.Data.Accepted)
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}
+
 func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
@@ -637,6 +716,88 @@ func TestSelectedActionChecksOnlyTerminalThreadInPendingBacklog(t *testing.T) {
 		synctest.Wait()
 		if err := <-result; !errors.Is(err, context.Canceled) {
 			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}
+
+func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		terminal := selectedItem(now.Add(-time.Second))
+		terminal.Key, terminal.NodeID = "comment:2", "node:2"
+		terminal.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-2"
+		terminalID := jobID(terminal.Key, "review")
+		notice := testNotification(terminal.UpdatedAt)
+		notice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
+		key := notificationKey(notice)
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.PendingNotifications[key] = state.PendingNotification{
+			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+			Since: now.Add(-time.Minute), UpdatedAt: notice.UpdatedAt, RetryAt: now.Add(time.Minute),
+		}
+		store.Data.JobFailures[terminalID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: key}
+		store.Data.NextInviteCheckAt = now.Add(time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+			permission:    github.Permission{Permission: "write"},
+			invitations: []github.Invitation{{ID: 41, Repository: github.Repository{
+				FullName: "example-owner/example-repo", ID: 1,
+				Owner: github.User{Login: "example-owner", ID: 2},
+			}, Permissions: "write"}},
+			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+				switch number {
+				case 7:
+					return []github.Item{selected}, nil
+				case 8:
+					return []github.Item{terminal}, nil
+				default:
+					return nil, fmt.Errorf("unexpected thread #%d", number)
+				}
+			},
+		}
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		released := false
+		defer func() {
+			if !released {
+				close(release)
+			}
+		}()
+		handler := selectedHandler(func(Job) error {
+			close(entered)
+			<-release
+			return ErrAcceptedRetry
+		})
+		clock := now
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return clock },
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()
+		select {
+		case <-entered:
+		case err := <-result:
+			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		synctest.Wait()
+		clock = now.Add(time.Minute)
+		close(release)
+		released = true
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, ErrAcceptedRetry) {
+			t.Fatalf("RunOnce did not retain deferred assignment: %v", err)
+		}
+		if !slices.Equal(gh.accepted, []int64{41}) || len(gh.comments) != 1 ||
+			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+terminalID+" -->") ||
+			store.Data.Processed[terminalID].IsZero() || store.Data.Accepted == nil {
+			t.Fatalf("due controls were skipped as Execute returned: invitations=%v comments=%v processed=%v accepted=%+v",
+				gh.accepted, gh.comments, store.Data.Processed[terminalID], store.Data.Accepted)
 		}
 	})
 }
