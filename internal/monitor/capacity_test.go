@@ -205,14 +205,14 @@ func TestRunOnceCapacityLossPreservesPendingRetryBytes(t *testing.T) {
 	initial := now.Add(-time.Minute)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, initial)
-	pendingNotification := testNotification(now.Add(-time.Minute))
+	pendingNotification := testNotification(now.Add(time.Minute))
 	pendingNotification.ID = "pending-thread"
 	pendingNotification.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
 	pending := state.PendingNotification{
 		Repository: pendingNotification.Repository.FullName, RepositoryID: 1, OwnerID: 2,
 		SubjectType: pendingNotification.Subject.Type, SubjectURL: pendingNotification.Subject.URL,
 		Since: initial.Add(-time.Hour), UpdatedAt: pendingNotification.UpdatedAt,
-		RetryAt: now.Add(20 * time.Minute), Failures: 4,
+		RetryAt: now.Add(-time.Second), Failures: 4,
 	}
 	pendingKey := notificationKey(pendingNotification)
 	store.Data.PendingNotifications[pendingKey] = pending
@@ -288,16 +288,28 @@ func TestRunOnceInterleavedRepositoriesReplayOnlyUnacceptedActions(t *testing.T)
 		}
 	}
 	firstRepo, secondRepo := "a/one", "b/two"
+	firstSince, secondSince := now.Add(-45*time.Second), now.Add(-2*time.Minute)
+	store.Data.RepositoryCursors = map[string]time.Time{firstRepo: firstSince, secondRepo: secondSince}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	gh := &fakeGitHub{
 		notifications: []github.Notification{
 			makeNotification(firstRepo, 1, 0), makeNotification(secondRepo, 2, 1),
 			makeNotification(firstRepo, 3, 2), makeNotification(secondRepo, 4, 3),
 		},
 		permission: github.Permission{Permission: "write"},
-		threadItems: func(repo string, number int, _ time.Time) ([]github.Item, error) {
+		threadItems: func(repo string, number int, since time.Time) ([]github.Item, error) {
 			key := repo + ":" + strconv.Itoa(number)
+			itemAt := now.Add(time.Duration(number) * time.Second)
+			if number == 4 {
+				itemAt = now.Add(-90 * time.Second) // Older than firstRepo's cursor, within secondRepo's window.
+			}
+			if itemAt.Before(since) {
+				return nil, nil
+			}
 			return []github.Item{{Key: key, NodeID: "node:" + key, Body: "@linkdataminion review",
-				Author: github.User{Login: "writer"}}}, nil
+				Author: github.User{Login: "writer"}, UpdatedAt: itemAt}}, nil
 		},
 	}
 	cfg := testConfig(t)
@@ -314,14 +326,22 @@ func TestRunOnceInterleavedRepositoriesReplayOnlyUnacceptedActions(t *testing.T)
 	}
 	if len(handler.jobs) != 2 || handler.jobs[0].Source.Key != "a/one:1" || handler.jobs[1].Source.Key != "b/two:2" ||
 		len(store.Data.Processed) != 2 || len(store.Data.PendingNotifications) != 3 ||
-		!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[firstRepo].Equal(initial) ||
-		!store.Data.RepositoryCursors[secondRepo].Equal(initial) {
+		!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[firstRepo].Equal(firstSince) ||
+		!store.Data.RepositoryCursors[secondRepo].Equal(secondSince) {
 		t.Fatalf("partial interleaved batch changed unaccepted state: jobs=%v state=%+v", handler.jobs, store.Data)
+	}
+	third := notificationKey(makeNotification(firstRepo, 3, 2))
+	fourth := notificationKey(makeNotification(secondRepo, 4, 3))
+	if !store.Data.PendingNotifications[third].Since.Equal(firstSince) || !store.Data.PendingNotifications[fourth].Since.Equal(secondSince) {
+		t.Fatalf("saved replay windows differ from repository cursors: %+v", store.Data.PendingNotifications)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	store = openStateAt(t, path, initial)
+	if !store.Data.PendingNotifications[third].Since.Equal(firstSince) || !store.Data.PendingNotifications[fourth].Since.Equal(secondSince) {
+		t.Fatalf("restart lost repository replay windows: %+v", store.Data.PendingNotifications)
+	}
 	gh.notifications = nil
 	handler.failAt = 0
 	clock = now.Add(time.Minute)
@@ -358,12 +378,12 @@ func TestRunOnceIdleResumesAndRejectsInvalidPendingIdentity(t *testing.T) {
 		}
 		gh := &fakeGitHub{
 			notifications: []github.Notification{testNotification(now)},
-			items: []github.Item{{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review",
-				Author: github.User{Login: "writer"}}},
-			permission: github.Permission{Permission: "write"},
+			items:         []github.Item{selectedItem(now)},
+			permission:    github.Permission{Permission: "write"},
 		}
 		handler := &heldCapacityHandler{entered: make(chan struct{}), release: make(chan struct{})}
-		m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return time.Now() }}
+		m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return time.Now() },
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		result := make(chan error, 1)
 		go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()
 		synctest.Wait()
@@ -384,9 +404,10 @@ func TestRunOnceIdleResumesAndRejectsInvalidPendingIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(handler.jobs) != 1 || handler.jobs[0].Source.Key != "comment:1" ||
-			len(store.Data.PendingNotifications) != 0 || gh.threadCalls != 1 {
-			t.Fatalf("ready pull failed to resume valid work or reject invalid retry: jobs=%v pending=%v threads=%d",
-				handler.jobs, store.Data.PendingNotifications, gh.threadCalls)
+			len(store.Data.PendingNotifications) != 0 || len(store.Data.Processed) != 1 ||
+			store.Data.Accepted != nil || gh.threadCalls != 1 {
+			t.Fatalf("ready pull failed to dispatch or reject invalid retry: jobs=%v state=%+v threads=%d",
+				handler.jobs, store.Data, gh.threadCalls)
 		}
 	})
 }
