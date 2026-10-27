@@ -403,6 +403,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				// retained command. Do not run commands from edited content.
 				m.logf("ignore edited command in %s (last editor @%s)", itemLocation(item), item.Editor.Login)
 				store.Data.Processed[job.ID] = started
+				delete(store.Data.JobFailures, job.ID)
 				if err := store.Save(); err != nil {
 					return stop(err)
 				}
@@ -411,6 +412,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if !repo.AllowsAction(cmd.Name) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
+				delete(store.Data.JobFailures, job.ID)
 				if err := store.Save(); err != nil {
 					return stop(err)
 				}
@@ -427,6 +429,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if permission.User.ID != item.Author.ID || !strings.EqualFold(permission.User.Login, item.Author.Login) {
 				m.logf("ignore %s from @%s in %s: permission identity differs", cmd.Action, item.Author.Login, repo.Name)
 				store.Data.Processed[job.ID] = started
+				delete(store.Data.JobFailures, job.ID)
 				if err := store.Save(); err != nil {
 					return stop(err)
 				}
@@ -435,6 +438,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
 				m.logf("ignore %s from @%s in %s: permission %q", cmd.Action, item.Author.Login, repo.Name, permission.Permission)
 				store.Data.Processed[job.ID] = started
+				delete(store.Data.JobFailures, job.ID)
 				if err := store.Save(); err != nil {
 					return stop(err)
 				}

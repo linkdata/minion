@@ -88,7 +88,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 				Repository: github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2, Login: "o"}},
 				Subject:    github.Subject{Type: "Issue", URL: "https://api.github.com/repos/o/r/issues/7"}, UpdatedAt: requestAt}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-			_, _ = fmt.Fprint(w, `{"title":"Issue","body":"Describe the source"}`)
+			_, _ = fmt.Fprint(w, `{"number":7,"title":"Issue","body":"Describe the source"}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			mu.Lock()
 			comments := append([]github.Comment{request}, published...)

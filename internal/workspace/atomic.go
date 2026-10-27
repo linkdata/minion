@@ -46,11 +46,16 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 		return err
 	}
 	temporary = ""
+	return SyncDirectories(append([]string{filepath.Dir(path)}, extraDirs...)...)
+}
+
+// SyncDirectories persists directory entries on platforms that support it.
+func SyncDirectories(directories ...string) error {
 	// shortcut: Windows directory Sync lacks write access; revisit if crash durability is required.
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	for _, directory := range append([]string{filepath.Dir(path)}, extraDirs...) {
+	for _, directory := range directories {
 		file, err := os.Open(directory)
 		if err != nil {
 			return err

@@ -135,7 +135,7 @@ type Store struct {
 //
 // The lock prevents overlapping cron invocations from executing the same command.
 func Open(path string, initialCursor time.Time) (*Store, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := prepareStateDirectory(filepath.Dir(path), workspace.SyncDirectories); err != nil {
 		return nil, err
 	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
@@ -201,6 +201,25 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 		store.Data.PendingFixes = map[string]PendingFix{}
 	}
 	return store, nil
+}
+
+// prepareStateDirectory persists the path to state before it can be accepted.
+// Syncing every ancestor also repairs a previous startup whose sync failed
+// after creating a directory. SyncDirectories is a no-op on Windows.
+func prepareStateDirectory(dir string, syncDirectories func(...string) error) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	var parents []string
+	for current := dir; ; {
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		parents = append(parents, parent)
+		current = parent
+	}
+	return syncDirectories(parents...)
 }
 
 // Save atomically replaces state and reports failed durability steps.

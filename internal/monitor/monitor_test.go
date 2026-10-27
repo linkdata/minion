@@ -1178,7 +1178,8 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 	config := testConfig(t)
 	config.Repositories[0].AllowedActors = []string{"allowed"}
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"allowed": 7}
-	store := openState(t, first.Add(-time.Minute))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, first.Add(-time.Minute))
 	clock := first
 	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
@@ -1201,11 +1202,26 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 		}
 		return item, nil
 	}
+	editedJob := jobID("comment:1", "review")
+	store.Data.JobFailures[editedJob] = state.JobFailure{AcceptedAt: first, Deadline: first.Add(7 * time.Minute)}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 1 || handler.jobs[0].Source.NodeID != "comment-node-2" || gh.checks != 1 || len(gh.reactions) != 1 {
 		t.Fatalf("edited command ran or original command failed: jobs=%+v checks=%d reactions=%v", handler.jobs, gh.checks, gh.reactions)
+	}
+	if _, ok := store.Data.JobFailures[editedJob]; ok {
+		t.Fatalf("processed edited command retained failure: %+v", store.Data.JobFailures)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, first.Add(-time.Minute))
+	if _, ok := reopened.Data.JobFailures[editedJob]; ok {
+		t.Fatalf("restart restored processed failure: %+v", reopened.Data.JobFailures)
 	}
 }
 

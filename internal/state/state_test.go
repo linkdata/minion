@@ -259,6 +259,41 @@ func TestSaveReportsPostRenameSyncFailureWithAcceptedRecord(t *testing.T) {
 	}
 }
 
+func TestStateDirectorySyncFailureRequiresRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows supports process-restart recovery only")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "new", "nested")
+	wantFirst := []string{filepath.Join(root, "new"), root}
+	syncFailure := errors.New("parent sync failed")
+	var first []string
+	err := prepareStateDirectory(dir, func(parents ...string) error {
+		first = append(first, parents...)
+		return syncFailure
+	})
+	if !errors.Is(err, syncFailure) || len(first) < len(wantFirst) || !reflect.DeepEqual(first[:len(wantFirst)], wantFirst) {
+		t.Fatalf("first directory preparation = %v, parents %v; want sync failure after %v", err, first, wantFirst)
+	}
+	var retried []string
+	if err := prepareStateDirectory(dir, func(parents ...string) error {
+		retried = append(retried, parents...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(retried, first) {
+		t.Fatalf("retry skipped existing directory parents: got %v, want %v", retried, first)
+	}
+	store, err := Open(filepath.Join(dir, "state.json"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestOpenFailureReleasesLock(t *testing.T) {
 	for name, content := range map[string]string{
 		"malformed":         "{",
