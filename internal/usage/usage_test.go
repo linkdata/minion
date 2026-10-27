@@ -113,6 +113,32 @@ func TestReadAllMissingDirectory(t *testing.T) {
 	}
 }
 
+func TestStoreLoadOneAttempt(t *testing.T) {
+	store := Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	record := testRecord()
+	if _, found, err := store.Load(record.ID); err != nil || found {
+		t.Fatalf("missing directory: found=%t err=%v", found, err)
+	}
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	if got, found, err := store.Load(record.ID); err != nil || !found || !reflect.DeepEqual(got, record) {
+		t.Fatalf("record=%+v found=%t err=%v", got, found, err)
+	}
+	if _, found, err := store.Load(strings.Repeat("b", 32)); err != nil || found {
+		t.Fatalf("missing attempt: found=%t err=%v", found, err)
+	}
+	if _, _, err := store.Load("../outside"); err == nil {
+		t.Fatal("accepted invalid attempt ID")
+	}
+	if err := os.WriteFile(filepath.Join(store.Dir, record.ID+".json"), []byte(`{"id":"`+record.ID+`","typo":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Load(record.ID); err == nil {
+		t.Fatal("accepted malformed stored record")
+	}
+}
+
 func TestSaveEncodeAndRenameFailuresKeepDirectoryClean(t *testing.T) {
 	for _, failure := range []string{"no write on encode error", "rename"} {
 		t.Run(failure, func(t *testing.T) {

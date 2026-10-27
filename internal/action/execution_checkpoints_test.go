@@ -105,6 +105,141 @@ func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T
 	}
 }
 
+func acceptedForJob(job Job) *state.AcceptedAction {
+	i := job.Identity
+	now := time.Now().UTC()
+	return &state.AcceptedAction{
+		JobID: i.JobID, AttemptID: i.AttemptID, ExecutorID: i.ExecutorID,
+		Repository: i.Repository, RepositoryID: i.RepositoryID, OwnerID: i.OwnerID,
+		SubjectType: i.SubjectType, SubjectNumber: i.Number,
+		SourceKey: "source-key", SourceNodeID: "source-node", SourceUpdatedAt: now,
+		Requester: i.Requester, RequesterID: i.RequesterID,
+		CommandName: job.Command, Action: string(job.Action), AcceptedAt: now, Deadline: now.Add(time.Minute),
+	}
+}
+
+func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = acceptedForJob(f.job)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store = store
+	if err := f.sink.BeforeAssignment(f.job); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sink.BeforeAssignment(f.job); err != nil {
+		t.Fatalf("same assignment after re-pull: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store = store
+	if !store.Data.Accepted.Assigned {
+		t.Fatal("worker assignment was not durable before delivery")
+	}
+	if err := f.sink.AssignmentNotDelivered(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Data.Accepted == nil || store.Data.Accepted.Assigned {
+		t.Fatalf("known undelivered assignment remained reserved: %+v", store.Data.Accepted)
+	}
+}
+
+func TestExecutionFailedAssignmentReleaseKeepsDurableAssignment(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.Data.Accepted = acceptedForJob(f.job)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.owner.Store = store
+	if err := f.sink.BeforeAssignment(f.job); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := f.sink.AssignmentNotDelivered(); !errors.Is(err, monitor.ErrAcceptanceState) || !f.sink.assigned {
+		t.Fatalf("failed release lost assignment uncertainty: assigned=%t error=%v", f.sink.assigned, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Assigned {
+		t.Fatalf("failed release changed durable assignment: %+v", reopened.Data.Accepted)
+	}
+}
+
+func TestExecutionAssignmentAllowsCaseOnlyRequesterChange(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := openState(t, time.Now())
+	f.owner.Store = store
+	accepted := acceptedForJob(f.job)
+	accepted.Requester = strings.ToUpper(accepted.Requester)
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sink.BeforeAssignment(f.job); err != nil || !store.Data.Accepted.Assigned {
+		t.Fatalf("case-only login change rejected: assigned=%t error=%v", store.Data.Accepted.Assigned, err)
+	}
+}
+
+func TestExecutionAssignmentRejectsMismatchAndSaveFailure(t *testing.T) {
+	for _, scenario := range []string{"mismatch", "requester ID", "save failure"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newExecutionAdapterFixture(t, testJob(command.Comment))
+			store := openState(t, time.Now())
+			f.owner.Store = store
+			store.Data.Accepted = acceptedForJob(f.job)
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "mismatch":
+				store.Data.Accepted.AttemptID = "foreign"
+			case "requester ID":
+				store.Data.Accepted.RequesterID++
+			default:
+				store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+			}
+			err := f.sink.BeforeAssignment(f.job)
+			if !errors.Is(err, monitor.ErrAcceptanceState) || f.sink.assigned {
+				t.Fatalf("unsafe assignment was acknowledged: assigned=%t error=%v", f.sink.assigned, err)
+			}
+			if releaseErr := f.sink.AssignmentNotDelivered(); !errors.Is(releaseErr, monitor.ErrAcceptanceState) {
+				t.Fatalf("uncertain assignment was released: %v", releaseErr)
+			}
+		})
+	}
+}
+
 func TestExecutionBeforeCallStateSaveFailureRemainsPreCall(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	store := openState(t, time.Now())

@@ -40,6 +40,10 @@ func run() int {
 }
 
 func runWithGitCheck(checkGit func(context.Context, string) error) int {
+	return runWithGitCheckAt(checkGit, time.Now)
+}
+
+func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "in-process", "service mode: in-process, orchestrate, or execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
@@ -105,10 +109,6 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
-	if err := checkWorkRoot(); err != nil {
-		logger.Printf("work root: %v", err)
-		return 1
-	}
 	var store *state.Store
 	initial := time.Now().UTC()
 	if cfg.StartAt != "" {
@@ -128,13 +128,28 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 			logger.Printf("close state: %v", err)
 		}
 	}()
-	if err := checkGit(ctx, cfg.WorkRoot); err != nil {
-		logger.Printf("Git preflight: %v", err)
-		return 1
+	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
+	preflight := func() bool {
+		if err := checkWorkRoot(); err != nil {
+			logger.Printf("work root: %v", err)
+			return false
+		}
+		if err := checkGit(ctx, cfg.WorkRoot); err != nil {
+			logger.Printf("Git preflight: %v", err)
+			return false
+		}
+		if err := checkModels(ctx, &cfg, logger); err != nil {
+			logger.Printf("AI preflight: %v", err)
+			return false
+		}
+		return true
 	}
-	if err := checkModels(ctx, &cfg, logger); err != nil {
-		logger.Printf("AI preflight: %v", err)
-		return 1
+	failedPreflight := !terminalRecovery && !preflight()
+	if failedPreflight {
+		if *check || !terminalRecoveryPendingAt(store, now()) {
+			return 1
+		}
+		terminalRecovery = true
 	}
 	token, err := githubToken(ctx)
 	if err != nil {
@@ -160,8 +175,21 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		return 0
 	}
 
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
+	if terminalRecovery {
+		code := recoverTerminalService(ctx, watcher, store, *loop && !failedPreflight, logger)
+		if failedPreflight {
+			return 1
+		}
+		if code != 0 || !*loop || ctx.Err() != nil {
+			return code
+		}
+		if !preflight() {
+			return 1
+		}
+	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
-	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Handler: orchestrator, Logger: logger}
+	watcher.Config, watcher.Handler = cfg, orchestrator
 	if *mode == "orchestrate" {
 		path, err := os.Executable()
 		if err != nil {
@@ -170,10 +198,10 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 		}
 		return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
 	}
-	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger)
+	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger, false)
 }
 
-func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger) int {
+func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool) int {
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -182,7 +210,7 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !loop || workerExited != nil && ctx.Err() == nil && errors.Is(err, action.ErrLocalWorkerUnavailable) {
+			if !loop || errors.Is(err, monitor.ErrAcceptanceState) || workerExited != nil && ctx.Err() == nil && errors.Is(err, action.ErrLocalWorkerUnavailable) {
 				return 1
 			}
 		}
@@ -195,6 +223,12 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 				}
 			default:
 			}
+		}
+		if stopAfterAccepted && store.Data.Accepted == nil {
+			if err != nil {
+				return 1
+			}
+			return 0
 		}
 		if !loop {
 			return 0

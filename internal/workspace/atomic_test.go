@@ -72,6 +72,11 @@ func TestWriteAtomicCleansTemporaryAfterRenameFailure(t *testing.T) {
 	}
 	if err := WriteAtomic(path, []byte("new")); err == nil {
 		t.Fatal("replaced non-empty directory with a record")
+	} else {
+		var linkErr *os.LinkError
+		if !errors.As(err, &linkErr) || linkErr.New != path {
+			t.Fatalf("rename error lost destination path: %v", err)
+		}
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || entries[0].Name() != "occupied" {
 		t.Fatalf("temporary record leaked after rename failure: %v,%v", entries, err)

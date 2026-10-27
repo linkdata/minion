@@ -22,7 +22,11 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 			}
 		}
 	}()
-	_, writeErr := file.Write(data)
+	// CreateTemp honors umask; retain owner read access for the saved record.
+	writeErr := file.Chmod(0o600)
+	if writeErr == nil {
+		_, writeErr = file.Write(data)
+	}
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}
@@ -35,15 +39,27 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 	}
 	// Root.Rename requests POSIX replacement semantics on Windows for open prior records.
 	err = root.Rename(filepath.Base(temporary), filepath.Base(path))
+	if err != nil {
+		op := "rename"
+		if linkErr, ok := err.(*os.LinkError); ok {
+			op, err = linkErr.Op, linkErr.Err
+		}
+		err = &os.LinkError{Op: op, Old: temporary, New: path, Err: err}
+	}
 	if err := errors.Join(err, root.Close()); err != nil {
 		return err
 	}
 	temporary = ""
+	return SyncDirectories(append([]string{filepath.Dir(path)}, extraDirs...)...)
+}
+
+// SyncDirectories persists directory entries on platforms that support it.
+func SyncDirectories(directories ...string) error {
 	// shortcut: Windows directory Sync lacks write access; revisit if crash durability is required.
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	for _, directory := range append([]string{filepath.Dir(path)}, extraDirs...) {
+	for _, directory := range directories {
 		file, err := os.Open(directory)
 		if err != nil {
 			return err

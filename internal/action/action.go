@@ -19,6 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 const maxOutputBytes = 58 << 10
@@ -36,8 +37,9 @@ var modelLineBreaks = strings.NewReplacer(
 
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
-	attemptID       string
-	usageCheckpoint *usageCheckpoint
+	attemptID          string
+	usageCheckpoint    *usageCheckpoint
+	assignmentRequired bool
 
 	Executor                  Executor
 	Runner                    Runner
@@ -82,7 +84,14 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	if acceptedAt.IsZero() {
 		acceptedAt = time.Now()
 	}
-	ctx, cancel := context.WithDeadline(ctx, runtimeDeadline(acceptedAt, e.MaxRuntime))
+	deadline := runtimeDeadline(acceptedAt, e.MaxRuntime)
+	if !job.Deadline.IsZero() {
+		if job.AcceptedAt.IsZero() || !job.Deadline.After(job.AcceptedAt) {
+			return fmt.Errorf("%w: invalid accepted action deadline", monitor.ErrTerminalJob)
+		}
+		deadline = job.Deadline
+	}
+	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -122,7 +131,12 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	attempt := *e
 	e = &attempt
 	e.usageCheckpoint = nil
-	if e.attemptID, err = newAttemptID(); err != nil {
+	if job.AttemptID != "" {
+		if !workspace.ValidIdentitySegment(job.AttemptID) {
+			return fmt.Errorf("%w: invalid accepted action attempt ID", monitor.ErrTerminalJob)
+		}
+		e.attemptID = job.AttemptID
+	} else if e.attemptID, err = monitor.NewAttemptID(); err != nil {
 		return err
 	}
 	// A panic leaves the last running checkpoint instead of claiming success.

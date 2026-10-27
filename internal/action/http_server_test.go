@@ -53,6 +53,19 @@ type httpDeadlineAfterCheck struct {
 	checks atomic.Int32
 }
 
+type httpAssignmentOrderWriter struct {
+	*httpRepullRecorder
+	saved *atomic.Bool
+	early bool
+}
+
+func (w *httpAssignmentOrderWriter) WriteHeader(status int) {
+	if status == http.StatusOK && !w.saved.Load() {
+		w.early = true
+	}
+	w.ResponseRecorder.WriteHeader(status)
+}
+
 func (c *httpDeadlineAfterCheck) Err() error {
 	if c.checks.Add(1) > 1 {
 		return context.DeadlineExceeded
@@ -237,6 +250,192 @@ func TestHTTPExecutorDispatchUsesRemainingRuntime(t *testing.T) {
 			t.Fatalf("known outcome lost after reduced dispatch budget: %v", result.err)
 		}
 	})
+}
+
+func TestHTTPExecutorBeforeDeliveryPrecedesAssignmentBytes(t *testing.T) {
+	job := testJob(command.Comment)
+	f := newHTTPServerTestInMemory(t, t.Context(), job, runnerExecutionCheckpoints{})
+	var saved atomic.Bool
+	var calls atomic.Int32
+	f.tx.mu.Lock()
+	f.tx.beforeDelivery = func(got Job) error {
+		calls.Add(1)
+		if !reflect.DeepEqual(got, job) {
+			return errors.New("pre-delivery Job differs from admitted Job")
+		}
+		saved.Store(true)
+		return nil
+	}
+	f.tx.mu.Unlock()
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/next", bytes.NewReader(pull))
+	request.Header.Set("Content-Type", "application/json")
+	response := &httpAssignmentOrderWriter{httpRepullRecorder: &httpRepullRecorder{httptest.NewRecorder()}, saved: &saved}
+	f.executor.serveNext(response, request)
+	var assignment httpAssignment
+	if err := httpDecode(response.Body, httpJobBytes, &assignment); err != nil || response.Code != http.StatusOK || response.early || !saved.Load() || calls.Load() != 1 || !sameAssignmentJob(job, assignment.Job) {
+		t.Fatalf("assignment preceded save or callback repeated: status=%d early=%t saved=%t calls=%d error=%v", response.Code, response.early, saved.Load(), calls.Load(), err)
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if result := f.result(t); result.err != nil {
+		t.Fatalf("saved assignment lost known outcome: %v", result.err)
+	}
+}
+
+func TestHTTPExecutorBeforeDeliveryFailureSendsNoAssignment(t *testing.T) {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	var replaced atomic.Bool
+	saveErr := errors.New("directory sync failed after replacement")
+	f.tx.mu.Lock()
+	f.tx.beforeDelivery = func(Job) error {
+		replaced.Store(true)
+		return saveErr
+	}
+	f.tx.mu.Unlock()
+	reply := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
+	if reply.err != nil || reply.status != http.StatusInternalServerError || reply.ack.Kind != "next" || reply.ack.Failure == nil || !replaced.Load() {
+		t.Fatalf("failed save emitted assignment or lost state uncertainty: reply=%+v replaced=%t", reply, replaced.Load())
+	}
+	got := f.result(t)
+	if !errors.Is(got.err, saveErr) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || f.tx.delivered || !replaced.Load() {
+		t.Fatalf("failed save claimed delivery or rolled back possible replacement: error=%v delivered=%t replaced=%t", got.err, f.tx.delivered, replaced.Load())
+	}
+}
+
+func TestHTTPExecutorStopBeforeAssignmentCannotSucceed(t *testing.T) {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	f.tx.forceStop()
+	got := f.result(t)
+	if !errors.Is(got.err, monitor.ErrRequestTransport) || f.tx.delivered {
+		t.Fatalf("stopped before assignment reported success: error=%v delivered=%t", got.err, f.tx.delivered)
+	}
+}
+
+func TestHTTPExecutorCancellationDrainsBeforeDelivery(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		saveErr error
+	}{
+		{name: "saved"},
+		{name: "save failed", saveErr: errors.New("late assignment save failure")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				f := newHTTPServerTestWithStopServer(t, ctx, testJob(command.Comment), runnerExecutionCheckpoints{}, nil,
+					func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, time.Millisecond)
+				entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				var once sync.Once
+				unblock := func() { once.Do(func() { close(release) }) }
+				defer unblock()
+				f.tx.mu.Lock()
+				f.tx.beforeDelivery = func(Job) error {
+					close(entered)
+					<-release
+					return test.saveErr
+				}
+				f.tx.mu.Unlock()
+				pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}, httpControlBytes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/next", bytes.NewReader(pull))
+				request.Header.Set("Content-Type", "application/json")
+				response := &httpRepullRecorder{httptest.NewRecorder()}
+				go func() {
+					f.executor.serveNext(response, request)
+					close(finished)
+				}()
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("pre-delivery callback did not enter")
+				}
+				cancel()
+				select {
+				case <-f.tx.stop:
+				case <-time.After(5 * time.Second):
+					t.Fatal("pre-delivery callback blocked transaction stop")
+				}
+				select {
+				case result := <-f.done:
+					t.Fatalf("Execute returned before entered callback drained: %+v", result)
+				default:
+				}
+				unblock()
+				<-finished
+				var ack httpAcknowledgement
+				wantStatus := http.StatusConflict
+				if test.saveErr != nil {
+					wantStatus = http.StatusInternalServerError
+				}
+				if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil || response.Code != wantStatus || ack.Failure == nil || f.tx.delivered {
+					t.Fatalf("canceled callback delivered assignment: status=%d ack=%+v delivered=%t error=%v", response.Code, ack, f.tx.delivered, err)
+				}
+				if got := f.result(t); !errors.Is(got.err, context.Canceled) || !errors.Is(got.err, test.saveErr) && test.saveErr != nil || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("canceled callback changed pre-delivery outcome: %v", got.err)
+				}
+			})
+		})
+	}
+}
+
+func TestHTTPExecutorDisconnectedPullDoesNotClaimSavedAssignment(t *testing.T) {
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
+	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var calls atomic.Int32
+	f.tx.mu.Lock()
+	f.tx.beforeDelivery = func(Job) error {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return nil
+	}
+	f.tx.mu.Unlock()
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	request := httptest.NewRequestWithContext(ctx, http.MethodPost, "/next", bytes.NewReader(pull))
+	request.Header.Set("Content-Type", "application/json")
+	response := &httpRepullRecorder{httptest.NewRecorder()}
+	go func() {
+		f.executor.serveNext(response, request)
+		close(finished)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("pre-delivery callback did not enter")
+	}
+	cancel()
+	unblock()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("disconnected pull did not release its slot")
+	}
+	if response.Body.Len() != 0 || f.tx.delivered {
+		t.Fatalf("disconnected pull emitted assignment: bytes=%d delivered=%t", response.Body.Len(), f.tx.delivered)
+	}
+	f.pull(t)
+	if calls.Load() != 2 {
+		t.Fatalf("fresh pull bypassed pre-delivery callback: calls=%d", calls.Load())
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if result := f.result(t); result.err != nil {
+		t.Fatalf("disconnected pull poisoned later assignment: %v", result.err)
+	}
 }
 
 func TestHTTPExecutorRejectsExpiryDuringAssignmentEncoding(t *testing.T) {

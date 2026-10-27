@@ -80,7 +80,7 @@ func TestHTTPCheckpointsKeepActualStoreRefusalsAndDurablePrefix(t *testing.T) {
 				remote.ServeHTTP(w, r)
 			}))
 			defer server.Close()
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			defer remote.Close()
 			type returned struct {

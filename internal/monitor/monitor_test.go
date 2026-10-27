@@ -50,16 +50,20 @@ type fakeGitHub struct {
 	reactions          []string
 	checks             int
 	repoChecks         int
+	repositoryErr      error
 	beforeRepository   func()
+	issueDetails       func(string, int) (github.Issue, error)
 	currentChecks      int
 	currentItem        func(github.Item) (github.Item, error)
 	commentErr         error
+	beforeComment      func()
 	commentCalls       int
 	comments           []github.Comment
 	threadItems        func(string, int, time.Time) ([]github.Item, error)
 	threadCalls        int
 	reviewReplies      []github.Item
 	verifiedCalls      []bool
+	verifiedSince      []time.Time
 	beforeVerify       func(context.Context, bool) error
 	rawIDs             bool
 	liveRepo           *github.Repository
@@ -113,10 +117,23 @@ func (f *fakeGitHub) Repository(ctx context.Context, name string) (github.Reposi
 	if err := ctx.Err(); err != nil {
 		return github.Repository{}, err
 	}
+	if f.repositoryErr != nil {
+		return github.Repository{}, f.repositoryErr
+	}
 	if f.liveRepo != nil {
 		return *f.liveRepo, nil
 	}
 	return fixtureRepository(github.Repository{FullName: name}), nil
+}
+
+func (f *fakeGitHub) IssueDetails(ctx context.Context, repo string, number int) (github.Issue, error) {
+	if err := ctx.Err(); err != nil {
+		return github.Issue{}, err
+	}
+	if f.issueDetails != nil {
+		return f.issueDetails(repo, number)
+	}
+	return github.Issue{Number: number}, nil
 }
 
 func (f *fakeGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
@@ -178,6 +195,7 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 
 func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
 	f.verifiedCalls = append(f.verifiedCalls, includeReviews)
+	f.verifiedSince = append(f.verifiedSince, since)
 	if f.beforeVerify != nil {
 		if err := f.beforeVerify(ctx, includeReviews); err != nil {
 			return false, err
@@ -226,6 +244,9 @@ func (f *fakeGitHub) ReactEyes(_ context.Context, nodeID string) error {
 
 func (f *fakeGitHub) CreateIssueComment(ctx context.Context, _ string, _ int, body string) (github.Comment, error) {
 	f.commentCalls++
+	if f.beforeComment != nil {
+		f.beforeComment()
+	}
 	if err := ctx.Err(); err != nil {
 		return github.Comment{}, err
 	}
@@ -699,7 +720,8 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 				time.Sleep(9 * time.Second)
 				return nil
 			},
-			beforeRepository: func() { time.Sleep(2 * time.Second) },
+			beforeRepository: func() { time.Sleep(8 * time.Second) },
+			beforeComment:    func() { time.Sleep(4 * time.Second) },
 		}
 		store := openState(t, now)
 		job := Job{
@@ -1165,7 +1187,8 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 	config := testConfig(t)
 	config.Repositories[0].AllowedActors = []string{"allowed"}
 	config.Repositories[0].AllowedActorIDs = map[string]int64{"allowed": 7}
-	store := openState(t, first.Add(-time.Minute))
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, first.Add(-time.Minute))
 	clock := first
 	m := &Monitor{Config: config, GitHub: gh, Handler: handler, Logger: log.New(io.Discard, "", 0), Now: func() time.Time { return clock }}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
@@ -1188,11 +1211,26 @@ func TestEditedCommentCannotUseOriginalAuthorAuthorization(t *testing.T) {
 		}
 		return item, nil
 	}
+	editedJob := jobID("comment:1", "review")
+	store.Data.JobFailures[editedJob] = state.JobFailure{AcceptedAt: first, Deadline: first.Add(7 * time.Minute)}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
 	if len(handler.jobs) != 1 || handler.jobs[0].Source.NodeID != "comment-node-2" || gh.checks != 1 || len(gh.reactions) != 1 {
 		t.Fatalf("edited command ran or original command failed: jobs=%+v checks=%d reactions=%v", handler.jobs, gh.checks, gh.reactions)
+	}
+	if _, ok := store.Data.JobFailures[editedJob]; ok {
+		t.Fatalf("processed edited command retained failure: %+v", store.Data.JobFailures)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, first.Add(-time.Minute))
+	if _, ok := reopened.Data.JobFailures[editedJob]; ok {
+		t.Fatalf("restart restored processed failure: %+v", reopened.Data.JobFailures)
 	}
 }
 
