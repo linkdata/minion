@@ -22,10 +22,7 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 			}
 		}
 	}()
-	writeErr := file.Chmod(0o600)
-	if writeErr == nil {
-		_, writeErr = file.Write(data)
-	}
+	_, writeErr := file.Write(data)
 	if writeErr == nil {
 		writeErr = file.Sync()
 	}

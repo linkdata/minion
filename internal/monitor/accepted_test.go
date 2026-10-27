@@ -188,12 +188,17 @@ func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
 		permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
 	store := openState(t, at.Add(-time.Minute))
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("reaction failure dispatched work"); return nil }))
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) {
+	next, err := m.RunOnce(t.Context(), store)
+	if !errors.Is(err, reactionErr) {
 		t.Fatalf("reaction error = %v", err)
 	}
 	accepted := store.Data.Accepted
-	if accepted == nil || store.Data.JobFailures[accepted.JobID].Attempts != 1 || len(store.Data.Processed) != 0 {
+	if accepted == nil || !next.Equal(accepted.RetryAt) || !time.Now().Before(accepted.RetryAt) ||
+		store.Data.JobFailures[accepted.JobID].Attempts != 1 || len(store.Data.Processed) != 0 {
 		t.Fatalf("reaction failure lost original acceptance: %+v", store.Data)
+	}
+	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(accepted.RetryAt) || len(gh.reactions) != 1 {
+		t.Fatalf("reaction retried before durable schedule: next=%s err=%v reactions=%v", next, err, gh.reactions)
 	}
 	gh.reactionErr = nil
 	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
@@ -203,6 +208,10 @@ func TestSelectedReactionFailureRetainsOriginalAcceptance(t *testing.T) {
 		}
 		return nil
 	})
+	accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.reactions) != 2 || len(store.Data.Processed) != 1 {
 		t.Fatalf("reaction retry failed to resume same action: err=%v reactions=%v state=%+v", err, gh.reactions, store.Data)
 	}
@@ -395,6 +404,13 @@ func TestSelectedFailedReplyStopsBeforeAnotherAcceptance(t *testing.T) {
 		t.Fatalf("failed reply let another acceptance through: executions=%d reactions=%v state=%+v", executions, gh.reactions, store.Data)
 	}
 	gh.commentErr = nil
+	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 1 || len(gh.comments) != 0 {
+		t.Fatalf("failure reply retried before due: err=%v executions=%d comments=%+v", err, executions, gh.comments)
+	}
+	store.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 1 || len(gh.comments) != 1 || store.Data.Accepted != nil {
 		t.Fatalf("recovery did not finish held reply: err=%v executions=%d comments=%+v state=%+v", err, executions, gh.comments, store.Data)
 	}
@@ -485,7 +501,7 @@ func TestSelectedRecoveryKeepsReservationOnTransientSourceError(t *testing.T) {
 		t.Fatal(err)
 	}
 	lookupErr := errors.New("GitHub unavailable")
-	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+	gh := &fakeGitHub{items: []github.Item{selectedItem(at)}, permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
 		return github.Item{}, lookupErr
 	}}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("lookup error dispatched"); return nil }))
@@ -500,6 +516,13 @@ func TestSelectedRecoveryKeepsReservationOnTransientSourceError(t *testing.T) {
 		}
 		return nil
 	})
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted == nil || len(store.Data.Processed) != 0 {
+		t.Fatalf("transient lookup retried before due: err=%v state=%+v", err, store.Data)
+	}
+	store.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.Processed) != 1 {
 		t.Fatalf("transient lookup did not resume original action: err=%v state=%+v", err, store.Data)
 	}
@@ -641,27 +664,43 @@ func TestSelectedTerminalRecoveryRetainsTransientLookupAndSchedulesRetry(t *test
 		t.Fatal(err)
 	}
 	lookupErr := errors.New("source lookup unavailable")
-	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
+	gh := &fakeGitHub{items: []github.Item{selectedItem(at)}, permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
 		return github.Item{}, lookupErr
 	}}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("terminal action redispatched"); return nil }))
-	for attempt := 0; attempt < 2; attempt++ {
-		before := time.Now().UTC()
-		prior := store.Data.NextPollAt
-		next, err := m.RunOnce(t.Context(), store)
-		if !errors.Is(err, lookupErr) || next.Before(before.Add(time.Minute-time.Second)) || next.Before(prior) ||
-			store.Data.Accepted == nil || !store.Data.Accepted.Deadline.Equal(accepted.Deadline) || len(gh.comments) != 0 {
-			t.Fatalf("transient terminal lookup spun or cleared reservation: next=%s err=%v state=%+v", next, err, store.Data)
-		}
+	before := time.Now().UTC()
+	next, err := m.RunOnce(t.Context(), store)
+	if !errors.Is(err, lookupErr) || next.Before(before.Add(time.Minute-time.Second)) ||
+		store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(next) ||
+		!store.Data.Accepted.Deadline.Equal(accepted.Deadline) || len(gh.comments) != 0 {
+		t.Fatalf("transient terminal lookup spun or cleared reservation: next=%s err=%v state=%+v", next, err, store.Data)
+	}
+	lookups := gh.currentChecks
+	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(store.Data.Accepted.RetryAt) || gh.currentChecks != lookups {
+		t.Fatalf("one-pass poll retried before due time: next=%s err=%v lookups=%d", next, err, gh.currentChecks)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
-	if reopened.Data.Accepted == nil || !reopened.Data.NextPollAt.Equal(store.Data.NextPollAt) {
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.RetryAt.Equal(store.Data.Accepted.RetryAt) {
 		t.Fatalf("retry schedule was not durable: %+v", reopened.Data)
 	}
+	if next, err := m.RunOnce(t.Context(), reopened); err != nil || !next.Equal(reopened.Data.Accepted.RetryAt) || gh.currentChecks != lookups {
+		t.Fatalf("restart retried before due time: next=%s err=%v lookups=%d", next, err, gh.currentChecks)
+	}
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RunOnce(t.Context(), reopened); !errors.Is(err, lookupErr) || gh.currentChecks != lookups+1 {
+		t.Fatalf("due retry skipped transient lookup: err=%v lookups=%d", err, gh.currentChecks)
+	}
 	gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(at), nil }
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(gh.comments) != 1 || reopened.Data.Accepted != nil {
 		t.Fatalf("terminal lookup retry did not finish: err=%v state=%+v", err, reopened.Data)
 	}

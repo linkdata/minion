@@ -250,10 +250,9 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		t.Fatalf("first poll processed = %v", store.Data.Processed)
 	}
 	// GitHub accepted the reply, but the process stopped before retaining its
-	// final local completion checkpoint. Restart with a new child and state lock.
-	for key := range store.Data.Processed {
-		delete(store.Data.Processed, key)
-	}
+	// final local completion checkpoint. Restore that on-disk checkpoint before
+	// restarting with a new child and state lock.
+	store.Data = checkpoint
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}

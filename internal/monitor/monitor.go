@@ -142,15 +142,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return store.Data.NextPollAt, err
 	}
 	if store.Data.Accepted != nil {
+		if retryAt := store.Data.Accepted.RetryAt; time.Now().Before(retryAt) {
+			return retryAt, nil
+		}
 		err := m.recoverAccepted(ctx, store)
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
-			retryAt := time.Now().UTC().Add(m.pollInterval())
-			if retryAt.After(store.Data.NextPollAt) {
-				store.Data.NextPollAt = retryAt
-				if saveErr := saveAcceptanceState(store); saveErr != nil {
-					err = errors.Join(err, saveErr)
-				}
-			}
+			retryAt, saveErr := m.scheduleAcceptedRetry(store)
+			return retryAt, errors.Join(err, saveErr)
 		}
 		return store.Data.NextPollAt, err
 	}
@@ -222,6 +220,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		err := errors.Join(slices.Concat(failures, errs)...)
 		if canceled := ctx.Err(); canceled != nil && !errors.Is(err, canceled) {
 			err = errors.Join(err, canceled)
+		}
+		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
+			retryAt, saveErr := m.scheduleAcceptedRetry(store)
+			return retryAt, errors.Join(err, saveErr)
 		}
 		return next, err
 	}
@@ -731,6 +733,17 @@ func (m *Monitor) pollInterval() time.Duration {
 	return interval
 }
 
+func (m *Monitor) scheduleAcceptedRetry(store *state.Store) (time.Time, error) {
+	accepted := store.Data.Accepted
+	now := time.Now().UTC()
+	retryAt := now.Add(m.pollInterval())
+	if now.Before(accepted.Deadline) && accepted.Deadline.Before(retryAt) {
+		retryAt = accepted.Deadline
+	}
+	accepted.RetryAt = retryAt
+	return retryAt, saveAcceptanceState(store)
+}
+
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {
 	if err := failure.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
@@ -825,7 +838,27 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 	}
 	current, err := m.GitHub.CurrentItem(ctx, jobFromAccepted(accepted).Source)
 	if err != nil {
-		return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted source: %w", err)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return config.Repository{}, github.Item{}, false, ctxErr
+		}
+		// An unreadable node may be a transient GraphQL failure. Confirm its
+		// absence in the complete live thread before releasing the reservation.
+		items, listErr := m.GitHub.ThreadItems(ctx, repo.Name, accepted.SubjectType, accepted.SubjectNumber, time.Time{})
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return config.Repository{}, github.Item{}, false, ctxErr
+		}
+		if listErr != nil {
+			return config.Repository{}, github.Item{}, false, errors.Join(fmt.Errorf("verify accepted source: %w", err), fmt.Errorf("list accepted source thread: %w", listErr))
+		}
+		for _, item := range items {
+			if item.Key == accepted.SourceKey && item.NodeID == accepted.SourceNodeID {
+				if item.Author.ID != accepted.RequesterID || !strings.EqualFold(item.Author.Login, accepted.Requester) {
+					return config.Repository{}, github.Item{}, false, nil
+				}
+				return config.Repository{}, github.Item{}, false, fmt.Errorf("verify accepted source: %w", err)
+			}
+		}
+		return config.Repository{}, github.Item{}, false, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return config.Repository{}, github.Item{}, false, err
@@ -905,6 +938,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return err
 	}
 	if !valid {
+		m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
 		return discardAccepted(store)
 	}
 	job.Repository, job.Source = repo, current
@@ -999,6 +1033,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 				return fmt.Errorf("revalidate %s before failure reply: %w", itemLocation(job.Source), verifyErr)
 			}
 			if !valid {
+				m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
 				return discardAccepted(store)
 			}
 			job.Repository, job.Source = configured, current
