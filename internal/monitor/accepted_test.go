@@ -840,6 +840,53 @@ func TestSelectedThirdAttemptExpiryPersistsTerminalMarkerBeforeReply(t *testing.
 	}
 }
 
+func TestSelectedThirdAttemptTerminalFailureDoesNotRedispatchAfterRestart(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: maxJobAttempts, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	replyErr := errors.New("failure reply unavailable")
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, commentErr: replyErr,
+		currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil }}
+	var executions int
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		executions++
+		return errors.Join(ErrTerminalJob, errors.New("preassignment failure"))
+	}))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || executions != 1 ||
+		store.Data.Accepted == nil || !store.Data.Accepted.Terminal || store.Data.Accepted.Assigned ||
+		store.Data.JobFailures[accepted.JobID].Attempts != maxJobAttempts || len(gh.comments) != 0 {
+		t.Fatalf("terminal preassignment failure lost its marker: err=%v executions=%d state=%+v", err, executions, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal {
+		t.Fatalf("terminal marker was not durable: %+v", reopened.Data)
+	}
+	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh.commentErr = nil
+	m.Handler = selectedHandler(func(Job) error {
+		t.Fatal("terminal attempt redispatched after restart")
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || executions != 1 ||
+		len(gh.comments) != 1 || reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("terminal recovery repeated work or missed reply: err=%v executions=%d state=%+v", err, executions, reopened.Data)
+	}
+}
+
 func TestSelectedDiscardRetainsPushedFixHead(t *testing.T) {
 	at := time.Now().UTC()
 	accepted := selectedAcceptance(t, at)
