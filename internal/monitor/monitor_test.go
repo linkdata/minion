@@ -51,6 +51,7 @@ type fakeGitHub struct {
 	checks             int
 	repoChecks         int
 	beforeRepository   func()
+	issueDetails       func(string, int) (github.Issue, error)
 	currentChecks      int
 	currentItem        func(github.Item) (github.Item, error)
 	commentErr         error
@@ -118,6 +119,16 @@ func (f *fakeGitHub) Repository(ctx context.Context, name string) (github.Reposi
 		return *f.liveRepo, nil
 	}
 	return fixtureRepository(github.Repository{FullName: name}), nil
+}
+
+func (f *fakeGitHub) IssueDetails(ctx context.Context, repo string, number int) (github.Issue, error) {
+	if err := ctx.Err(); err != nil {
+		return github.Issue{}, err
+	}
+	if f.issueDetails != nil {
+		return f.issueDetails(repo, number)
+	}
+	return github.Issue{Number: number}, nil
 }
 
 func (f *fakeGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {

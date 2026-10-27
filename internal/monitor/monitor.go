@@ -29,6 +29,7 @@ import (
 type GitHub interface {
 	ListRepositoryNotifications(context.Context, string, time.Time) ([]github.Notification, time.Duration, error)
 	Repository(context.Context, string) (github.Repository, error)
+	IssueDetails(context.Context, string, int) (github.Issue, error)
 	ListRepositoryInvitations(context.Context) ([]github.Invitation, error)
 	AcceptRepositoryInvitation(context.Context, int64) error
 	DeclineRepositoryInvitation(context.Context, int64) error
@@ -713,9 +714,9 @@ func infrastructureFailure(err error) bool {
 	return errors.Is(err, ErrRequestTransport) || errors.As(err, &network)
 }
 
-func githubGone(err error) bool {
+func githubThreadMovedOrGone(err error) bool {
 	var status *github.StatusError
-	return errors.As(err, &status) && status.StatusCode == http.StatusGone
+	return errors.As(err, &status) && (status.StatusCode == http.StatusMovedPermanently || status.StatusCode == http.StatusGone)
 }
 
 func (m *Monitor) actionRuntime() time.Duration {
@@ -814,6 +815,23 @@ func (m *Monitor) acceptedRepository(accepted state.AcceptedAction) (config.Repo
 	return repo, ok && mapping.Action == accepted.Action
 }
 
+func (m *Monitor) acceptedIssuePresent(ctx context.Context, accepted state.AcceptedAction) (bool, error) {
+	if accepted.SubjectType != "Issue" {
+		return true, nil
+	}
+	issue, err := m.GitHub.IssueDetails(ctx, accepted.Repository, accepted.SubjectNumber)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, ctxErr
+	}
+	if githubThreadMovedOrGone(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("verify accepted issue thread: %w", err)
+	}
+	return issue.Number == accepted.SubjectNumber, nil
+}
+
 func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.AcceptedAction, requireInstalled bool) (config.Repository, github.Item, bool, error) {
 	repo, ok := m.acceptedRepository(accepted)
 	if !ok {
@@ -843,6 +861,9 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 	if !repo.MatchesIdentity(liveRepo.ID, liveRepo.Owner.ID) {
 		return config.Repository{}, github.Item{}, false, nil
 	}
+	if present, err := m.acceptedIssuePresent(ctx, accepted); err != nil || !present {
+		return config.Repository{}, github.Item{}, false, err
+	}
 	current, err := m.GitHub.CurrentItem(ctx, jobFromAccepted(accepted).Source)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -855,7 +876,7 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 			return config.Repository{}, github.Item{}, false, ctxErr
 		}
 		if listErr != nil {
-			if githubGone(listErr) {
+			if githubThreadMovedOrGone(listErr) {
 				return config.Repository{}, github.Item{}, false, nil
 			}
 			return config.Repository{}, github.Item{}, false, errors.Join(fmt.Errorf("verify accepted source: %w", err), fmt.Errorf("list accepted source thread: %w", listErr))
@@ -1037,11 +1058,21 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 	marker := job.Marker()
 	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancelLookup()
+	if accepted := store.Data.Accepted; accepted != nil {
+		present, err := m.acceptedIssuePresent(lookupCtx, *accepted)
+		if err != nil {
+			return err
+		}
+		if !present {
+			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
+			return discardAccepted(store)
+		}
+	}
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
 	if err != nil {
-		if store.Data.Accepted != nil && githubGone(err) {
-			m.logf("discard accepted %s: source thread was deleted", itemLocation(job.Source))
+		if store.Data.Accepted != nil && githubThreadMovedOrGone(err) {
+			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
 			return discardAccepted(store)
 		}
 		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)

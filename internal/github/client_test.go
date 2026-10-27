@@ -237,6 +237,28 @@ func TestRepositoryNeverFollowsRedirectOutsideWhitelist(t *testing.T) {
 	}
 }
 
+func TestIssueDetailsReportsTransferWithoutFollowingRedirect(t *testing.T) {
+	redirected := false
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected = true
+		_, _ = fmt.Fprint(w, `{"number":19}`)
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/example-owner/example-repo/issues/7" {
+			t.Errorf("unexpected issue request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Location", target.URL+"/repos/other/repo/issues/19")
+		w.WriteHeader(http.StatusMovedPermanently)
+	}))
+	defer source.Close()
+	_, err := testClient(source).IssueDetails(t.Context(), "example-owner/example-repo", 7)
+	var status *StatusError
+	if !errors.As(err, &status) || status.StatusCode != http.StatusMovedPermanently || redirected {
+		t.Fatalf("transferred issue redirect followed or lost: err=%v redirected=%t", err, redirected)
+	}
+}
+
 func TestRepositoryRejectsMismatchedIdentity(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := fmt.Fprint(w, `{"full_name":"other/repo"}`); err != nil {

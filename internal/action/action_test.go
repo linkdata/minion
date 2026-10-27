@@ -229,6 +229,9 @@ func (f *actionMonitorGitHub) ListRepositoryNotifications(context.Context, strin
 func (f *actionMonitorGitHub) Repository(_ context.Context, name string) (github.Repository, error) {
 	return github.Repository{ID: 1, FullName: name, Owner: github.User{ID: 2}}, nil
 }
+func (f *actionMonitorGitHub) IssueDetails(_ context.Context, _ string, number int) (github.Issue, error) {
+	return github.Issue{Number: number}, nil
+}
 func (f *actionMonitorGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
 	return nil, nil
 }

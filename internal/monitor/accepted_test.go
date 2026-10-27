@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -639,6 +641,82 @@ func TestSelectedAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
 	}
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 1 {
 		t.Fatalf("completed recovery repeated reply: err=%v replies=%d", err, gh.commentCalls)
+	}
+}
+
+func TestSelectedIssueRecoveryChecksOriginalThread(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		for _, status := range []int{http.StatusMovedPermanently, http.StatusNotFound, http.StatusOK} {
+			name := "unassigned"
+			if terminal {
+				name = "terminal"
+			}
+			t.Run(fmt.Sprintf("%s/%d", name, status), func(t *testing.T) {
+				at := time.Now().UTC()
+				accepted := selectedAcceptance(t, at)
+				accepted.SubjectType = "Issue"
+				accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+				accepted.Terminal = terminal
+				path := filepath.Join(t.TempDir(), "state.json")
+				store := openStateAt(t, path, at.Add(-time.Minute))
+				store.Data.Accepted = &accepted
+				attempts := 1
+				if terminal {
+					attempts = maxJobAttempts
+				}
+				store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: attempts, AcceptedAt: at, Deadline: accepted.Deadline}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				item := selectedItem(at)
+				item.HTMLURL = accepted.SourceURL
+				var detailsCalls, dispatches int
+				gh := &fakeGitHub{permission: github.Permission{Permission: "write"},
+					currentItem: func(github.Item) (github.Item, error) { return item, nil },
+					issueDetails: func(repo string, number int) (github.Issue, error) {
+						detailsCalls++
+						if repo != accepted.Repository || number != accepted.SubjectNumber {
+							t.Fatalf("checked wrong issue: %s #%d", repo, number)
+						}
+						if status != http.StatusOK {
+							return github.Issue{}, &github.StatusError{Method: http.MethodGet, Path: "/repos/example-owner/example-repo/issues/7", StatusCode: status}
+						}
+						return github.Issue{ID: 77, NodeID: "issue-node", Number: 7, HTMLURL: "https://github.com/example-owner/example-repo/issues/7"}, nil
+					},
+				}
+				m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { dispatches++; return nil }))
+				_, err := m.RunOnce(t.Context(), store)
+				if detailsCalls == 0 {
+					t.Fatal("accepted issue was not checked at its original repository")
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store = openStateAt(t, path, at.Add(-time.Minute))
+				if status == http.StatusNotFound {
+					var got *github.StatusError
+					if !errors.As(err, &got) || got.StatusCode != status || store.Data.Accepted == nil ||
+						store.Data.Accepted.AttemptID != accepted.AttemptID || store.Data.Accepted.Terminal != terminal ||
+						!store.Data.Accepted.AcceptedAt.Equal(accepted.AcceptedAt) || !store.Data.Accepted.Deadline.Equal(accepted.Deadline) ||
+						!store.Data.Accepted.RetryAt.After(time.Now()) || store.Data.JobFailures[accepted.JobID].Attempts != attempts ||
+						len(store.Data.Processed) != 0 || dispatches != 0 || len(gh.comments) != 0 {
+						t.Fatalf("404 did not preserve accepted retry: err=%v dispatches=%d comments=%v state=%+v", err, dispatches, gh.comments, store.Data)
+					}
+					return
+				}
+				_, processed := store.Data.Processed[accepted.JobID]
+				if err != nil || store.Data.Accepted != nil || !processed || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+					t.Fatalf("issue recovery result: err=%v state=%+v", err, store.Data)
+				}
+				if status == http.StatusMovedPermanently {
+					if dispatches != 0 || len(gh.comments) != 0 {
+						t.Fatalf("transferred issue dispatched or replied: dispatches=%d comments=%v", dispatches, gh.comments)
+					}
+				} else if gh.currentChecks == 0 || terminal && (dispatches != 0 || len(gh.comments) != 1) || !terminal && (dispatches != 1 || len(gh.comments) != 0) {
+					t.Fatalf("live issue did not recover normally: dispatches=%d comments=%v", dispatches, gh.comments)
+				}
+			})
+		}
 	}
 }
 
