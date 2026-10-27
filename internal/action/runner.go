@@ -149,15 +149,22 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
 		failed := cleanupFailed
+		var retained []string
 		for _, dir := range owned {
 			if err := cleanup.RemoveAll(dir); err != nil {
 				failed = true
+				retained = append(retained, filepath.Base(dir))
 			}
 		}
 		if failed {
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."})
 			if cleanupDetail != "" {
 				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_recovery", Message: cleanupDetail})
+			}
+			if len(retained) != 0 {
+				// Minion creates these basenames; preserve them exactly for recovery.
+				message := "Owned workspace recovery paths under the configured work root: " + strings.Join(retained, ", ")
+				result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "cleanup_recovery", Message: httpFailureDiagnostic(message)})
 			}
 		}
 	}()

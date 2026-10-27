@@ -74,12 +74,17 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 					t.Fatalf("safe controlled root did not dispatch: calls=%d error=%v", calls, err)
 				}
 				entries, readErr := os.ReadDir(root)
-				wantEntries := 0
+				wantEntries := []string{"worker-diagnostics"}
 				if !unsafe && critic {
-					wantEntries = 1
+					wantEntries = append([]string{"reviews"}, wantEntries...)
 				}
-				if readErr != nil || len(entries) != wantEntries || (wantEntries == 1 && (entries[0].Name() != "reviews" || !entries[0].IsDir())) {
+				if readErr != nil || len(entries) != len(wantEntries) {
 					t.Fatalf("controlled root retained execution paths: %v,%v", entries, readErr)
+				}
+				for i, name := range wantEntries {
+					if entries[i].Name() != name || !entries[i].IsDir() {
+						t.Fatalf("controlled root retained execution paths: %v", entries)
+					}
 				}
 				otherEntries, readErr := os.ReadDir(other)
 				if readErr != nil || len(otherEntries) != 0 {

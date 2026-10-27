@@ -25,6 +25,10 @@ type localWorker struct {
 	exited       chan struct{}
 	childMu      sync.Mutex
 	stopSent     atomic.Bool
+	stopOnce     sync.Once
+	stopUntil    time.Time
+	stopTimer    *time.Timer
+	stopErr      error
 	unclean      atomic.Bool
 	reuse        atomic.Int32
 	stderr       *bounded.Tail
@@ -156,7 +160,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		}
 		return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}, fmt.Errorf("%w: local worker is busy or not ready for another assignment", monitor.ErrRequestTransport)
 	}
-	var state httpExecutionState
+	state := httpExecutionState{onStop: w.beginStop}
 	result, err := w.executor.execute(ctx, 0, job, sink, &state)
 	w.executor.mu.Lock()
 	closed, unavailable := w.executor.closed, w.executor.unavailable
@@ -169,7 +173,7 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	if cleanupFailed {
 		w.unclean.Store(true)
 	}
-	if closed || unavailable || cleanupFailed || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
+	if closed || unavailable || cleanupFailed || w.reuse.Load() == workerRetired || state.admitted && (ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded)) {
 		w.reuse.Store(workerRetired)
 		closeErr := w.Close()
 		// A received outcome remains the Job result; Close reports lifecycle errors separately.
@@ -186,6 +190,9 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 		w.reuse.CompareAndSwap(workerRunning, workerNeedsPull)
 	} else {
 		w.reuse.CompareAndSwap(workerRunning, workerReusable)
+	}
+	if state.delivered && !state.outcome {
+		err = errors.Join(err, errLocalWorkerCleanupUnverified)
 	}
 	return result, err
 }
@@ -319,40 +326,60 @@ func (w *localWorker) awaitHeldPull(ctx context.Context) (waitErr error) {
 	}
 }
 
-// Close drains accepted callbacks while HTTP serves, allows the direct child
-// to consume the canceled pull, then stops it if needed before closing HTTPS.
+// beginStop retires capacity and stops only the direct child at the first
+// transaction stop deadline. An entered checkpoint save may drain afterward.
+func (w *localWorker) beginStop(until time.Time) {
+	w.reuse.Store(workerRetired)
+	w.stopOnce.Do(func() {
+		w.stopUntil = until
+		w.stopTimer = time.AfterFunc(time.Until(until), w.stopDirectChild)
+	})
+}
+
+func (w *localWorker) stopDirectChild() {
+	w.childMu.Lock()
+	defer w.childMu.Unlock()
+	select {
+	case <-w.exited:
+		return
+	default:
+	}
+	if err := w.cmd.Process.Kill(); err == nil {
+		w.stopSent.Store(true)
+	} else if !localWorkerProcessDone(err) {
+		w.stopErr = fmt.Errorf("stop direct local worker: %w", err)
+		w.cancel()
+	}
+}
+
+// Close drains accepted callbacks while HTTP serves, lets the child receive
+// idle shutdown until the first stop deadline, then joins the direct child.
 func (w *localWorker) Close() error {
 	w.reuse.Store(workerRetired)
 	w.closeOnce.Do(func() {
+		started := time.Now()
 		coreErr := w.executor.Close()
-		grace := time.NewTimer(w.stopGrace)
+		w.beginStop(started.Add(w.stopGrace)) // Idle fallback; an active transaction keeps its first deadline.
+		// Give a worker between assignments time to receive the canceled next pull.
+		// HTTPS must still close at the stop deadline if child reaping stalls.
+		grace := time.NewTimer(time.Until(w.stopUntil))
 		select {
 		case <-w.exited:
 		case <-grace.C:
 		}
 		grace.Stop()
-		// A published exit before cancellation is spontaneous, including one
-		// observed while accepted callbacks drain. Recheck under childMu so
-		// the waiter cannot publish an exit between this check and the stop.
-		w.childMu.Lock()
-		exitedBeforeCancel := false
-		select {
-		case <-w.exited:
-			exitedBeforeCancel = true
-		default:
-			w.cancel()
-		}
-		w.childMu.Unlock()
+		endpointErr := w.endpoint.closeUntil(w.stopUntil)
 		<-w.exited
-		if exitedBeforeCancel {
-			w.cancel() // Release the command context after a graceful exit.
+		w.stopTimer.Stop()
+		w.childMu.Lock()
+		waitErr, stopErr := w.waitErr, w.stopErr
+		w.childMu.Unlock()
+		stopSent := w.stopSent.Load()
+		w.cancel() // Release the command context after the child has exited.
+		if waitErr != nil && !expectedLocalWorkerCancellation(waitErr, stopSent) {
+			w.closeErr = fmt.Errorf("local worker exited: %w", waitErr)
 		}
-		// Cmd.Wait may have returned before cancellation but published afterward.
-		// Keep every nonzero exit code and other unexpected Wait error.
-		if w.waitErr != nil && (exitedBeforeCancel || !expectedLocalWorkerCancellation(w.waitErr, w.stopSent.Load())) {
-			w.closeErr = fmt.Errorf("local worker exited: %w", w.waitErr)
-		}
-		w.closeErr = errors.Join(w.closeErr, coreErr, w.endpoint.Close())
+		w.closeErr = errors.Join(w.closeErr, stopErr, coreErr, endpointErr)
 	})
 	return w.closeErr
 }

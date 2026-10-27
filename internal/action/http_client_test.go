@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -433,6 +434,13 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
+					if name == "expired" || name == "expired outcome ACK lost" {
+						// A nanosecond budget can fit inside one Windows clock tick.
+						received := time.Now()
+						for time.Since(received) <= assignment.Job.RuntimeBudget {
+							time.Sleep(time.Millisecond)
+						}
+					}
 					w.Header().Set("Content-Type", "application/json")
 					if name == "HTTP 202" {
 						w.WriteHeader(http.StatusAccepted)
@@ -801,18 +809,48 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 	}
 }
 
+// testDeadlineContext lets a protocol test expire after slow real Git setup.
+type testDeadlineContext struct {
+	context.Context
+	done chan struct{}
+	once sync.Once
+}
+
+func (c *testDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c *testDeadlineContext) Err() error {
+	select {
+	case <-c.done:
+		return context.DeadlineExceeded
+	default:
+		return c.Context.Err()
+	}
+}
+
+func (c *testDeadlineContext) expire() {
+	c.once.Do(func() { close(c.done) })
+}
+
 func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 	for _, phase := range []string{"prepare", "upload"} {
 		t.Run(phase, func(t *testing.T) {
 			run := func(t *testing.T) {
 				job := testJob(command.Comment)
 				job.RuntimeBudget = 2 * time.Second
+				parentContext := t.Context()
+				var deadline *testDeadlineContext
+				if phase == "upload" {
+					job.RuntimeBudget = time.Minute
+					deadline = &testDeadlineContext{Context: t.Context(), done: make(chan struct{})}
+					parentContext = deadline
+					defer deadline.expire()
+				}
 				paid := make(chan CallUsage, 1)
 				newServer := httptest.NewServer
 				if phase == "prepare" {
 					newServer = func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }
 				}
-				f := newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{
+				f := newHTTPServerTestWithServer(t, parentContext, job, runnerExecutionCheckpoints{
 					after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
 				}, nil, newServer)
 				entered, release := make(chan struct{}), make(chan struct{})
@@ -849,13 +887,24 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 				go func() { done <- RunHTTP(ctx, &client, f.server.URL, job.Identity.ExecutorID, runner) }()
 				select {
 				case <-entered:
-				case <-time.After(5 * time.Second):
+				case <-time.After(30 * time.Second):
 					t.Fatal("optional observation did not enter its stalled request")
+				}
+				if deadline != nil {
+					deadline.expire()
+				}
+				select {
+				case cause := <-stopped:
+					if !errors.Is(cause, context.DeadlineExceeded) {
+						t.Fatalf("observation did not inherit the accepted action expiry: %v", cause)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("optional Status did not stop promptly after action expiry")
 				}
 				var err error
 				select {
 				case err = <-done:
-				case <-time.After(5 * time.Second):
+				case <-time.After(30 * time.Second):
 					t.Fatal("optional Status consumed required outcome grace after action expiry")
 				}
 				got := f.result(t)
@@ -866,11 +915,8 @@ func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
 				var reported *workerFailureError
 				// The worker can expire before the parent because pull transit consumes
 				// part of its budget. Its deadline report stays private worker evidence.
-				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.Terminal || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls || len(stopped) != 1 {
-					t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d stopped=%d", err, got.err, got.result, native.Load(), len(paid), len(stopped))
-				}
-				if cause := <-stopped; !errors.Is(cause, context.DeadlineExceeded) {
-					t.Fatalf("observation did not inherit the accepted action expiry: %v", cause)
+				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.Terminal || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls {
+					t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d", err, got.err, got.result, native.Load(), len(paid))
 				}
 				if wantCalls == 1 {
 					if receipt := <-paid; receipt != got.result.Calls[0] || receipt.Tokens != tokens || !receipt.Complete || got.result.Answer != "Completed before upload stalled" {
@@ -912,20 +958,27 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		{name: "upload watch and malformed final ACK", duringUpload: true, malformedACK: true},
 		{name: "watch first then caller cause before outcome", duringUpload: true, callerBeforeOutcome: true},
 		{name: "watch first then caller cause after ACK", duringUpload: true, externalCause: true},
-		{name: "accepted expiry after upload watch", duringUpload: true, expiredAfterWatch: true},
+		{name: "parent expiry after upload watch", duringUpload: true, expiredAfterWatch: true},
 		{name: "native failure during upload watch", duringUpload: true, nativeFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
+			parentContext := t.Context()
+			var deadline *testDeadlineContext
 			if test.expiredAfterWatch {
-				job.RuntimeBudget = 2 * time.Second
+				job.RuntimeBudget = time.Minute
+				deadline = &testDeadlineContext{Context: t.Context(), done: make(chan struct{})}
+				parentContext = deadline
+				defer deadline.expire()
 			}
 			f := newExecutionAdapterFixture(t, job)
 			store := f.startUsage()
-			parent := newHTTPServerTest(t, t.Context(), f.job, f.sink, nil)
+			parent := newHTTPServerTest(t, parentContext, f.job, f.sink, nil)
 			started := make(chan struct{})
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
 			uploadEntered := make(chan struct{})
+			closeUpload := sync.OnceFunc(func() { close(uploadEntered) })
+			defer closeUpload()
 			ctx, cancel := context.WithCancelCause(t.Context())
 			externalCause := errors.Join(syscall.ENOSPC, monitor.ErrExecutionOutcomeUnknown)
 			var native, outcomes, faultReads, observations atomic.Int32
@@ -934,13 +987,14 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			underlying := client.Transport
 			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
 				if test.duringUpload && r.URL.Path == "/status" && observations.Add(1) == 2 {
-					close(uploadEntered)
+					closeUpload()
 					<-r.Context().Done() // The watch must cancel the optional request before its cause is sampled.
 					if test.callerBeforeOutcome {
 						cancel(externalCause)
 					}
 					if test.expiredAfterWatch {
-						<-parent.tx.budget.Done() // The real accepted expiry follows the watch's child cancellation.
+						deadline.expire() // Accepted expiry follows the watch's child cancellation.
+						<-parent.tx.budget.Done()
 					}
 					return nil, r.Context().Err()
 				}
@@ -1014,17 +1068,33 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 			})
 			go func() { done <- RunHTTP(ctx, &client, parent.server.URL, f.job.Identity.ExecutorID, runner) }()
+			if test.expiredAfterWatch {
+				select {
+				case <-uploadEntered:
+				case <-time.After(30 * time.Second):
+					t.Fatal("worker did not reach upload Status before accepted expiry")
+				}
+				select {
+				case <-parent.tx.budget.Done():
+				case <-time.After(10 * time.Second):
+					t.Fatal("watch failure did not trigger accepted expiry")
+				}
+			}
 			var workerErr error
+			wait := 5 * time.Second
+			if test.expiredAfterWatch {
+				wait = 30 * time.Second
+			}
 			select {
 			case workerErr = <-done:
 				finished = true
-			case <-time.After(5 * time.Second):
+			case <-time.After(wait):
 				t.Fatal("worker did not drain its outcome and gated watch")
 			}
 			got := parent.result(t)
 			callerFailure := test.externalCause || test.callerBeforeOutcome
 			workerUnknown := test.early || test.malformedACK || callerFailure || test.nativeFailure
-			workerFailed := workerUnknown || test.expiredAfterWatch
+			workerFailed := workerUnknown
 			parentFailed := test.early || test.callerBeforeOutcome || test.nativeFailure || test.expiredAfterWatch
 			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
 				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
@@ -1035,8 +1105,8 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			if errors.Is(workerErr, syscall.ENOSPC) != (callerFailure || test.nativeFailure) || errors.Is(got.err, syscall.ENOSPC) || test.nativeFailure && !errors.Is(workerErr, externalCause) {
 				t.Fatalf("worker native failure escaped into parent policy: worker=%v parent=%v", workerErr, got.err)
 			}
-			if test.expiredAfterWatch && (!errors.Is(workerErr, monitor.ErrTerminalJob) || !errors.Is(workerErr, context.DeadlineExceeded) || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
-				t.Fatalf("watch child cancellation masked accepted expiry: worker=%v parent=%v", workerErr, got.err)
+			if test.expiredAfterWatch && (workerErr != nil || !errors.Is(got.err, monitor.ErrTerminalJob) || !errors.Is(got.err, context.DeadlineExceeded)) {
+				t.Fatalf("watch child cancellation masked parent expiry after known outcome: worker=%v parent=%v", workerErr, got.err)
 			}
 			call := got.result.Calls[0]
 			if call.Tokens != tokens || call.Complete == test.early || !slices.Equal(f.sink.calls, got.result.Calls) || f.sink.pending != nil {

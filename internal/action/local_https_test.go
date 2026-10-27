@@ -237,6 +237,69 @@ func TestLocalEndpointUnauthorizedUnfinishedBodyDoesNotHoldShutdown(t *testing.T
 	}
 }
 
+func TestLocalEndpointCloseUsesRemainingDeadline(t *testing.T) {
+	core, err := NewHTTPExecutor("local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := ListenLocalExecution(core)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	holdAuthenticatedUnfinishedLocalRequest(t, endpoint)
+	until := time.Now().Add(150 * time.Millisecond)
+	started := time.Now()
+	err = endpoint.closeUntil(until)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("active HTTPS request did not consume remaining stop time: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("HTTPS shutdown started a new grace period: %v", elapsed)
+	}
+	select {
+	case <-endpoint.serveDone:
+	default:
+		t.Fatal("HTTPS serving was not joined after deadline")
+	}
+}
+
+func holdAuthenticatedUnfinishedLocalRequest(t *testing.T, endpoint *LocalEndpoint) {
+	t.Helper()
+	access := endpoint.Access()
+	u, err := url.Parse(access.BaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, err := x509.ParseCertificate(access.Certificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	connection, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", u.Host, &tls.Config{
+		MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	if err := connection.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(connection, "POST /next HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: 5\r\nExpect: 100-continue\r\n\r\n", u.Host, access.Token); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(connection), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusContinue {
+		t.Fatalf("unfinished authenticated body did not enter handler: status=%d", response.StatusCode)
+	}
+}
+
 func TestLocalEndpointCloseWakesHeldPull(t *testing.T) {
 	core, endpoint := testLocalEndpoint(t)
 	access := endpoint.Access()

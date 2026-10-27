@@ -187,9 +187,17 @@ func (e *LocalEndpoint) checkAlive() error {
 
 // Close stops assignment first, then closes the listener after callbacks drain.
 func (e *LocalEndpoint) Close() error {
+	return e.closeUntil(time.Time{})
+}
+
+// closeUntil uses the direct worker's existing stop deadline when one exists.
+func (e *LocalEndpoint) closeUntil(until time.Time) error {
 	e.closeOnce.Do(func() {
 		coreErr := e.executor.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), httpControlTimeout)
+		if until.IsZero() {
+			until = time.Now().Add(httpControlTimeout)
+		}
+		ctx, cancel := context.WithDeadline(context.Background(), until)
 		serverErr := e.server.Shutdown(ctx)
 		cancel()
 		if serverErr != nil {

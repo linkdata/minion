@@ -29,6 +29,63 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+func TestPerformRetainsWorkerRecoveryAfterWorkRootBecomesReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires effective POSIX directory permissions and a non-root user")
+	}
+	gitFixtureRemote(t)
+	root := t.TempDir()
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0700); err != nil {
+			t.Error(err)
+		}
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveIssueFixture(t, w, r) {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	var journal bytes.Buffer
+	const recovery = "minion-codex-PRIVATE-RECOVERY"
+	owner := attemptFixture(&Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0),
+		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Executor: executorFunc(func(_ context.Context, job Job, _ Checkpoints) (Result, error) {
+			if err := os.Chmod(root, 0500); err != nil {
+				t.Fatal(err)
+			}
+			return Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+				Diagnostics: []Diagnostic{{Code: "cleanup_recovery", Message: recovery}}}, errLocalWorkerCleanupUnverified
+		}),
+	})
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	request.Repository.Actions = []string{"comment"}
+	err := owner.perform(testActionContext(t), request)
+	if !errors.Is(err, errLocalWorkerCleanupUnverified) || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("worker cleanup failure classification changed: %v", err)
+	}
+	path := filepath.Join(root, "worker-diagnostics", owner.attemptID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("private recovery record missing after work root became read-only: %v", err)
+	}
+	var record retainedWorkerDiagnostics
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := workspace.CanonicalPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Identity.AttemptID != owner.attemptID || record.CleanupUnverifiedWorkRoot != canonicalRoot ||
+		len(record.WorkerReportedDiagnostics) != 1 || record.WorkerReportedDiagnostics[0] != (Diagnostic{Code: "cleanup_recovery", Message: recovery}) ||
+		strings.Contains(journal.String(), recovery) || !strings.Contains(journal.String(), "private_path=") {
+		t.Fatalf("private recovery scope or redaction lost: record=%+v journal=%q", record, journal.String())
+	}
+}
+
 func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 	for _, kind := range []string{"model result", "recovery", "fixed reply"} {
 		t.Run(kind, func(t *testing.T) {
@@ -342,7 +399,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 		t.Fatalf("publication did not complete: modelCalls=%d comments=%d body=%q", modelCalls, comments, body)
 	}
 	entries, err := os.ReadDir(root)
-	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "minion-checkout-") {
+	if err != nil || len(entries) != 2 || !strings.HasPrefix(entries[0].Name(), "minion-checkout-") || entries[1].Name() != "worker-diagnostics" || !entries[1].IsDir() {
 		t.Fatalf("fixture did not leave a checkout after failed cleanup: entries=%v error=%v", entries, err)
 	}
 	if !strings.Contains(journal.String(), "close prepared action:") || !strings.Contains(journal.String(), "remove checkout:") || !strings.Contains(journal.String(), "permission denied") {

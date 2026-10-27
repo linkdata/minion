@@ -50,6 +50,9 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 	}()
 	var result Result
 	if prepared.needsExecution() {
+		if _, err := privateRecordsDir(e.WorkRoot, "worker-diagnostics"); err != nil {
+			return preparationFailure("prepare private worker diagnostics", err)
+		}
 		executor := e.Executor
 		if executor == nil {
 			runner := e.Runner
