@@ -558,18 +558,19 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 }
 
 func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
+	const scanLimit = 1000
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.cache\n")}})
 	marker := filepath.Join(t.TempDir(), "add-ran")
 	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-	// The tracked ignore file and intended change bring this to exactly 100000.
-	for i := 0; i < workspace.MaxEntries-2; i++ {
+	// The tracked ignore file and intended change bring this to exactly scanLimit.
+	for i := 0; i < scanLimit-2; i++ {
 		if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("entry-%06d.cache", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
-	changes, err := index.Changes(t.Context())
+	changes, err := index.changesWithControlLimit(t.Context(), scanLimit)
 	want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("exact control-scan bound refused the intended fix: changes=%+v error=%v", changes, err)
@@ -581,7 +582,7 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "overflow.cache", nil)
-	if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
+	if changes, err := index.changesWithControlLimit(t.Context(), scanLimit); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
 		t.Fatalf("oversized control scan was accepted: changes=%+v error=%v", changes, err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
