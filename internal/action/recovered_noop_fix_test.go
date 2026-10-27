@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
@@ -38,7 +39,7 @@ func TestPublishRecoveredFixRejectsUnchangedReviewedFile(t *testing.T) {
 	result := completedRecoveryResult(job)
 	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")}}
 	store, _, request := savedRecoveryFixture(t, job, result)
-	var writes int
+	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments" {
 			_, _ = fmt.Fprint(w, `[]`)
@@ -47,7 +48,7 @@ func TestPublishRecoveredFixRejectsUnchangedReviewedFile(t *testing.T) {
 		if serveFixFlowFixture(t, w, r) {
 			return
 		}
-		writes++
+		writes.Add(1)
 		t.Errorf("unchanged fix caused GitHub write: %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 	}))
@@ -55,7 +56,7 @@ func TestPublishRecoveredFixRejectsUnchangedReviewedFile(t *testing.T) {
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
-		!strings.Contains(err.Error(), "staged paths do not match reviewed changes") || writes != 0 {
-		t.Fatalf("unchanged fix was not terminal: writes=%d error=%v", writes, err)
+		!strings.Contains(err.Error(), "staged paths do not match reviewed changes") || writes.Load() != 0 {
+		t.Fatalf("unchanged fix was not terminal: writes=%d error=%v", writes.Load(), err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -155,7 +156,7 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 			result := privateReviewResult(job)
 			result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
 			store, _, request := savedRecoveryFixture(t, job, result)
-			posts := 0
+			var posts atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -163,7 +164,7 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 					_, _ = fmt.Fprint(w, publicRepositoryJSON)
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					posts++
+					posts.Add(1)
 					w.WriteHeader(http.StatusCreated)
 					_, _ = fmt.Fprint(w, `{"id":1}`)
 				default:
@@ -184,8 +185,8 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
 				Runner: Runner{runModel: forbidModel(t)}}
 			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
-				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts != 0 {
-				t.Fatalf("retention I/O did not keep saved result retryable: posts=%d error=%v", posts, err)
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts.Load() != 0 {
+				t.Fatalf("retention I/O did not keep saved result retryable: posts=%d error=%v", posts.Load(), err)
 			}
 			if present, err := store.HasAcceptedResult(); err != nil || !present {
 				t.Fatalf("saved result lost before retry: present=%t error=%v", present, err)
@@ -193,8 +194,8 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 			if err := os.Chmod(dir, 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := e.PublishRecovered(t.Context(), request); err != nil || posts != 1 {
-				t.Fatalf("restored retention did not publish: posts=%d error=%v", posts, err)
+			if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored retention did not publish: posts=%d error=%v", posts.Load(), err)
 			}
 		})
 	}

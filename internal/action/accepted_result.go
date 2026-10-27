@@ -165,6 +165,11 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 			}
 		}
 	}
+	if c.assignmentContext != nil {
+		if cause := c.assignmentContext.Err(); cause != nil {
+			return c.fail(cause)
+		}
+	}
 	if err != nil {
 		return c.fail(fmt.Errorf("%w: invalid publication result: %w", monitor.ErrTerminalJob, err))
 	}
@@ -196,6 +201,11 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	}
 	if err := c.owner.Store.WithLock(func() error {
 		a := c.owner.Store.Data.Accepted
+		if c.assignmentContext != nil {
+			if cause := c.assignmentContext.Err(); cause != nil {
+				return c.fail(cause)
+			}
+		}
 		if a == nil || !record.MatchesAccepted(*a) || !jobMatchesAccepted(c.job, *a) ||
 			!requestMatchesAccepted(c.assignmentRequest, *a) || !a.Assigned || a.Terminal || !time.Now().Before(a.Deadline) {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))

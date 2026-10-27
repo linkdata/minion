@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
@@ -48,14 +49,13 @@ func TestCompletedAuditRetentionSurvivesReplyRetry(t *testing.T) {
 	if err := result.Validate(job); err != nil {
 		t.Fatal(err)
 	}
-	posts := 0
+	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts++
-			if posts == 1 {
+			if posts.Add(1) == 1 {
 				http.Error(w, "reply failed", http.StatusBadGateway)
 				return
 			}
@@ -73,8 +73,8 @@ func TestCompletedAuditRetentionSurvivesReplyRetry(t *testing.T) {
 		Command: command.Command{Name: job.Command, Action: command.SecurityAudit}}
 	prepared := &preparedAction{job: job, request: request}
 	first := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")}
-	if err := first.publish(t.Context(), prepared, result); !errors.Is(err, monitor.ErrPostModelPublication) || posts != 1 {
-		t.Fatalf("failed reply: posts=%d error=%v", posts, err)
+	if err := first.publish(t.Context(), prepared, result); !errors.Is(err, monitor.ErrPostModelPublication) || posts.Load() != 1 {
+		t.Fatalf("failed reply: posts=%d error=%v", posts.Load(), err)
 	}
 	auditRoot := filepath.Join(root, "audits")
 	entries, err := os.ReadDir(auditRoot)
@@ -88,8 +88,8 @@ func TestCompletedAuditRetentionSurvivesReplyRetry(t *testing.T) {
 	}
 	// A partial or damaged retained copy must stop publication, not count as saved.
 	restarted := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")}
-	if err := restarted.publish(t.Context(), prepared, result); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retained completed audit differs") || posts != 1 {
-		t.Fatalf("missing retained report: posts=%d error=%v", posts, err)
+	if err := restarted.publish(t.Context(), prepared, result); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "retained completed audit differs") || posts.Load() != 1 {
+		t.Fatalf("missing retained report: posts=%d error=%v", posts.Load(), err)
 	}
 	for _, file := range result.Artifacts {
 		if file.Path == "REPORT.md" {
@@ -102,8 +102,8 @@ func TestCompletedAuditRetentionSurvivesReplyRetry(t *testing.T) {
 			break
 		}
 	}
-	if err := restarted.publish(t.Context(), prepared, result); err != nil || posts != 2 {
-		t.Fatalf("recovered reply: posts=%d error=%v", posts, err)
+	if err := restarted.publish(t.Context(), prepared, result); err != nil || posts.Load() != 2 {
+		t.Fatalf("recovered reply: posts=%d error=%v", posts.Load(), err)
 	}
 	entries, err = os.ReadDir(auditRoot)
 	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(dir) {

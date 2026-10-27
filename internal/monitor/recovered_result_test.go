@@ -213,6 +213,82 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 	}
 }
 
+func TestRunOnceRemovesCompletedResultSidecarAfterRestart(t *testing.T) {
+	store, path, accepted, _, monitor := storedRecoveryFixture(t)
+	store.Data.Processed[accepted.JobID] = time.Now().UTC()
+	delete(store.Data.JobFailures, accepted.JobID)
+	store.Data.Accepted = nil
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+	handler := &recoveredResultHandler{}
+	monitor.Handler = handler
+	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := reopened.HasAcceptedResult(); err != nil || present ||
+		handler.executions != 0 || handler.publications != 0 ||
+		reopened.Data.Processed[accepted.JobID].IsZero() {
+		t.Fatalf("completed attempt retained a result or dispatched work: present=%t err=%v handler=%+v state=%+v",
+			present, err, handler, reopened.Data)
+	}
+}
+
+func TestSelectedCompletionSaveFailureRetainsReceiptForRestart(t *testing.T) {
+	store, path, accepted, gh, monitor := storedRecoveryFixture(t)
+	job := jobFromAccepted(accepted)
+	store.Data.PendingFixes[job.ID] = state.PendingFix{SHA: "reviewed-commit"}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	backup := path + ".saved"
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := monitor.completeSelected(t.Context(), store, job, time.Now().UTC(), nil); !errors.Is(err, ErrAcceptanceState) {
+		t.Fatalf("failed completion save did not stop publication: %v", err)
+	}
+	if store.Data.Accepted == nil || *store.Data.Accepted != accepted ||
+		store.Data.JobFailures[job.ID].Attempts != 1 ||
+		store.Data.PendingFixes[job.ID].SHA != "reviewed-commit" ||
+		!store.Data.Processed[job.ID].IsZero() {
+		t.Fatalf("failed completion save did not roll back in-memory state: %+v", store.Data)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("failed completion save lost receipt: present=%t err=%v", present, err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+	handler := &recoveredResultHandler{}
+	monitor.Handler = handler
+	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if handler.executions != 0 || handler.publications != 1 ||
+		reopened.Data.Accepted != nil || reopened.Data.Processed[job.ID].IsZero() ||
+		len(gh.comments) != 0 {
+		t.Fatalf("restart did not finish saved result: handler=%+v state=%+v comments=%v", handler, reopened.Data, gh.comments)
+	}
+	if present, err := reopened.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("restart retained completed result: present=%t err=%v", present, err)
+	}
+}
+
 func TestStoredResultRecoveryPublishesAfterAcceptedDeadline(t *testing.T) {
 	at := time.Now().UTC().Add(-8 * time.Minute)
 	store, path, accepted, gh, monitor := storedRecoveryFixtureAt(t, at)

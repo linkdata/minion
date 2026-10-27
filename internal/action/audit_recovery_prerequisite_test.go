@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 	job.Identity.Repository = "o/r"
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
-	var posts int
+	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -33,7 +34,7 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts++
+			posts.Add(1)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprint(w, `{"id":1}`)
 		default:
@@ -47,15 +48,15 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 		Runner: Runner{runModel: forbidModel(t)}}
 	t.Setenv("PATH", t.TempDir()) // The publishing validator is missing after the result was saved.
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
-		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts != 0 {
-		t.Fatalf("missing validator discarded audit: posts=%d error=%v", posts, err)
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+		t.Fatalf("missing validator discarded audit: posts=%d error=%v", posts.Load(), err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("missing validator lost saved result: present=%t error=%v", present, err)
 	}
 	t.Setenv("PATH", nodePath)
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts != 1 {
-		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
 	}
 	entries, err := os.ReadDir(filepath.Join(root, "audits"))
 	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "complete-") {
@@ -97,7 +98,7 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	job.Identity.Repository = "o/r"
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
-	posts := 0
+	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -105,7 +106,7 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts++
+			posts.Add(1)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprint(w, `{"id":1}`)
 		default:
@@ -126,8 +127,8 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
-		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts != 0 {
-		t.Fatalf("retention I/O did not remain retryable: posts=%d error=%v", posts, err)
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts.Load() != 0 {
+		t.Fatalf("retention I/O did not remain retryable: posts=%d error=%v", posts.Load(), err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("retention I/O lost saved result: present=%t error=%v", present, err)
@@ -135,8 +136,8 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	if err := os.Chmod(auditDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts != 1 {
-		t.Fatalf("restored retention did not publish saved audit: posts=%d error=%v", posts, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+		t.Fatalf("restored retention did not publish saved audit: posts=%d error=%v", posts.Load(), err)
 	}
 }
 
@@ -159,7 +160,7 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(script, 0600) })
-	posts := 0
+	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -167,7 +168,7 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts++
+			posts.Add(1)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprint(w, `{"id":1}`)
 		default:
@@ -180,8 +181,8 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) ||
-		!errors.Is(err, os.ErrPermission) || posts != 0 {
-		t.Fatalf("unreadable validator discarded saved audit: posts=%d error=%v", posts, err)
+		!errors.Is(err, os.ErrPermission) || posts.Load() != 0 {
+		t.Fatalf("unreadable validator discarded saved audit: posts=%d error=%v", posts.Load(), err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("unreadable validator lost saved result: present=%t error=%v", present, err)
@@ -189,8 +190,8 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 	if err := os.Chmod(script, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts != 1 {
-		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
 	}
 }
 

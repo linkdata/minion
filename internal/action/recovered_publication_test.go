@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,16 +78,17 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	var reads, writes, rootChecks int
+	var reads, writes atomic.Int32
+	var rootChecks int
 	markerBody := "Completed before restart\n\n" + request.Marker()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && !(r.Method == http.MethodPost && r.URL.Path == "/graphql") {
-			writes++
+			writes.Add(1)
 			t.Errorf("recovered marker caused a second write: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 			return
 		}
-		reads++
+		reads.Add(1)
 		switch r.URL.Path {
 		case "/repos/owner/repo/issues/7/comments":
 			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
@@ -100,8 +102,8 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, CheckWorkRoot: func() error { rootChecks++; return workroot.ErrUnsafe }}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || reads != 2 || writes != 0 || rootChecks != 0 {
-		t.Fatalf("posted marker was not reconciled: reads=%d writes=%d root_checks=%d error=%v", reads, writes, rootChecks, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || reads.Load() != 2 || writes.Load() != 0 || rootChecks != 0 {
+		t.Fatalf("posted marker was not reconciled: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("reconciliation removed result before monitor state save: present=%t error=%v", present, err)
@@ -111,22 +113,23 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 func TestPublishRecoveredChecksWorkRootBeforeNewPublication(t *testing.T) {
 	job := testJob(command.Comment)
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
-	var reads, writes, rootChecks int
+	var reads, writes atomic.Int32
+	var rootChecks int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/7/comments" {
-			reads++
+			reads.Add(1)
 			_, _ = fmt.Fprint(w, `[]`)
 			return
 		}
-		writes++
+		writes.Add(1)
 		t.Errorf("unsafe work root allowed publication: %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		CheckWorkRoot: func() error { rootChecks++; return workroot.ErrUnsafe }}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, workroot.ErrUnsafe) || reads != 1 || writes != 0 || rootChecks != 1 {
-		t.Fatalf("unsafe work root did not stop new publication: reads=%d writes=%d root_checks=%d error=%v", reads, writes, rootChecks, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, workroot.ErrUnsafe) || reads.Load() != 1 || writes.Load() != 0 || rootChecks != 1 {
+		t.Fatalf("unsafe work root did not stop new publication: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
 	}
 }
 
@@ -157,16 +160,16 @@ func TestPublishRecoveredRejectsTamperedResultSidecarBeforeGitHub(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	var requests int
+	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		requests.Add(1)
 		t.Errorf("tampered result reached GitHub: %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir()}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests != 0 {
-		t.Fatalf("tampered sidecar was published: requests=%d error=%v", requests, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests.Load() != 0 {
+		t.Fatalf("tampered sidecar was published: requests=%d error=%v", requests.Load(), err)
 	}
 }
 
@@ -176,7 +179,7 @@ func TestPublishRecoveredNoChangeFixRepliesWithoutFork(t *testing.T) {
 	job.Identity.Repository = "o/r"
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
 	var comment string
-	var replies int
+	var replies atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -194,7 +197,7 @@ func TestPublishRecoveredNoChangeFixRepliesWithoutFork(t *testing.T) {
 			}
 			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
 		case captureComment(t, w, r, &comment):
-			replies++
+			replies.Add(1)
 		default:
 			t.Errorf("no-change fix requested fork or branch: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -203,10 +206,10 @@ func TestPublishRecoveredNoChangeFixRepliesWithoutFork(t *testing.T) {
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies != 1 ||
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies.Load() != 1 ||
 		!strings.Contains(comment, "AI returned a response without changing files.") || !strings.Contains(comment, "Saved complete answer") ||
 		!strings.HasSuffix(comment, request.Marker()) {
-		t.Fatalf("saved no-change fix was not published: replies=%d comment=%q error=%v", replies, comment, err)
+		t.Fatalf("saved no-change fix was not published: replies=%d comment=%q error=%v", replies.Load(), comment, err)
 	}
 }
 
@@ -217,7 +220,7 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 	result := completedRecoveryResult(job)
 	result.Answer = "configured-secret"
 	store, _, request := savedRecoveryFixture(t, job, result)
-	var writes int
+	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments" {
 			_, _ = fmt.Fprint(w, `[]`)
@@ -227,7 +230,7 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node"}`)
 			return
 		}
-		writes++
+		writes.Add(1)
 		t.Errorf("invalid no-change result reached GitHub publication: %s %s", r.Method, r.URL.Path)
 		http.NotFound(w, r)
 	}))
@@ -235,8 +238,8 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{Codex: config.CodexConfig{APIKey: "configured-secret"}, runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
-		!strings.Contains(err.Error(), "configured provider key") || writes != 0 {
-		t.Fatalf("invalid no-change result was published: writes=%d error=%v", writes, err)
+		!strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+		t.Fatalf("invalid no-change result was published: writes=%d error=%v", writes.Load(), err)
 	}
 }
 
@@ -325,7 +328,7 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	var comment string
-	var replies, branchLookups int
+	var replies, branchLookups atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -340,14 +343,13 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
 			_, _ = fmt.Fprint(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
-			branchLookups++
-			if branchLookups == 1 {
+			if branchLookups.Add(1) == 1 {
 				http.NotFound(w, r)
 				return
 			}
 			_, _ = fmt.Fprintf(w, `{"name":"minion/fix-7-aaaaaaaaaaaa","commit":{"sha":%q}}`, sha)
 		case captureComment(t, w, r, &comment):
-			replies++
+			replies.Add(1)
 		default:
 			t.Errorf("unexpected branch reuse request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -358,8 +360,8 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || !strings.Contains(err.Error(), "refusing to replace the checkpoint") ||
-		replies != 0 || branchLookups != 1 || store.Data.PendingFixes[request.ID].SHA != sha {
-		t.Fatalf("missing branch lookup lost checkpoint: replies=%d checkpoint=%+v error=%v", replies, store.Data.PendingFixes[request.ID], err)
+		replies.Load() != 0 || branchLookups.Load() != 1 || store.Data.PendingFixes[request.ID].SHA != sha {
+		t.Fatalf("missing branch lookup lost checkpoint: replies=%d checkpoint=%+v error=%v", replies.Load(), store.Data.PendingFixes[request.ID], err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -369,9 +371,9 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T
 		t.Fatal(err)
 	}
 	orchestrator.Store = store
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies != 1 ||
-		branchLookups != 2 || !strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
-		t.Fatalf("matching checkpoint was not reused: branch_lookups=%d replies=%d comment=%q checkpoint=%+v error=%v", branchLookups, replies, comment, store.Data.PendingFixes[request.ID], err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies.Load() != 1 ||
+		branchLookups.Load() != 2 || !strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
+		t.Fatalf("matching checkpoint was not reused: branch_lookups=%d replies=%d comment=%q checkpoint=%+v error=%v", branchLookups.Load(), replies.Load(), comment, store.Data.PendingFixes[request.ID], err)
 	}
 }
 
@@ -386,10 +388,10 @@ func TestPublishRecoveredFixRejectsUnrecordedBranchSHA(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	var writes int
+	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			writes++
+			writes.Add(1)
 		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
@@ -414,8 +416,8 @@ func TestPublishRecoveredFixRejectsUnrecordedBranchSHA(t *testing.T) {
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	err := orchestrator.PublishRecovered(t.Context(), request)
-	if err == nil || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes != 0 {
-		t.Fatalf("foreign branch was reused: writes=%d error=%v", writes, err)
+	if err == nil || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes.Load() != 0 {
+		t.Fatalf("foreign branch was reused: writes=%d error=%v", writes.Load(), err)
 	}
 }
 
@@ -424,9 +426,12 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 		name          string
 		defaultBranch string
 		forkID        int64
+		private       bool
+		visibility    string
 	}{
-		{name: "default branch", defaultBranch: "release", forkID: 4},
-		{name: "fork identity", defaultBranch: "main", forkID: 5},
+		{name: "default branch", defaultBranch: "release", forkID: 4, visibility: "public"},
+		{name: "fork identity", defaultBranch: "main", forkID: 5, visibility: "public"},
+		{name: "visibility", defaultBranch: "main", forkID: 4, private: true, visibility: "private"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Fix)
@@ -435,18 +440,19 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 			result := completedRecoveryResult(job)
 			result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
 			store, _, request := savedRecoveryFixture(t, job, result)
-			var writes int
+			var writes atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method != http.MethodGet {
-					writes++
+					writes.Add(1)
 				}
 				switch {
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 					_, _ = fmt.Fprint(w, `[]`)
+				case serveSafeForkChecks(w, r, "bot/r", test.private):
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprintf(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":%q,"visibility":"public"}`, test.defaultBranch)
+					_, _ = fmt.Fprintf(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"},"default_branch":%q,"private":%t,"visibility":%q}`, test.defaultBranch, test.private, test.visibility)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
-					_, _ = fmt.Fprintf(w, `{"id":%d,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`, test.forkID)
+					_, _ = fmt.Fprintf(w, `{"id":%d,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"private":%t,"visibility":%q}`, test.forkID, test.private, test.visibility)
 				case serveFixFlowFixture(t, w, r):
 				default:
 					t.Errorf("unexpected request after destination drift: %s %s", r.Method, r.URL.Path)
@@ -458,8 +464,8 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 			orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 				Runner: Runner{runModel: forbidModel(t)}}
 			err := orchestrator.PublishRecovered(t.Context(), request)
-			if err == nil || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes != 0 {
-				t.Fatalf("changed destination was used: writes=%d error=%v", writes, err)
+			if err == nil || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes.Load() != 0 {
+				t.Fatalf("changed destination was used: writes=%d error=%v", writes.Load(), err)
 			}
 			if present, err := store.HasAcceptedResult(); err != nil || !present {
 				t.Fatalf("destination drift lost accepted result: present=%t error=%v", present, err)
