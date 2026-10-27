@@ -138,3 +138,57 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 		t.Fatalf("restored retention did not publish saved audit: posts=%d error=%v", posts, err)
 	}
 }
+
+func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("script permission fixture requires a non-root Unix account")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	job.Identity.Repository = "o/r"
+	result := completeAuditResult(job)
+	store, _, request := savedRecoveryFixture(t, job, result)
+	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+	if err != nil || !installed {
+		t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+	}
+	script := filepath.Join(filepath.Dir(skill), auditValidators[0].script)
+	if err := os.Chmod(script, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(script, 0600) })
+	posts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			posts++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected audit recovery request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}}
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) ||
+		!errors.Is(err, os.ErrPermission) || posts != 0 {
+		t.Fatalf("unreadable validator discarded saved audit: posts=%d error=%v", posts, err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("unreadable validator lost saved result: present=%t error=%v", present, err)
+	}
+	if err := os.Chmod(script, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts != 1 {
+		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts, err)
+	}
+}

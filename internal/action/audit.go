@@ -33,15 +33,8 @@ type auditTools struct {
 }
 
 func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
-	for _, validator := range auditValidators {
-		script := filepath.Join(filepath.Dir(skill), validator.script)
-		info, err := os.Stat(script)
-		if err != nil {
-			return auditTools{}, fmt.Errorf("audit validator %q: %w", script, err)
-		}
-		if !info.Mode().IsRegular() {
-			return auditTools{}, fmt.Errorf("audit validator %q is not a regular file", script)
-		}
+	if err := checkAuditValidatorScripts(skill); err != nil {
+		return auditTools{}, err
 	}
 	binary, err := aicli.AbsoluteExecutable("node")
 	if err != nil {
@@ -49,6 +42,27 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 	}
 	flag, err := auditNodePermissionFlag(ctx, dir, binary)
 	return auditTools{binary: binary, permissionFlag: flag}, err
+}
+
+func checkAuditValidatorScripts(skill string) error {
+	for _, validator := range auditValidators {
+		script := filepath.Join(filepath.Dir(skill), validator.script)
+		info, err := os.Stat(script)
+		if err != nil {
+			return fmt.Errorf("audit validator %q: %w", script, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("audit validator %q is not a regular file", script)
+		}
+		file, err := os.Open(script)
+		if err != nil {
+			return fmt.Errorf("read audit validator %q: %w", script, err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close audit validator %q: %w", script, err)
+		}
+	}
+	return nil
 }
 
 func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {

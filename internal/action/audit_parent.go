@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -47,12 +46,8 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
 			return fmt.Errorf("%w: audit validator execution: %w", errAuditPublicationUnavailable, err)
 		}
-		for _, validator := range auditValidators {
-			script := filepath.Join(filepath.Dir(skill), validator.script)
-			info, statErr := os.Stat(script)
-			if statErr != nil || !info.Mode().IsRegular() {
-				return fmt.Errorf("%w: audit validator %q changed during validation: %w", errAuditPublicationUnavailable, script, errors.Join(err, statErr))
-			}
+		if scriptErr := checkAuditValidatorScripts(skill); scriptErr != nil {
+			return fmt.Errorf("%w: audit validator changed during validation: %w", errAuditPublicationUnavailable, errors.Join(err, scriptErr))
 		}
 		return err
 	}

@@ -26,6 +26,8 @@ func TestRetentionFailureClassification(t *testing.T) {
 		{"permission denied", os.ErrPermission, true},
 		{"read only", syscall.EROFS, true},
 		{"device I/O", syscall.EIO, true},
+		{"process descriptors exhausted", &os.PathError{Op: "open", Path: "record", Err: syscall.EMFILE}, true},
+		{"system descriptors exhausted", syscall.ENFILE, true},
 		{"missing retained file", os.ErrNotExist, false},
 		{"invalid record", errors.New("record changed"), false},
 		{"disk full and mismatch", errors.Join(fmt.Errorf("rename: %w", syscall.ENOSPC), errors.New("record changed")), false},
@@ -49,7 +51,7 @@ func TestRetentionFailureClassification(t *testing.T) {
 
 func TestRetentionFailureNeedsSavedResultForPublicationRetry(t *testing.T) {
 	job := testJob(command.Comment)
-	cause := retainedRecordFailure("save private record", syscall.ENOSPC)
+	cause := retainedRecordFailure("save private record", syscall.EMFILE)
 	e := &Orchestrator{}
 	if err := e.retentionForSavedResult(job, cause); !errors.Is(err, monitor.ErrTerminalJob) ||
 		!errors.Is(err, monitor.ErrPostModelPublication) {
