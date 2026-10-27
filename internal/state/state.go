@@ -114,6 +114,7 @@ type JobFailure struct {
 	Attempts         int       `json:"attempts"`
 	ReplyAttempts    int       `json:"reply_attempts,omitempty"`
 	ModelCallStarted bool      `json:"model_call_started,omitempty"`
+	NotificationKey  string    `json:"notification_key,omitempty"`
 	AcceptedAt       time.Time `json:"accepted_at,omitzero"`
 	Deadline         time.Time `json:"deadline,omitzero"`
 }

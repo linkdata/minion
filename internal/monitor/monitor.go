@@ -438,6 +438,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			selected := selectedMode
 			jobFailure := store.Data.JobFailures[job.ID]
+			jobFailure.NotificationKey = entry.key
 			if jobFailure.ModelCallStarted {
 				jobFailure.Attempts = maxJobAttempts
 			}
@@ -573,7 +574,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
 						jobFailure.Attempts--
 					}
-					if jobFailure == (state.JobFailure{}) {
+					if jobFailure == (state.JobFailure{NotificationKey: entry.key}) {
 						delete(store.Data.JobFailures, job.ID)
 					} else {
 						store.Data.JobFailures[job.ID] = jobFailure
@@ -1227,21 +1228,25 @@ func (m *Monitor) executeSelected(ctx context.Context, store *state.Store, job J
 // No other action is discovered or assigned until this execution has finished.
 func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.Store, job Job, at time.Time,
 	cachedKey string, cachedItems []github.Item) error {
-	var terminalControls bool
+	terminalKeys := make(map[string]bool)
+	var unknownTerminalKey bool
 	_ = store.WithLock(func() error {
 		for id, failure := range store.Data.JobFailures {
 			if id == job.ID || !store.Data.Processed[id].IsZero() {
 				continue
 			}
 			if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted || !failure.Deadline.IsZero() {
-				terminalControls = true
-				break
+				if failure.NotificationKey == "" {
+					unknownTerminalKey = true
+				} else {
+					terminalKeys[failure.NotificationKey] = true
+				}
 			}
 		}
 		return nil
 	})
 	commandSets := make(map[string]map[string]command.Action)
-	if terminalControls {
+	if unknownTerminalKey || len(terminalKeys) != 0 {
 		for _, configured := range m.Config.Repositories {
 			commandSets[configured.Name] = m.controlCommands(configured)
 		}
@@ -1278,10 +1283,13 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 		var due []notificationScan
 		_ = store.WithLock(func() error {
 			next = store.Data.NextInviteCheckAt
-			if !terminalControls {
+			if !unknownTerminalKey && len(terminalKeys) == 0 {
 				return nil
 			}
 			for key, pending := range store.Data.PendingNotifications {
+				if !unknownTerminalKey && !terminalKeys[key] {
+					continue
+				}
 				checkAt := pending.RetryAt
 				if previous, checked := nextCheck[key]; checked {
 					if previous.IsZero() {
@@ -1380,10 +1388,10 @@ func (m *Monitor) processTerminalNotification(ctx context.Context, store *state.
 			return m.now().UTC().Add(time.Minute)
 		}
 	}
-	return m.processTerminalItems(ctx, store, activeJobID, repo, notification.Subject.Type, number, items, commandSets[repo.Name])
+	return m.processTerminalItems(ctx, store, activeJobID, entry.key, repo, notification.Subject.Type, number, items, commandSets[repo.Name])
 }
 
-func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, activeJobID string,
+func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, activeJobID, notificationKey string,
 	repo config.Repository, subjectType string, number int, items []github.Item, commands map[string]command.Action) time.Time {
 	var next time.Time
 	wake := func(at time.Time) {
@@ -1450,6 +1458,7 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		if failure.ModelCallStarted || !failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline) {
 			failure.Attempts = maxJobAttempts
 		}
+		failure.NotificationKey = notificationKey
 		if err := m.finishFailedJob(ctx, store, job, m.now().UTC(), failure); err != nil {
 			m.logf("terminal control in %s: %v", itemLocation(current), err)
 			wake(m.now().UTC().Add(time.Minute))

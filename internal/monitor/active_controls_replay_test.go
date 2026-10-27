@@ -558,3 +558,85 @@ func TestSelectedActionSkipsIrrelevantPendingBacklogWhileCheckingInvitations(t *
 		}
 	})
 }
+
+func TestSelectedActionChecksOnlyTerminalThreadInPendingBacklog(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		selected := selectedItem(now.Add(-2 * time.Second))
+		terminal := selectedItem(now.Add(-time.Second))
+		terminal.Key, terminal.NodeID = "comment:2", "node:2"
+		terminal.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-2"
+		terminalID := jobID(terminal.Key, "review")
+		target := testNotification(terminal.UpdatedAt)
+		target.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
+		targetKey := notificationKey(target)
+		initial := now.Add(-time.Minute)
+		store := openState(t, initial)
+		for number := 8; number < 73; number++ {
+			notice := testNotification(terminal.UpdatedAt)
+			notice.Subject.URL = fmt.Sprintf("https://api.github.com/repos/example-owner/example-repo/pulls/%d", number)
+			store.Data.PendingNotifications[notificationKey(notice)] = state.PendingNotification{
+				Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
+				SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
+				Since: initial, UpdatedAt: notice.UpdatedAt,
+			}
+		}
+		store.Data.JobFailures[terminalID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: targetKey}
+		store.Data.NextInviteCheckAt = now.Add(time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.MaxRuntimeMinutes = 7
+		gh := &fakeGitHub{
+			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
+			items:         []github.Item{selected},
+			permission:    github.Permission{Permission: "write"},
+			invitations: []github.Invitation{{ID: 41, Repository: github.Repository{
+				FullName: "example-owner/example-repo", ID: 1,
+				Owner: github.User{Login: "example-owner", ID: 2},
+			}, Permissions: "write"}},
+			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
+				switch number {
+				case 7:
+					return []github.Item{selected}, nil
+				case 8:
+					return []github.Item{terminal}, nil
+				default:
+					return nil, nil
+				}
+			},
+		}
+		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		select {
+		case <-held.entered:
+		case err := <-result:
+			t.Fatalf("RunOnce returned before Execute: %v", err)
+		}
+		time.Sleep(time.Minute)
+		synctest.Wait()
+		if gh.repoChecks != 3 || gh.threadCalls != 2 || len(gh.comments) != 1 ||
+			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+terminalID+" -->") ||
+			store.Data.Processed[terminalID].IsZero() || !slices.Equal(gh.accepted, []int64{41}) ||
+			held.executions.Load() != 1 || store.Data.Accepted == nil {
+			t.Fatalf("pending backlog swept or terminal control missed: repository calls=%d thread calls=%d comments=%v processed=%v invitations=%v executions=%d accepted=%+v",
+				gh.repoChecks, gh.threadCalls, gh.comments, store.Data.Processed[terminalID], gh.accepted, held.executions.Load(), store.Data.Accepted)
+		}
+		select {
+		case err := <-result:
+			t.Fatalf("RunOnce returned while Execute was blocked: %v", err)
+		default:
+		}
+		cancel()
+		synctest.Wait()
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunOnce after cancellation: %v", err)
+		}
+	})
+}
