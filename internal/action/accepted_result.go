@@ -101,7 +101,7 @@ func (r AcceptedResultRecord) Validate() error {
 func DecodeAcceptedResultRecord(data []byte) (AcceptedResultRecord, error) {
 	var record AcceptedResultRecord
 	if err := httpDecodeBytes(data, int(AcceptedResultMaxBytes), &record); err != nil {
-		return AcceptedResultRecord{}, err
+		return AcceptedResultRecord{}, fmt.Errorf("accepted result: %w", err)
 	}
 	if err := record.Validate(); err != nil {
 		return AcceptedResultRecord{}, err
@@ -195,8 +195,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 				return c.fail(cause)
 			}
 		}
-		if a == nil || !record.MatchesAccepted(*a) ||
-			!monitor.AssignmentMatchesAccepted(c.assignmentRequest, *a) || !a.Assigned || a.Terminal {
+		if a == nil || !record.MatchesAccepted(*a) || !a.Assigned || a.Terminal {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))
 		}
 		if !time.Now().Before(a.Deadline) {

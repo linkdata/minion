@@ -43,6 +43,9 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	}()
 	tools, err := checkAuditTools(ctx, validationDir, skill)
 	if err != nil {
+		if cause := ctx.Err(); cause != nil {
+			return cause
+		}
 		return fmt.Errorf("%w: audit prerequisites: %w", errAuditPublicationUnavailable, err)
 	}
 	if err := runAuditValidators(ctx, byPath, validationDir, skill, tools); err != nil {

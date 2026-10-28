@@ -73,7 +73,7 @@ func completedRecoveryResult(job Job) Result {
 func TestPublishRecoveredRequiresGitHubClient(t *testing.T) {
 	job := testJob(command.Comment)
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
-	if err := (&Orchestrator{Store: store}).PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) {
+	if err := (&Orchestrator{Store: store}).PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "GitHub client is missing") {
 		t.Fatalf("missing GitHub client did not stop recovery with state intact: %v", err)
 	}
 }
@@ -211,7 +211,7 @@ func TestPublishRecoveredChecksWorkRootBeforeNewPublication(t *testing.T) {
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		CheckWorkRoot: func() error { rootChecks++; return workroot.ErrUnsafe }}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, workroot.ErrUnsafe) || reads.Load() != 1 || writes.Load() != 0 || rootChecks != 1 {
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || reads.Load() != 1 || writes.Load() != 0 || rootChecks != 1 {
 		t.Fatalf("unsafe work root did not stop new publication: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
 	}
 }
@@ -277,7 +277,7 @@ func TestPublishRecoveredRejectsTamperedResultSidecarBeforeGitHub(t *testing.T) 
 	}))
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir()}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests.Load() != 0 {
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "decode accepted result") || requests.Load() != 0 {
 		t.Fatalf("tampered sidecar was published: requests=%d error=%v", requests.Load(), err)
 	}
 }
@@ -616,7 +616,7 @@ func TestPublishRecoveredFixChecksGitBeforeRestoringSource(t *testing.T) {
 	t.Cleanup(server.Close)
 	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
-	if err := e.PublishRecovered(t.Context(), request); err == nil || !strings.Contains(err.Error(), "Git 2.45.1 or later") || writes.Load() != 0 {
+	if err := e.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git 2.45.1 or later") || writes.Load() != 0 {
 		t.Fatalf("unchecked Git reached recovery publication: writes=%d error=%v", writes.Load(), err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {

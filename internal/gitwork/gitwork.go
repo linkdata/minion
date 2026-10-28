@@ -242,7 +242,8 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 // Import must have successfully validated and staged the reviewed changes.
 // It bounds the staged patch, commits without hooks or signing, and uses the
 // validated repository URL. Unstaged files are never added here.
-// beforePush must persist the new commit SHA for later recovery.
+// commitDate fixes author and committer time at +0000 so a restored checkout
+// rebuilds the same SHA. beforePush must persist that SHA for later recovery.
 func (c *Checkout) CommitAndPush(ctx context.Context, repo, branch, botLogin, message string, commitDate time.Time, beforePush func(string) error) error {
 	url, err := repositoryURL(repo)
 	if err != nil {

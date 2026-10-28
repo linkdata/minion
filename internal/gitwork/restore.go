@@ -13,6 +13,11 @@ import (
 // RestoreCheckout recreates a trusted fix checkout from the pinned Job source.
 // It does not fetch a branch that may have moved since the action ran.
 func RestoreCheckout(ctx context.Context, workRoot string, snapshot workspace.Snapshot) (_ *Checkout, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("restore checkout: %w", err)
+		}
+	}()
 	if err := workspace.ValidateSnapshot(snapshot); err != nil {
 		return nil, err
 	}

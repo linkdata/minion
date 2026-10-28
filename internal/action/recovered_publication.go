@@ -146,7 +146,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		}
 	}()
 	if err := p.checkout.NewBranch(ctx, p.branch); err != nil {
-		return err
+		return fmt.Errorf("create restored fix branch: %w", err)
 	}
 	return e.publish(ctx, p, result)
 }

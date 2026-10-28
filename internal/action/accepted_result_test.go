@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,7 +125,7 @@ func TestPublishRecoveredRejectsResultFromPriorAcceptedAttempt(t *testing.T) {
 	}))
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests.Load() != 0 {
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "accepted result differs from current action") || requests.Load() != 0 {
 		t.Fatalf("old result was accepted for new attempt: requests=%d error=%v", requests.Load(), err)
 	}
 }
@@ -449,6 +450,12 @@ func TestSelectedHTTPOutcomeLostACKKeepsDurableRecord(t *testing.T) {
 	if got := f.result(t); got.err != nil || !reflect.DeepEqual(got.result, outcome.Result) {
 		t.Fatalf("lost ACK erased accepted result: result=%+v error=%v", got.result, got.err)
 	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("lost ACK released worker capacity")
+	}
 	if record, err := readSavedResult(store); err != nil || !reflect.DeepEqual(record.Result, outcome.Result) {
 		t.Fatalf("lost ACK erased durable result: record=%+v error=%v", record, err)
 	}
@@ -474,7 +481,7 @@ func TestSelectedHTTPOutcomeRequiresCompletionReceiver(t *testing.T) {
 	if !completed {
 		t.Fatal("selected outcome without durable receiver was not sealed")
 	}
-	if got := f.result(t); !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrAcceptanceState) {
+	if got := f.result(t); !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrAcceptanceState) || !strings.Contains(got.err.Error(), "selected HTTP outcome receiver is missing") {
 		t.Fatalf("selected outcome without durable receiver lost its refusal: result=%+v error=%v", got.result, got.err)
 	}
 }

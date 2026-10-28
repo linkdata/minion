@@ -22,6 +22,27 @@ import (
 	"github.com/linkdata/minion/internal/skills"
 )
 
+func auditRecoveryServer(t *testing.T, posts *atomic.Int32) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			posts.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected audit recovery request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 func TestCanceledSavedAuditDoesNotRetainIncompleteCopy(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	t.Setenv("PATH", t.TempDir())
@@ -91,22 +112,7 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
 	var posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, publicRepositoryJSON)
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts.Add(1)
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprint(w, `{"id":1}`)
-		default:
-			t.Errorf("unexpected audit recovery request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+	server := auditRecoveryServer(t, &posts)
 	root := t.TempDir()
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
 		Runner: Runner{runModel: forbidModel(t)}}
@@ -163,22 +169,7 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
 	var posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, publicRepositoryJSON)
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts.Add(1)
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprint(w, `{"id":1}`)
-		default:
-			t.Errorf("unexpected audit recovery request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+	server := auditRecoveryServer(t, &posts)
 	root := t.TempDir()
 	auditDir := filepath.Join(root, "audits")
 	if err := os.Mkdir(auditDir, 0700); err != nil {
@@ -225,22 +216,7 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(script, 0600) })
 	var posts atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-			_, _ = fmt.Fprint(w, publicRepositoryJSON)
-		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			posts.Add(1)
-			w.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprint(w, `{"id":1}`)
-		default:
-			t.Errorf("unexpected audit recovery request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
+	server := auditRecoveryServer(t, &posts)
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||

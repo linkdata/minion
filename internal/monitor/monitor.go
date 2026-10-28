@@ -53,7 +53,8 @@ var ErrRequestTransport = errors.New("request transport failure")
 
 // ErrPostModelPublication marks publication failure after model work or during a fixed recovery reply.
 //
-// Without a model-call marker, retrying it consumes a job attempt even when the write error is transient.
+// Without a model-call marker or saved result, retrying it consumes a job attempt
+// even when the write error is transient. A saved result retries publication only.
 var ErrPostModelPublication = errors.New("post-model publication failure")
 
 // ErrAcceptanceState means the selected action's durable reservation is uncertain.
@@ -61,7 +62,7 @@ var ErrPostModelPublication = errors.New("post-model publication failure")
 var ErrAcceptanceState = errors.New("action acceptance state failure")
 
 // ErrAcceptedDiscarded means final assignment validation durably resolved an invalid request.
-var ErrAcceptedDiscarded = errors.New("accepted action discarded before assignment")
+var ErrAcceptedDiscarded = errors.New("accepted action discarded")
 
 // ErrAcceptedRetry means final assignment validation could not establish current validity.
 var ErrAcceptedRetry = errors.New("accepted action assignment validation deferred")
@@ -169,7 +170,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	if store.Data.Accepted == nil {
 		// A completed attempt may leave its sidecar after a crash or failed unlink.
-		// Remove it before a different attempt can write the fixed sidecar path.
+		// Remove it before a new reservation can pair with this stale sidecar.
 		if present, err := store.HasAcceptedResult(); err != nil {
 			return store.Data.NextPollAt, fmt.Errorf("%w: inspect completed result: %w", ErrAcceptanceState, err)
 		} else if present {

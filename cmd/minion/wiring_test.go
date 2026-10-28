@@ -65,7 +65,7 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 func TestServiceWiringSnapshotsNativeCodexCredentials(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "native-key")
 	t.Setenv("CODEX_ACCESS_TOKEN", "native-token")
-	got := newOrchestrator(config.Config{}, nil, nil, nil, nil).Runner.Codex
+	got := newOrchestrator(config.Config{Main: "claude"}, nil, nil, nil, nil).Runner.Codex
 	if got.NativeAPIKey != "" || got.NativeAccessToken != "" || got.APIKey != "" {
 		t.Fatalf("unselected ambient Codex credentials were retained: %+v", got)
 	}

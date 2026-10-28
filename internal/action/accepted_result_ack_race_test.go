@@ -89,8 +89,8 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		}
 		select {
 		case reply := <-outcomeDone:
-			if reply.err == nil && reply.status == http.StatusOK && reply.ack.Failure == nil {
-				t.Fatalf("outcome was acknowledged despite failed required ACK: %+v", reply)
+			if reply.err != nil || reply.status != http.StatusInternalServerError || reply.ack.Failure == nil {
+				t.Fatalf("failed required ACK produced wrong outcome response: %+v", reply)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("outcome remained blocked after failed required ACK")

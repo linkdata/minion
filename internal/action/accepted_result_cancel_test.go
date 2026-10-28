@@ -11,7 +11,7 @@ import (
 
 func TestCanceledSelectedAuditDoesNotSaveUnavailableValidatorResult(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
-	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", t.TempDir())
 	job := testJob(command.SecurityAudit)
 	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
 	outcome := completeHTTPResult(t, f)

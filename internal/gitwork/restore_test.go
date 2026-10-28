@@ -18,7 +18,13 @@ func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "later default branch\n")
 	fixture.commit("refs/heads/main", "advance default branch")
-	changes := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}
+	// Rebuild the same commit after a case-only rename, deletion, and mode change.
+	// These exercise the host-dependent index behavior of a restored checkout.
+	changes := []workspace.Change{
+		{Path: "README.md", Delete: true},
+		{Path: "readme.md", Mode: workspace.Regular, Data: []byte("fixed\n")},
+		{Path: "script.sh", Mode: workspace.Executable, Data: []byte("#!/bin/sh\nexit 0\n")},
+	}
 	const normalBranch = "minion/fix-normal"
 	if err := fixture.checkout.NewBranch(ctx, normalBranch); err != nil {
 		t.Fatal(err)

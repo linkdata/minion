@@ -89,7 +89,7 @@ func TestRetentionFailureNeedsSavedResultForPublicationRetry(t *testing.T) {
 	}
 }
 
-func TestImportDiskFullWithGitExitKeepsSavedResultRetryable(t *testing.T) {
+func TestImportDiskFullWithGitExitIsClassifiedRetryable(t *testing.T) {
 	for _, errno := range []error{syscall.ENOSPC, syscall.EDQUOT} {
 		gitExit := &exec.ExitError{}
 		failure := errors.Join(errno, gitExit)

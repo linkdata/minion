@@ -38,7 +38,7 @@ type preparedAction struct {
 	recoverFix  state.PendingFix
 }
 
-// needsExecution distinguishes supplied work from fixed replies and publication recovery.
+// needsExecution distinguishes supplied work from fixed replies.
 func (p *preparedAction) needsExecution() bool { return p.job.Version != 0 }
 
 func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (resultErr error) {

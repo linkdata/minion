@@ -9,7 +9,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 )
 
-func TestCompletedAuditRetentionIsReusableAcrossPlatforms(t *testing.T) {
+func TestCompletedAuditRetentionIsReusable(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	result := completeAuditResult(job)
 	prepared := &preparedAction{job: job}
