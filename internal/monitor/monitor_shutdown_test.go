@@ -164,7 +164,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || test.err != nil && !errors.Is(err, test.err) {
 				t.Fatalf("canceled failure reply lost cancellation: %v", err)
 			}
-			if gh.repositoryCalls != 2 || len(handler.jobs) != 0 || len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[key] != pending ||
+			if gh.repositoryCalls != 2+test.replies || len(handler.jobs) != 0 || len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[key] != pending ||
 				!store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors[first.Repository.FullName].Equal(initial) {
 				t.Fatalf("canceled failure reply continued discovery or changed backoff/cursors: calls=%d state=%+v", gh.repositoryCalls, store.Data)
 			}

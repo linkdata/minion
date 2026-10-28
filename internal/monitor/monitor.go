@@ -1357,6 +1357,10 @@ func (m *Monitor) acceptedIssuePresent(ctx context.Context, accepted state.Accep
 }
 
 func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.AcceptedAction, requireInstalled bool) (config.Repository, github.Item, bool, error) {
+	return m.validateAcceptedSourceWithLookup(ctx, accepted, requireInstalled, jobFromAccepted(accepted).Source)
+}
+
+func (m *Monitor) validateAcceptedSourceWithLookup(ctx context.Context, accepted state.AcceptedAction, requireInstalled bool, source github.Item) (config.Repository, github.Item, bool, error) {
 	repo, ok := m.acceptedRepository(accepted)
 	if !ok {
 		return config.Repository{}, github.Item{}, false, nil
@@ -1386,7 +1390,7 @@ func (m *Monitor) validateAcceptedSource(ctx context.Context, accepted state.Acc
 	if present, err := m.acceptedIssuePresent(ctx, accepted); err != nil || !present {
 		return config.Repository{}, github.Item{}, false, err
 	}
-	current, err := m.GitHub.CurrentItem(ctx, jobFromAccepted(accepted).Source)
+	current, err := m.GitHub.CurrentItem(ctx, source)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return config.Repository{}, github.Item{}, false, ctxErr
@@ -1647,7 +1651,7 @@ func (m *Monitor) revalidateJobSource(ctx context.Context, job Job) error {
 		SourceUpdatedAt: job.Source.UpdatedAt, Requester: job.Source.Author.Login, RequesterID: job.Source.Author.ID,
 		CommandName: job.Command.Name, Action: string(job.Command.Action),
 	}
-	_, _, valid, err := m.validateAcceptedSource(ctx, accepted, false)
+	_, _, valid, err := m.validateAcceptedSourceWithLookup(ctx, accepted, false, job.Source)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
 	}
@@ -2516,6 +2520,20 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			return store.WithLock(func() error { return m.discardAccepted(store) })
 		}
 		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
+	}
+	if !replied && accepted == nil {
+		verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
+		verifyErr := m.revalidateJobSource(verifyCtx, job)
+		if verifyErr == nil {
+			verifyErr = verifyCtx.Err()
+		}
+		cancel()
+		if errors.Is(verifyErr, ErrTerminalJob) {
+			m.logf("skip failure reply to %s: source or requester is no longer valid", itemLocation(job.Source))
+			replied = true // Finish the failed job without a fresh reply.
+		} else if verifyErr != nil {
+			return fmt.Errorf("revalidate %s before failure reply: %w", itemLocation(job.Source), verifyErr)
+		}
 	}
 	if !replied {
 		if accepted != nil {

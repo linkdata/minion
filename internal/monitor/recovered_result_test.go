@@ -98,17 +98,23 @@ func TestRecoveredTerminalDecisionReconcilesUsageBeforeCleanup(t *testing.T) {
 			}
 			reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
 			calls := 0
-			monitor.Handler = &terminalUsageRecoveryHandler{onTerminal: func(job Job, got string, at time.Time) {
+			handler := &terminalUsageRecoveryHandler{onTerminal: func(job Job, got string, at time.Time) {
 				calls++
 				if got != outcome || job.ID != accepted.JobID || at.IsZero() || reopened.Data.Accepted == nil {
 					t.Errorf("terminal usage ran after cleanup or with wrong decision: job=%+v outcome=%q state=%+v", job, got, reopened.Data)
 				}
 			}}
+			monitor.Handler = handler
 			if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
 				t.Fatal(err)
 			}
-			if calls != 1 || reopened.Data.Accepted != nil {
-				t.Fatalf("terminal usage was not reconciled once before cleanup: calls=%d state=%+v", calls, reopened.Data)
+			if calls != 1 || handler.executions != 0 || handler.publications != 0 ||
+				reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() {
+				t.Fatalf("terminal decision reran work or skipped cleanup: usage=%d executions=%d publications=%d state=%+v",
+					calls, handler.executions, handler.publications, reopened.Data)
+			}
+			if present, err := reopened.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("terminal decision retained accepted result: present=%t err=%v", present, err)
 			}
 		})
 	}

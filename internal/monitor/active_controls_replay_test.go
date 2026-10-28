@@ -1202,7 +1202,7 @@ func TestSelectedActionChecksOnlyTerminalThreadInPendingBacklog(t *testing.T) {
 		}
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if gh.repoChecks != 3 || gh.threadCalls != 2 || len(gh.comments) != 1 ||
+		if gh.repoChecks != 4 || gh.threadCalls != 2 || len(gh.comments) != 1 ||
 			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+terminalID+" -->") ||
 			store.Data.Processed[terminalID].IsZero() || !slices.Equal(gh.accepted, []int64{41}) ||
 			held.executions.Load() != 1 || store.Data.Accepted == nil {

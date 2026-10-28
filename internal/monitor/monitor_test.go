@@ -727,13 +727,12 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 			beforeComment:    func() { time.Sleep(4 * time.Second) },
 		}
 		store := openState(t, now)
-		job := Job{
-			Repository:  config.Repository{Name: "example-owner/example-repo", ID: 1, OwnerID: 2},
-			SubjectType: "Issue",
-			Number:      7,
-			ID:          "failure-reply-budget",
-		}
-		m := &Monitor{Config: config.Config{BotLogin: "linkdataminion"}, GitHub: gh}
+		accepted := selectedAcceptance(t, now)
+		job := jobFromAccepted(accepted)
+		job.Source = selectedItem(now)
+		job.AttemptID = "" // In-process failure replies have no selected reservation.
+		gh.permission = github.Permission{Permission: "write"}
+		m := &Monitor{Config: testConfig(t), GitHub: gh}
 		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{}); err != nil {
 			t.Fatal(err)
 		}
