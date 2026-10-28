@@ -54,7 +54,8 @@ func retryableHostIO(err error) bool {
 
 func retainedRecordFailure(stage string, err error) error {
 	marker := monitor.ErrTerminalJob
-	if retryableHostIO(err) || errors.Is(err, errPrivateRecordsUnavailable) {
+	// A private directory may disappear after its initial check.
+	if retryableHostIO(err) || errors.Is(err, errPrivateRecordsUnavailable) || errors.Is(err, os.ErrNotExist) {
 		marker = monitor.ErrPostModelPublication
 	}
 	return fmt.Errorf("%w: %s: %w", marker, stage, err)

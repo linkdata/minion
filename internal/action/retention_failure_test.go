@@ -29,7 +29,7 @@ func TestRetentionFailureClassification(t *testing.T) {
 		{"device I/O", syscall.EIO, true},
 		{"process descriptors exhausted", &os.PathError{Op: "open", Path: "record", Err: syscall.EMFILE}, true},
 		{"system descriptors exhausted", syscall.ENFILE, true},
-		{"missing retained file", os.ErrNotExist, false},
+		{"private directory removed after admission", os.ErrNotExist, true},
 		{"invalid record", errors.New("record changed"), false},
 		{"disk full and mismatch", errors.Join(fmt.Errorf("rename: %w", syscall.ENOSPC), errors.New("record changed")), false},
 	} {
@@ -262,6 +262,56 @@ func TestSavedPrivateRecordConflictHoldsReceiptForRepair(t *testing.T) {
 			}
 			if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
 				t.Fatalf("repaired private record did not publish: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
+
+func TestSavedPrivateDirectoryDisappearsDuringSync(t *testing.T) {
+	for _, name := range []string{"worker-diagnostics", "reviews"} {
+		t.Run(name, func(t *testing.T) {
+			job := testJob(command.Comment)
+			result := completedRecoveryResult(job)
+			if name == "reviews" {
+				job = withClaudeCritic(job)
+				result = privateReviewResult(job)
+			} else {
+				result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
+			}
+			job.Identity.Repository = "o/r"
+			result.Identity = job.Identity
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}}
+			var err error
+			if name == "reviews" {
+				err = e.retainReviewEvidence(job, result)
+			} else {
+				err = e.retainWorkerDiagnostics(job, result, nil)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalSync := syncPrivateRecordDirectories
+			t.Cleanup(func() { syncPrivateRecordDirectories = originalSync })
+			syncPrivateRecordDirectories = func(dirs ...string) error {
+				if err := os.RemoveAll(dirs[0]); err != nil {
+					return err
+				}
+				return &os.PathError{Op: "sync", Path: dirs[0], Err: os.ErrNotExist}
+			}
+			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
+				t.Fatalf("disappearing private directory discarded result: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("disappearing private directory lost receipt: present=%t error=%v", present, err)
+			}
+			syncPrivateRecordDirectories = originalSync
+			if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("recreated private directory did not publish: posts=%d error=%v", posts.Load(), err)
 			}
 		})
 	}
