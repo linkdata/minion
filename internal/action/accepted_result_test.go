@@ -301,9 +301,10 @@ func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	}
 }
 
-func TestSelectedAuditUnavailableSavesResultForRecoveryWithSuccessACK(t *testing.T) {
+func TestSelectedAuditValidatesAfterSavingResultAndOutcomeACK(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
-	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	validatorCalled := filepath.Join(t.TempDir(), "validator-called")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*) exit 0;; esac\nprintf called > "+shellQuote(validatorCalled)+"\nexit 0\n")
 	nodePath := os.Getenv("PATH")
 	job := testJob(command.SecurityAudit)
 	job.Identity.Repository = "o/r"
@@ -314,46 +315,58 @@ func TestSelectedAuditUnavailableSavesResultForRecoveryWithSuccessACK(t *testing
 	if err := outcome.Result.Validate(f.job); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", t.TempDir()) // The publishing validator disappears after model work.
 	ack := f.request("/outcome", outcome)
 	if ack.err != nil || ack.status != http.StatusOK || ack.ack.Failure != nil {
 		t.Fatalf("saved result did not receive success ACK: %+v", ack)
 	}
 	record, err := readSavedResult(store)
 	if err != nil || !reflect.DeepEqual(record.Result, outcome.Result) {
-		t.Fatalf("unavailable validator lost the complete result: record=%+v error=%v", record, err)
+		t.Fatalf("durable audit result differs from outcome: record=%+v error=%v", record, err)
+	}
+	if _, err := os.Stat(validatorCalled); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("publishing validator ran before outcome ACK: %v", err)
 	}
 	got := f.result(t)
-	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrPostModelPublication) ||
-		errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("saved outcome was not a known publication retry: result=%+v error=%v", got.result, got.err)
+	if !reflect.DeepEqual(got.result, outcome.Result) || got.err != nil {
+		t.Fatalf("saved outcome changed before publication: result=%+v error=%v", got.result, got.err)
 	}
 	f.executor.mu.Lock()
 	unavailable := f.executor.unavailable
 	f.executor.mu.Unlock()
 	if unavailable {
-		t.Fatal("parent-side audit outage retired healthy worker capacity")
+		t.Fatal("acknowledged audit result retired healthy worker capacity")
 	}
-	if err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err); !errors.Is(err, monitor.ErrPostModelPublication) ||
-		errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("saved outcome became terminal or unknown after checkpoint finish: %v", err)
+	if err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err); err != nil {
+		t.Fatalf("saved outcome changed after checkpoint finish: %v", err)
 	}
 
-	t.Setenv("PATH", nodePath)
 	var posts atomic.Int32
 	server := auditRecoveryServer(t, &posts)
 	checkpoints := f.tx.sink.(*executionCheckpoints)
 	recovered := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot",
 		WorkRoot: checkpoints.owner.WorkRoot, Runner: Runner{runModel: forbidModel(t)}}
+	t.Setenv("PATH", t.TempDir()) // The publishing validator disappears after the outcome ACK.
+	if err := recovered.PublishRecovered(t.Context(), checkpoints.assignmentRequest); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
+		t.Fatalf("missing publishing validator discarded result: posts=%d error=%v", posts.Load(), err)
+	}
+	if saved, err := store.HasAcceptedResult(); err != nil || !saved {
+		t.Fatalf("missing publishing validator lost saved result: saved=%t error=%v", saved, err)
+	}
+	t.Setenv("PATH", nodePath)
 	if err := recovered.PublishRecovered(t.Context(), checkpoints.assignmentRequest); err != nil || posts.Load() != 1 {
 		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
 	}
+	if _, err := os.Stat(validatorCalled); err != nil {
+		t.Fatalf("publishing validator did not run after outcome ACK: %v", err)
+	}
 }
 
-func TestSelectedAuditInvalidValidatorResultDoesNotSave(t *testing.T) {
+func TestSelectedAuditInvalidValidatorResultIsRejectedAfterACK(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*) exit 0;; esac\nexit 9\n")
 	job := testJob(command.SecurityAudit)
+	job.Identity.Repository = "o/r"
 	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
 	outcome := completeHTTPResult(t, f)
 	audit := completeAuditResult(f.job)
@@ -362,15 +375,21 @@ func TestSelectedAuditInvalidValidatorResultDoesNotSave(t *testing.T) {
 		t.Fatal(err)
 	}
 	ack := f.request("/outcome", outcome)
-	if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || !ack.ack.Failure.Terminal {
-		t.Fatalf("invalid audit validator result was not terminal: %+v", ack)
+	if ack.err != nil || ack.status != http.StatusOK || ack.ack.Failure != nil {
+		t.Fatalf("complete audit result did not receive durable ACK: %+v", ack)
 	}
-	if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) ||
+	if got := f.result(t); got.err != nil ||
 		!reflect.DeepEqual(got.result, outcome.Result) {
-		t.Fatalf("invalid audit result did not retain its known outcome: result=%+v error=%v", got.result, got.err)
+		t.Fatalf("saved audit result changed before publication: result=%+v error=%v", got.result, got.err)
 	}
-	if saved, err := store.HasAcceptedResult(); err != nil || saved {
-		t.Fatalf("invalid audit validator result left a publishable sidecar: saved=%t error=%v", saved, err)
+	var posts atomic.Int32
+	server := auditRecoveryServer(t, &posts)
+	checkpoints := f.tx.sink.(*executionCheckpoints)
+	recovered := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+		WorkRoot: checkpoints.owner.WorkRoot, Runner: Runner{runModel: forbidModel(t)}}
+	if err := recovered.PublishRecovered(t.Context(), checkpoints.assignmentRequest); !errors.Is(err, monitor.ErrTerminalJob) ||
+		errors.Is(err, monitor.ErrPostModelPublication) || posts.Load() != 0 {
+		t.Fatalf("invalid audit report was published: posts=%d error=%v", posts.Load(), err)
 	}
 }
 

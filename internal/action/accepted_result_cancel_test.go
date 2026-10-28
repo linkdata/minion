@@ -9,9 +9,8 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-func TestCanceledSelectedAuditDoesNotSaveUnavailableValidatorResult(t *testing.T) {
+func TestCanceledSelectedAuditDoesNotSaveResult(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
-	t.Setenv("PATH", t.TempDir())
 	job := testJob(command.SecurityAudit)
 	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
 	outcome := completeHTTPResult(t, f)
@@ -21,13 +20,12 @@ func TestCanceledSelectedAuditDoesNotSaveUnavailableValidatorResult(t *testing.T
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // The parent has canceled before the completed result reaches validation.
+	cancel() // The parent has canceled before the completed result reaches storage.
 	sink := f.tx.sink.(*executionCheckpoints)
 	sink.assignmentContext = ctx
 	err := sink.ReceiveCompletedResult(outcome.Result)
-	if !errors.Is(err, context.Canceled) || errors.Is(err, errAcceptedResultSavedForRetry) ||
-		errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("canceled validator became a publication retry: %v", err)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("canceled selected result became a publication retry: %v", err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || present {
 		t.Fatalf("canceled validator saved a publishable result: present=%t error=%v", present, err)

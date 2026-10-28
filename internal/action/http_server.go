@@ -738,7 +738,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
-			var savedRetry, terminalResult error
+			var terminalResult error
 			// A successful outcome is acknowledged only after its optional parent
 			// receiver has validated and saved the complete selected attempt.
 			if !failedOutcome {
@@ -767,17 +767,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				}
 				if hasReceiver && terminalResult == nil {
 					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
-						if errors.Is(err, errAcceptedResultSavedForRetry) {
-							savedRetry = err
-						} else {
-							// The result is known but refused: retain its diagnostics without a success ACK.
-							terminalResult = err
-						}
+						// The result is known but refused: retain its diagnostics without a success ACK.
+						terminalResult = err
 					}
 				}
 			}
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), savedRetry, terminalResult)
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), terminalResult)
 			if terminalResult == nil {
 				tx.runErr = errors.Join(tx.runErr, tx.checkpointErr)
 			} else {

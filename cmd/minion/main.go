@@ -185,6 +185,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if code != 0 || !*loop || ctx.Err() != nil {
 			return code
 		}
+		cfg = watcher.Config
 		if !preflight() {
 			return 1
 		}

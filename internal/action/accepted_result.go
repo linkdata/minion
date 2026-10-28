@@ -20,9 +20,6 @@ const AcceptedResultMaxBytes int64 = httpJobBytes + httpOutcomeBytes + 1<<20
 
 const acceptedResultMetadataBytes = 1<<20 - 4096
 
-// Only a completed result already saved for replay can use this retry path.
-var errAcceptedResultSavedForRetry = errors.New("accepted result saved for publication retry")
-
 // AcceptedResultRecord retains the complete supplied input and validated output
 // for publication after a process restart. Accepted is the save-time identity.
 type AcceptedResultRecord struct {
@@ -140,17 +137,6 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	if err == nil {
 		err = rejectPublishedRefutations(c.job, result, published)
 	}
-	var auditUnavailable error
-	if err == nil && c.job.Action == command.SecurityAudit {
-		if c.assignmentContext == nil {
-			err = errors.New("audit validation context is missing")
-		} else {
-			err = c.owner.validateAuditForPublication(c.assignmentContext, c.job, result.Artifacts)
-			if errors.Is(err, errAuditPublicationUnavailable) {
-				auditUnavailable, err = err, nil
-			}
-		}
-	}
 	if c.assignmentContext != nil {
 		if cause := httpExecutionContextError(c.assignmentContext); cause != nil {
 			return c.fail(cause)
@@ -207,9 +193,6 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 		return nil
 	}); err != nil {
 		return err
-	}
-	if auditUnavailable != nil {
-		return c.fail(fmt.Errorf("%w: %w: audit validation unavailable: %w", errAcceptedResultSavedForRetry, monitor.ErrPostModelPublication, auditUnavailable))
 	}
 	return nil
 }
