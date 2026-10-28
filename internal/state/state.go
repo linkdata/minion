@@ -74,6 +74,7 @@ type AcceptedAction struct {
 	Deadline        time.Time `json:"deadline"`
 	RetryAt         time.Time `json:"retry_at,omitzero"`
 	Assigned        bool      `json:"assigned"`
+	ResultReady     bool      `json:"result_ready,omitempty"`
 	Terminal        bool      `json:"terminal,omitempty"`
 }
 

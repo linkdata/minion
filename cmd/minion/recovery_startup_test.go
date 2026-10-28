@@ -76,6 +76,10 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	if err := store.WriteAcceptedResult(data); err != nil {
 		t.Fatal(err)
 	}
+	store.Data.Accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}

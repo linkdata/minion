@@ -387,7 +387,7 @@ func (e *Orchestrator) hasSavedResult(job Job) (saved bool, err error) {
 		return false, nil
 	}
 	err = e.Store.WithLock(func() error {
-		if accepted := e.Store.Data.Accepted; accepted != nil && jobMatchesAccepted(job, *accepted) {
+		if accepted := e.Store.Data.Accepted; accepted != nil && accepted.ResultReady && jobMatchesAccepted(job, *accepted) {
 			var checkErr error
 			saved, checkErr = e.Store.HasAcceptedResult()
 			return checkErr

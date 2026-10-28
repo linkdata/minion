@@ -496,6 +496,39 @@ func TestDecideAcceptedUsesPreDeadlineCompletionTime(t *testing.T) {
 	})
 }
 
+func TestDecideAcceptedPreservesCancellationAfterLateCleanup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		_, store, job, _, path := assignmentValidationFixture(t)
+		now := time.Now().UTC()
+		job.AcceptedAt, job.Deadline = now, now.Add(time.Second)
+		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
+		store.Data.Accepted.Assigned = true
+		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		parent, cancel := context.WithCancel(t.Context())
+		cancel()
+		time.Sleep(2 * time.Second) // The worker finishes cleanup after the original deadline.
+		completedAt := time.Now().UTC()
+		outcome, err := selectedCompletedOutcome(store, job, context.Canceled, parent.Err(), completedAt, time.Time{})
+		if err != nil || outcome != "canceled" {
+			t.Fatalf("late worker cleanup outcome = %q, %v; want canceled", outcome, err)
+		}
+		decision, err := decideAccepted(store, job, outcome, completedAt)
+		if err != nil || decision.Outcome != "canceled" {
+			t.Fatalf("persisted decision = %+v, %v; want canceled", decision, err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened := openStateAt(t, path, completedAt)
+		if got := reopened.Data.TerminalDecisions[job.ID].Outcome; got != "canceled" {
+			t.Fatalf("reopened decision = %q; want canceled", got)
+		}
+	})
+}
+
 func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing.T) {
 	_, store, job, _, _ := assignmentValidationFixture(t)
 	store.Data.Accepted.Assigned = true
@@ -510,6 +543,10 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 	outcome, err = selectedCompletedOutcome(store, job, nil, context.DeadlineExceeded, completedAt, completedAt.Add(-time.Second))
 	if err != nil || outcome != "canceled" {
 		t.Fatalf("earlier parent deadline lost to completion: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.Canceled, context.DeadlineExceeded, job.Deadline.Add(time.Second), time.Time{})
+	if err != nil || outcome != "expired" {
+		t.Fatalf("original deadline lost to later worker cancellation: outcome=%q err=%v", outcome, err)
 	}
 }
 

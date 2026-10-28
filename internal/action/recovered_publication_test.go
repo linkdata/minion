@@ -54,6 +54,10 @@ func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, s
 	if err := store.WriteAcceptedResult(data); err != nil {
 		t.Fatal(err)
 	}
+	accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	request := monitor.Job{
 		Repository:  config.Repository{Name: accepted.Repository, ID: accepted.RepositoryID, OwnerID: accepted.OwnerID},
 		SubjectType: accepted.SubjectType, Number: accepted.SubjectNumber,
@@ -75,6 +79,30 @@ func TestPublishRecoveredRequiresGitHubClient(t *testing.T) {
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
 	if err := (&Orchestrator{Store: store}).PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "GitHub client is missing") {
 		t.Fatalf("missing GitHub client did not stop recovery with state intact: %v", err)
+	}
+}
+
+func TestPublishRecoveredRejectsUncommittedSidecar(t *testing.T) {
+	job := testJob(command.Comment)
+	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	store.Data.Accepted.ResultReady = false
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("test sidecar: present=%t error=%v", present, err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+	}))
+	defer server.Close()
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests.Load() != 0 {
+		t.Fatalf("uncommitted sidecar was publishable: err=%v requests=%d", err, requests.Load())
+	}
+	if saved, err := e.hasSavedResult(job); err != nil || saved {
+		t.Fatalf("uncommitted sidecar authorized retry: saved=%t error=%v", saved, err)
 	}
 }
 

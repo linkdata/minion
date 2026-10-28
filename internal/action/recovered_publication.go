@@ -57,6 +57,9 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		if accepted.Terminal || decided {
 			return fmt.Errorf("%w: accepted action is already terminal", monitor.ErrTerminalJob)
 		}
+		if !accepted.ResultReady {
+			return errors.New("accepted result was not committed")
+		}
 		var err error
 		data, err = e.Store.ReadAcceptedResult(AcceptedResultMaxBytes)
 		return err

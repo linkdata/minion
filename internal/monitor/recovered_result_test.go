@@ -92,6 +92,10 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 	if err := store.WriteAcceptedResult([]byte(`{"result":"opaque-to-monitor"}`)); err != nil {
 		t.Fatal(err)
 	}
+	store.Data.Accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	gh := &fakeGitHub{
 		permission:  github.Permission{Permission: "write"},
 		currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil },
@@ -132,7 +136,11 @@ func TestSelectedExecutionKeepsSavedResultAfterPublicationError(t *testing.T) {
 			if err := store.Save(); err != nil {
 				return err
 			}
-			return store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`))
+			if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`)); err != nil {
+				return err
+			}
+			store.Data.Accepted.ResultReady = true
+			return store.Save()
 		}); err != nil {
 			return err
 		}
@@ -168,7 +176,11 @@ func TestSelectedExecutionEndsPermanentSavedResult(t *testing.T) {
 			if err := store.Save(); err != nil {
 				return err
 			}
-			return store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`))
+			if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`)); err != nil {
+				return err
+			}
+			store.Data.Accepted.ResultReady = true
+			return store.Save()
 		}); err != nil {
 			return err
 		}
@@ -228,6 +240,27 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 	if err != nil || present || finished.Data.Accepted != nil ||
 		finished.Data.Processed[accepted.JobID].IsZero() || len(finished.Data.JobFailures) != 0 {
 		t.Fatalf("publication was not durably completed: present=%t err=%v state=%+v", present, err, finished.Data)
+	}
+}
+
+func TestUncommittedStoredResultDoesNotPublishAfterRestart(t *testing.T) {
+	store, path, accepted, _, monitor := storedRecoveryFixture(t)
+	store.Data.Accepted.ResultReady = false // The sidecar write was not accepted before cancellation.
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+	handler := &recoveredResultHandler{}
+	monitor.Handler = handler
+	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if handler.executions != 0 || handler.publications != 0 ||
+		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "lost" {
+		t.Fatalf("uncommitted sidecar authorized publication: handler=%+v state=%+v", handler, reopened.Data)
 	}
 }
 

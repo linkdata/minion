@@ -1228,7 +1228,7 @@ func decideAccepted(store *state.Store, job Job, outcome string, at time.Time) (
 		if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
 			return fmt.Errorf("accepted action changed before terminal decision")
 		}
-		if !at.Before(job.Deadline) {
+		if outcome != "canceled" && !at.Before(job.Deadline) {
 			outcome = "expired"
 		}
 		var err error
@@ -1627,7 +1627,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if err != nil {
 		return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
 	}
-	if stored {
+	if stored && accepted.ResultReady {
 		return m.recoverStoredResult(ctx, store, job)
 	}
 	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
@@ -1997,7 +1997,7 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		return "", nil
 	}
 	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled)) {
-		return "canceled", nil
+		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
 	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
 		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {

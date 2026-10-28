@@ -227,6 +227,11 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 			}
 			return c.fail(cause)
 		}
+		a.ResultReady = true
+		if err := c.owner.Store.Save(); err != nil {
+			a.ResultReady = false
+			return c.fail(fmt.Errorf("%w: commit accepted result: %w", monitor.ErrAcceptanceState, err))
+		}
 		return nil
 	}); err != nil {
 		return err
