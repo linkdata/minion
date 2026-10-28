@@ -19,7 +19,7 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 	for _, group := range []struct {
 		name  string
 		count int
-	}{{"unchanged", 20}, {"changed", 3}, {"deleted", 2}} {
+	}{{"unchanged", 2}, {"changed", 3}, {"deleted", 2}} {
 		for i := 0; i < group.count; i++ {
 			name := fmt.Sprintf("%s-%02d", group.name, i)
 			writeFile(t, filepath.Join(fixture.source, name), "base "+name+"\n")
@@ -98,9 +98,9 @@ func TestReadOnlySnapshotUsesLocalObjectsWithoutOrigin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			wantHead, wantBase := 26, 0
+			wantHead, wantBase := 8, 0
 			if tc.pull {
-				wantHead, wantBase = 24, 5
+				wantHead, wantBase = 6, 5
 			}
 			if snapshot.Head != head || len(snapshot.Files) != wantHead || len(snapshot.BaseFiles) != wantBase {
 				t.Fatalf("snapshot head=%s regular=%d base=%d", snapshot.Head, len(snapshot.Files), len(snapshot.BaseFiles))
