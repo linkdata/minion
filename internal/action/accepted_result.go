@@ -213,7 +213,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 				outcome = "canceled" // The context retains a cancellation that won before its deadline.
 			} else if errors.Is(cause, context.DeadlineExceeded) {
 				if inner, ok := c.assignmentContext.Deadline(); ok && inner.Before(a.Deadline) {
-					outcome = "failed" // An inner runtime limit does not expire the original action.
+					outcome = "canceled" // The assignment context inherits an earlier parent deadline.
 				}
 			}
 			if outcome == "" && !time.Now().Before(a.Deadline) {

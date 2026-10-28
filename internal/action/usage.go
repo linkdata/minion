@@ -111,14 +111,14 @@ func (e *Orchestrator) CompleteTerminalUsage(job monitor.Job, outcome string, at
 	}
 	record, found, err := e.Usage.Load(job.AttemptID)
 	if err != nil {
-		e.logf("load recovered action usage checkpoint failed: %q", err)
+		e.logf("load action usage checkpoint failed: %q", err)
 		return
 	}
 	if !found {
 		return
 	}
 	if record.JobID != job.ID {
-		e.logf("recovered action usage attempt %s belongs to another job", job.AttemptID)
+		e.logf("action usage attempt %s belongs to another job", job.AttemptID)
 		return
 	}
 	status := "failed"
@@ -140,6 +140,6 @@ func (e *Orchestrator) CompleteTerminalUsage(job monitor.Job, outcome string, at
 	}
 	record.FinishedAt, record.Status = &finished, status
 	if err := e.Usage.Save(record); err != nil {
-		e.logf("final recovered action usage checkpoint failed: %q", err)
+		e.logf("final action usage checkpoint failed: %q", err)
 	}
 }

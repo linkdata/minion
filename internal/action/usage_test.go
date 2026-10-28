@@ -135,7 +135,7 @@ func TestRecoveredUsageValidationFailureOnlyLogs(t *testing.T) {
 	// Completing a record with model calls but no usage source fails validation.
 	e.CompleteTerminalUsage(job, "succeeded", time.Now().UTC())
 	got, found, err := store.Load(job.AttemptID)
-	if err != nil || !found || !reflect.DeepEqual(got, prior) || !strings.Contains(journal.String(), "final recovered action usage checkpoint failed:") {
+	if err != nil || !found || !reflect.DeepEqual(got, prior) || !strings.Contains(journal.String(), "final action usage checkpoint failed:") {
 		t.Fatalf("usage save failure changed publication evidence or went unlogged: got=%+v err=%v log=%q", got, err, journal.String())
 	}
 }
