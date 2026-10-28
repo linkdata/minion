@@ -125,8 +125,9 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 	request := monitor.Job{
 		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2},
 		SubjectType: "Issue", Number: 7,
-		Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: time.Now()},
-		Command: command.Command{Name: "fix", Action: command.Fix},
+		Source:     github.Item{Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: time.Now()},
+		Command:    command.Command{Name: "fix", Action: command.Fix},
+		AcceptedAt: time.Now().UTC(),
 	}
 	orchestrator := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", Store: store, WorkRoot: workRoot}
 	repo, fork, err := orchestrator.fixFork(t.Context(), request.Repository)

@@ -3,8 +3,6 @@ package action
 import (
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,22 +159,7 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 			result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
 			store, _, request := savedRecoveryFixture(t, job, result)
 			var posts atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-					_, _ = fmt.Fprint(w, `[]`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, publicRepositoryJSON)
-				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					posts.Add(1)
-					w.WriteHeader(http.StatusCreated)
-					_, _ = fmt.Fprint(w, `{"id":1}`)
-				default:
-					t.Errorf("unexpected recovery request: %s %s", r.Method, r.URL.Path)
-					http.NotFound(w, r)
-				}
-			}))
-			t.Cleanup(server.Close)
+			server := auditRecoveryServer(t, &posts)
 			root := t.TempDir()
 			dir := filepath.Join(root, name)
 			if err := os.Mkdir(dir, 0700); err != nil {

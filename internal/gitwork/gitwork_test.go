@@ -312,10 +312,10 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
-	symlinkOrSkip(t, "README.md", filepath.Join(fixture.source, "omitted-link"))
-	fixture.git(fixture.source, "add", "omitted-link")
+	// An index-only symlink avoids requiring Windows symlink privileges.
+	linkBlob := fixture.gitInput(fixture.source, "README.md", "hash-object", "-w", "--stdin")
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "120000,"+linkBlob+",omitted-link")
 	fixture.git(fixture.source, "commit", "-m", "add gitlink and symlink")
-	linkBlob := fixture.git(fixture.source, "rev-parse", "HEAD:omitted-link")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 
 	checkout := fixture.clone()
@@ -340,11 +340,7 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "omitted-link"); got != "120000 blob "+linkBlob+"\tomitted-link" {
 		t.Fatalf("published symlink changed: %q", got)
 	}
-	restored, err := RestoreCheckout(ctx, t.TempDir(), snapshot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = restored.Close() })
+	restored := fixture.keepCheckout(RestoreCheckout(ctx, t.TempDir(), snapshot))
 	const restoredBranch = "minion/fix-restored-gitlink"
 	if err := restored.NewBranch(ctx, restoredBranch); err != nil {
 		t.Fatal(err)
@@ -388,10 +384,6 @@ func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 	identity := fixture.git(fixture.checkout.path, "show", "-s", "--format=%an <%ae>|%cn <%ce>", "HEAD")
 	if want := "example-bot <example-bot@users.noreply.github.com>|example-bot <example-bot@users.noreply.github.com>"; identity != want {
 		t.Fatalf("commit identity = %q, want %q", identity, want)
-	}
-	if dates, want := fixture.git(fixture.checkout.path, "show", "-s", "--format=%at|%ct", "HEAD"),
-		fmt.Sprintf("%d|%d", testCommitDate.Unix(), testCommitDate.Unix()); dates != want {
-		t.Fatalf("commit author and committer dates = %q, want %q", dates, want)
 	}
 	if dates, want := fixture.git(fixture.checkout.path, "show", "-s", "--format=%ad|%cd", "--date=raw", "HEAD"),
 		fmt.Sprintf("%d +0000|%d +0000", testCommitDate.Unix(), testCommitDate.Unix()); dates != want {

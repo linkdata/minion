@@ -248,7 +248,7 @@ func localWorkerReport(t *testing.T, ctx context.Context, report, suffix string)
 		if err == nil {
 			return string(data)
 		}
-		// Win32 32 and 33 are sharing and lock violations while the worker replaces a marker.
+		// Win32 32 and 33 are sharing and lock violations while the worker renames a marker into place.
 		if !errors.Is(err, os.ErrNotExist) &&
 			!(runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)))) {
 			t.Fatalf("read worker marker %s: %v", path, err)

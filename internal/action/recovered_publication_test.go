@@ -504,10 +504,11 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 		t.Fatalf("retry recorded commit after fork push outage: %v", err)
 	}
 	tip := strings.TrimSpace(modelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"))
-	date := strings.TrimSpace(modelGit(t, source, "--git-dir="+forkRemote, "show", "-s", "--format=%ct", tip))
-	if tip != recorded || store.Data.PendingFixes[request.ID].SHA != recorded || date != fmt.Sprint(request.AcceptedAt.Unix()) ||
+	dates := strings.TrimSpace(modelGit(t, source, "--git-dir="+forkRemote, "show", "-s", "--format=%at|%ct", tip))
+	wantDates := fmt.Sprintf("%d|%d", request.AcceptedAt.Unix(), request.AcceptedAt.Unix())
+	if tip != recorded || store.Data.PendingFixes[request.ID].SHA != recorded || dates != wantDates ||
 		!strings.Contains(comment, recorded) || !strings.HasSuffix(comment, request.Marker()) {
-		t.Fatalf("retry changed recorded commit: tip=%s recorded=%s date=%s comment=%q", tip, recorded, date, comment)
+		t.Fatalf("retry changed recorded commit: tip=%s recorded=%s dates=%s comment=%q", tip, recorded, dates, comment)
 	}
 }
 
@@ -588,7 +589,7 @@ func TestPublishRecoveredFixChecksGitBeforeRestoringSource(t *testing.T) {
 	result := completedRecoveryResult(job)
 	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
 	store, _, request := savedRecoveryFixture(t, job, result)
-	testsupport.FakeOnPath(t, "git", "#!/bin/sh\nprintf 'git version 2.44.0\\n'\n")
+	fakeOnPath(t, "git", "#!/bin/sh\nprintf 'git version 2.44.0\\n'\n")
 	var writes atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

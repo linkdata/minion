@@ -12,13 +12,14 @@ import (
 func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 	fixture := newFixture(t)
 	ctx := t.Context()
-	snapshot, err := fixture.checkout.Snapshot(ctx)
+	normal := fixture.clone()
+	snapshot, err := normal.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "later default branch\n")
 	fixture.commit("refs/heads/main", "advance default branch")
-	// Rebuild the same commit after a case-only rename, deletion, and mode change.
+	// Rebuild the same commit after a case-only rename, deletion, and executable addition.
 	// These exercise the host-dependent index behavior of a restored checkout.
 	changes := []workspace.Change{
 		{Path: "README.md", Delete: true},
@@ -26,14 +27,14 @@ func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 		{Path: "script.sh", Mode: workspace.Executable, Data: []byte("#!/bin/sh\nexit 0\n")},
 	}
 	const normalBranch = "minion/fix-normal"
-	if err := fixture.checkout.NewBranch(ctx, normalBranch); err != nil {
+	if err := normal.NewBranch(ctx, normalBranch); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.checkout.Import(ctx, snapshot.Head, changes); err != nil {
+	if err := normal.Import(ctx, snapshot.Head, changes); err != nil {
 		t.Fatal(err)
 	}
 	var normalSHA string
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, normalBranch, "example-bot", "Fix from saved result", testCommitDate, func(sha string) error {
+	if err := normal.commitAndPush(ctx, fixture.remote, normalBranch, "example-bot", "Fix from saved result", testCommitDate, func(sha string) error {
 		normalSHA = sha
 		return nil
 	}); err != nil {

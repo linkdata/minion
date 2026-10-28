@@ -616,7 +616,7 @@ func TestFixIndexBoundsBinaryAndDeletionDiffs(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			var files []workspace.File
 			if kind == "large deletion" {
-				files = []workspace.File{{Path: "deleted", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", 2<<20))}}
+				files = []workspace.File{{Path: "deleted", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", MaxPatchBytes+1))}}
 			}
 			index, source := offlineIndexFixture(t, files)
 			switch kind {

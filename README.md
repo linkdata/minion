@@ -66,7 +66,7 @@ A failed request gets at most three execution attempts, with these exceptions. T
 | Permanent publication error with a saved complete result, such as a fix that produces no commit | Stop publication retries and post the fixed failure reply without rerunning the model. |
 | Final usage save failure after successful publication | Log a warning and retain the last durable counters; the published action stays successful. |
 
-A saved result keeps its action accepted, so new notification discovery stays paused until publication succeeds or the action is otherwise resolved. A persistent publication failure can leave discovery paused indefinitely and require operator intervention. If the command was edited or the requester lost access, source revalidation discards the saved result without a reply.
+A saved result keeps its action accepted, so new notification discovery stays paused until publication succeeds or the action is otherwise resolved. A persistent publication failure can leave discovery paused indefinitely and require operator intervention. Source revalidation discards the saved result without a reply if the source or repository is no longer eligible, including an edited or deleted command, lost requester access, an archived or default-branchless repository, or a changed allowlist.
 If an existing completed audit directory differs from the saved result, recovery keeps that directory and retries; inspect it before removing it to let publication continue.
 
 Minion waits for each direct command to exit and bounds pipe draining. The AI CLIs own their model-tool processes. Minion does not track their descendants or enforce per-command process and memory limits. Run Minion inside a VM or container if hard resource isolation is required.

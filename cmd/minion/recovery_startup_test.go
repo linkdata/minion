@@ -218,6 +218,7 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 			return nil
 		})
 	}, "-mode=orchestrate", "-loop")
+	// The test binary cannot serve as an execute-mode worker, so startup exits 1 after preflight.
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "Claude settings: model=claude-test") ||
 		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
 		t.Fatalf("loop did not use resolved service config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)

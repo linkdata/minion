@@ -61,7 +61,7 @@ var ErrPostModelPublication = errors.New("post-model publication failure")
 // The caller must stop before another action can be dispatched.
 var ErrAcceptanceState = errors.New("action acceptance state failure")
 
-// ErrAcceptedDiscarded means final assignment validation durably resolved an invalid request.
+// ErrAcceptedDiscarded means an invalid accepted request was durably discarded.
 var ErrAcceptedDiscarded = errors.New("accepted action discarded")
 
 // ErrAcceptedRetry means final assignment validation could not establish current validity.
@@ -1526,9 +1526,7 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 	if !ok {
 		return fmt.Errorf("%w: stored result publisher is unavailable", ErrAcceptanceState)
 	}
-	// Invitation handling may append repositories while the remote validation runs.
 	validator := *m
-	validator.Config.Repositories = slices.Clone(m.Config.Repositories)
 	invalidSource := errors.New("saved result source is no longer valid")
 	m.logf("recover publication of %s from %s", job.Command.Action, itemLocation(job.Source))
 	return m.runSelectedWithControls(ctx, store, job, "", nil,

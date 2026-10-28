@@ -25,7 +25,8 @@ func TestCanceledSelectedAuditDoesNotSaveUnavailableValidatorResult(t *testing.T
 	sink := f.tx.sink.(*executionCheckpoints)
 	sink.assignmentContext = ctx
 	err := sink.ReceiveCompletedResult(outcome.Result)
-	if !errors.Is(err, context.Canceled) || errors.Is(err, errAcceptedResultSavedForRetry) || errors.Is(err, monitor.ErrPostModelPublication) {
+	if !errors.Is(err, context.Canceled) || errors.Is(err, errAcceptedResultSavedForRetry) ||
+		errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("canceled validator became a publication retry: %v", err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || present {

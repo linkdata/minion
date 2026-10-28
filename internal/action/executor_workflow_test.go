@@ -26,6 +26,70 @@ func (f executorFunc) Execute(ctx context.Context, job Job, checkpoints Checkpoi
 	return f(ctx, job, checkpoints)
 }
 
+func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
+	gitFixtureRemote(t)
+	installActionTestSkills(t, testFixSkillURL)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveFixFlowFixture(t, w, r) {
+			t.Errorf("unexpected fix preparation request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	request := usageJob()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	request.Repository.Actions = []string{"fix"}
+	const attemptID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	accepted := acceptedForJob(Job{Identity: Identity{
+		JobID: request.ID, AttemptID: attemptID, ExecutorID: LocalExecutorID,
+		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
+		SubjectType: request.SubjectType, Number: request.Number,
+		Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
+	}, Command: "fix", Action: command.Fix})
+	request.AttemptID = attemptID
+	request.Source.Key, request.Source.NodeID = accepted.SourceKey, accepted.SourceNodeID
+	request.Source.UpdatedAt = accepted.SourceUpdatedAt
+	request.AcceptedAt, request.Deadline = accepted.AcceptedAt, accepted.Deadline
+	store := openState(t, accepted.AcceptedAt)
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	var got FixDestination
+	called := false
+	stop := errors.New("executor stopped after assignment")
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Store: store,
+		Main: "codex", Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
+		assignmentRequired: true,
+		ValidateAssignment: func(context.Context, monitor.Job) error { return nil },
+		Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+			called = true
+			sink, ok := checkpoints.(*executionCheckpoints)
+			if !ok || !sink.AssignmentRequired() {
+				t.Fatalf("selected executor did not receive assignment checkpoints: %T", checkpoints)
+			}
+			if err := sink.BeforeAssignment(job); err != nil {
+				t.Fatal(err)
+			}
+			if sink.fixDestination == nil {
+				t.Fatal("selected fix destination was not passed to executor")
+			}
+			got = *sink.fixDestination
+			return Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}, stop
+		}),
+	}
+	e.attemptID = attemptID
+	if err := e.perform(testActionContext(t), request); !errors.Is(err, stop) {
+		t.Fatalf("executor was not reached: %v", err)
+	}
+	want := FixDestination{RepositoryID: 1, DefaultBranch: "main", Visibility: "public", ForkID: 4, ForkFullName: "bot/r"}
+	if !called || got != want {
+		t.Fatalf("selected fix destination = %+v; want %+v (executor called=%t)", got, want, called)
+	}
+}
+
 func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T) {
 	for _, mode := range []string{"omitted", "unacknowledged suffix", "changed refutation", "unacknowledged decision", "failed After", "acknowledged decision"} {
 		t.Run(mode, func(t *testing.T) {

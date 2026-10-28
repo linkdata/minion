@@ -51,6 +51,16 @@ func assertModelRepositoryGit(t *testing.T, source, want string, args ...string)
 	}
 }
 
+func TestInitFilesystemConfigKeepsOnlyFreshProbes(t *testing.T) {
+	got, err := initFilesystemConfig([]byte("core.ignorecase\ntrue\x00credential.helper\n!unsafe\x00core.precomposeunicode\nfalse\x00"))
+	if err != nil || got != "ignoreCase = true\nprecomposeUnicode = false\n" {
+		t.Fatalf("fresh filesystem config = %q, error = %v", got, err)
+	}
+	if _, err := initFilesystemConfig([]byte("core.ignorecase\ninvalid\x00")); err == nil {
+		t.Fatal("invalid fresh filesystem probe was accepted")
+	}
+}
+
 func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.source, "deleted"), "historical contents\n")
@@ -424,6 +434,21 @@ func TestRepositoryPinsModelConfigAndDisablesLogMailmap(t *testing.T) {
 	}
 	source, _ := repositoryFixture(t, snapshot)
 	assertModelRepositoryGit(t, source, snapshot.Head+"\n", "rev-parse", "refs/remotes/origin/HEAD")
+	for _, key := range []string{"core.ignoreCase", "core.precomposeUnicode"} {
+		original, originalErr := testsupport.ModelGit(t, checkout.path, "config", "--local", "--get", "--bool", key)
+		materialized, materializedErr := testsupport.ModelGit(t, source, "config", "--local", "--get", "--bool", key)
+		if originalErr == nil && materializedErr == nil {
+			if !bytes.Equal(original, materialized) {
+				t.Fatalf("%s fresh filesystem probe = %q, materialized = %q", key, original, materialized)
+			}
+			continue
+		}
+		var originalExit, materializedExit *exec.ExitError
+		if !errors.As(originalErr, &originalExit) || originalExit.ExitCode() != 1 ||
+			!errors.As(materializedErr, &materializedExit) || materializedExit.ExitCode() != 1 {
+			t.Fatalf("%s fresh filesystem probe = %q (%v), materialized = %q (%v)", key, original, originalErr, materialized, materializedErr)
+		}
+	}
 	for _, setting := range []struct{ key, want string }{
 		{"core.hooksPath", os.DevNull + "\n"}, {"core.fsmonitor", "false\n"}, {"core.fileMode", gitFileMode() + "\n"},
 		{"core.excludesFile", os.DevNull + "\n"}, {"core.attributesFile", os.DevNull + "\n"},

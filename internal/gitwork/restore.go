@@ -27,7 +27,7 @@ func RestoreCheckout(ctx context.Context, workRoot string, snapshot workspace.Sn
 	}
 	path, err := os.MkdirTemp(root, "minion-checkout-")
 	if err != nil {
-		return nil, fmt.Errorf("create restored checkout: %w", err)
+		return nil, err
 	}
 	defer func() {
 		if err != nil {
