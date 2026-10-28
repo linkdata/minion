@@ -1897,11 +1897,16 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		deadline := errors.Is(err, context.DeadlineExceeded) && errors.Is(actionCtx.Err(), context.DeadlineExceeded)
 		readDone()
 		if completed {
-			if completedWithDecision() || ctx.Err() != nil {
+			if completedWithDecision() {
 				return finish(result)
 			}
+			if parentErr := ctx.Err(); parentErr != nil {
+				stopErr := stopWorker(parentErr)
+				return errors.Join(finish(result), stopErr, parentErr)
+			}
 			if deadline {
-				return errors.Join(finish(result), err)
+				stopErr := stopWorker(err)
+				return errors.Join(finish(result), stopErr, err)
 			}
 			return errors.Join(finish(result), fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err))
 		}
@@ -1986,13 +1991,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			return finish(result)
 		}
 		if err := ctx.Err(); err != nil {
+			stopErr := stopWorker(err)
 			if !completed {
-				stopErr := stopWorker(err)
 				result = <-done
 				completed = true
-				return errors.Join(finish(result), stopErr, err)
 			}
-			return finish(result)
+			return errors.Join(finish(result), stopErr, err)
 		}
 		if err := actionCtx.Err(); err != nil {
 			stopErr := stopWorker(err)
@@ -2310,6 +2314,15 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 
 func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job Job, at time.Time, err error) error {
 	if errors.Is(err, ErrAcceptanceState) {
+		accepted := store.Data.Accepted
+		if accepted != nil && AssignmentMatchesAccepted(job, *accepted) {
+			failure, exists := store.Data.JobFailures[job.ID]
+			decision, decided := store.Data.TerminalDecisions[job.ID]
+			if exists && decided && decision.AttemptID == job.AttemptID && failure.Attempts > 0 &&
+				failure.AcceptedAt.Equal(job.AcceptedAt) && failure.Deadline.Equal(job.Deadline) {
+				return errors.Join(err, m.resolveSelectedDecision(ctx, store, job, at, failure, decision))
+			}
+		}
 		return err
 	}
 	if errors.Is(err, ErrAcceptedDiscarded) {

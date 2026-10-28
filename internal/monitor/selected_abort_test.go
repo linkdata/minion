@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -21,6 +22,84 @@ func selectedAbortFixture(t *testing.T) (*Monitor, *state.Store, Job, *fakeGitHu
 	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
 	m.Now = time.Now
 	return m, store, job, gh, now
+}
+
+func TestSelectedCancelAfterAmbiguousResultSaveIsDurable(t *testing.T) {
+	for _, stage := range []string{"result marker", "terminal decision"} {
+		t.Run(stage, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				m, store, job, gh, path := assignmentValidationFixture(t)
+				now := time.Now().UTC()
+				job.AcceptedAt, job.Deadline = now, now.Add(time.Minute)
+				store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
+				store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
+				store.Data.NextInviteCheckAt = now
+				m.Now = time.Now
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				parent, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				workerReturned := make(chan struct{})
+				gh.beforeList = func() {
+					<-workerReturned
+					synctest.Wait() // Let the worker finish before the canceled invitation check returns.
+				}
+				run := func(context.Context, Job) error {
+					defer close(workerReturned)
+					if err := store.WithLock(func() error {
+						store.Data.Accepted.Assigned = true
+						if err := store.WriteAcceptedResult([]byte(`{"result":"saved"}`)); err != nil {
+							return err
+						}
+						store.Data.Accepted.ResultReady = true
+						return store.Save()
+					}); err != nil {
+						return err
+					}
+					cancel()
+					if stage == "result marker" {
+						store.Data.Accepted.ResultReady = false // A post-rename save error rolls back memory only.
+						return errors.Join(ErrAcceptanceState, errors.New("result marker sync failed"))
+					}
+					backup := path + ".before-decision"
+					if err := os.Rename(path, backup); err != nil {
+						return err
+					}
+					if err := os.Mkdir(path, 0700); err != nil {
+						return err
+					}
+					decisionErr := store.WithLock(func() error {
+						_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "canceled", time.Now().UTC())
+						return err
+					})
+					if err := os.Remove(path); err != nil {
+						return err
+					}
+					if err := os.Rename(backup, path); err != nil {
+						return err
+					}
+					if decisionErr == nil {
+						return errors.New("terminal decision save unexpectedly succeeded")
+					}
+					return errors.Join(ErrAcceptanceState, decisionErr)
+				}
+				err := m.runSelectedWithControls(parent, store, job, "", nil, run,
+					func(err error) error { return m.completeSelected(parent, store, job, now, err) })
+				if !errors.Is(err, ErrAcceptanceState) ||
+					store.Data.TerminalDecisions[job.ID].Outcome != "canceled" {
+					t.Fatalf("canceled result left no terminal decision: err=%v state=%+v", err, store.Data)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened := openStateAt(t, path, now)
+				if decision := reopened.Data.TerminalDecisions[job.ID]; decision.AttemptID != job.AttemptID || decision.Outcome != "canceled" {
+					t.Fatalf("restart lost canceled decision: %+v", reopened.Data)
+				}
+			})
+		})
+	}
 }
 
 func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testing.T) {
