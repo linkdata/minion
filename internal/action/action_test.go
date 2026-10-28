@@ -625,10 +625,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		t.Skip("Unix shell wrapper and executable mode are required")
 	}
 	for _, test := range []struct {
-		name                        string
-		critic, capped, saveFailure bool
+		name                                    string
+		critic, capped, saveFailure, runExecute bool
 	}{
-		{name: "no critic"},
+		{name: "no critic", runExecute: true},
 		{name: "approved", critic: true},
 		{name: "capped blockers", critic: true, capped: true},
 		{name: "capped save failure", critic: true, capped: true, saveFailure: true},
@@ -675,6 +675,9 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix\n\nCheck the failing error path.", HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
 				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC(),
 			}
+			if test.runExecute {
+				job.AcceptedAt = time.Time{} // Exercise Execute's default accepted time through the commit path.
+			}
 			store, err := state.Open(statePath, time.Now())
 			if err != nil {
 				t.Fatal(err)
@@ -692,6 +695,8 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			var rulesetChecks int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+					_, _ = fmt.Fprint(w, `[]`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 					_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
@@ -806,7 +811,11 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if withCritic {
 				orchestrator.Adversarial = "claude"
 			}
-			err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			if test.runExecute {
+				err = attemptFixture(orchestrator).Execute(t.Context(), job)
+			} else {
+				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			}
 			if test.saveFailure {
 				if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "record commit before push") || commentBody != "" {
 					t.Fatalf("checkpoint save failure did not stop publication: %v", err)

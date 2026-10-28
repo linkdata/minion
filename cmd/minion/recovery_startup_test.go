@@ -35,7 +35,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	statePath := filepath.Join(root, "state.json")
 	at := time.Now().UTC().Add(-time.Minute)
 	accepted := state.AcceptedAction{
-		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7,
 		SourceKey: "issue-comment:42", SourceNodeID: "source-node",
@@ -212,6 +212,9 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error {
 			gitChecks++
+			mu.Lock()
+			requests = append(requests, "git preflight")
+			mu.Unlock()
 			return nil
 		})
 	}, "-mode=orchestrate", "-loop")
@@ -219,8 +222,16 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
 		t.Fatalf("loop did not use resolved service config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
-	_, _, observedPublications = snapshot()
-	if observedPublications != 2 {
-		t.Fatalf("loop did not recover the saved result before preflight: publications=%d", observedPublications)
+	observedRequests, _, observedPublications = snapshot()
+	firstPublish := slices.Index(observedRequests, "POST /repos/owner/repo/issues/7/comments")
+	secondPublish := -1
+	if firstPublish >= 0 {
+		if next := slices.Index(observedRequests[firstPublish+1:], "POST /repos/owner/repo/issues/7/comments"); next >= 0 {
+			secondPublish = firstPublish + 1 + next
+		}
+	}
+	preflight := slices.Index(observedRequests, "git preflight")
+	if observedPublications != 2 || secondPublish < 0 || preflight < 0 || secondPublish >= preflight {
+		t.Fatalf("loop did not recover the saved result before preflight: requests=%v publications=%d", observedRequests, observedPublications)
 	}
 }

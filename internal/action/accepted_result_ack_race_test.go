@@ -2,7 +2,6 @@ package action
 
 import (
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -13,20 +12,6 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 )
-
-type heldRequiredACKWriter struct {
-	http.ResponseWriter
-	entered chan struct{}
-	release <-chan struct{}
-}
-
-func (w heldRequiredACKWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-func (w heldRequiredACKWriter) Write([]byte) (int, error) {
-	close(w.entered)
-	<-w.release
-	return 0, io.ErrClosedPipe
-}
 
 type observedResultReceiver struct {
 	*executionCheckpoints
@@ -48,7 +33,7 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		f, _, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/after" {
-					w = heldRequiredACKWriter{ResponseWriter: w, entered: ackEntered, release: ackRelease}
+					w = httpServerHeldWrite{ResponseWriter: httpServerFailWrite{w}, entered: ackEntered, release: ackRelease}
 				}
 				next.ServeHTTP(w, r)
 			})
@@ -114,12 +99,6 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		case <-receiverEntered:
 			t.Fatal("failed required ACK reached the complete result receiver")
 		default:
-		}
-		f.tx.mu.Lock()
-		stopCancel := f.tx.stopCancel
-		f.tx.mu.Unlock()
-		if stopCancel != nil {
-			stopCancel() // End the test's post-stop collection grace.
 		}
 		if got := f.result(t); !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrAcceptanceState) {
 			t.Fatalf("failed required ACK was not an unknown outcome: %+v", got)

@@ -5,6 +5,7 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -27,6 +28,9 @@ func TestAuditValidationUnavailableOnSignaledValidator(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := exec.CommandContext(t.Context(), "sh", "-c", test.script).Run()
+			if err != nil {
+				err = fmt.Errorf("audit validator failed: %w", err)
+			}
 			if err == nil || auditValidationUnavailable(err) != test.unavailable {
 				t.Fatalf("validator error=%v, unavailable=%t", err, auditValidationUnavailable(err))
 			}
@@ -48,7 +52,7 @@ func TestCanceledAuditValidationRetainsIncompleteInProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = started.Close() })
-	fakeOnPath(t, "node", "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > "+shellQuote(startedPath)+"\nexec /bin/cat < "+shellQuote(holdPath)+"\n")
+	fakeOnPath(t, "node", "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > "+shellQuote(startedPath)+"\nread _ < "+shellQuote(holdPath)+"\n")
 	job := testJob(command.SecurityAudit)
 	result := completeAuditResult(job)
 	root := t.TempDir()

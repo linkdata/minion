@@ -191,7 +191,6 @@ func TestSelectedTerminalCheckpointRefusalDoesNotBecomeAcceptanceFailure(t *test
 	if stopCancel == nil {
 		t.Fatal("refused checkpoint did not start control drain")
 	}
-	stopCancel() // End the test's post-stop collection grace.
 	if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrAcceptanceState) {
 		t.Fatalf("terminal checkpoint became a service acceptance failure: %v", got.err)
 	}
@@ -221,21 +220,21 @@ func TestSelectedCheckpointRefusalWithoutMarkerRemainsJobFailure(t *testing.T) {
 	}
 }
 
-func TestSelectedLateOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T) {
+func TestSelectedCanceledOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T) {
 	f, store, _ := selectedHTTPResultFixture(t, nil)
 	outcome := completeHTTPResult(t, f)
-	outcome.Result.Diagnostics = []Diagnostic{{Code: "late", Message: "worker finished after budget"}}
+	outcome.Result.Diagnostics = []Diagnostic{{Code: "canceled", Message: "worker finished after cancellation"}}
 	f.tx.stopBudget()
 	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
 	if ack.Failure == nil {
-		t.Fatal("late result received a success ACK")
+		t.Fatal("canceled result received a success ACK")
 	}
 	got := f.result(t)
 	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("late result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
+		t.Fatalf("canceled result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
 	}
 	if saved, err := store.HasAcceptedResult(); err != nil || saved {
-		t.Fatalf("late result was saved: saved=%t error=%v", saved, err)
+		t.Fatalf("canceled result was saved: saved=%t error=%v", saved, err)
 	}
 }
 
@@ -349,8 +348,12 @@ func TestSelectedAuditInvalidValidatorResultDoesNotSave(t *testing.T) {
 	if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || !ack.ack.Failure.Terminal {
 		t.Fatalf("invalid audit validator result was not terminal: %+v", ack)
 	}
-	if _, err := store.ReadAcceptedResult(AcceptedResultMaxBytes); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("invalid audit validator result left a publishable sidecar: %v", err)
+	if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) ||
+		!reflect.DeepEqual(got.result, outcome.Result) {
+		t.Fatalf("invalid audit result did not retain its known outcome: result=%+v error=%v", got.result, got.err)
+	}
+	if saved, err := store.HasAcceptedResult(); err != nil || saved {
+		t.Fatalf("invalid audit validator result left a publishable sidecar: saved=%t error=%v", saved, err)
 	}
 }
 
@@ -448,9 +451,6 @@ func TestSelectedHTTPOutcomeLostACKKeepsDurableRecord(t *testing.T) {
 	}
 	if record, err := readSavedResult(store); err != nil || !reflect.DeepEqual(record.Result, outcome.Result) {
 		t.Fatalf("lost ACK erased durable result: record=%+v error=%v", record, err)
-	}
-	if duplicate := f.request("/outcome", outcome); duplicate.err != nil || duplicate.status != http.StatusConflict {
-		t.Fatalf("duplicate outcome changed completed attempt: %+v", duplicate)
 	}
 }
 

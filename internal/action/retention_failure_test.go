@@ -44,7 +44,7 @@ func TestRetentionFailureClassification(t *testing.T) {
 		})
 	}
 	if runtime.GOOS == "windows" {
-		for _, code := range []syscall.Errno{4, 8, 14, 21, 23, 29, 30, 31, 1117, 1450, 1455} {
+		for _, code := range []syscall.Errno{4, 8, 14, 19, 21, 23, 29, 30, 31, 1117, 1450, 1455} {
 			if err := retainedRecordFailure("retain record", &os.PathError{Op: "write", Path: "record", Err: code}); !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("Win32 resource or device I/O classification for %d: %v", code, err)
 			}
@@ -94,10 +94,10 @@ func TestImportDiskFullWithGitExitKeepsSavedResultRetryable(t *testing.T) {
 		gitExit := &exec.ExitError{}
 		failure := errors.Join(errno, gitExit)
 		if retryableHostIO(failure) || !retryableImportIO(failure) {
-			t.Fatalf("Git exit masked retryable disk errno %T", errno)
+			t.Fatalf("Git exit masked retryable disk errno %v", errno)
 		}
 		if retryableImportIO(errors.Join(failure, gitwork.ErrUnsupportedSource)) {
-			t.Fatalf("Git source rejection was treated as host I/O for %T", errno)
+			t.Fatalf("Git source rejection was treated as host I/O for %v", errno)
 		}
 	}
 	if retryableImportIO(&exec.ExitError{}) {

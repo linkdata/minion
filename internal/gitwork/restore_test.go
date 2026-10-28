@@ -11,14 +11,30 @@ import (
 
 func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 	fixture := newFixture(t)
-	snapshot, err := fixture.checkout.Snapshot(t.Context())
+	ctx := t.Context()
+	snapshot, err := fixture.checkout.Snapshot(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(fixture.source, "README.md"), "later default branch\n")
 	fixture.commit("refs/heads/main", "advance default branch")
+	changes := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}
+	const normalBranch = "minion/fix-normal"
+	if err := fixture.checkout.NewBranch(ctx, normalBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.checkout.Import(ctx, snapshot.Head, changes); err != nil {
+		t.Fatal(err)
+	}
+	var normalSHA string
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, normalBranch, "example-bot", "Fix from saved result", testCommitDate, func(sha string) error {
+		normalSHA = sha
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	restored, err := RestoreCheckout(t.Context(), t.TempDir(), snapshot)
+	restored, err := RestoreCheckout(ctx, t.TempDir(), snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,22 +43,25 @@ func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if head, err := restored.verifiedHead(t.Context()); err != nil || head != snapshot.Head {
+	if head, err := restored.verifiedHead(ctx); err != nil || head != snapshot.Head {
 		t.Fatalf("restored head = %q, error = %v; want %q", head, err, snapshot.Head)
 	}
 	const branch = "minion/fix-recovered"
-	if err := restored.NewBranch(t.Context(), branch); err != nil {
+	if err := restored.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
-	if err := restored.Import(t.Context(), snapshot.Head, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
+	if err := restored.Import(ctx, snapshot.Head, changes); err != nil {
 		t.Fatal(err)
 	}
 	var recorded string
-	if err := restored.commitAndPush(t.Context(), fixture.remote, branch, "example-bot", "Fix from saved result", testCommitDate, func(sha string) error {
+	if err := restored.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Fix from saved result", testCommitDate, func(sha string) error {
 		recorded = sha
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	if normalSHA != recorded {
+		t.Fatalf("normal and restored fix SHA differ: normal=%s restored=%s", normalSHA, recorded)
 	}
 	if remote := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+branch); remote != recorded || remote == snapshot.Head {
 		t.Fatalf("pushed SHA = %q, recorded SHA = %q, source head = %q", remote, recorded, snapshot.Head)

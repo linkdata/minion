@@ -414,9 +414,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(request.outputDir, "run-metadata.json"), []byte(metadata), 0600); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(request.outputDir, "findings.json"), make([]byte, (5<<20)+1), 0600); err != nil {
-					t.Fatal(err)
-				}
+				writeSparseFixtureFile(t, request.outputDir, "findings.json", (5<<20)+1)
 				return aicli.Result{Tokens: usage.Tokens{Input: 9}}, failure
 			}}
 			result, err := runner.Run(t.Context(), job)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 func TestCanceledSavedAuditDoesNotRetainIncompleteCopy(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
+	t.Setenv("PATH", t.TempDir())
 	job := testJob(command.SecurityAudit)
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
@@ -45,8 +47,8 @@ func TestInProcessAuditRetainsIncompleteWhenValidatorUnavailable(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("PATH", t.TempDir())
 	e := &Orchestrator{WorkRoot: root}
-	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, errAuditPublicationUnavailable) {
-		t.Fatalf("missing validator did not defer publication: %v", err)
+	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("missing validator was not terminal before a saved result: %v", err)
 	}
 	dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*"))
 	if err != nil || len(dirs) != 1 {
@@ -110,7 +112,7 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 		Runner: Runner{runModel: forbidModel(t)}}
 	t.Setenv("PATH", t.TempDir()) // The publishing validator is missing after the result was saved.
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
-		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, exec.ErrNotFound) || posts.Load() != 0 {
 		t.Fatalf("missing validator discarded audit: posts=%d error=%v", posts.Load(), err)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
@@ -145,7 +147,7 @@ func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
 		t.Fatal(err)
 	}
 	orchestrator := &Orchestrator{WorkRoot: t.TempDir()}
-	if err := orchestrator.validateAuditForPublication(t.Context(), job, completeAuditResult(job).Artifacts); !errors.Is(err, errAuditPublicationUnavailable) {
+	if err := orchestrator.validateAuditForPublication(t.Context(), job, completeAuditResult(job).Artifacts); !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing audit validator was treated as invalid result: %v", err)
 	}
 }

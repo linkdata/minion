@@ -521,7 +521,7 @@ exec %s "$@"
 				return
 			}
 			if stage == "fork changed" {
-				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
+				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 					t.Fatalf("changed fork reached publication: writes=%d err=%v", writes, err)
 				}
 				return

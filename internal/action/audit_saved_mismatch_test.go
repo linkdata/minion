@@ -9,6 +9,7 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestSavedAuditDamagedPrivateCopyKeepsReceipt(t *testing.T) {
@@ -17,7 +18,10 @@ func TestSavedAuditDamagedPrivateCopyKeepsReceipt(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
-	root := t.TempDir()
+	root, err := workspace.CanonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	e := &Orchestrator{Store: store, WorkRoot: root}
 	prepared := &preparedAction{job: job, request: request}
 	if _, err := e.preparePublication(t.Context(), prepared, result); err != nil {

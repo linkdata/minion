@@ -72,6 +72,6 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 		return retainedRecordFailure("save private worker diagnostics", err)
 	}
 	id := job.Identity
-	e.logf("action worker diagnostics job=%s attempt=%s executor=%s count=%d worker_reported_failure=%t private_path=%q cleanup_unverified=%t", id.JobID, id.AttemptID, id.ExecutorID, len(diagnostics), failure != nil, path, record.CleanupUnverifiedWorkRoot != "")
+	e.logf("action worker diagnostics job=%s attempt=%s executor=%s count=%d worker_reported_failure=%t private_path=%q cleanup_unverified=%t", id.JobID, id.AttemptID, id.ExecutorID, len(diagnostics), failure != nil, path, cleanupUnverified)
 	return nil
 }

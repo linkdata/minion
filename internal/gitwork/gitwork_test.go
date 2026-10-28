@@ -389,6 +389,10 @@ func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 	if want := "example-bot <example-bot@users.noreply.github.com>|example-bot <example-bot@users.noreply.github.com>"; identity != want {
 		t.Fatalf("commit identity = %q, want %q", identity, want)
 	}
+	if dates, want := fixture.git(fixture.checkout.path, "show", "-s", "--format=%at|%ct", "HEAD"),
+		fmt.Sprintf("%d|%d", testCommitDate.Unix(), testCommitDate.Unix()); dates != want {
+		t.Fatalf("commit author and committer dates = %q, want %q", dates, want)
+	}
 	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "no changes", testCommitDate, func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("repeat publication=%v", err)
 	}

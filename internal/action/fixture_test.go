@@ -296,6 +296,18 @@ func writeFixtureFile(t *testing.T, source, name string, data []byte) {
 	}
 }
 
+func writeSparseFixtureFile(t *testing.T, source, name string, size int64) {
+	t.Helper()
+	path := filepath.Join(source, name)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(file.Truncate(size), file.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func forbidModel(t *testing.T) modelCall {
 	t.Helper()
 	return func(context.Context, modelRun) (aicli.Result, error) {

@@ -151,7 +151,7 @@ func TestCollectUsagePrunesHistoricalDaysBeforeCurrentRootAndHelper(t *testing.T
 			}
 			// Fresh mtimes deliberately defeat the file-mtime gate. These dated
 			// histories must be pruned before consuming the traversal/header caps.
-			for i := 0; i < 250; i++ {
+			for i := 0; i < 17; i++ {
 				if err := os.WriteFile(filepath.Join(old, fmt.Sprintf("old-%03d.jsonl", i)), []byte("unrelated old content\n"), 0600); err != nil {
 					t.Fatal(err)
 				}

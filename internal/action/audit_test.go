@@ -490,7 +490,7 @@ func TestAuditArtifactReadModesPreserveFailurePolicies(t *testing.T) {
 					}
 					symlinkOrSkip(t, "REPORT.md", name)
 				case "oversized report":
-					writeFixtureFile(t, root, artifact, []byte(strings.Repeat("x", maxOutputBytes+1)))
+					writeSparseFixtureFile(t, root, artifact, maxOutputBytes+1)
 				case "invalid UTF-8 report":
 					writeFixtureFile(t, root, artifact, []byte{0xff})
 				case "NUL report":

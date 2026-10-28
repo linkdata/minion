@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -172,7 +173,7 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 }
 
 func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
-	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch", "nil recorder"} {
+	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch", "nil recorder", "zero commit date"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
 			ctx := t.Context()
@@ -184,6 +185,7 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 				t.Fatal(err)
 			}
 			pushBranch, message, want := branch, "reviewed fix", ""
+			commitDate := testCommitDate
 			switch kind {
 			case "branch":
 				pushBranch, want = "bad:ref", "invalid branch"
@@ -201,6 +203,8 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 				want = "does not match push branch"
 			case "nil recorder":
 				want = "before-push recorder is required"
+			case "zero commit date":
+				commitDate, want = time.Time{}, "commit date is required"
 			}
 			head := f.git(f.checkout.path, "rev-parse", "HEAD")
 			refs := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
@@ -213,7 +217,7 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 			if kind == "nil recorder" {
 				recorder = nil
 			}
-			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, testCommitDate, recorder)
+			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, commitDate, recorder)
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("%s was not refused: %v", kind, err)
 			}

@@ -39,7 +39,8 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	if err := store.Save(prior); err != nil {
 		t.Fatal(err)
 	}
-	e := &Orchestrator{Usage: store}
+	var journal bytes.Buffer
+	e := &Orchestrator{Usage: store, Logger: log.New(&journal, "", 0)}
 	e.completeRecoveredUsage(job)
 	got, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || got.FinishedAt == nil || got.FinishedAt.Before(failedAt) {
@@ -64,8 +65,8 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	}
 	e.completeRecoveredUsage(other)
 	unchanged, found, err := store.Load(job.AttemptID)
-	if err != nil || !found || !reflect.DeepEqual(unchanged, prior) {
-		t.Fatalf("mismatched recovery replaced usage: got=%+v err=%v", unchanged, err)
+	if err != nil || !found || !reflect.DeepEqual(unchanged, prior) || !strings.Contains(journal.String(), "belongs to another job") {
+		t.Fatalf("mismatched recovery replaced usage or skipped warning: got=%+v err=%v log=%q", unchanged, err, journal.String())
 	}
 	records, err := usage.ReadAll(store.Dir)
 	if err != nil || len(records) != 1 {

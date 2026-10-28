@@ -105,7 +105,7 @@ func TestVisibleAcceptedResultWaitsForDirectorySync(t *testing.T) {
 	if present, err := store.HasAcceptedResult(); present || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("sidecar with reported sync failure was treated as durable: present=%t error=%v", present, err)
 	}
-	if got, err := store.ReadAcceptedResult(int64(len(result))); got != nil || !errors.Is(err, os.ErrNotExist) {
+	if got, err := store.ReadAcceptedResult(int64(len(result))); got != nil || !errors.Is(err, os.ErrNotExist) || err == os.ErrNotExist {
 		t.Fatalf("direct sidecar read bypassed sync: got=%q error=%v", got, err)
 	}
 	if err := os.Mkdir(store.syncDir, 0700); err != nil {

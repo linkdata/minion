@@ -99,6 +99,19 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 	return store, path, accepted, gh, selectedMonitor(t, at, gh, nil)
 }
 
+func TestStoredResultDiscardDoesNotHideControlStateFailure(t *testing.T) {
+	store, _, _, _, monitor := storedRecoveryFixture(t)
+	controlErr := errors.New("control state unavailable")
+	handler := &recoveredResultHandler{publish: func(Job) error {
+		return errors.Join(ErrAcceptedDiscarded, ErrAcceptanceState, controlErr)
+	}}
+	monitor.Handler = handler
+	_, err := monitor.RunOnce(t.Context(), store)
+	if !errors.Is(err, ErrAcceptanceState) || !errors.Is(err, controlErr) || handler.publications != 1 || store.Data.Accepted == nil {
+		t.Fatalf("stored discard hid control failure: err=%v publications=%d accepted=%+v", err, handler.publications, store.Data.Accepted)
+	}
+}
+
 func TestSelectedExecutionKeepsSavedResultAfterPublicationError(t *testing.T) {
 	at := time.Now().UTC()
 	store := openState(t, at.Add(-time.Minute))

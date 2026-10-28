@@ -95,6 +95,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		}
 		deadline = job.Deadline
 	}
+	job.AcceptedAt = acceptedAt
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if err := ctx.Err(); err != nil {

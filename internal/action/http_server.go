@@ -750,11 +750,10 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					checkpointErr, controlErr := tx.checkpointErr, tx.requiredControlErr
 					tx.mu.Unlock()
 					if checkpointErr != nil {
-						marker := monitor.ErrTerminalJob
-						if errors.Is(checkpointErr, monitor.ErrAcceptanceState) {
-							marker = monitor.ErrAcceptanceState
+						terminalResult = errors.Join(terminalResult, checkpointErr, controlErr)
+						if !errors.Is(terminalResult, monitor.ErrAcceptanceState) && !errors.Is(terminalResult, monitor.ErrTerminalJob) {
+							terminalResult = errors.Join(terminalResult, monitor.ErrTerminalJob)
 						}
-						terminalResult = errors.Join(terminalResult, marker, checkpointErr, controlErr)
 					} else if controlErr != nil {
 						terminalResult = errors.Join(terminalResult, monitor.ErrExecutionOutcomeUnknown, controlErr)
 					} else if err := httpExecutionContextError(tx.budget); err != nil {
@@ -793,7 +792,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
 			if budgetErr := httpExecutionContextError(tx.budget); budgetErr != nil {
-				if cause := tx.budget.Err(); cause == nil || !errors.Is(tx.runErr, cause) {
+				cause := tx.budget.Err()
+				if cause == nil {
+					cause = context.DeadlineExceeded // Deadline passed before context notified its waiters.
+				}
+				if !errors.Is(tx.runErr, cause) {
 					tx.runErr = errors.Join(tx.runErr, budgetErr)
 				}
 			}

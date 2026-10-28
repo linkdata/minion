@@ -82,9 +82,7 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			if len(evidence.Calls) != 0 {
 				err = errors.Join(err, e.retentionForSavedResult(prepared.job, e.retainReviewEvidence(prepared.job, evidence)))
 			}
-			if prepared.job.Action == command.SecurityAudit {
-				err = errors.Join(err, e.retainIncompleteUnlessSaved(prepared, result))
-			}
+			err = errors.Join(err, e.retainIncompleteUnlessSaved(prepared, result))
 			if validationErr := result.validate(prepared.job, false); validationErr != nil {
 				return errors.Join(err, fmt.Errorf("%w: invalid incomplete action result: %w", monitor.ErrTerminalJob, validationErr))
 			}
@@ -284,7 +282,8 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 				return publication{}, errors.Join(ctxErr, e.retainIncompleteUnlessSaved(p, result))
 			}
 			if errors.Is(err, errAuditPublicationUnavailable) {
-				return publication{}, errors.Join(fmt.Errorf("%w: audit validation unavailable: %w", monitor.ErrPostModelPublication, err), e.retainIncompleteUnlessSaved(p, result))
+				failure := fmt.Errorf("%w: audit validation unavailable: %w", monitor.ErrPostModelPublication, err)
+				return publication{}, errors.Join(e.retentionForSavedResult(p.job, failure), e.retainIncompleteUnlessSaved(p, result))
 			}
 			return publication{}, errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 		}
@@ -304,7 +303,7 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 	return published, nil
 }
 
-// A post-model storage fault can replay publication only after the complete
+// A post-model host fault can replay publication only after the complete
 // accepted result has been durably saved for this action. Other attempts cannot
 // rerun paid work to recover a missing private record.
 func (e *Orchestrator) retentionForSavedResult(job Job, err error) error {
@@ -337,6 +336,9 @@ func (e *Orchestrator) hasSavedResult(job Job) (saved bool, err error) {
 }
 
 func (e *Orchestrator) retainIncompleteUnlessSaved(p *preparedAction, result Result) error {
+	if p.job.Action != command.SecurityAudit {
+		return nil
+	}
 	saved, err := e.hasSavedResult(p.job)
 	if err != nil {
 		return fmt.Errorf("%w: inspect saved audit result: %w", monitor.ErrAcceptanceState, err)
@@ -422,20 +424,42 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 	}
 	if complete {
 		dir := filepath.Join(root, "complete-"+p.job.Identity.AttemptID)
+		stage := filepath.Join(root, ".complete-"+p.job.Identity.AttemptID)
+		// A crash before rename can leave a partial stage from this attempt.
+		if err := os.RemoveAll(stage); err != nil {
+			return err
+		}
 		if _, err := os.Lstat(dir); err == nil {
 			if err := workspace.CheckUnchanged(ctx, dir, files); err != nil {
+				if cause := ctx.Err(); cause != nil {
+					return cause
+				}
+				if retryableHostIO(err) {
+					return err
+				}
 				return fmt.Errorf("%w at %q: %w", errRetainedAuditMismatch, dir, err)
 			}
 		} else {
 			if !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
-			stage, err := os.MkdirTemp(root, ".complete-")
-			if err != nil {
+			if err := os.Mkdir(stage, 0700); err != nil {
 				return err
 			}
 			defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(stage)) }()
 			if err := workspace.Materialize(stage, files); err != nil {
+				return err
+			}
+			for _, file := range files {
+				written, err := os.OpenFile(filepath.Join(stage, filepath.FromSlash(file.Path)), os.O_RDWR, 0)
+				if err != nil {
+					return err
+				}
+				if err := errors.Join(written.Sync(), written.Close()); err != nil {
+					return err
+				}
+			}
+			if err := workspace.SyncDirectories(stage); err != nil {
 				return err
 			}
 			if err := ctx.Err(); err != nil {
@@ -444,6 +468,9 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 			if err := os.Rename(stage, dir); err != nil {
 				return err
 			}
+		}
+		if err := workspace.SyncDirectories(dir, root, filepath.Dir(root)); err != nil {
+			return err
 		}
 		e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
 		return nil

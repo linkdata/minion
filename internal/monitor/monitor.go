@@ -205,7 +205,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return wake(retryAt, true), nil
 		}
 		err := m.recoverAccepted(ctx, store)
-		if errors.Is(err, ErrAcceptedDiscarded) {
+		if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
 			return wake(store.Data.NextPollAt, true), nil
 		}
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
@@ -633,7 +633,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				executeErr := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items)
 				clearResolvedTerminalFailures()
 				if err := executeErr; err != nil {
-					if errors.Is(err, ErrAcceptedDiscarded) {
+					if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
 						return stop() // The refused assignment retired this worker.
 					}
 					if errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || ctx.Err() != nil {

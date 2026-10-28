@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -481,7 +480,7 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) {
 		t.Fatalf("inconsistent saved review decision was accepted: %v", err)
 	}
-	if output, err := exec.CommandContext(t.Context(), "git", "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa").CombinedOutput(); err == nil {
+	if output, err := testsupport.ModelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"); err == nil {
 		t.Fatalf("inconsistent review decision reached remote: %s", output)
 	}
 	wrong.Cap = nil
@@ -493,7 +492,7 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "rebuilt fix commit") {
 		t.Fatalf("recovered fix accepted a different commit: %v", err)
 	}
-	if output, err := exec.CommandContext(t.Context(), "git", "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa").CombinedOutput(); err == nil {
+	if output, err := testsupport.ModelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"); err == nil {
 		t.Fatalf("different recovered commit reached remote: %s", output)
 	}
 	wrong.SHA = recorded
@@ -561,7 +560,7 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *te
 		}
 	}))
 	defer server.Close()
-	t.Setenv("PATH", t.TempDir()) // An unexpected rebuild needs Git and must fail this test.
+	t.Setenv("PATH", t.TempDir()) // A missing branch needs Git before rebuilding from the saved result.
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git readiness before recovered fix") ||

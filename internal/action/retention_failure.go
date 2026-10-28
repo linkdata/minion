@@ -39,8 +39,9 @@ func retryableHostIO(err error) bool {
 		return true
 	}
 	if runtime.GOOS == "windows" {
-		// Win32 resource, device I/O, sharing and disk-capacity failures.
-		for _, code := range []syscall.Errno{4, 8, 14, 21, 23, 29, 30, 31, 32, 33, 39, 112, 1117, 1295, 1450, 1455} {
+		// Win32 resource, write-protect, device I/O, sharing and disk-capacity failures.
+		// Numeric values keep this common file buildable on non-Windows hosts.
+		for _, code := range []syscall.Errno{4, 8, 14, 19, 21, 23, 29, 30, 31, 32, 33, 39, 112, 1117, 1295, 1450, 1455} {
 			if errors.Is(err, code) {
 				return true
 			}
