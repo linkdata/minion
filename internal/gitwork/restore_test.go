@@ -46,6 +46,9 @@ func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 	if remote := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+branch); remote != recorded || remote == snapshot.Head {
 		t.Fatalf("pushed SHA = %q, recorded SHA = %q, source head = %q", remote, recorded, snapshot.Head)
 	}
+	if parent := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+branch+"^"); parent != snapshot.Head {
+		t.Fatalf("restored push parent = %q, want %q", parent, snapshot.Head)
+	}
 }
 
 func TestRestoreCheckoutRejectsChangedPinnedFilesAndCleansUp(t *testing.T) {

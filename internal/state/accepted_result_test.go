@@ -118,3 +118,32 @@ func TestVisibleAcceptedResultWaitsForDirectorySync(t *testing.T) {
 		t.Fatalf("restored sync did not return sidecar: got=%q error=%v", got, err)
 	}
 }
+
+func TestClearAcceptedResultReportsDirectorySyncFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory sync is a no-op")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	store, err := Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.WriteAcceptedResult([]byte("saved")); err != nil {
+		t.Fatal(err)
+	}
+	store.syncDir = filepath.Join(dir, "missing-sync")
+	if err := store.ClearAcceptedResult(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clear did not report directory sync failure: %v", err)
+	}
+	if _, err := os.Stat(path + ".result"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clear left sidecar after sync failure: %v", err)
+	}
+	if err := os.Mkdir(store.syncDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClearAcceptedResult(); err != nil {
+		t.Fatalf("repeat clear after sync recovery: %v", err)
+	}
+}

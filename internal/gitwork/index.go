@@ -389,10 +389,6 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 // Check control-file shapes before Git can open FIFOs while discovering output.
 // Ignored directories are skipped unless they contain supplied tracked files.
 // shortcut: live writers can race these checks; isolate and quiesce executors in #96.
-func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
-	return index.checkControlFilesWithLimit(ctx, workspace.MaxEntries)
-}
-
 func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit int) error {
 	trackedDirs := map[string]bool{}
 	trackedChildren := map[string][]string{}

@@ -1,12 +1,14 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"reflect"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
@@ -22,8 +24,13 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		if terminalGitworkFailure(resultErr) {
 			resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 		}
+		if resultErr == nil {
+			e.completeRecoveredUsage(request)
+		}
 		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
 	}()
+	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
+	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
 	}

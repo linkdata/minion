@@ -1,6 +1,7 @@
 package action
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
@@ -110,6 +112,78 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 	}
 }
 
+func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
+	job := testJob(command.Review)
+	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	type postedReview struct{ body, commit string }
+	var posted atomic.Pointer[postedReview]
+	var timelineReads, provenanceReads, reviewWrites atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			var input struct{ Query string }
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+				return
+			}
+			if strings.Contains(input.Query, "timelineItems") {
+				timelineReads.Add(1)
+				var nodes []map[string]any
+				if review := posted.Load(); review != nil {
+					nodes = []map[string]any{{"id": "review-node", "fullDatabaseId": "1", "body": review.body,
+						"author": map[string]string{"login": "bot"}, "state": "COMMENTED", "submittedAt": request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339)}}
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
+					"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
+				return
+			}
+			provenanceReads.Add(1)
+			review := posted.Load()
+			if review == nil {
+				t.Error("review provenance checked before publication")
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{
+				"body": review.body, "author": map[string]string{"login": "bot"}}}})
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo":
+			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"owner/repo","owner":{"id":2,"login":"owner"},"default_branch":"main","visibility":"public"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls/7/reviews":
+			var input struct {
+				Body   string `json:"body"`
+				Commit string `json:"commit_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Error(err)
+				return
+			}
+			reviewWrites.Add(1)
+			posted.Store(&postedReview{body: input.Body, commit: input.Commit})
+			_, _ = fmt.Fprint(w, `{"id":1}`)
+		default:
+			t.Errorf("unexpected review recovery request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}}
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	review := posted.Load()
+	if review == nil || review.commit != job.Source.Head || !strings.HasSuffix(review.body, "\n\n"+request.Marker()) ||
+		reviewWrites.Load() != 1 || timelineReads.Load() != 2 || provenanceReads.Load() != 1 {
+		t.Fatalf("recovered review was not reconciled: review=%+v writes=%d timelines=%d provenance=%d", review,
+			reviewWrites.Load(), timelineReads.Load(), provenanceReads.Load())
+	}
+}
+
 func TestPublishRecoveredChecksWorkRootBeforeNewPublication(t *testing.T) {
 	job := testJob(command.Comment)
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
@@ -131,6 +205,32 @@ func TestPublishRecoveredChecksWorkRootBeforeNewPublication(t *testing.T) {
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, workroot.ErrUnsafe) || reads.Load() != 1 || writes.Load() != 0 || rootChecks != 1 {
 		t.Fatalf("unsafe work root did not stop new publication: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
 	}
+}
+
+func TestPublishRecoveredBoundsEachAttempt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet || r.URL.Path != "/repos/owner/repo/issues/7/comments" {
+				t.Errorf("unexpected recovery request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+				return
+			}
+			<-r.Context().Done()
+		}))
+		defer server.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), MaxRuntime: 20 * time.Millisecond}
+		started := time.Now()
+		if err := orchestrator.PublishRecovered(ctx, request); !errors.Is(err, context.DeadlineExceeded) || time.Since(started) >= time.Second {
+			t.Fatalf("recovery did not stop at its attempt budget: elapsed=%s error=%v", time.Since(started), err)
+		}
+		if present, err := store.HasAcceptedResult(); err != nil || !present {
+			t.Fatalf("bounded recovery lost its saved result: present=%t error=%v", present, err)
+		}
+	})
 }
 
 func TestPublishRecoveredRejectsTamperedResultSidecarBeforeGitHub(t *testing.T) {
@@ -278,7 +378,6 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 	result := completedRecoveryResult(job)
 	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("reviewed change\n")}}
 	store, _, request := savedRecoveryFixture(t, job, result)
-	request.Source.UpdatedAt = store.Data.Accepted.SourceUpdatedAt
 	var comment string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {

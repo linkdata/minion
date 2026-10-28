@@ -10,7 +10,7 @@ import (
 func TestNativeCredentialEnvironmentRejectsCredentialsAddedAfterCapture(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("CODEX_ACCESS_TOKEN", "")
-	settings := captureAmbientNativeCredentials(config.CodexConfig{})
+	settings := CaptureAmbientNativeCredentials(config.CodexConfig{})
 	env := nativeCredentialEnvironment([]string{
 		"HOME=/trusted/home",
 		"CODEX_API_KEY=late-key",

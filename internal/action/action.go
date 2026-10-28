@@ -69,6 +69,8 @@ type Orchestrator struct {
 	Commands              map[string]config.CommandMapping
 }
 
+var _ monitor.StoredResultPublisher = (*Orchestrator)(nil)
+
 // WaitCapacity gates discovery when the selected executor owns readiness.
 func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	ready, ok := e.Executor.(interface{ WaitCapacity(context.Context) error })

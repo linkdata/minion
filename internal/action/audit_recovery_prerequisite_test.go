@@ -1,9 +1,11 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +36,48 @@ func TestCanceledSavedAuditDoesNotRetainIncompleteCopy(t *testing.T) {
 	}
 	if dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*")); err != nil || len(dirs) != 0 {
 		t.Fatalf("saved audit was mislabeled incomplete: dirs=%v error=%v", dirs, err)
+	}
+}
+
+func TestInProcessAuditRetainsIncompleteWhenValidatorUnavailable(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	root := t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+	e := &Orchestrator{WorkRoot: root}
+	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, errAuditPublicationUnavailable) {
+		t.Fatalf("missing validator did not defer publication: %v", err)
+	}
+	dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*"))
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("in-process audit lost private incomplete copy: dirs=%v error=%v", dirs, err)
+	}
+	if _, err := os.Stat(filepath.Join(dirs[0], "INCOMPLETE.txt")); err != nil {
+		t.Fatalf("incomplete audit marker missing: %v", err)
+	}
+}
+
+func TestValidatedAuditDoesNotFailAfterScratchCleanupError(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	var journal bytes.Buffer
+	e := &Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0)}
+	original := removeAuditValidationDir
+	t.Cleanup(func() { removeAuditValidationDir = original })
+	removeAuditValidationDir = func(path string) error {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+		return errors.New("cleanup unavailable")
+	}
+	if err := e.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
+		t.Fatalf("validated audit was blocked by scratch cleanup: %v", err)
+	}
+	if !strings.Contains(journal.String(), "audit validation scratch cleanup failed") || !strings.Contains(journal.String(), "cleanup unavailable") {
+		t.Fatalf("cleanup failure was not logged: %q", journal.String())
 	}
 }
 
@@ -223,6 +267,9 @@ func TestAuditValidationHostIOClassification(t *testing.T) {
 		{"artifact copy full", &os.PathError{Op: "write", Path: "findings.json", Err: syscall.ENOSPC}, true},
 		{"artifact copy I/O", &os.PathError{Op: "write", Path: "findings.json", Err: syscall.EIO}, true},
 		{"validator launch descriptors", &os.PathError{Op: "fork/exec", Path: "node", Err: syscall.EMFILE}, true},
+		{"validator launch retryable", &os.PathError{Op: "fork/exec", Path: "node", Err: syscall.EAGAIN}, true},
+		{"validator launch memory", &os.PathError{Op: "fork/exec", Path: "node", Err: syscall.ENOMEM}, true},
+		{"validator text busy", &os.PathError{Op: "fork/exec", Path: "node", Err: syscall.ETXTBSY}, true},
 		{"validator missing", os.ErrNotExist, true},
 		{"invalid content", errors.New("audit metadata is invalid"), false},
 		{"invalid content and I/O", errors.Join(errors.New("audit metadata is invalid"), syscall.ENOSPC), false},

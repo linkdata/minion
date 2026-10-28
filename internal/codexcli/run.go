@@ -78,7 +78,7 @@ func execConfigArgs() []string {
 // login for this run. It is excluded from model-command environments and
 // redacted from the returned answer and error text.
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.CodexConfig) (result aicli.Result, runError error) {
-	settings = captureAmbientNativeCredentials(settings)
+	settings = CaptureAmbientNativeCredentials(settings)
 	defer func() {
 		result.Answer = redactCodexText(result.Answer, settings)
 		runError = redactCodexError(runError, settings)

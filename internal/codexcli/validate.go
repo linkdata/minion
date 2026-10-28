@@ -38,7 +38,7 @@ type modelInfo struct {
 // A nonempty APIKey in settings selects API authentication for discovery without
 // changing the stored CLI login.
 func Validate(ctx context.Context, settings config.CodexConfig) (resolved config.CodexConfig, resultErr error) {
-	settings = captureAmbientNativeCredentials(settings)
+	settings = CaptureAmbientNativeCredentials(settings)
 	defer func() { resultErr = redactCodexError(resultErr, settings) }()
 	home, err := HomePath()
 	if err != nil {

@@ -1541,7 +1541,7 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 			}
 			job.Repository, job.Source = repo, current
 			job.Source.HTMLURL = accepted.SourceURL
-			job.Source.UpdatedAt = accepted.SourceUpdatedAt // Publication markers use the original command timestamp.
+			job.Source.UpdatedAt = accepted.SourceUpdatedAt // Reply lookup uses the original command timestamp.
 			return publisher.PublishRecovered(runCtx, job)
 		}, func(err error) error {
 			if errors.Is(err, invalidSource) {
@@ -1958,6 +1958,9 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		if !errors.Is(err, ErrTerminalJob) || errors.Is(err, context.Canceled) ||
 			errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 			// The worker finished. Only publication may be retried from its durable receipt.
+			if errors.Is(err, ErrPostModelPublication) {
+				return err
+			}
 			return fmt.Errorf("%w: %w", ErrPostModelPublication, err)
 		}
 		// Terminal validation/import failure cannot become publishable on replay.

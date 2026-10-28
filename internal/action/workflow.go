@@ -68,7 +68,10 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		err = checkpoints.finish(result, err)
 		if err != nil {
 			if errors.Is(err, errAcceptedResultSavedForRetry) {
-				return err // Complete result awaits host validation; replay owns retention.
+				e.logResult(prepared.job, result)
+				return errors.Join(err,
+					e.retentionForSavedResult(prepared.job, e.retainWorkerDiagnostics(prepared.job, result, err)),
+					e.retentionForSavedResult(prepared.job, e.retainReviewEvidence(prepared.job, result)))
 			}
 			evidence := checkpoints.failureEvidence()
 			err = errors.Join(err, e.retentionForSavedResult(prepared.job, e.retainWorkerDiagnostics(prepared.job, result, err)))
@@ -274,17 +277,17 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 	}
 	if p.job.Action == command.SecurityAudit {
 		if err := e.validateAuditForPublication(ctx, p.job, result.Artifacts); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return publication{}, errors.Join(ctxErr, e.retainIncompleteUnlessSaved(p, result))
+			}
 			if errors.Is(err, errAuditPublicationUnavailable) {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return publication{}, errors.Join(ctxErr, e.retainIncompleteUnlessSaved(p, result))
-				}
-				return publication{}, fmt.Errorf("%w: audit validation unavailable: %w", monitor.ErrPostModelPublication, err)
+				return publication{}, errors.Join(fmt.Errorf("%w: audit validation unavailable: %w", monitor.ErrPostModelPublication, err), e.retainIncompleteUnlessSaved(p, result))
 			}
 			return publication{}, errors.Join(fmt.Errorf("%w: invalid audit report: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 		}
 		if err := e.retainAudit(ctx, p, published.artifacts, true); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
-				return publication{}, ctxErr
+				return publication{}, errors.Join(ctxErr, e.retainIncompleteUnlessSaved(p, result))
 			}
 			return publication{}, e.retentionForSavedResult(p.job, retainedRecordFailure("retain completed audit", err))
 		}
@@ -567,6 +570,9 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	if err := p.checkout.Import(ctx, p.job.Source.Head, result.Changes); err != nil {
 		if ctx.Err() != nil {
 			return err
+		}
+		if retryableRetentionIO(err) {
+			return e.retentionForSavedResult(p.job, fmt.Errorf("%w: import action result: %w", monitor.ErrPostModelPublication, err))
 		}
 		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
 	}

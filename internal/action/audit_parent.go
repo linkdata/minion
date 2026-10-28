@@ -5,14 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 var errAuditPublicationUnavailable = errors.New("audit publishing validator is unavailable")
+var removeAuditValidationDir = os.RemoveAll
 
 // validateAuditForPublication checks received data with the publishing host's installed skill.
-func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job, files []workspace.File) (resultErr error) {
+func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job, files []workspace.File) error {
 	configured := e.Runner
 	if err := configured.ConfigureRole(job.Main); err != nil {
 		return fmt.Errorf("%w: resolve audit skill: %w", errAuditPublicationUnavailable, err)
@@ -30,12 +32,8 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		return fmt.Errorf("%w: create validation directory: %w", errAuditPublicationUnavailable, err)
 	}
 	defer func() {
-		if err := os.RemoveAll(validationDir); err != nil {
-			if resultErr == nil {
-				resultErr = fmt.Errorf("%w: remove validation directory: %w", errAuditPublicationUnavailable, err)
-			} else {
-				resultErr = errors.Join(resultErr, err)
-			}
+		if err := removeAuditValidationDir(validationDir); err != nil {
+			e.logf("audit validation scratch cleanup failed at %q: %v", validationDir, err)
 		}
 	}()
 	tools, err := checkAuditTools(ctx, validationDir, skill)
@@ -55,5 +53,7 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 }
 
 func auditValidationUnavailable(err error) bool {
-	return errors.Is(err, os.ErrNotExist) || retryableRetentionIO(err)
+	var exit *exec.ExitError
+	return errors.Is(err, os.ErrNotExist) || retryableRetentionIO(err) ||
+		errors.As(err, &exit) && exit.ProcessState != nil && exit.ProcessState.ExitCode() < 0
 }

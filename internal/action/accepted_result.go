@@ -199,7 +199,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 				return c.fail(cause)
 			}
 		}
-		if a == nil || !record.MatchesAccepted(*a) || !jobMatchesAccepted(c.job, *a) ||
+		if a == nil || !record.MatchesAccepted(*a) ||
 			!monitor.AssignmentMatchesAccepted(c.assignmentRequest, *a) || !a.Assigned || a.Terminal {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))
 		}

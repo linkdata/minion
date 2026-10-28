@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,12 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	assertNoStartupCommands(t, markers)
 	if publications != 1 || !strings.Contains(reply, "Saved answer") || !strings.HasSuffix(reply, "<!-- linkdataminion:job-1 -->") {
 		t.Fatalf("stored result was not published once: requests=%v reply=%q", requests, reply)
+	}
+	graphql := slices.Index(requests, "POST /graphql")
+	permission := slices.Index(requests, "GET /repos/owner/repo/collaborators/writer/permission")
+	publish := slices.Index(requests, "POST /repos/owner/repo/issues/7/comments")
+	if graphql < 0 || permission < 0 || publish < 0 || graphql >= publish || permission >= publish {
+		t.Fatalf("recovery skipped source or permission revalidation before publication: requests=%v", requests)
 	}
 	store, err = state.Open(statePath, time.Time{})
 	if err != nil {

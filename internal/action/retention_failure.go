@@ -34,7 +34,8 @@ func retryableRetentionIO(err error) bool {
 	}
 	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS) ||
 		errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.EIO) ||
-		errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) {
+		errors.Is(err, syscall.EMFILE) || errors.Is(err, syscall.ENFILE) ||
+		errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.ENOMEM) || errors.Is(err, syscall.ETXTBSY) {
 		return true
 	}
 	if runtime.GOOS == "windows" {

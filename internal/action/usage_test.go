@@ -1,14 +1,17 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +23,76 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	job := usageJob()
+	job.AttemptID = strings.Repeat("b", 32)
+	started := time.Now().UTC().Add(-time.Hour)
+	failedAt := started.Add(5 * time.Minute)
+	prior := usage.Record{
+		ID: job.AttemptID, JobID: job.ID, Repo: job.Repository.Name, User: job.Source.Author.Login,
+		Action: string(job.Command.Action), Provider: "codex", Model: "default", StartedAt: started,
+		FinishedAt: &failedAt, Status: "failed", ExecutorID: "local", SourceRef: strings.Repeat("a", 40),
+		UsageSource: "executor_reported", CodexCalls: 1, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageComplete: true,
+	}
+	if err := store.Save(prior); err != nil {
+		t.Fatal(err)
+	}
+	e := &Orchestrator{Usage: store}
+	e.completeRecoveredUsage(job)
+	got, found, err := store.Load(job.AttemptID)
+	if err != nil || !found || got.FinishedAt == nil || got.FinishedAt.Before(failedAt) {
+		t.Fatalf("recovered usage was not completed: record=%+v found=%t err=%v", got, found, err)
+	}
+	want := prior
+	want.Status, want.FinishedAt = "succeeded", got.FinishedAt
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recovery changed usage counters or provenance: got=%+v want=%+v", got, want)
+	}
+	e.completeRecoveredUsage(job)
+	again, found, err := store.Load(job.AttemptID)
+	if err != nil || !found || !reflect.DeepEqual(got, again) {
+		t.Fatalf("recovery changed completed usage twice: got=%+v again=%+v err=%v", got, again, err)
+	}
+	other := job
+	other.AttemptID = strings.Repeat("c", 32)
+	e.completeRecoveredUsage(other)
+	other.AttemptID, other.ID = job.AttemptID, "different-job"
+	if err := store.Save(prior); err != nil {
+		t.Fatal(err)
+	}
+	e.completeRecoveredUsage(other)
+	unchanged, found, err := store.Load(job.AttemptID)
+	if err != nil || !found || !reflect.DeepEqual(unchanged, prior) {
+		t.Fatalf("mismatched recovery replaced usage: got=%+v err=%v", unchanged, err)
+	}
+	records, err := usage.ReadAll(store.Dir)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("recovery invented a usage record: records=%+v err=%v", records, err)
+	}
+}
+
+func TestRecoveredUsageSaveFailureOnlyLogs(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	job := usageJob()
+	job.AttemptID = strings.Repeat("b", 32)
+	prior := usage.Record{
+		ID: job.AttemptID, JobID: job.ID, Repo: job.Repository.Name, User: job.Source.Author.Login,
+		Action: string(job.Command.Action), Provider: "codex", Model: "default", StartedAt: time.Now().UTC().Add(-time.Hour),
+		Status: "running", ExecutorID: "local", SourceRef: strings.Repeat("a", 40), CodexCalls: 1,
+	}
+	if err := store.Save(prior); err != nil {
+		t.Fatal(err)
+	}
+	var journal bytes.Buffer
+	e := &Orchestrator{Usage: store, Logger: log.New(&journal, "", 0)}
+	e.completeRecoveredUsage(job)
+	got, found, err := store.Load(job.AttemptID)
+	if err != nil || !found || !reflect.DeepEqual(got, prior) || !strings.Contains(journal.String(), "final recovered action usage checkpoint failed:") {
+		t.Fatalf("usage save failure changed publication evidence or went unlogged: got=%+v err=%v log=%q", got, err, journal.String())
+	}
+}
 
 func TestSelectedUsageStartsEachRetryOnItsOwnDayAndKeepsRecoveryStart(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}

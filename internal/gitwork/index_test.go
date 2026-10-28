@@ -959,7 +959,7 @@ func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "queries")
 	script := "#!/bin/sh\nfor arg do\n if [ \"$arg\" = check-ignore ]; then printf 'query\\n' >> " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-	if err := index.checkControlFiles(t.Context()); err != nil {
+	if err := index.checkControlFilesWithLimit(t.Context(), workspace.MaxEntries); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(marker)

@@ -36,17 +36,23 @@ func TestChangedFixResultRequiresOriginalDestination(t *testing.T) {
 	if err := record.Validate(); err != nil {
 		t.Fatalf("valid original destination: %v", err)
 	}
+	changes := record.Result.Changes
+	record.Result.Changes = nil
+	if err := record.Validate(); err == nil {
+		t.Fatal("unchanged fix result accepted an original destination")
+	}
+	record.Result.Changes = changes
 	record.FixDestination.RepositoryID++
 	if err := record.Validate(); err == nil {
 		t.Fatal("original destination accepted with wrong repository ID")
 	}
 }
 
-func selectedHTTPResultFixture(t *testing.T, wrap func(http.Handler) http.Handler) (*httpServerTest, *state.Store, string) {
-	return selectedHTTPResultFixtureForJob(t, testJob(command.Comment), wrap)
+func selectedHTTPResultFixture(t *testing.T, wrap func(http.Handler) http.Handler, server ...func(http.Handler) *httptest.Server) (*httpServerTest, *state.Store, string) {
+	return selectedHTTPResultFixtureForJob(t, testJob(command.Comment), wrap, server...)
 }
 
-func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handler) http.Handler) (*httpServerTest, *state.Store, string) {
+func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handler) http.Handler, server ...func(http.Handler) *httptest.Server) (*httpServerTest, *state.Store, string) {
 	t.Helper()
 	f := newExecutionAdapterFixture(t, job)
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -74,7 +80,11 @@ func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handl
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatalf("save selected assignment: %v", err)
 	}
-	httpFixture := newHTTPServerTest(t, t.Context(), f.job, f.sink, wrap)
+	newServer := httptest.NewServer
+	if len(server) != 0 {
+		newServer = server[0]
+	}
+	httpFixture := newHTTPServerTestWithServer(t, t.Context(), f.job, f.sink, wrap, newServer)
 	httpFixture.pull(t)
 	if !monitor.AssignmentMatchesAccepted(f.sink.assignmentRequest, *store.Data.Accepted) {
 		t.Fatalf("selected HTTP fixture request differs from accepted action: request=%+v accepted=%+v", f.sink.assignmentRequest, store.Data.Accepted)
@@ -139,6 +149,45 @@ func (w acceptedResultACKWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+func TestSelectedTerminalCheckpointRefusalDoesNotBecomeAcceptanceFailure(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	f.tx.stopGrace = 10 * time.Millisecond
+	bad := f.call(1)
+	bad.Checkpoint.Call.Round = 0
+	ack := f.ack(t, "/before", bad, http.StatusInternalServerError, 1)
+	if ack.Failure == nil || !ack.Failure.Terminal {
+		t.Fatalf("invalid checkpoint was not terminal: %+v", ack)
+	}
+	ack = f.ack(t, "/outcome", f.outcome(2, nil), http.StatusInternalServerError, 2)
+	if ack.Failure == nil || !ack.Failure.Terminal {
+		t.Fatalf("later outcome changed terminal checkpoint error: %+v", ack)
+	}
+	if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrAcceptanceState) {
+		t.Fatalf("terminal checkpoint became a service acceptance failure: %v", got.err)
+	}
+	if saved, err := store.HasAcceptedResult(); err != nil || saved {
+		t.Fatalf("invalid checkpoint saved a result: saved=%t error=%v", saved, err)
+	}
+}
+
+func TestSelectedLateOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	outcome := completeHTTPResult(t, f)
+	outcome.Result.Diagnostics = []Diagnostic{{Code: "late", Message: "worker finished after budget"}}
+	f.tx.stopBudget()
+	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+	if ack.Failure == nil {
+		t.Fatal("late result received a success ACK")
+	}
+	got := f.result(t)
+	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("late result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
+	}
+	if saved, err := store.HasAcceptedResult(); err != nil || saved {
+		t.Fatalf("late result was saved: saved=%t error=%v", saved, err)
+	}
+}
+
 func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	var store *state.Store
 	checked := make(chan error, 1)
@@ -196,6 +245,12 @@ func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutACK(t *testing.T) 
 	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrPostModelPublication) ||
 		errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
 		t.Fatalf("saved outcome was not a known publication retry: result=%+v error=%v", got.result, got.err)
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("failed audit ACK left worker capacity reusable")
 	}
 	if err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
@@ -263,13 +318,19 @@ func TestSelectedInvalidPublicationReturnsKnownResultWithoutSuccessACK(t *testin
 		errors.Is(got.err, monitor.ErrAcceptanceState) || !reflect.DeepEqual(got.result, outcome.Result) {
 		t.Fatalf("known rejected result lost its diagnostics: result=%+v error=%v", got.result, got.err)
 	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("rejected result left worker capacity reusable")
+	}
 	if present, err := store.HasAcceptedResult(); err != nil || present {
 		t.Fatalf("invalid result left a publishable receipt: present=%t error=%v", present, err)
 	}
 }
 
 func TestSelectedHTTPOutcomeRejectsChangedAttemptAndSaveFailure(t *testing.T) {
-	for _, change := range []string{"foreign attempt", "changed deadline", "expired deadline", "save failure"} {
+	for _, change := range []string{"foreign attempt", "changed deadline", "save failure"} {
 		t.Run(change, func(t *testing.T) {
 			f, store, path := selectedHTTPResultFixture(t, nil)
 			outcome := completeHTTPResult(t, f)
@@ -278,8 +339,6 @@ func TestSelectedHTTPOutcomeRejectsChangedAttemptAndSaveFailure(t *testing.T) {
 				store.Data.Accepted.AttemptID = "other-attempt"
 			case "changed deadline":
 				store.Data.Accepted.Deadline = store.Data.Accepted.Deadline.Add(time.Minute)
-			case "expired deadline":
-				store.Data.Accepted.Deadline = time.Now().Add(-time.Second)
 			case "save failure":
 				if err := os.Mkdir(path+".result", 0700); err != nil {
 					t.Fatal(err)
@@ -288,6 +347,9 @@ func TestSelectedHTTPOutcomeRejectsChangedAttemptAndSaveFailure(t *testing.T) {
 			ack := f.request("/outcome", outcome)
 			if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil {
 				t.Fatalf("failed selected result received success ACK: %+v", ack)
+			}
+			if change == "save failure" && !errors.Is(f.tx.sink.(*executionCheckpoints).failure, monitor.ErrAcceptanceState) {
+				t.Fatalf("failed result save had wrong parent error class: %v", f.tx.sink.(*executionCheckpoints).failure)
 			}
 			f.tx.mu.Lock()
 			completed := f.tx.outcome

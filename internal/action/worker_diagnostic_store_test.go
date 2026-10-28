@@ -98,6 +98,35 @@ func TestWorkerDiagnosticsRecordUnverifiedLocalCleanupWithoutWorkerClaims(t *tes
 	}
 }
 
+func TestRecoveredWorkerDiagnosticsPreserveCleanupFailure(t *testing.T) {
+	job := testJob(command.Comment)
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Diagnostics: []Diagnostic{{Code: "private", Message: "worker message"}}}
+	root, err := workspace.CanonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var journal bytes.Buffer
+	e := Orchestrator{WorkRoot: root, Logger: log.New(&journal, "", 0)}
+	if err := e.retainWorkerDiagnostics(job, result, errLocalWorkerCleanupUnverified); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.retainWorkerDiagnostics(job, result, nil); err != nil {
+		t.Fatalf("recovery rejected unchanged diagnostics: %v", err)
+	}
+	if strings.Count(journal.String(), "cleanup_unverified=true") != 2 {
+		t.Fatalf("recovery log lost the retained cleanup failure: %q", journal.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "worker-diagnostics", job.Identity.AttemptID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved retainedWorkerDiagnostics
+	if err := json.Unmarshal(data, &saved); err != nil || saved.CleanupUnverifiedWorkRoot != root {
+		t.Fatalf("recovery lost cleanup failure: %+v error=%v", saved, err)
+	}
+}
+
 func TestWorkerDiagnosticsRetrySyncsIdenticalRecord(t *testing.T) {
 	job := testJob(command.Comment)
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,

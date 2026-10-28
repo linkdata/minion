@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -246,7 +248,8 @@ func localWorkerReport(t *testing.T, ctx context.Context, report, suffix string)
 		if err == nil {
 			return string(data)
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, os.ErrNotExist) &&
+			!(runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)))) {
 			t.Fatalf("read worker marker %s: %v", path, err)
 		}
 		select {

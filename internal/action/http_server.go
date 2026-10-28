@@ -745,16 +745,20 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					checkpointErr, controlErr := tx.checkpointErr, tx.requiredControlErr
 					tx.mu.Unlock()
 					if checkpointErr != nil {
+						if errors.Is(checkpointErr, monitor.ErrTerminalJob) && !errors.Is(checkpointErr, monitor.ErrAcceptanceState) {
+							return errors.Join(checkpointErr, controlErr)
+						}
 						return errors.Join(monitor.ErrAcceptanceState, checkpointErr, controlErr)
 					}
 					if controlErr != nil {
 						return errors.Join(monitor.ErrExecutionOutcomeUnknown, controlErr)
 					}
 					if err := httpExecutionContextError(tx.budget); err != nil {
-						return err
+						// A late result cannot publish, but its diagnostics remain known.
+						terminalResult = err
 					}
 				}
-				if hasReceiver {
+				if hasReceiver && terminalResult == nil {
 					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
 						if !errors.Is(err, errAcceptedResultSavedForRetry) {
 							if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrAcceptanceState) ||
@@ -813,7 +817,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	var checkpointACK chan struct{}
 	if callbackErr != nil {
 		tx.mu.Lock()
-		if tx.checkpointErr == nil {
+		if kind != "outcome" && tx.checkpointErr == nil {
 			tx.checkpointErr = callbackErr
 			checkpointACK = make(chan struct{})
 			tx.checkpointACK = checkpointACK

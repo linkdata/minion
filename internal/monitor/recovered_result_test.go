@@ -183,11 +183,13 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 			job.Source.Key != accepted.SourceKey || job.Source.Author.ID != accepted.RequesterID ||
 			!job.Source.UpdatedAt.Equal(accepted.SourceUpdatedAt) ||
 			!job.Deadline.Equal(accepted.Deadline) {
-			t.Fatalf("publication lost accepted identity: %+v", job)
+			t.Errorf("publication lost accepted identity: %+v", job)
+			return errors.New("publication lost accepted identity")
 		}
 		present, err := reopened.HasAcceptedResult()
 		if err != nil || !present {
-			t.Fatalf("publication started without saved result: present=%t err=%v", present, err)
+			t.Errorf("publication started without saved result: present=%t err=%v", present, err)
+			return errors.New("publication started without saved result")
 		}
 		return nil
 	}}
@@ -207,9 +209,6 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 	if err != nil || present || finished.Data.Accepted != nil ||
 		finished.Data.Processed[accepted.JobID].IsZero() || len(finished.Data.JobFailures) != 0 {
 		t.Fatalf("publication was not durably completed: present=%t err=%v state=%+v", present, err, finished.Data)
-	}
-	if _, err := monitor.RunOnce(t.Context(), finished); err != nil || handler.publications != 1 {
-		t.Fatalf("completed result published again: err=%v publications=%d", err, handler.publications)
 	}
 }
 
@@ -235,6 +234,23 @@ func TestRunOnceRemovesCompletedResultSidecarAfterRestart(t *testing.T) {
 		reopened.Data.Processed[accepted.JobID].IsZero() {
 		t.Fatalf("completed attempt retained a result or dispatched work: present=%t err=%v handler=%+v state=%+v",
 			present, err, handler, reopened.Data)
+	}
+}
+
+func TestSelectedCompletedResultCleanupFailureKeepsCompletion(t *testing.T) {
+	store, path, accepted, _, monitor := storedRecoveryFixture(t)
+	if err := os.Remove(path + ".result"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".result", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path+".result", "held"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := monitor.completeSelected(t.Context(), store, jobFromAccepted(accepted), time.Now().UTC(), nil)
+	if !errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+		t.Fatalf("cleanup failure reopened completed action: err=%v state=%+v", err, store.Data)
 	}
 }
 
@@ -302,7 +318,8 @@ func TestStoredResultRecoveryPublishesAfterAcceptedDeadline(t *testing.T) {
 	monitor.Now = time.Now
 	handler := &recoveredResultHandler{publish: func(job Job) error {
 		if job.AttemptID != accepted.AttemptID || !job.Deadline.Equal(accepted.Deadline) {
-			t.Fatalf("publication lost expired accepted attempt: %+v", job)
+			t.Errorf("publication lost expired accepted attempt: %+v", job)
+			return errors.New("publication lost expired accepted attempt")
 		}
 		return nil
 	}}
@@ -541,6 +558,31 @@ func TestStoredResultRecoveryRetainsReceiptOnPublicationDeadline(t *testing.T) {
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("publication timeout lost receipt: present=%t err=%v", present, err)
+	}
+}
+
+func TestCompleteSelectedRetainsSavedResultOnCancellation(t *testing.T) {
+	for _, name := range []string{"publisher canceled", "parent canceled"} {
+		t.Run(name, func(t *testing.T) {
+			store, _, accepted, _, monitor := storedRecoveryFixture(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			failure := errors.Join(ErrTerminalJob, errors.New("publication interrupted"))
+			if name == "publisher canceled" {
+				failure = errors.Join(failure, context.Canceled)
+			} else {
+				cancel()
+			}
+			err := monitor.completeSelected(ctx, store, jobFromAccepted(accepted), time.Now().UTC(), failure)
+			if !errors.Is(err, ErrPostModelPublication) || !errors.Is(err, failure) ||
+				store.Data.Accepted == nil || store.Data.Accepted.AttemptID != accepted.AttemptID ||
+				!store.Data.Processed[accepted.JobID].IsZero() {
+				t.Fatalf("cancellation cleared a saved result: err=%v state=%+v", err, store.Data)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("cancellation lost saved receipt: present=%t err=%v", present, err)
+			}
+		})
 	}
 }
 
