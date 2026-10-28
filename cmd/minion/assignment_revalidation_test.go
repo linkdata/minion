@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -192,7 +191,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 				t.Fatal(err)
 			}
 			modelData, err := os.ReadFile(modelCalls)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
 				t.Fatal(err)
 			}
 			mu.Lock()

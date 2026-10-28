@@ -132,6 +132,6 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 		t.Fatalf("combined source limit +1 was accepted: %v", err)
 	}
 	if entries, err := os.ReadDir(checkout.path); err != nil || len(entries) != 1 || entries[0].Name() != ".git" {
-		t.Fatalf("read-only preparation materialized a second worktree: %v,%v", entries, err)
+		t.Fatalf("snapshot materialized worktree files: %v, %v", entries, err)
 	}
 }

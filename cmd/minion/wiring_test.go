@@ -73,6 +73,10 @@ func TestServiceWiringSnapshotsNativeCodexCredentials(t *testing.T) {
 	if got.NativeAPIKey != "native-key" || got.NativeAccessToken != "native-token" {
 		t.Fatal("selected startup recovery lost ambient Codex credentials")
 	}
+	got = newOrchestrator(config.Config{Main: "claude", Adversarial: "codex"}, nil, nil, nil, nil).Runner.Codex
+	if got.NativeAPIKey != "native-key" || got.NativeAccessToken != "native-token" {
+		t.Fatal("selected Codex critic lost ambient credentials")
+	}
 	got = newOrchestrator(config.Config{Codex: config.CodexConfig{NativeAPIKey: "validated-key", NativeAccessToken: "validated-token"}}, nil, nil, nil, nil).Runner.Codex
 	if got.NativeAPIKey != "validated-key" || got.NativeAccessToken != "validated-token" {
 		t.Fatalf("validated Codex credentials changed before dispatch: %+v", got)

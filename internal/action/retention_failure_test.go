@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -55,25 +57,6 @@ func TestRetentionFailureClassification(t *testing.T) {
 	}
 }
 
-func TestWindowsPrivateRecordRenameContentionKeepsSavedResultRetryable(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Win32 rename errors")
-	}
-	job := testJob(command.Comment)
-	store, _, _ := savedRecoveryFixture(t, job, completedRecoveryResult(job))
-	e := &Orchestrator{Store: store}
-	for _, code := range []syscall.Errno{32, 33} {
-		cause := &os.LinkError{Op: "rename", Old: "temporary", New: "record", Err: code}
-		err := e.retentionForSavedResult(job, retainedRecordFailure("save private record", cause))
-		if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, cause) {
-			t.Fatalf("Win32 rename contention %d lost saved-result retry: %v", code, err)
-		}
-		if present, err := store.HasAcceptedResult(); err != nil || !present {
-			t.Fatalf("Win32 rename contention %d lost saved result: present=%t error=%v", code, present, err)
-		}
-	}
-}
-
 func TestRetentionFailureNeedsSavedResultForPublicationRetry(t *testing.T) {
 	job := testJob(command.Comment)
 	cause := retainedRecordFailure("save private record", syscall.EMFILE)
@@ -98,6 +81,22 @@ func TestRetentionFailureNeedsSavedResultForPublicationRetry(t *testing.T) {
 	}
 	if err := e.retentionForSavedResult(job, cause); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("missing saved result enabled retry: %v", err)
+	}
+}
+
+func TestImportDiskFullWithGitExitKeepsSavedResultRetryable(t *testing.T) {
+	for _, errno := range []error{syscall.ENOSPC, syscall.EDQUOT} {
+		gitExit := &exec.ExitError{}
+		failure := errors.Join(errno, gitExit)
+		if retryableHostIO(failure) || !retryableImportIO(failure) {
+			t.Fatalf("Git exit masked retryable disk errno %T", errno)
+		}
+		if retryableImportIO(errors.Join(failure, gitwork.ErrUnsupportedSource)) {
+			t.Fatalf("Git source rejection was treated as host I/O for %T", errno)
+		}
+	}
+	if retryableImportIO(&exec.ExitError{}) {
+		t.Fatal("ordinary Git failure became retryable host I/O")
 	}
 }
 

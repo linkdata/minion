@@ -10,10 +10,10 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-// Retention can be retried from a saved result only when every cause is a host
+// Host I/O can be retried from a saved result only when every cause is a host
 // I/O failure. A joined content mismatch must remain terminal even if another
 // operation (such as a rename) also failed with a retryable I/O error.
-func retryableRetentionIO(err error) bool {
+func retryableHostIO(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -23,14 +23,14 @@ func retryableRetentionIO(err error) bool {
 			return false
 		}
 		for _, cause := range causes {
-			if !retryableRetentionIO(cause) {
+			if !retryableHostIO(cause) {
 				return false
 			}
 		}
 		return true
 	}
 	if wrapped := errors.Unwrap(err); wrapped != nil {
-		return retryableRetentionIO(wrapped)
+		return retryableHostIO(wrapped)
 	}
 	if errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS) ||
 		errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT) || errors.Is(err, syscall.EIO) ||
@@ -48,7 +48,7 @@ func retryableRetentionIO(err error) bool {
 
 func retainedRecordFailure(stage string, err error) error {
 	marker := monitor.ErrTerminalJob
-	if retryableRetentionIO(err) {
+	if retryableHostIO(err) {
 		marker = monitor.ErrPostModelPublication
 	}
 	return fmt.Errorf("%w: %s: %w", marker, stage, err)

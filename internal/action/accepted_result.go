@@ -1,7 +1,6 @@
 package action
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -101,10 +100,7 @@ func (r AcceptedResultRecord) Validate() error {
 // DecodeAcceptedResultRecord validates bounded, typed state sidecar contents.
 func DecodeAcceptedResultRecord(data []byte) (AcceptedResultRecord, error) {
 	var record AcceptedResultRecord
-	if int64(len(data)) > AcceptedResultMaxBytes {
-		return record, errHTTPBodyLimit
-	}
-	if err := httpDecode(bytes.NewReader(data), int(AcceptedResultMaxBytes), &record); err != nil {
+	if err := httpDecodeBytes(data, int(AcceptedResultMaxBytes), &record); err != nil {
 		return AcceptedResultRecord{}, err
 	}
 	if err := record.Validate(); err != nil {

@@ -736,7 +736,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				receiver, hasReceiver := tx.sink.(interface{ ReceiveCompletedResult(Result) error })
 				if selected, ok := tx.sink.(assignmentCheckpoint); ok && selected.AssignmentRequired() {
 					if !hasReceiver {
-						return fmt.Errorf("%w: selected HTTP outcome receiver is missing", monitor.ErrAcceptanceState)
+						terminalResult = fmt.Errorf("%w: selected HTTP outcome receiver is missing", monitor.ErrAcceptanceState)
 					}
 					// Earlier callbacks release mutation ownership before their ACK writes.
 					// Their delivery must be known before a complete result is saved.
@@ -746,29 +746,24 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					tx.mu.Unlock()
 					if checkpointErr != nil {
 						if errors.Is(checkpointErr, monitor.ErrTerminalJob) && !errors.Is(checkpointErr, monitor.ErrAcceptanceState) {
-							return errors.Join(checkpointErr, controlErr)
+							terminalResult = errors.Join(terminalResult, checkpointErr, controlErr)
+						} else {
+							terminalResult = errors.Join(terminalResult, monitor.ErrAcceptanceState, checkpointErr, controlErr)
 						}
-						return errors.Join(monitor.ErrAcceptanceState, checkpointErr, controlErr)
-					}
-					if controlErr != nil {
-						return errors.Join(monitor.ErrExecutionOutcomeUnknown, controlErr)
-					}
-					if err := httpExecutionContextError(tx.budget); err != nil {
+					} else if controlErr != nil {
+						terminalResult = errors.Join(terminalResult, monitor.ErrExecutionOutcomeUnknown, controlErr)
+					} else if err := httpExecutionContextError(tx.budget); err != nil {
 						// A late result cannot publish, but its diagnostics remain known.
-						terminalResult = err
+						terminalResult = errors.Join(terminalResult, err)
 					}
 				}
 				if hasReceiver && terminalResult == nil {
 					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
-						if !errors.Is(err, errAcceptedResultSavedForRetry) {
-							if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrAcceptanceState) ||
-								errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-								return err
-							}
+						if errors.Is(err, errAcceptedResultSavedForRetry) {
+							savedRetry = err
+						} else {
 							// The result is known but refused: retain its diagnostics without a success ACK.
 							terminalResult = err
-						} else {
-							savedRetry = err
 						}
 					}
 				}

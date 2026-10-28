@@ -105,6 +105,30 @@ func TestSelectedFixOutcomePersistsOriginalDestination(t *testing.T) {
 	}
 }
 
+func TestPublishRecoveredRejectsResultFromPriorAcceptedAttempt(t *testing.T) {
+	job := testJob(command.Comment)
+	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	store.Data.Accepted.AttemptID = "fedcba9876543210fedcba9876543210"
+	request.AttemptID = store.Data.Accepted.AttemptID
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if !monitor.AssignmentMatchesAccepted(request, *store.Data.Accepted) {
+		t.Fatal("new request does not match its accepted attempt")
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Errorf("old result reached GitHub: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests.Load() != 0 {
+		t.Fatalf("old result was accepted for new attempt: requests=%d error=%v", requests.Load(), err)
+	}
+}
+
 func completeHTTPResult(t *testing.T, f *httpServerTest) httpOutcome {
 	t.Helper()
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
@@ -151,7 +175,6 @@ func (w acceptedResultACKWriter) WriteHeader(status int) {
 
 func TestSelectedTerminalCheckpointRefusalDoesNotBecomeAcceptanceFailure(t *testing.T) {
 	f, store, _ := selectedHTTPResultFixture(t, nil)
-	f.tx.stopGrace = 10 * time.Millisecond
 	bad := f.call(1)
 	bad.Checkpoint.Call.Round = 0
 	ack := f.ack(t, "/before", bad, http.StatusInternalServerError, 1)
@@ -162,6 +185,13 @@ func TestSelectedTerminalCheckpointRefusalDoesNotBecomeAcceptanceFailure(t *test
 	if ack.Failure == nil || !ack.Failure.Terminal {
 		t.Fatalf("later outcome changed terminal checkpoint error: %+v", ack)
 	}
+	f.tx.mu.Lock()
+	stopCancel := f.tx.stopCancel
+	f.tx.mu.Unlock()
+	if stopCancel == nil {
+		t.Fatal("refused checkpoint did not start control drain")
+	}
+	stopCancel() // End the test's post-stop collection grace.
 	if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) || errors.Is(got.err, monitor.ErrAcceptanceState) {
 		t.Fatalf("terminal checkpoint became a service acceptance failure: %v", got.err)
 	}
@@ -219,7 +249,7 @@ func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	}
 }
 
-func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutACK(t *testing.T) {
+func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutSuccessACK(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	nodePath := os.Getenv("PATH")
@@ -354,8 +384,12 @@ func TestSelectedHTTPOutcomeRejectsChangedAttemptAndSaveFailure(t *testing.T) {
 			f.tx.mu.Lock()
 			completed := f.tx.outcome
 			f.tx.mu.Unlock()
-			if completed {
-				t.Fatal("failed selected result marked transaction complete")
+			if !completed {
+				t.Fatal("refused complete result did not seal its known outcome")
+			}
+			if got := f.result(t); !reflect.DeepEqual(got.result, outcome.Result) ||
+				!errors.Is(got.err, monitor.ErrAcceptanceState) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("refused complete result lost its known outcome: result=%+v error=%v", got.result, got.err)
 			}
 			if change != "save failure" {
 				if _, err := store.ReadAcceptedResult(AcceptedResultMaxBytes); !errors.Is(err, os.ErrNotExist) {
@@ -415,7 +449,10 @@ func TestSelectedHTTPOutcomeRequiresCompletionReceiver(t *testing.T) {
 	f.tx.mu.Lock()
 	completed := f.tx.outcome
 	f.tx.mu.Unlock()
-	if completed {
-		t.Fatal("selected outcome without durable receiver marked transaction complete")
+	if !completed {
+		t.Fatal("selected outcome without durable receiver was not sealed")
+	}
+	if got := f.result(t); !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrAcceptanceState) {
+		t.Fatalf("selected outcome without durable receiver lost its refusal: result=%+v error=%v", got.result, got.err)
 	}
 }

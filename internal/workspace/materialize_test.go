@@ -111,6 +111,16 @@ func TestChangedFilesPreservesSeparateTransferLimits(t *testing.T) {
 	if total != MaxBytes+len(data) {
 		t.Fatalf("separate transfers lost bytes: got %d, want %d", total, MaxBytes+len(data))
 	}
+	root := privateRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "occupied"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeChanges(root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace root is not empty") {
+		t.Fatalf("public materialization rejected the separate limits: %v", err)
+	}
+	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed: added") {
+		t.Fatalf("public candidate check rejected the separate limits: %v", err)
+	}
 	byteOverflow := append(slices.Clone(base[:MaxBytes/len(data)]), File{Path: changes[0].Path, Mode: Regular, Data: data})
 	if err := validateFiles(byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
 		t.Fatalf("candidate canary widened source byte limit: %v", err)

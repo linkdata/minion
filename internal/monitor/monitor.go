@@ -1540,8 +1540,6 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 				return invalidSource
 			}
 			job.Repository, job.Source = repo, current
-			job.Source.HTMLURL = accepted.SourceURL
-			job.Source.UpdatedAt = accepted.SourceUpdatedAt // Reply lookup uses the original command timestamp.
 			return publisher.PublishRecovered(runCtx, job)
 		}, func(err error) error {
 			if errors.Is(err, invalidSource) {

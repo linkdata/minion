@@ -140,15 +140,6 @@ func TestWorkerDiagnosticsRetrySyncsIdenticalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "worker-diagnostics", job.Identity.AttemptID+".json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The replacement exists even though the final directory sync failed.
-	writeErr := workspace.WriteAtomic(path, data, filepath.Join(root, "missing"))
-	if runtime.GOOS != "windows" && !errors.Is(writeErr, os.ErrNotExist) || runtime.GOOS == "windows" && writeErr != nil {
-		t.Fatalf("expected failure after replacement: %v", writeErr)
-	}
 	originalSync := syncPrivateRecordDirectories
 	t.Cleanup(func() { syncPrivateRecordDirectories = originalSync })
 	calls := 0

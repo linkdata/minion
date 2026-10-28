@@ -135,6 +135,9 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 	if expected.SHA != "" {
 		return fmt.Errorf("branch %s is unavailable with recorded bot commit %s; refusing to replace the checkpoint", p.branch, expected.SHA)
 	}
+	if err := gitwork.Check(ctx, e.WorkRoot); err != nil {
+		return fmt.Errorf("Git readiness before recovered fix: %w", err)
+	}
 	p.checkout, err = gitwork.RestoreCheckout(ctx, e.WorkRoot, p.job.Source)
 	if err != nil {
 		return err

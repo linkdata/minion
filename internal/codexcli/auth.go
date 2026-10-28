@@ -11,8 +11,8 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-// CaptureAmbientNativeCredentials binds inherited auth to this CLI call so it
-// can be redacted and cannot silently change between calls in one session.
+// CaptureAmbientNativeCredentials snapshots inherited auth for redaction and
+// keeps it fixed across validation, recovery and CLI calls in one session.
 func CaptureAmbientNativeCredentials(settings config.CodexConfig) config.CodexConfig {
 	if settings.APIKey == "" && settings.NativeAPIKey == "" && settings.NativeAccessToken == "" {
 		settings.NativeAPIKey = os.Getenv("CODEX_API_KEY")

@@ -3,6 +3,7 @@ package gitwork
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/workspace"
@@ -60,7 +61,7 @@ func TestRestoreCheckoutRejectsChangedPinnedFilesAndCleansUp(t *testing.T) {
 	snapshot.Files[0].Data = []byte("changed")
 	root := t.TempDir()
 	checkout, err := RestoreCheckout(t.Context(), root, snapshot)
-	if err == nil || checkout != nil {
+	if err == nil || checkout != nil || !strings.Contains(err.Error(), "source files differ from pinned repository") {
 		t.Fatalf("changed source returned checkout=%v error=%v", checkout, err)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {

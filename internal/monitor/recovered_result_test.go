@@ -252,6 +252,13 @@ func TestSelectedCompletedResultCleanupFailureKeepsCompletion(t *testing.T) {
 	if !errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
 		t.Fatalf("cleanup failure reopened completed action: err=%v state=%+v", err, store.Data)
 	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, time.Time{})
+	if reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() {
+		t.Fatalf("cleanup failure was not durably completed: %+v", reopened.Data)
+	}
 }
 
 func TestSelectedCompletionSaveFailureRetainsReceiptForRestart(t *testing.T) {

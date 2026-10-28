@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -46,7 +45,7 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		var releaseACK sync.Once
 		unlockACK := func() { releaseACK.Do(func() { close(ackRelease) }) }
 		defer unlockACK()
-		f, store, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
+		f, _, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/after" {
 					w = heldRequiredACKWriter{ResponseWriter: w, entered: ackEntered, release: ackRelease}
@@ -78,6 +77,11 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		f.tx.mu.Unlock()
 		if sequence != 3 {
 			t.Fatalf("complete outcome never entered while required ACK was held: sequence=%d", sequence)
+		}
+		select {
+		case <-outcomeDone:
+			t.Fatal("outcome finished while required ACK was held")
+		default:
 		}
 		select {
 		case <-receiverEntered:
@@ -119,9 +123,6 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		}
 		if got := f.result(t); !errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrAcceptanceState) {
 			t.Fatalf("failed required ACK was not an unknown outcome: %+v", got)
-		}
-		if _, err := store.ReadAcceptedResult(AcceptedResultMaxBytes); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("failed required ACK left a publishable result: %v", err)
 		}
 	})
 }

@@ -2,14 +2,15 @@ package action
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
@@ -289,6 +290,9 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return publication{}, errors.Join(ctxErr, e.retainIncompleteUnlessSaved(p, result))
 			}
+			if errors.Is(err, errRetainedAuditMismatch) {
+				return publication{}, e.retentionForSavedResult(p.job, fmt.Errorf("%w: retain completed audit: %w", monitor.ErrPostModelPublication, err))
+			}
 			return publication{}, e.retentionForSavedResult(p.job, retainedRecordFailure("retain completed audit", err))
 		}
 	}
@@ -402,6 +406,8 @@ func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) e
 	return e.retainAudit(context.Background(), p, safe, false)
 }
 
+var errRetainedAuditMismatch = errors.New("retained completed audit differs from accepted result")
+
 func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files []workspace.File, complete bool) (resultErr error) {
 	if complete {
 		if err := ctx.Err(); err != nil {
@@ -413,12 +419,10 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 		return err
 	}
 	if complete {
-		// A fixed hash keeps each accepted attempt in one portable directory.
-		identity := sha256.Sum256([]byte(p.job.Identity.JobID + "\x00" + p.job.Identity.AttemptID))
-		dir := filepath.Join(root, fmt.Sprintf("complete-%x", identity[:]))
+		dir := filepath.Join(root, "complete-"+p.job.Identity.AttemptID)
 		if _, err := os.Lstat(dir); err == nil {
 			if err := workspace.CheckUnchanged(ctx, dir, files); err != nil {
-				return fmt.Errorf("retained completed audit differs from accepted result: %w", err)
+				return fmt.Errorf("%w at %q: %w", errRetainedAuditMismatch, dir, err)
 			}
 		} else {
 			if !errors.Is(err, os.ErrNotExist) {
@@ -571,7 +575,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		if ctx.Err() != nil {
 			return err
 		}
-		if retryableRetentionIO(err) {
+		if retryableImportIO(err) {
 			return e.retentionForSavedResult(p.job, fmt.Errorf("%w: import action result: %w", monitor.ErrPostModelPublication, err))
 		}
 		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
@@ -594,6 +598,18 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		return err
 	}
 	return e.publishFixReply(ctx, p)
+}
+
+// Git includes its exit status beside a typed disk-full errno; the exit status
+// does not turn that host fault into a source-content failure.
+func retryableImportIO(err error) bool {
+	if retryableHostIO(err) {
+		return true
+	}
+	var exit *exec.ExitError
+	return errors.As(err, &exit) &&
+		(errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT)) &&
+		!errors.Is(err, gitwork.ErrUnsupportedSource)
 }
 
 func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) error {

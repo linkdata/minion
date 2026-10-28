@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,11 +80,14 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		t.Fatal(err)
 	}
 
+	var mu sync.Mutex
 	var requests []string
 	var reply string
 	publications := 0
 	previousTransport := http.DefaultTransport
 	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		key := request.Method + " " + request.URL.Path
 		requests = append(requests, key)
 		recorder := httptest.NewRecorder()
@@ -119,6 +123,11 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		return recorder.Result(), nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	snapshot := func() ([]string, string, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(requests), reply, publications
+	}
 
 	cfg := config.Config{BotLogin: "bot", StatePath: statePath, WorkRoot: root,
 		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
@@ -137,14 +146,15 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		t.Fatalf("stored result recovery ran preflight or worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
 	assertNoStartupCommands(t, markers)
-	if publications != 1 || !strings.Contains(reply, "Saved answer") || !strings.HasSuffix(reply, "<!-- linkdataminion:job-1 -->") {
-		t.Fatalf("stored result was not published once: requests=%v reply=%q", requests, reply)
+	observedRequests, observedReply, observedPublications := snapshot()
+	if observedPublications != 1 || !strings.Contains(observedReply, "Saved answer") || !strings.HasSuffix(observedReply, "<!-- linkdataminion:job-1 -->") {
+		t.Fatalf("stored result was not published once: requests=%v reply=%q", observedRequests, observedReply)
 	}
-	graphql := slices.Index(requests, "POST /graphql")
-	permission := slices.Index(requests, "GET /repos/owner/repo/collaborators/writer/permission")
-	publish := slices.Index(requests, "POST /repos/owner/repo/issues/7/comments")
+	graphql := slices.Index(observedRequests, "POST /graphql")
+	permission := slices.Index(observedRequests, "GET /repos/owner/repo/collaborators/writer/permission")
+	publish := slices.Index(observedRequests, "POST /repos/owner/repo/issues/7/comments")
 	if graphql < 0 || permission < 0 || publish < 0 || graphql >= publish || permission >= publish {
-		t.Fatalf("recovery skipped source or permission revalidation before publication: requests=%v", requests)
+		t.Fatalf("recovery skipped source or permission revalidation before publication: requests=%v", observedRequests)
 	}
 	store, err = state.Open(statePath, time.Time{})
 	if err != nil {
@@ -209,7 +219,8 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
 		t.Fatalf("loop did not use resolved service config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
-	if publications != 2 {
-		t.Fatalf("loop did not recover the saved result before preflight: publications=%d", publications)
+	_, _, observedPublications = snapshot()
+	if observedPublications != 2 {
+		t.Fatalf("loop did not recover the saved result before preflight: publications=%d", observedPublications)
 	}
 }

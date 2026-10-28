@@ -27,7 +27,6 @@ func TestCanceledSavedAuditDoesNotRetainIncompleteCopy(t *testing.T) {
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
 	root := t.TempDir()
-	t.Setenv("PATH", t.TempDir()) // Make the publishing validator unavailable after save.
 	e := &Orchestrator{Store: store, WorkRoot: root}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

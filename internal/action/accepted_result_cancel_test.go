@@ -21,7 +21,7 @@ func TestCanceledSelectedAuditDoesNotSaveUnavailableValidatorResult(t *testing.T
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // The publishing validator is interrupted after worker completion.
+	cancel() // The parent has canceled before the completed result reaches validation.
 	sink := f.tx.sink.(*executionCheckpoints)
 	sink.assignmentContext = ctx
 	err := sink.ReceiveCompletedResult(outcome.Result)

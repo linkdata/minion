@@ -36,8 +36,8 @@ func TestAuditValidationUnavailableOnSignaledValidator(t *testing.T) {
 
 func TestCanceledAuditValidationRetainsIncompleteInProcess(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
-	bin := t.TempDir()
-	startedPath, holdPath := filepath.Join(bin, "started"), filepath.Join(bin, "hold")
+	pipes := t.TempDir()
+	startedPath, holdPath := filepath.Join(pipes, "started"), filepath.Join(pipes, "hold")
 	for _, path := range []string{startedPath, holdPath} {
 		if err := syscall.Mkfifo(path, 0600); err != nil {
 			t.Fatal(err)
@@ -56,12 +56,15 @@ func TestCanceledAuditValidationRetainsIncompleteInProcess(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		_, err := e.preparePublication(ctx, &preparedAction{job: job}, result)
 		done <- err
 	}()
 	marker := make(chan error, 1)
 	go func() {
+		defer close(marker)
 		var signal [7]byte
 		_, err := io.ReadFull(started, signal[:])
 		if err == nil && string(signal[:]) != "started" {
@@ -69,11 +72,27 @@ func TestCanceledAuditValidationRetainsIncompleteInProcess(t *testing.T) {
 		}
 		marker <- err
 	}()
+	defer func() {
+		cancel()
+		_, _ = started.Write([]byte("started")) // Unblock the marker reader on early failure.
+		select {
+		case <-marker:
+		case <-time.After(5 * time.Second):
+			t.Error("marker reader did not stop")
+		}
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("validator did not stop")
+		}
+	}()
 	select {
 	case err := <-marker:
 		if err != nil {
 			t.Fatal(err)
 		}
+	case err := <-done:
+		t.Fatalf("audit preparation ended before validator started: %v", err)
 	case <-time.After(10 * time.Second):
 		t.Fatal("validator did not start")
 	}

@@ -54,6 +54,6 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 
 func auditValidationUnavailable(err error) bool {
 	var exit *exec.ExitError
-	return errors.Is(err, os.ErrNotExist) || retryableRetentionIO(err) ||
+	return errors.Is(err, os.ErrNotExist) || retryableHostIO(err) ||
 		errors.As(err, &exit) && exit.ProcessState != nil && exit.ProcessState.ExitCode() < 0
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -473,6 +474,49 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchLookup(t *testing.T
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies.Load() != 1 ||
 		branchLookups.Load() != 2 || !strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
 		t.Fatalf("matching checkpoint was not reused: branch_lookups=%d replies=%d comment=%q checkpoint=%+v error=%v", branchLookups.Load(), replies.Load(), comment, store.Data.PendingFixes[request.ID], err)
+	}
+}
+
+func TestPublishRecoveredFixChecksGitBeforeRestoringSource(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	job.Identity.Repository = "o/r"
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
+	store, _, request := savedRecoveryFixture(t, job, result)
+	testsupport.FakeOnPath(t, "git", "#!/bin/sh\nprintf 'git version 2.44.0\\n'\n")
+	var writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case serveSafeForkChecks(w, r, "bot/r", false):
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/minion/fix-7-aaaaaaaaaaaa":
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected recovered fix request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}}
+	if err := e.PublishRecovered(t.Context(), request); err == nil || !strings.Contains(err.Error(), "Git 2.45.1 or later") || writes.Load() != 0 {
+		t.Fatalf("unchecked Git reached recovery publication: writes=%d error=%v", writes.Load(), err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("Git preflight discarded saved result: present=%t error=%v", present, err)
 	}
 }
 
