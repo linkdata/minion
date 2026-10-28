@@ -83,7 +83,10 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			return err
 		}
 	}
-	return e.publish(ctx, prepared, result)
+	if err := e.publish(ctx, prepared, result); err != nil {
+		return err
+	}
+	return e.recordPublishedOutcome(request)
 }
 
 func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepared *preparedAction, resultErr error) {

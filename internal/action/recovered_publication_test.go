@@ -182,6 +182,9 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || reads.Load() != 2 || writes.Load() != 0 || rootChecks != 0 {
 		t.Fatalf("posted marker was not reconciled: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
 	}
+	if decision := store.Data.TerminalDecisions[request.ID]; decision.Outcome != "succeeded" || !store.Data.Accepted.Terminal {
+		t.Fatalf("reconciled publication did not record success before monitor cleanup: %+v", store.Data)
+	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("reconciliation removed result before monitor state save: present=%t error=%v", present, err)
 	}
@@ -248,7 +251,10 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
+	// A separate state file models restart before the first publication decision was saved.
+	retryStore, _, retryRequest := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	orchestrator.Store = retryStore
+	if err := orchestrator.PublishRecovered(t.Context(), retryRequest); err != nil {
 		t.Fatal(err)
 	}
 	review := posted.Load()

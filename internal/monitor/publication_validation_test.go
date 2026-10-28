@@ -430,6 +430,36 @@ func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
 	}
 }
 
+func TestSelectedSuccessBeforeLateParentStopStaysSucceeded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m, store, job, _, _ := assignmentValidationFixture(t)
+		now := time.Now().UTC()
+		job.AcceptedAt, job.Deadline = now, now.Add(time.Minute)
+		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
+		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
+		store.Data.NextInviteCheckAt = now.Add(time.Hour)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		parent, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		m.afterSelectedRunReturn = func() {
+			cancel()
+			synctest.Wait() // Let the stop path run before the delayed success decision.
+		}
+		run := func(context.Context, Job) error {
+			return store.WithLock(func() error {
+				store.Data.Accepted.Assigned = true
+				return store.Save()
+			})
+		}
+		_ = m.runSelectedWithControls(parent, store, job, "", nil, run, func(error) error { return nil })
+		if got := store.Data.TerminalDecisions[job.ID].Outcome; got != "succeeded" {
+			t.Fatalf("late parent cancellation changed published success to %q", got)
+		}
+	})
+}
+
 func TestSelectedSavedResultRetrySurvivesSlowInvitationCheck(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m, store, job, gh, _ := assignmentValidationFixture(t)
@@ -460,7 +490,11 @@ func TestSelectedSavedResultRetrySurvivesSlowInvitationCheck(t *testing.T) {
 				if err := store.Save(); err != nil {
 					return err
 				}
-				return store.WriteAcceptedResult([]byte(`{"result":"saved-before-timeout"}`))
+				if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-timeout"}`)); err != nil {
+					return err
+				}
+				store.Data.Accepted.ResultReady = true
+				return store.Save()
 			}); err != nil {
 				return err
 			}
@@ -606,6 +640,10 @@ func TestCompleteSelectedKeepsSavedResultAfterInnerRequestDeadline(t *testing.T)
 		t.Fatal(err)
 	}
 	if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-timeout"}`)); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted.ResultReady = true
+	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
 	err := m.completeSelected(t.Context(), store, job, time.Now().UTC(), context.DeadlineExceeded)

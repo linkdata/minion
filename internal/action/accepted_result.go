@@ -202,37 +202,46 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 		if err := writeResult(data); err != nil {
 			return c.fail(fmt.Errorf("%w: save accepted result: %w", monitor.ErrAcceptanceState, err))
 		}
-		// A durable write may cross the original deadline. Its receipt then remains
-		// diagnostic evidence, but cannot authorize a new publication on replay.
-		var outcome string
-		var cause error
-		if c.assignmentContext != nil {
-			cause = httpExecutionContextError(c.assignmentContext)
-		}
-		if errors.Is(cause, context.Canceled) {
-			outcome = "canceled" // The context retains a cancellation that won before its deadline.
-		} else if errors.Is(cause, context.DeadlineExceeded) {
-			if inner, ok := c.assignmentContext.Deadline(); ok && inner.Before(a.Deadline) {
-				outcome = "failed" // An inner runtime limit does not expire the original action.
+		// Both durable writes may cross the deadline; check again before an ACK.
+		checkEnded := func() error {
+			var outcome string
+			var cause error
+			if c.assignmentContext != nil {
+				cause = httpExecutionContextError(c.assignmentContext)
 			}
-		}
-		if outcome == "" && !time.Now().Before(a.Deadline) {
-			outcome, cause = "expired", errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
-		} else if outcome == "" && cause != nil {
-			outcome = "failed"
-		}
-		if outcome != "" {
+			if errors.Is(cause, context.Canceled) {
+				outcome = "canceled" // The context retains a cancellation that won before its deadline.
+			} else if errors.Is(cause, context.DeadlineExceeded) {
+				if inner, ok := c.assignmentContext.Deadline(); ok && inner.Before(a.Deadline) {
+					outcome = "failed" // An inner runtime limit does not expire the original action.
+				}
+			}
+			if outcome == "" && !time.Now().Before(a.Deadline) {
+				outcome, cause = "expired", errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+			} else if outcome == "" && cause != nil {
+				outcome = "failed"
+			}
+			if outcome == "" {
+				return nil
+			}
 			if _, err := c.owner.Store.DecideTerminalLocked(c.job.Identity.JobID, c.job.Identity.AttemptID, outcome, time.Now()); err != nil {
 				return c.fail(fmt.Errorf("%w: save terminal result decision: %w", monitor.ErrAcceptanceState, err))
 			}
 			return c.fail(cause)
 		}
+		if err := checkEnded(); err != nil {
+			return err
+		}
 		a.ResultReady = true
-		if err := c.owner.Store.Save(); err != nil {
+		saveResult := c.owner.Store.Save
+		if c.saveAcceptedResult != nil {
+			saveResult = c.saveAcceptedResult
+		}
+		if err := saveResult(); err != nil {
 			a.ResultReady = false
 			return c.fail(fmt.Errorf("%w: commit accepted result: %w", monitor.ErrAcceptanceState, err))
 		}
-		return nil
+		return checkEnded()
 	}); err != nil {
 		return err
 	}

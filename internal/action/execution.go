@@ -66,6 +66,7 @@ type executionCheckpoints struct {
 	assignmentRequest   monitor.Job
 	fixDestination      *FixDestination
 	writeAcceptedResult func([]byte) error // Test seam for a save that crosses the deadline.
+	saveAcceptedResult  func() error       // Test seam for the result commit crossing the deadline.
 }
 
 func newExecutionCheckpoints(owner *Orchestrator, job Job) *executionCheckpoints {

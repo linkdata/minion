@@ -48,13 +48,19 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}
 	var accepted state.AcceptedAction
 	var data []byte
+	var completed bool
 	if err := e.Store.WithLock(func() error {
 		if e.Store.Data.Accepted == nil {
 			return errors.New("accepted action is missing")
 		}
 		accepted = *e.Store.Data.Accepted
-		_, decided := e.Store.Data.TerminalDecisions[request.ID]
+		decision, decided := e.Store.Data.TerminalDecisions[request.ID]
 		if accepted.Terminal || decided {
+			if decided && decision.AttemptID == request.AttemptID && decision.Outcome == "succeeded" &&
+				monitor.AssignmentMatchesAccepted(request, accepted) {
+				completed = true
+				return nil
+			}
 			return fmt.Errorf("%w: accepted action is already terminal", monitor.ErrTerminalJob)
 		}
 		if !accepted.ResultReady {
@@ -69,6 +75,9 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		}
 		return fmt.Errorf("%w: read accepted result: %w", monitor.ErrAcceptanceState, err)
 	}
+	if completed {
+		return nil
+	}
 	record, err := DecodeAcceptedResultRecord(data)
 	if err != nil {
 		return fmt.Errorf("%w: decode accepted result: %w", monitor.ErrAcceptanceState, err)
@@ -77,8 +86,11 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		return fmt.Errorf("%w: accepted result differs from current action", monitor.ErrAcceptanceState)
 	}
 	acknowledged, err := e.alreadyAcknowledged(ctx, request)
-	if err != nil || acknowledged {
+	if err != nil {
 		return err
+	}
+	if acknowledged {
+		return e.recordPublishedOutcome(request)
 	}
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
@@ -94,9 +106,14 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}
 	p := &preparedAction{request: request, job: record.Job}
 	if p.job.Action != command.Fix {
-		return e.publish(ctx, p, record.Result)
+		err = e.publish(ctx, p, record.Result)
+	} else {
+		err = e.publishRecoveredFix(ctx, p, record.Result, record.FixDestination)
 	}
-	return e.publishRecoveredFix(ctx, p, record.Result, record.FixDestination)
+	if err != nil {
+		return err
+	}
+	return e.recordPublishedOutcome(request)
 }
 
 func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedAction, result Result, original *FixDestination) error {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -107,14 +108,15 @@ func (j Job) Marker() string {
 }
 
 type Monitor struct {
-	Config             config.Config
-	ConfigPath         string
-	GitHub             GitHub
-	Handler            ActionHandler
-	Logger             *log.Logger
-	Now                func() time.Time
-	SelectedCommands   map[string]bool // Non-nil freezes discovery to the selected worker's commands.
-	SelectedExecutorID string          // Nonempty only while a selected local worker owns actions.
+	Config                 config.Config
+	ConfigPath             string
+	GitHub                 GitHub
+	Handler                ActionHandler
+	Logger                 *log.Logger
+	Now                    func() time.Time
+	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
+	SelectedExecutorID     string          // Nonempty only while a selected local worker owns actions.
+	afterSelectedRunReturn func()          // Test seam between worker return and terminal decision.
 }
 
 // NewAttemptID returns a random ID shared by acceptance and action records.
@@ -1733,6 +1735,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	}
 	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
+	var completionMu sync.Mutex
+	var successfulReturn bool
 	recordAssignedStop := func(stoppedAt time.Time, cause error) error {
 		parentDeadline, _ := ctx.Deadline()
 		outcome := selectedStopOutcome(cause, stoppedAt, job.Deadline, parentDeadline)
@@ -1752,6 +1756,11 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		})
 	}
 	stopWorker := func(fallback error) error {
+		completionMu.Lock()
+		if successfulReturn {
+			completionMu.Unlock()
+			return nil // A completed publication won before this stop was observed.
+		}
 		stoppedAt := time.Now().UTC()
 		cause := actionCtx.Err()
 		if cause == nil {
@@ -1761,6 +1770,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			cause = fallback
 		}
 		cancel()
+		completionMu.Unlock()
 		return recordAssignedStop(stoppedAt, cause)
 	}
 	done := make(chan error, 1)
@@ -1768,9 +1778,16 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() { done <- result }()
 		result = run(actionCtx, job)
+		completionMu.Lock()
 		completedAt := time.Now().UTC()
+		cause := actionCtx.Err()
+		successfulReturn = result == nil && cause == nil
+		completionMu.Unlock()
+		if m.afterSelectedRunReturn != nil {
+			m.afterSelectedRunReturn()
+		}
 		parentDeadline, _ := ctx.Deadline()
-		outcome, err := selectedCompletedOutcome(store, job, result, actionCtx.Err(), completedAt, parentDeadline)
+		outcome, err := selectedCompletedOutcome(store, job, result, cause, completedAt, parentDeadline)
 		if err != nil {
 			result = err
 		} else if outcome != "" {

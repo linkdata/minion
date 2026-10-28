@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -189,6 +190,7 @@ func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {
 type acceptedResultACKWriter struct {
 	http.ResponseWriter
 	store *state.Store
+	path  string
 	check chan error
 }
 
@@ -199,6 +201,17 @@ func (w acceptedResultACKWriter) WriteHeader(status int) {
 		record, err := readSavedResult(w.store)
 		if err == nil && !record.Accepted.Assigned {
 			err = errors.New("saved result lacks assigned marker")
+		}
+		if err == nil {
+			var persisted state.Data
+			var data []byte
+			data, err = os.ReadFile(w.path)
+			if err == nil {
+				err = json.Unmarshal(data, &persisted)
+			}
+			if err == nil && (persisted.Accepted == nil || !persisted.Accepted.ResultReady) {
+				err = errors.New("successful ACK preceded durable result commit")
+			}
 		}
 		w.check <- err
 	}
@@ -272,16 +285,18 @@ func TestSelectedCanceledOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T
 
 func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	var store *state.Store
+	var path string
 	checked := make(chan error, 1)
-	f, savedStore, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
+	f, savedStore, savedPath := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/outcome" {
-				w = acceptedResultACKWriter{ResponseWriter: w, store: store, check: checked}
+				w = acceptedResultACKWriter{ResponseWriter: w, store: store, path: path, check: checked}
 			}
 			next.ServeHTTP(w, r)
 		})
 	})
 	store = savedStore
+	path = savedPath
 	outcome := completeHTTPResult(t, f)
 	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
 	select {

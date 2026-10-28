@@ -136,6 +136,65 @@ func TestSelectedResultSaveCrossingDeadlineCannotPublishAfterRestart(t *testing.
 	}
 }
 
+func TestSelectedResultCommitCrossingDeadlineRefusesOutcome(t *testing.T) {
+	f, store, path := selectedHTTPResultFixture(t, nil)
+	result := completeHTTPResult(t, f).Result
+	sink := f.tx.sink.(*executionCheckpoints)
+	synctest.Test(t, func(t *testing.T) {
+		accepted := store.Data.Accepted
+		accepted.AcceptedAt = time.Now().UTC()
+		accepted.Deadline = accepted.AcceptedAt.Add(time.Second)
+		sink.assignmentRequest.AcceptedAt = accepted.AcceptedAt
+		sink.assignmentRequest.Deadline = accepted.Deadline
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		sink.saveAcceptedResult = func() error {
+			time.Sleep(2 * time.Second)
+			return store.Save()
+		}
+		err := sink.ReceiveCompletedResult(result)
+		if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("result committed after deadline was acknowledged: %v", err)
+		}
+		if !accepted.ResultReady || !accepted.Terminal ||
+			store.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+			t.Fatalf("late result was not terminal: accepted=%+v decisions=%+v", accepted, store.Data.TerminalDecisions)
+		}
+	})
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	accepted := reopened.Data.Accepted
+	if accepted == nil || !accepted.Terminal || reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+		t.Fatalf("late result lost terminal decision on restart: accepted=%+v decisions=%+v", accepted, reopened.Data.TerminalDecisions)
+	}
+}
+
+func TestSelectedResultCancellationDuringCommitRefusesOutcome(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	result := completeHTTPResult(t, f).Result
+	sink := f.tx.sink.(*executionCheckpoints)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sink.assignmentContext = ctx
+	sink.saveAcceptedResult = func() error {
+		cancel()
+		return store.Save()
+	}
+	err := sink.ReceiveCompletedResult(result)
+	accepted := store.Data.Accepted
+	if !errors.Is(err, context.Canceled) || accepted == nil || !accepted.Terminal ||
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "canceled" {
+		t.Fatalf("cancellation during result commit was acknowledged: err=%v accepted=%+v decisions=%+v", err, accepted, store.Data.TerminalDecisions)
+	}
+}
+
 func TestSelectedResultCancellationBeforeDeadlineWinsDuringLateSave(t *testing.T) {
 	f, store, _ := selectedHTTPResultFixture(t, nil)
 	result := completeHTTPResult(t, f).Result
