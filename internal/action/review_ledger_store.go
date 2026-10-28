@@ -32,6 +32,7 @@ var syncPrivateRecordDirectories = workspace.SyncDirectories
 // A private record directory can become unavailable independently of its
 // contents. A saved action result can retry after the host layout is repaired.
 var errPrivateRecordsUnavailable = errors.New("private records directory unavailable")
+var errPrivateRecordConflict = errors.New("private record conflicts with saved action")
 
 // retainReviewEvidence validates and saves private review history for an accepted Job.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
@@ -98,12 +99,15 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	path := filepath.Join(root, job.Identity.AttemptID+".json")
 	previous, err := workspace.ReadRegular(path, workspace.MaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if !retryableHostIO(err) {
+			return fmt.Errorf("%w: %w", errPrivateRecordConflict, err)
+		}
 		return err
 	}
 	if err == nil {
 		var saved retainedReview
 		if err := json.Unmarshal(previous, &saved); err != nil {
-			return errors.New("saved review evidence is invalid")
+			return fmt.Errorf("%w: saved review evidence is invalid", errPrivateRecordConflict)
 		}
 		if saved.ReviewClaimOrigin != record.ReviewClaimOrigin && (saved.ReviewClaimOrigin != "" || len(saved.Calls) != 0 || len(saved.Refutations) != 0 || saved.CriticStopReason != "") ||
 			(saved.CriticStopReason != "" && saved.CriticStopReason != record.CriticStopReason) ||
@@ -112,7 +116,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 			saved.CriticConsecutiveNoBlockerRounds != record.CriticConsecutiveNoBlockerRounds ||
 			len(saved.Calls) > len(record.Calls) || len(saved.Refutations) > len(record.Refutations) ||
 			!slices.Equal(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {
-			return errors.New("review evidence changed or discarded a saved prefix")
+			return fmt.Errorf("%w: review evidence changed or discarded a saved prefix", errPrivateRecordConflict)
 		}
 		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
 			return syncPrivateRecordDirectories(root, filepath.Dir(root))

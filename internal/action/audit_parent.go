@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 
+	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -55,7 +57,22 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		if scriptErr := checkAuditValidatorScripts(skill); scriptErr != nil {
 			return fmt.Errorf("%w: audit validator unavailable after execution failure: %w", errAuditPublicationUnavailable, errors.Join(err, scriptErr))
 		}
+		if scriptErr := checkAuditValidatorSyntax(ctx, validationDir, skill, tools); scriptErr != nil {
+			return fmt.Errorf("%w: audit validator unavailable after execution failure: %w", errAuditPublicationUnavailable, errors.Join(err, scriptErr))
+		}
 		return err
+	}
+	return nil
+}
+
+func checkAuditValidatorSyntax(ctx context.Context, dir, skill string, tools auditTools) error {
+	for _, validator := range auditValidators {
+		script := filepath.Join(filepath.Dir(skill), validator.script)
+		cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
+			"--allow-fs-read="+filepath.Dir(skill), "--check", script)
+		if err := executil.Run(cmd); err != nil {
+			return fmt.Errorf("check audit validator %q syntax: %w", script, err)
+		}
 	}
 	return nil
 }

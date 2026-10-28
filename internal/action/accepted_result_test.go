@@ -352,7 +352,7 @@ func TestSelectedAuditUnavailableSavesResultForRecoveryWithSuccessACK(t *testing
 
 func TestSelectedAuditInvalidValidatorResultDoesNotSave(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
-	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$2\" in -e) exit 0;; esac\nexit 9\n")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*) exit 0;; esac\nexit 9\n")
 	job := testJob(command.SecurityAudit)
 	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
 	outcome := completeHTTPResult(t, f)

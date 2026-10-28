@@ -142,6 +142,51 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 	}
 }
 
+func TestSavedAuditWaitsForBrokenPublishingValidator(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	marker := filepath.Join(t.TempDir(), "syntax-checked")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*) exit 0;; esac\ncase \" $* \" in *' --check '*) printf checked > "+shellQuote(marker)+";; esac\nfor arg do case \"$arg\" in *.cjs) validator=$arg;; esac; done\nIFS= read -r first < \"$validator\"\n[ \"$first\" = 'function (' ] && exit 1\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	job.Identity.Repository = "o/r"
+	result := completeAuditResult(job)
+	store, _, request := savedRecoveryFixture(t, job, result)
+	var posts atomic.Int32
+	server := auditRecoveryServer(t, &posts)
+	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}}
+	if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
+		t.Fatalf("original validator rejected saved audit: %v", err)
+	}
+	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+	if err != nil || !installed {
+		t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+	}
+	script := filepath.Join(filepath.Dir(skill), auditValidators[0].script)
+	original, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("function (\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+		t.Fatalf("broken validator discarded saved audit: posts=%d error=%v", posts.Load(), err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("validator syntax was not checked: %v", err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("broken validator lost saved result: present=%t error=%v", present, err)
+	}
+	if err := os.WriteFile(script, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+	}
+}
+
 func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	job := testJob(command.SecurityAudit)

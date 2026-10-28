@@ -59,11 +59,14 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 	path := filepath.Join(root, job.Identity.AttemptID+".json")
 	previous, err := workspace.ReadRegular(path, workspace.MaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if !retryableHostIO(err) {
+			err = fmt.Errorf("%w: %w", errPrivateRecordConflict, err)
+		}
 		return retainedRecordFailure("read private worker diagnostics", err)
 	}
 	if err == nil {
 		if !bytes.Equal(previous, data) {
-			return fmt.Errorf("%w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob)
+			return fmt.Errorf("%w: %w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob, errPrivateRecordConflict)
 		}
 		if err := syncPrivateRecordDirectories(root, filepath.Dir(root)); err != nil {
 			return retainedRecordFailure("sync private worker diagnostics", err)

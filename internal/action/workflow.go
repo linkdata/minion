@@ -258,7 +258,8 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 	e.logResult(p.job, result)
 	if err := e.retainReviewEvidence(p.job, result); err != nil {
 		err = e.requireSavedResultForRetry(p.job, err)
-		if errors.Is(err, monitor.ErrPostModelPublication) && !errors.Is(err, monitor.ErrTerminalJob) {
+		if errors.Is(err, monitor.ErrAcceptanceState) ||
+			errors.Is(err, monitor.ErrPostModelPublication) && !errors.Is(err, monitor.ErrTerminalJob) {
 			return publication{}, err
 		}
 		return publication{}, errors.Join(err, e.retainIncompleteAudit(p, result))
@@ -304,7 +305,19 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 // result has been durably saved for this action. Other attempts cannot rerun
 // paid work to recover a missing result.
 func (e *Orchestrator) requireSavedResultForRetry(job Job, err error) error {
-	if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errPrivateRecordConflict) {
+		saved, inspectErr := e.hasSavedResult(job)
+		if inspectErr != nil {
+			return fmt.Errorf("%w: inspect saved result before private record hold: %w", monitor.ErrAcceptanceState, inspectErr)
+		}
+		if saved {
+			return fmt.Errorf("%w: %v", monitor.ErrAcceptanceState, err)
+		}
+	}
+	if !errors.Is(err, monitor.ErrPostModelPublication) {
 		return err
 	}
 	saved, inspectErr := e.hasSavedResult(job)

@@ -221,3 +221,48 @@ func TestSavedPrivateRetentionRetriesDirectoryLayoutFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestSavedPrivateRecordConflictHoldsReceiptForRepair(t *testing.T) {
+	for _, name := range []string{"worker-diagnostics", "reviews"} {
+		t.Run(name, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			job.Identity.Repository = "o/r"
+			result := privateReviewResult(job)
+			result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}}
+			var err error
+			if name == "reviews" {
+				err = e.retainReviewEvidence(job, result)
+			} else {
+				err = e.retainWorkerDiagnostics(job, result, nil)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(e.WorkRoot, name, job.Identity.AttemptID+".json")
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || posts.Load() != 0 {
+				t.Fatalf("damaged private record did not hold publication: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("damaged private record lost saved result: present=%t error=%v", present, err)
+			}
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("repaired private record did not publish: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
