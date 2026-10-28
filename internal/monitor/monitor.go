@@ -116,7 +116,7 @@ type Monitor struct {
 	Now                    func() time.Time
 	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
 	SelectedExecutorID     string          // Nonempty only while a selected local worker owns actions.
-	afterSelectedRunReturn func()          // Test seam between worker return and terminal decision.
+	afterSelectedRunReturn func()          // Test seam after the worker's terminal decision.
 }
 
 // NewAttemptID returns a random ID shared by acceptance and action records.
@@ -1244,17 +1244,18 @@ func decideAccepted(store *state.Store, job Job, outcome string, at time.Time) (
 }
 
 func (m *Monitor) terminalAccepted(ctx context.Context, store *state.Store, job Job, failure state.JobFailure) error {
+	at := m.now().UTC()
 	outcome := "failed"
-	if !time.Now().Before(job.Deadline) {
+	if !at.Before(job.Deadline) {
 		outcome = "expired"
 	} else if accepted := store.Data.Accepted; (accepted != nil && accepted.Assigned) || failure.ModelCallStarted {
 		outcome = "lost"
 	}
-	decision, err := decideAccepted(store, job, outcome, time.Now().UTC())
+	decision, err := decideAccepted(store, job, outcome, at)
 	if err != nil {
 		return err
 	}
-	return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
+	return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 }
 
 func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Store, job Job, at time.Time,
@@ -1798,13 +1799,23 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
 	var completionMu sync.Mutex
-	var successfulReturn bool
+	var terminalReturn bool
 	recordAssignedStop := func(stoppedAt time.Time, cause error) error {
 		parentDeadline, _ := ctx.Deadline()
 		outcome := selectedStopOutcome(cause, stoppedAt, job.Deadline, parentDeadline)
 		return store.WithLock(func() error {
 			accepted := store.Data.Accepted
-			if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
+			if accepted == nil {
+				// Assignment validation may have durably discarded this attempt
+				// while the stop was being requested.
+				decision := store.Data.TerminalDecisions[job.ID]
+				if decision.AttemptID == job.AttemptID && decision.Outcome == "lost" &&
+					!store.Data.Processed[job.ID].IsZero() {
+					return nil
+				}
+				return fmt.Errorf("%w: accepted action changed during execution", ErrAcceptanceState)
+			}
+			if !AssignmentMatchesAccepted(job, *accepted) {
 				return fmt.Errorf("%w: accepted action changed during execution", ErrAcceptanceState)
 			}
 			if !accepted.Assigned {
@@ -1819,9 +1830,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	}
 	stopWorker := func(fallback error) error {
 		completionMu.Lock()
-		if successfulReturn {
+		if terminalReturn {
 			completionMu.Unlock()
-			return nil // A completed publication won before this stop was observed.
+			return nil // A conclusive worker result won before this stop was observed.
 		}
 		stoppedAt := time.Now().UTC()
 		cause := actionCtx.Err()
@@ -1832,8 +1843,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			cause = fallback
 		}
 		cancel()
+		stopErr := recordAssignedStop(stoppedAt, cause)
 		completionMu.Unlock()
-		return recordAssignedStop(stoppedAt, cause)
+		return stopErr
 	}
 	done := make(chan error, 1)
 	go func() {
@@ -1843,11 +1855,6 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		completionMu.Lock()
 		completedAt := time.Now().UTC()
 		cause := actionCtx.Err()
-		successfulReturn = result == nil && cause == nil
-		completionMu.Unlock()
-		if m.afterSelectedRunReturn != nil {
-			m.afterSelectedRunReturn()
-		}
 		parentDeadline, _ := ctx.Deadline()
 		outcome, err := selectedCompletedOutcome(store, job, result, cause, completedAt, parentDeadline)
 		if err != nil {
@@ -1855,7 +1862,13 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		} else if outcome != "" {
 			if _, err := decideAccepted(store, job, outcome, completedAt); err != nil {
 				result = err
+			} else {
+				terminalReturn = true
 			}
+		}
+		completionMu.Unlock()
+		if m.afterSelectedRunReturn != nil {
+			m.afterSelectedRunReturn()
 		}
 	}()
 	var result error
@@ -1881,10 +1894,14 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		return decided
 	}
 	abort := func(err error) error {
+		deadline := errors.Is(err, context.DeadlineExceeded) && errors.Is(actionCtx.Err(), context.DeadlineExceeded)
 		readDone()
 		if completed {
 			if completedWithDecision() || ctx.Err() != nil {
 				return finish(result)
+			}
+			if deadline {
+				return errors.Join(finish(result), err)
 			}
 			return errors.Join(finish(result), fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err))
 		}
@@ -1893,6 +1910,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		completed = true
 		if ctx.Err() != nil {
 			return errors.Join(finish(result), stopErr, ctx.Err())
+		}
+		if deadline {
+			return errors.Join(finish(result), stopErr, err)
 		}
 		return errors.Join(fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err), stopErr)
 	}
@@ -2075,7 +2095,8 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		}
 		return "", nil
 	}
-	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled)) {
+	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled) ||
+		(errors.Is(result, context.DeadlineExceeded) && errors.Is(cause, context.DeadlineExceeded))) {
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
 	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&

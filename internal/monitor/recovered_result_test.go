@@ -666,6 +666,7 @@ func TestStoredResultRecoveryEndsPermanentPublicationFailure(t *testing.T) {
 func TestStoredResultRecoveryDoesNotRetryAfterAcceptedDeadline(t *testing.T) {
 	at := time.Now().UTC().Add(-8 * time.Minute)
 	store, _, accepted, _, monitor := storedRecoveryFixtureAt(t, at)
+	monitor.Now = time.Now
 	handler := &recoveredResultHandler{publish: func(Job) error {
 		t.Fatal("expired result reached publisher")
 		return nil
