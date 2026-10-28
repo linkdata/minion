@@ -439,7 +439,7 @@ func TestPublishFixRevalidatesForkAndImportBeforePush(t *testing.T) {
 			script := fmt.Sprintf(`#!/bin/sh
 case " $* " in
  *" add --all "*)
-  if test %s = 'canceled import'; then touch %s; sleep 30; exit 1; fi
+  if test %s = 'canceled import'; then touch %s; exec sleep 30; fi
   ;;
  *" diff --cached --raw "*)
   if test %s = import; then touch %s; exit 0; fi

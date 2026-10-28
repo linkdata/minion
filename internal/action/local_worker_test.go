@@ -65,6 +65,7 @@ func TestLocalWorkerRequiresAuthenticatedHeldPull(t *testing.T) {
 
 func TestLocalWorkerCanceledHTTPSPullCannotSupplyCapacity(t *testing.T) {
 	w := startHTTPSWorkerTest(t, "hold")
+	w.stopGrace = 100 * time.Millisecond
 	access := w.endpoint.Access()
 	client, err := NewLocalExecutionClient(access)
 	if err != nil {
@@ -309,6 +310,9 @@ func TestLocalWorkerCrashAndCleanupFailureRetireCapacity(t *testing.T) {
 	for _, mode := range []string{"crash-after-job", "cleanup-failed"} {
 		t.Run(mode, func(t *testing.T) {
 			w := startHTTPSWorkerTest(t, mode)
+			if mode == "cleanup-failed" {
+				w.stopGrace = 100 * time.Millisecond
+			}
 			w.executor.outcomeGrace = 25 * time.Millisecond
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
