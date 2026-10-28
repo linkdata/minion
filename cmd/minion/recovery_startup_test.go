@@ -178,6 +178,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 
 	// Repeat recovery with -loop. Its later preflight resolves the default
 	// model; the worker startup must use that resolved selection.
+	accepted.ResultReady = false
 	store.Data.Accepted = &accepted
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
 	delete(store.Data.Processed, accepted.JobID)
@@ -186,6 +187,10 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		t.Fatal(err)
 	}
 	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	accepted.ResultReady = true
+	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

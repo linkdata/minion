@@ -94,7 +94,7 @@ func TestSelectedResultRechecksIdentityAtFinalStoreLock(t *testing.T) {
 	}
 }
 
-func TestSelectedResultSaveCrossingDeadlineCannotPublishAfterRestart(t *testing.T) {
+func TestSelectedResultSaveCrossingDeadlinePersistsExpiryAfterRestart(t *testing.T) {
 	f, store, path := selectedHTTPResultFixture(t, nil)
 	result := completeHTTPResult(t, f).Result
 	sink := f.tx.sink.(*executionCheckpoints)

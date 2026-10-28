@@ -26,7 +26,7 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 			resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 		}
 		if resultErr == nil {
-			e.completeRecoveredUsage(request)
+			e.CompleteTerminalUsage(request, "succeeded", time.Now().UTC())
 		}
 		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
 	}()

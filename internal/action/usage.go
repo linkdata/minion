@@ -104,11 +104,6 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	return finish, nil
 }
 
-// completeRecoveredUsage updates only an existing attempt after saved publication succeeds.
-func (e *Orchestrator) completeRecoveredUsage(job monitor.Job) {
-	e.CompleteTerminalUsage(job, "succeeded", time.Now().UTC())
-}
-
 // CompleteTerminalUsage reconciles an existing attempt before terminal state is removed.
 func (e *Orchestrator) CompleteTerminalUsage(job monitor.Job, outcome string, at time.Time) {
 	if e.Usage == nil || job.AttemptID == "" {

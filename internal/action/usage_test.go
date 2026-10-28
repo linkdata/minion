@@ -41,7 +41,7 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	}
 	var journal bytes.Buffer
 	e := &Orchestrator{Usage: store, Logger: log.New(&journal, "", 0)}
-	e.completeRecoveredUsage(job)
+	e.CompleteTerminalUsage(job, "succeeded", time.Now().UTC())
 	got, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || got.FinishedAt == nil || got.FinishedAt.Before(failedAt) {
 		t.Fatalf("recovered usage was not completed: record=%+v found=%t err=%v", got, found, err)
@@ -51,19 +51,19 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("recovery changed usage counters or provenance: got=%+v want=%+v", got, want)
 	}
-	e.completeRecoveredUsage(job)
+	e.CompleteTerminalUsage(job, "succeeded", time.Now().UTC())
 	again, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || !reflect.DeepEqual(got, again) {
 		t.Fatalf("recovery changed completed usage twice: got=%+v again=%+v err=%v", got, again, err)
 	}
 	other := job
 	other.AttemptID = strings.Repeat("c", 32)
-	e.completeRecoveredUsage(other)
+	e.CompleteTerminalUsage(other, "succeeded", time.Now().UTC())
 	other.AttemptID, other.ID = job.AttemptID, "different-job"
 	if err := store.Save(prior); err != nil {
 		t.Fatal(err)
 	}
-	e.completeRecoveredUsage(other)
+	e.CompleteTerminalUsage(other, "succeeded", time.Now().UTC())
 	unchanged, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || !reflect.DeepEqual(unchanged, prior) || !strings.Contains(journal.String(), "belongs to another job") {
 		t.Fatalf("mismatched recovery replaced usage or skipped warning: got=%+v err=%v log=%q", unchanged, err, journal.String())
@@ -133,7 +133,7 @@ func TestRecoveredUsageValidationFailureOnlyLogs(t *testing.T) {
 	var journal bytes.Buffer
 	e := &Orchestrator{Usage: store, Logger: log.New(&journal, "", 0)}
 	// Completing a record with model calls but no usage source fails validation.
-	e.completeRecoveredUsage(job)
+	e.CompleteTerminalUsage(job, "succeeded", time.Now().UTC())
 	got, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || !reflect.DeepEqual(got, prior) || !strings.Contains(journal.String(), "final recovered action usage checkpoint failed:") {
 		t.Fatalf("usage save failure changed publication evidence or went unlogged: got=%+v err=%v log=%q", got, err, journal.String())
