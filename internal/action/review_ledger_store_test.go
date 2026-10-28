@@ -15,6 +15,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -103,7 +104,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 				http.NotFound(w, r)
 			}))
 			defer server.Close()
-			e := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0)}
+			e := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0)}
 			request := monitor.Job{ID: job.Identity.JobID, Number: 7, SubjectType: "Issue", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
 			publishErr := e.publish(t.Context(), &preparedAction{job: job, request: request}, result)
 			if test.status == http.StatusCreated {

@@ -58,7 +58,7 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 			if subject == "Issue" {
 				job.AcceptedAt = time.Now().Add(-time.Minute)
 			}
-			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "linkdataminion", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
+			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Store: openState(t, time.Now()), BotLogin: "linkdataminion", BotID: 8, Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Runner: Runner{
 					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
 						if subject == "Issue" {

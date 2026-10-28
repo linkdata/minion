@@ -60,6 +60,12 @@ func (g *synchronizedRecoveryGitHub) HasVerifiedBotReply(ctx context.Context, re
 	return g.fakeGitHub.HasVerifiedBotReply(ctx, repo, number, since, botLogin, marker, includeReviews)
 }
 
+func (g *synchronizedRecoveryGitHub) HasVerifiedBotPublication(ctx context.Context, repo string, number int, since time.Time, bot github.User, marker, kind string) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fakeGitHub.HasVerifiedBotPublication(ctx, repo, number, since, bot, marker, kind)
+}
+
 func (h *recoveredResultHandler) Execute(_ context.Context, job Job) error {
 	h.executions++
 	if h.execute != nil {
@@ -147,6 +153,35 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 		currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil },
 	}
 	return store, path, accepted, gh, selectedMonitor(t, at, gh, nil)
+}
+
+func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
+	now := time.Now().UTC()
+	store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+	store.Data.Accepted.RetryAt = accepted.Deadline
+	marker := "<!-- linkdataminion:" + accepted.JobID + " -->"
+	store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
+		AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion",
+		Repository: accepted.Repository, Number: accepted.SubjectNumber,
+		Marker: marker, Since: accepted.SourceUpdatedAt, StartedAt: now,
+		Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh.reviewReplies = []github.Item{{Key: "review:1", Body: "published\n\n" + marker,
+		Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}}
+	gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+	handler := &recoveredResultHandler{publish: func(Job) error { return nil }}
+	m.Handler = handler
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if handler.publications != 1 || store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWriteObserved ||
+		store.Data.Processed[accepted.JobID].IsZero() || store.Data.Accepted != nil {
+		t.Fatalf("observed task waited until accepted deadline: publications=%d write=%+v processed=%v accepted=%+v",
+			handler.publications, store.Data.PublicationWrites[accepted.JobID], store.Data.Processed[accepted.JobID], store.Data.Accepted)
+	}
 }
 
 func TestMonitorPreservesControlFailureFromStoredResultPublisher(t *testing.T) {

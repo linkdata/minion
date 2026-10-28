@@ -235,14 +235,20 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 			break
 		}
 		body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", request.Source.Author.Login, inertModelOutput(published.answer), request.Marker())
+		if err = e.beginTaskPublication(ctx, request, "review"); err != nil {
+			break
+		}
 		_, err = e.GitHub.CreatePullRequestReview(ctx, request.Repository.Name, request.Number, body, p.job.Source.Head)
+		if err == nil {
+			err = e.observeTaskPublication(request)
+		}
 	case command.Comment:
 		if err = e.publicationAllowed(ctx, request, true); err == nil {
-			err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
+			err = e.publishTaskComment(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
 		}
 	case command.SecurityAudit:
 		if err = e.publicationAllowed(ctx, request, true); err == nil {
-			err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
+			err = e.publishTaskComment(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
 		}
 	case command.Fix:
 		return e.publishFix(ctx, p, result, published)

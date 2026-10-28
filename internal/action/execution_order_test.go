@@ -112,7 +112,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 	defer server.Close()
 	var journal bytes.Buffer
 	zero, calls := 0, 0
-	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Usage: store, Logger: log.New(&journal, "", 0),
+	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Usage: store, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0),
 		Main: "codex", Adversarial: "claude", CodexModel: mainModel, CodexEffort: "high", ClaudeModel: criticModel, ClaudeEffort: "medium",
 		CriticStopping: config.CriticStopping{MaxRounds: maxRounds, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
 		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},

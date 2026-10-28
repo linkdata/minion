@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -118,7 +119,7 @@ func TestSelectedExecuteRecordsPublicationBeforeMonitorCleanup(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Store: store,
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Store: store,
 		Commands:            map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		assignmentRequired:  true,
 		ValidateAssignment:  func(context.Context, monitor.Job) error { return nil },
@@ -275,7 +276,7 @@ func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testin
 			}
 			var refusal error
 			executorErr := errors.New("executor stopped")
-			e := &Orchestrator{WorkRoot: t.TempDir(), Usage: store, BotLogin: "bot", GitHub: testGitHub(server, "fixture"),
+			e := &Orchestrator{WorkRoot: t.TempDir(), Usage: store, Store: openState(t, time.Now()), BotLogin: "bot", BotID: 8, GitHub: testGitHub(server, "fixture"),
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 					call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}

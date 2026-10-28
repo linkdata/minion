@@ -609,6 +609,87 @@ func TestHasVerifiedBotReplyStopsAtReviewMatch(t *testing.T) {
 	}
 }
 
+func TestHasVerifiedBotPublicationUsesRecordedSurface(t *testing.T) {
+	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	marker := "<!-- linkdataminion:job -->"
+	body := "done\n\n" + marker
+	for _, presentKind := range []string{"comment", "review"} {
+		for _, tc := range []struct {
+			name             string
+			author           User
+			provenanceAuthor User
+			bot              User
+			want             bool
+			wantProvenance   int
+		}{
+			{name: "original account", author: User{ID: 8, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}, want: true, wantProvenance: 1},
+			{name: "renamed account", author: User{ID: 8, Login: "renamed-bot"}, bot: User{ID: 8, Login: "linkdataminion"}, want: true, wantProvenance: 1},
+			{name: "reclaimed login", author: User{ID: 9, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}},
+			{name: "provenance changed", author: User{ID: 8, Login: "linkdataminion"}, provenanceAuthor: User{ID: 9, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}, wantProvenance: 1},
+			{name: "legacy login", author: User{ID: 8, Login: "linkdataminion"}, bot: User{Login: "linkdataminion"}, want: true, wantProvenance: 1},
+		} {
+			t.Run(presentKind+"/"+tc.name, func(t *testing.T) {
+				var comments, reviews, provenance int
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/repos/o/r/issues/7/comments":
+						comments++
+						if presentKind == "comment" {
+							_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"comment-node","body":%q,"user":{"id":%d,"login":%q},"updated_at":"2026-10-09T08:00:01Z"}]`, body, tc.author.ID, tc.author.Login)
+						} else {
+							_, _ = fmt.Fprint(w, `[]`)
+						}
+					case "/graphql":
+						var input struct {
+							Query string `json:"query"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+							t.Error(err)
+							return
+						}
+						if !strings.Contains(input.Query, "... on User { id: databaseId }") ||
+							!strings.Contains(input.Query, "... on Bot { id: databaseId }") {
+							t.Errorf("publication lookup omitted author account IDs: %s", input.Query)
+						}
+						if strings.Contains(input.Query, "timelineItems") {
+							reviews++
+							if presentKind == "review" {
+								_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"review-node","fullDatabaseId":"2","body":%q,"author":{"id":%d,"login":%q},"state":"COMMENTED","submittedAt":"2026-10-09T08:00:02Z"}],"pageInfo":{"hasNextPage":false}}}}}}`, body, tc.author.ID, tc.author.Login)
+							} else {
+								_, _ = fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}`)
+							}
+						} else {
+							provenance++
+							author := tc.author
+							if tc.provenanceAuthor.ID != 0 {
+								author = tc.provenanceAuthor
+							}
+							_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"id":%d,"login":%q}}}}`, body, author.ID, author.Login)
+						}
+					default:
+						t.Errorf("unexpected publication lookup: %s %s", r.Method, r.URL)
+						http.NotFound(w, r)
+					}
+				}))
+				t.Cleanup(server.Close)
+				client := testClient(server)
+				wrongKind := "review"
+				if presentKind == "review" {
+					wrongKind = "comment"
+				}
+				found, err := client.HasVerifiedBotPublication(t.Context(), "o/r", 7, since, tc.bot, marker, wrongKind)
+				if err != nil || found || presentKind == "comment" && comments != 0 || presentKind == "review" && reviews != 0 {
+					t.Fatalf("opposite surface matched or was scanned: found=%t err=%v comments=%d reviews=%d", found, err, comments, reviews)
+				}
+				found, err = client.HasVerifiedBotPublication(t.Context(), "o/r", 7, since, tc.bot, marker, presentKind)
+				if err != nil || found != tc.want || comments != 1 || reviews != 1 || provenance != tc.wantProvenance {
+					t.Fatalf("recorded surface lookup: found=%t err=%v comments=%d reviews=%d provenance=%d", found, err, comments, reviews, provenance)
+				}
+			})
+		}
+	}
+}
+
 func TestBranchLookup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.EscapedPath() {

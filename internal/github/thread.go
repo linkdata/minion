@@ -45,7 +45,7 @@ func (c *Client) CurrentItem(ctx context.Context, item Item) (Item, error) {
 		} `json:"errors"`
 	}
 	_, _, err := c.request(ctx, http.MethodPost, "/graphql", map[string]any{
-		"query":     `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } } editor { login } lastEditedAt } } }`,
+		"query":     `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } ... on Bot { id: databaseId } } editor { login } lastEditedAt } } }`,
 		"variables": map[string]string{"id": item.NodeID},
 	}, &result, nil, http.StatusOK)
 	if err != nil {
@@ -248,6 +248,18 @@ func eligible(updated, since time.Time) bool {
 // reviews. The since bound applies to comments and filters reviews by
 // submission time.
 func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+	return c.hasVerifiedBotReply(ctx, repo, number, since, User{Login: botLogin}, marker, true, includeReviews)
+}
+
+// HasVerifiedBotPublication checks only the recorded comment or review surface.
+func (c *Client) HasVerifiedBotPublication(ctx context.Context, repo string, number int, since time.Time, bot User, marker, kind string) (bool, error) {
+	if kind != "comment" && kind != "review" {
+		return false, fmt.Errorf("invalid publication kind %q", kind)
+	}
+	return c.hasVerifiedBotReply(ctx, repo, number, since, bot, marker, kind == "comment", kind == "review")
+}
+
+func (c *Client) hasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, bot User, marker string, scanComments, scanReviews bool) (bool, error) {
 	path, err := repoPath(repo)
 	if err != nil {
 		return false, err
@@ -255,42 +267,50 @@ func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number in
 	if number <= 0 {
 		return false, fmt.Errorf("invalid thread number %d", number)
 	}
+	matchesBot := func(author User) bool {
+		if bot.ID > 0 {
+			return author.ID == bot.ID
+		}
+		return strings.EqualFold(author.Login, bot.Login)
+	}
 	match := func(item Item) (bool, error) {
-		if !strings.EqualFold(item.Author.Login, botLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+		if !matchesBot(item.Author) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
 			return false, nil
 		}
 		current, err := c.CurrentItem(ctx, item)
 		if err != nil {
 			return false, fmt.Errorf("check bot reply provenance: %w", err)
 		}
-		return !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
+		return !current.Edited && matchesBot(current.Author) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
 	}
 
-	// A reply cannot predate its command, so older comments need no scan.
-	q := sinceQuery(since)
-	for page := 1; ; page++ {
-		if page > 1000 {
-			return false, errors.New("too many GitHub comment pages")
-		}
-		q.Set("page", strconv.Itoa(page))
-		var batch []Comment
-		header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/issues/"+strconv.Itoa(number)+"/comments", q), nil, &batch, nil, http.StatusOK)
-		if err != nil {
-			return false, err
-		}
-		for _, comment := range batch {
-			if !eligible(nonzeroTime(comment.UpdatedAt, comment.CreatedAt), since) {
-				continue
+	if scanComments {
+		// A reply cannot predate its command, so older comments need no scan.
+		q := sinceQuery(since)
+		for page := 1; ; page++ {
+			if page > 1000 {
+				return false, errors.New("too many GitHub comment pages")
 			}
-			if found, err := match(commentItem(repo, "issue-comment", comment)); found || err != nil {
-				return found, err
+			q.Set("page", strconv.Itoa(page))
+			var batch []Comment
+			header, _, err := c.request(ctx, http.MethodGet, withQuery(path+"/issues/"+strconv.Itoa(number)+"/comments", q), nil, &batch, nil, http.StatusOK)
+			if err != nil {
+				return false, err
 			}
-		}
-		if !hasNextPage(header.Get("Link")) {
-			break
+			for _, comment := range batch {
+				if !eligible(nonzeroTime(comment.UpdatedAt, comment.CreatedAt), since) {
+					continue
+				}
+				if found, err := match(commentItem(repo, "issue-comment", comment)); found || err != nil {
+					return found, err
+				}
+			}
+			if !hasNextPage(header.Get("Link")) {
+				break
+			}
 		}
 	}
-	if !includeReviews {
+	if !scanReviews {
 		return false, nil
 	}
 	var found bool
@@ -348,7 +368,7 @@ func (c *Client) forEachReview(ctx context.Context, repo string, number int, sin
       timelineItems(first: 100, after: $after, since: $since, itemTypes: [PULL_REQUEST_REVIEW]) {
         nodes { ... on PullRequestReview {
           id fullDatabaseId body state submittedAt url
-          author { login ... on User { id: databaseId } }
+          author { login ... on User { id: databaseId } ... on Bot { id: databaseId } }
         } }
         pageInfo { hasNextPage endCursor }
       }

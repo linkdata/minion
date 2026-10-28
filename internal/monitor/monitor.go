@@ -37,6 +37,7 @@ type GitHub interface {
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
 	CurrentItem(context.Context, github.Item) (github.Item, error)
 	HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error)
+	HasVerifiedBotPublication(context.Context, string, int, time.Time, github.User, string, string) (bool, error)
 	Permission(context.Context, string, string) (github.Permission, error)
 	ReactEyes(context.Context, string) error
 	CreateIssueComment(context.Context, string, int, string) (github.Comment, error)
@@ -181,10 +182,23 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 		}
 	}
+	activeJobID := ""
+	activeWriteChecked := false
+	if store.Data.Accepted != nil {
+		activeJobID = store.Data.Accepted.JobID
+		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending
+	}
+	if err := m.reconcilePublicationWrites(ctx, store, activeJobID, ""); err != nil {
+		return store.Data.NextPollAt, err
+	}
+	skipChecked := ""
+	if activeWriteChecked {
+		skipChecked = activeJobID
+	}
 	now := m.now
 	wake := func(next time.Time, service bool) time.Time {
 		if !selectedMode {
-			return earlierWake(next, store.Data.NextInviteCheckAt)
+			return withPublicationWriteWake(earlierWake(next, store.Data.NextInviteCheckAt), store, now().UTC())
 		}
 		var terminal time.Time
 		if service && ctx.Err() == nil {
@@ -194,25 +208,31 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		if next.IsZero() {
 			if terminal.IsZero() {
-				return next
+				return withPublicationWriteWake(next, store, now().UTC())
 			}
-			return earlierWake(terminal, store.Data.NextInviteCheckAt)
+			return withPublicationWriteWake(earlierWake(terminal, store.Data.NextInviteCheckAt), store, now().UTC())
 		}
-		return earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal)
+		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, now().UTC())
 	}
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
 		_, decided := store.Data.TerminalDecisions[accepted.JobID]
-		if retryAt := accepted.RetryAt; (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
+		observed := store.Data.PublicationWrites[accepted.JobID].Status == state.PublicationWriteObserved
+		if retryAt := accepted.RetryAt; !observed && (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
+			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
+				return wake(retryAt, false), err
+			}
 			if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
 				return wake(retryAt, false), err
 			}
 			return wake(retryAt, true), nil
 		}
 		err := m.recoverAccepted(ctx, store)
-		if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
+		reconcileErr := m.reconcilePublicationWrites(ctx, store, "", skipChecked)
+		if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) && reconcileErr == nil {
 			return wake(store.Data.NextPollAt, true), nil
 		}
+		err = errors.Join(err, reconcileErr)
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)
 			return wake(retryAt, false), errors.Join(err, saveErr)
@@ -282,9 +302,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)
-			return earlierWake(earlierWake(retryAt, store.Data.NextInviteCheckAt), terminal), errors.Join(err, saveErr)
+			return withPublicationWriteWake(earlierWake(earlierWake(retryAt, store.Data.NextInviteCheckAt), terminal), store, now().UTC()), errors.Join(err, saveErr)
 		}
-		return earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), err
+		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, now().UTC()), err
 	}
 	stopAt := func(location string, err error) (time.Time, error) {
 		if err == nil {
@@ -846,7 +866,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		}
 	}()
 	for {
-		due := earlierWake(store.Data.NextInviteCheckAt, nextTerminal)
+		due := withPublicationWriteWake(earlierWake(store.Data.NextInviteCheckAt, nextTerminal), store, m.now().UTC())
 		timer := time.NewTimer(due.Sub(m.now().UTC()))
 		select {
 		case err := <-done:
@@ -863,6 +883,9 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 			at := m.now().UTC()
 			if at.Before(due) {
 				at = due
+			}
+			if err := m.reconcilePublicationWrites(ctx, store, "", ""); err != nil {
+				return err
 			}
 			if err := m.checkDueInvitations(ctx, store, at); err != nil {
 				return err
@@ -1759,8 +1782,25 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 	m.logf("recover publication of %s from %s", job.Command.Action, itemLocation(job.Source))
 	return m.runSelectedWithControls(ctx, store, job, "", nil,
 		func(runCtx context.Context, job Job) error {
-			if err := validator.RevalidatePublication(runCtx, store, job, true); err != nil {
+			var issued bool
+			if err := store.WithLock(func() error {
+				write, exists := store.Data.PublicationWrites[job.ID]
+				if !exists {
+					return nil
+				}
+				if write.AttemptID != job.AttemptID || write.Repository != job.Repository.Name ||
+					write.Number != job.Number || write.Marker != job.Marker() {
+					return fmt.Errorf("%w: issued publication differs from recovered action", ErrAcceptanceState)
+				}
+				issued = true
+				return nil
+			}); err != nil {
 				return err
+			}
+			if !issued {
+				if err := validator.RevalidatePublication(runCtx, store, job, true); err != nil {
+					return err
+				}
 			}
 			return publisher.PublishRecovered(runCtx, job)
 		}, func(err error) error {
@@ -1926,10 +1966,26 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		return errors.Join(fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err), stopErr)
 	}
 	nextCheck := make(map[string]time.Time)
+	nextPublicationCheck := m.now().UTC()
+	initialPublicationCheck := true
 	for {
 		readDone()
 		if completedWithDecision() {
 			return finish(result)
+		}
+		if !m.now().UTC().Before(nextPublicationCheck) {
+			skipJobID := ""
+			if initialPublicationCheck {
+				skipJobID = job.ID // The worker and RunOnce check this active write.
+				initialPublicationCheck = false
+			}
+			if err := m.reconcilePublicationWrites(actionCtx, store, "", skipJobID); err != nil {
+				return abort(err)
+			}
+			nextPublicationCheck = publicationWriteWake(store, m.now().UTC())
+			if nextPublicationCheck.IsZero() {
+				nextPublicationCheck = m.now().UTC().Add(publicationRecheckInterval)
+			}
 		}
 		completedAtStart := completed
 		if err := m.checkDueInvitations(actionCtx, store, m.now().UTC()); err != nil {
@@ -2016,6 +2072,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				return finish(result)
 			}
 			continue
+		}
+		if next.IsZero() || nextPublicationCheck.Before(next) {
+			next = nextPublicationCheck
 		}
 		if next.IsZero() {
 			next = m.now().UTC().Add(15 * time.Minute)
@@ -2498,7 +2557,22 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		}
 	}
 	marker := job.Marker()
-	if accepted != nil {
+	var issuedWrite bool
+	if err := store.WithLock(func() error {
+		write, exists := store.Data.PublicationWrites[job.ID]
+		if !exists {
+			return nil
+		}
+		if write.Repository != job.Repository.Name || write.Number != job.Number || write.Marker != marker ||
+			(job.AttemptID != "" && write.AttemptID != job.AttemptID) {
+			return fmt.Errorf("%w: issued publication differs from failed action", ErrAcceptanceState)
+		}
+		issuedWrite = true
+		return nil
+	}); err != nil {
+		return err
+	}
+	if accepted != nil && !issuedWrite {
 		issueCtx, cancelIssue := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		present, err := m.acceptedIssuePresent(issueCtx, *accepted)
 		cancelIssue()
@@ -2510,16 +2584,22 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			return store.WithLock(func() error { return m.discardAccepted(store) })
 		}
 	}
-	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancelLookup()
-	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
-	replied, err := m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
-	if err != nil {
-		if accepted != nil && githubResourceMovedOrGone(err) {
-			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-			return store.WithLock(func() error { return m.discardAccepted(store) })
+	replied := issuedWrite
+	var err error
+	if issuedWrite {
+		m.logf("skip failure reply to %s: an earlier task publication was issued; reconcile its remote effect separately", itemLocation(job.Source))
+	} else {
+		lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelLookup()
+		includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
+		replied, err = m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
+		if err != nil {
+			if accepted != nil && githubResourceMovedOrGone(err) {
+				m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
+				return store.WithLock(func() error { return m.discardAccepted(store) })
+			}
+			return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 		}
-		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 	}
 	if !replied && accepted == nil {
 		verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)

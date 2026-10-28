@@ -46,6 +46,7 @@ type liveActionFixture struct {
 	bot        *github.Client
 	repo       github.Repository
 	ownerUser  github.User
+	botUser    github.User
 }
 
 func TestLiveFixPublishesBranch(t *testing.T) {
@@ -202,7 +203,7 @@ func liveActionSetup(t *testing.T, ctx context.Context) liveActionFixture {
 		t.Fatalf("owner credential does not identify %s: %v", cfg.OwnerLogin, err)
 	}
 	botUser, err := bot.AuthenticatedUser(ctx)
-	if err != nil || botUser.Login != cfg.BotLogin {
+	if err != nil || botUser.Login != cfg.BotLogin || botUser.ID <= 0 {
 		t.Fatalf("bot credential does not identify %s: %v", cfg.BotLogin, err)
 	}
 	repo, err := owner.Repository(ctx, liveFixRepository)
@@ -216,7 +217,7 @@ func liveActionSetup(t *testing.T, ctx context.Context) liveActionFixture {
 	if permission.Permission != "write" && permission.Permission != "maintain" && permission.Permission != "admin" {
 		t.Fatal("bot needs write access; run the ordinary live write test first")
 	}
-	return liveActionFixture{cfg: cfg, ownerToken: ownerToken, botToken: botToken, owner: owner, bot: bot, repo: repo, ownerUser: ownerUser}
+	return liveActionFixture{cfg: cfg, ownerToken: ownerToken, botToken: botToken, owner: owner, bot: bot, repo: repo, ownerUser: ownerUser, botUser: botUser}
 }
 
 func liveFixToken(ctx context.Context, login string) (string, error) {

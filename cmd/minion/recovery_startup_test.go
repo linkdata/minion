@@ -183,6 +183,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
 	delete(store.Data.Processed, accepted.JobID)
 	delete(store.Data.TerminalDecisions, accepted.JobID) // Rebuild an unprocessed fixture for the loop case.
+	delete(store.Data.PublicationWrites, accepted.JobID)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}

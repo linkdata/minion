@@ -51,6 +51,7 @@ type Orchestrator struct {
 	ClaudeModel, ClaudeEffort string
 	GitHub                    *github.Client
 	BotLogin                  string
+	BotID                     int64
 	Store                     *state.Store
 	Usage                     *usage.Store
 	Logger                    *log.Logger
@@ -66,6 +67,8 @@ type Orchestrator struct {
 	ValidateFixedRefusal func(context.Context, monitor.Job) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
+	// PublicationGrace bounds reconciliation of an already-issued GitHub write.
+	PublicationGrace time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.
 	//
 	// Nonpositive values use [config.DefaultMaxGitHubContextBytes].
@@ -102,6 +105,9 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	job.AcceptedAt = acceptedAt
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
+	if handled, err := e.resumeTaskPublication(ctx, job); handled || err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)

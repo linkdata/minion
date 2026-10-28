@@ -24,15 +24,67 @@ type Data struct {
 	Cursor time.Time `json:"cursor"`
 	// RepositoryCursors tracks each repository's durable notification cursor.
 	// Missing entries start at Cursor when that repository is first polled.
-	RepositoryCursors    map[string]time.Time           `json:"repository_cursors,omitempty"`
-	NextPollAt           time.Time                      `json:"next_poll_at,omitempty"`
-	NextInviteCheckAt    time.Time                      `json:"next_invite_check_at,omitempty"`
-	Processed            map[string]time.Time           `json:"processed"`
-	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
-	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
-	PendingFixes         map[string]PendingFix          `json:"pending_fixes,omitempty"`
-	TerminalDecisions    map[string]TerminalDecision    `json:"terminal_decisions,omitempty"`
-	Accepted             *AcceptedAction                `json:"accepted,omitempty"`
+	RepositoryCursors     map[string]time.Time           `json:"repository_cursors,omitempty"`
+	NextPollAt            time.Time                      `json:"next_poll_at,omitempty"`
+	NextInviteCheckAt     time.Time                      `json:"next_invite_check_at,omitempty"`
+	Processed             map[string]time.Time           `json:"processed"`
+	JobFailures           map[string]JobFailure          `json:"job_failures,omitempty"`
+	PendingNotifications  map[string]PendingNotification `json:"pending_notifications,omitempty"`
+	PendingFixes          map[string]PendingFix          `json:"pending_fixes,omitempty"`
+	PublicationWrites     map[string]PublicationWrite    `json:"publication_writes,omitempty"`
+	PublicationScanCursor string                         `json:"publication_scan_cursor,omitempty"`
+	TerminalDecisions     map[string]TerminalDecision    `json:"terminal_decisions,omitempty"`
+	Accepted              *AcceptedAction                `json:"accepted,omitempty"`
+}
+
+const (
+	PublicationWritePending   = "pending"
+	PublicationWriteObserved  = "observed"
+	PublicationWriteUncertain = "uncertain"
+)
+
+// PublicationWrite tracks one GitHub write independently of the action's terminal decision.
+type PublicationWrite struct {
+	AttemptID  string    `json:"attempt_id,omitempty"`
+	Kind       string    `json:"kind"`
+	BotLogin   string    `json:"bot_login"`
+	BotID      int64     `json:"bot_id,omitempty"`
+	Repository string    `json:"repository"`
+	Number     int       `json:"number"`
+	Marker     string    `json:"marker"`
+	Since      time.Time `json:"since"`
+	StartedAt  time.Time `json:"started_at"`
+	Deadline   time.Time `json:"deadline"`
+	Status     string    `json:"status"`
+	ResolvedAt time.Time `json:"resolved_at,omitzero"`
+}
+
+// ValidPublicationBotLogin accepts the bounded account identity stored with a write.
+func ValidPublicationBotLogin(login string) bool {
+	return workspace.ValidIdentitySegment(strings.TrimSuffix(login, "[bot]"))
+}
+
+func validPublicationWrite(jobID string, write PublicationWrite) bool {
+	if !workspace.ValidIdentitySegment(jobID) || write.AttemptID != "" && !workspace.ValidIdentitySegment(write.AttemptID) ||
+		!ValidPublicationBotLogin(write.BotLogin) || write.BotID < 0 ||
+		!workspace.ValidRepository(write.Repository) || write.Number <= 0 ||
+		write.StartedAt.IsZero() || !write.Deadline.After(write.StartedAt) ||
+		write.Marker != "<!-- linkdataminion:"+jobID+" -->" {
+		return false
+	}
+	switch write.Kind {
+	case "comment", "review":
+	default:
+		return false
+	}
+	switch write.Status {
+	case PublicationWritePending:
+		return write.ResolvedAt.IsZero()
+	case PublicationWriteObserved, PublicationWriteUncertain:
+		return !write.ResolvedAt.IsZero()
+	default:
+		return false
+	}
 }
 
 // TerminalDecision records the first outcome for one accepted attempt.
@@ -212,7 +264,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]PendingFix{}, TerminalDecisions: map[string]TerminalDecision{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]PendingFix{}, PublicationWrites: map[string]PublicationWrite{}, TerminalDecisions: map[string]TerminalDecision{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -239,6 +291,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if store.Data.Cursor.IsZero() {
 		return nil, errors.Join(fmt.Errorf("state cursor is missing"), store.Close())
 	}
+	if store.Data.PublicationScanCursor != "" && !workspace.ValidIdentitySegment(store.Data.PublicationScanCursor) {
+		return nil, errors.Join(fmt.Errorf("invalid publication scan cursor"), store.Close())
+	}
 	if store.Data.Accepted != nil {
 		if err := store.Data.Accepted.Validate(); err != nil {
 			return nil, errors.Join(fmt.Errorf("invalid accepted action: %w", err), store.Close())
@@ -252,6 +307,11 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	for jobID, decision := range store.Data.TerminalDecisions {
 		if !validTerminalDecision(jobID, decision) {
 			return nil, errors.Join(fmt.Errorf("invalid terminal decision %q", jobID), store.Close())
+		}
+	}
+	for jobID, write := range store.Data.PublicationWrites {
+		if !validPublicationWrite(jobID, write) {
+			return nil, errors.Join(fmt.Errorf("invalid publication write %q", jobID), store.Close())
 		}
 	}
 	if store.Data.Processed == nil {
@@ -268,6 +328,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	if store.Data.PendingFixes == nil {
 		store.Data.PendingFixes = map[string]PendingFix{}
+	}
+	if store.Data.PublicationWrites == nil {
+		store.Data.PublicationWrites = map[string]PublicationWrite{}
 	}
 	if store.Data.TerminalDecisions == nil {
 		store.Data.TerminalDecisions = map[string]TerminalDecision{}

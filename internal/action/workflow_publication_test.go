@@ -44,7 +44,7 @@ func TestOrchestratorAllowsQuotedRequestNotesButRejectsNewPrivateText(t *testing
 				}
 			}))
 			defer server.Close()
-			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"), BotLogin: "bot", Main: "codex", Adversarial: "claude",
+			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"), Store: openState(t, time.Now()), BotLogin: "bot", BotID: 8, Main: "codex", Adversarial: "claude",
 				Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 			}
 			e.Executor = executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {

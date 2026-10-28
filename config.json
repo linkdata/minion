@@ -38,6 +38,7 @@
   "poll_interval_seconds": 60,
   "inactivity_timeout_minutes": 10,
   "max_runtime_minutes": 240,
+  "publication_grace_seconds": 120,
   "max_github_context_bytes": 32768,
   "state_path": "var/state.json",
   "work_root": "var/work",

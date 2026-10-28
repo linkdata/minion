@@ -153,6 +153,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			var logs bytes.Buffer
 			logger := log.New(&logs, "", 0)
 			owner := newOrchestrator(cfg, client, store, logger, nil)
+			owner.BotID = 8
 			watcher := &monitor.Monitor{Config: cfg, GitHub: client, Logger: logger}
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
@@ -219,6 +220,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 					t.Fatal(err)
 				}
 				restarted := newOrchestrator(cfg, client, store, logger, nil)
+				restarted.BotID = 8
 				freshMonitor := &monitor.Monitor{Config: cfg, GitHub: client, Logger: logger}
 				if code := runOrchestrateMode(t.Context(), restarted, freshMonitor, store, false, logger, worker, 20*time.Second); code != 0 {
 					t.Fatalf("restart did not reuse the accepted action: exit=%d log=%s", code, logs.String())

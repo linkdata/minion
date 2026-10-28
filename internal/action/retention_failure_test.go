@@ -169,7 +169,7 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
-			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
 				Runner: Runner{runModel: forbidModel(t)}}
 			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts.Load() != 0 {
@@ -203,7 +203,7 @@ func TestSavedPrivateRetentionRetriesDirectoryLayoutFailure(t *testing.T) {
 			if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
 				Runner: Runner{runModel: forbidModel(t)}}
 			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 				errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
@@ -232,7 +232,7 @@ func TestSavedPrivateRecordConflictHoldsReceiptForRepair(t *testing.T) {
 			store, _, request := savedRecoveryFixture(t, job, result)
 			var posts atomic.Int32
 			server := auditRecoveryServer(t, &posts)
-			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
 				Runner: Runner{runModel: forbidModel(t)}}
 			var err error
 			if name == "reviews" {
@@ -283,7 +283,7 @@ func TestSavedPrivateDirectoryDisappearsDuringSync(t *testing.T) {
 			store, _, request := savedRecoveryFixture(t, job, result)
 			var posts atomic.Int32
 			server := auditRecoveryServer(t, &posts)
-			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
 				Runner: Runner{runModel: forbidModel(t)}}
 			var err error
 			if name == "reviews" {

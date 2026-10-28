@@ -1,0 +1,496 @@
+package monitor
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/state"
+)
+
+func TestReconcilePublicationWriteObservesVerifiedMarker(t *testing.T) {
+	for _, kind := range []string{"comment", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store := openState(t, now)
+				jobID := "issued-job"
+				write := state.PublicationWrite{
+					AttemptID: "attempt-1", Kind: kind, BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
+					Marker: "<!-- linkdataminion:issued-job -->", Since: now,
+					StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+				}
+				store.Data.PublicationWrites[jobID] = write
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				gh := &fakeGitHub{}
+				item := github.Item{Body: "published\n\n" + write.Marker, Author: github.User{ID: 8, Login: "renamed-bot"}, UpdatedAt: now}
+				if kind == "review" {
+					gh.reviewReplies = []github.Item{item}
+				} else {
+					gh.items = []github.Item{item}
+				}
+				m := &Monitor{Config: config.Config{BotLogin: "replacement-bot"}, GitHub: gh}
+				if err := m.reconcilePublicationWrites(t.Context(), store, "", ""); err != nil {
+					t.Fatal(err)
+				}
+				got := store.Data.PublicationWrites[jobID]
+				if got.Status != state.PublicationWriteObserved || got.ResolvedAt.IsZero() || len(gh.verifiedCalls) != 1 ||
+					gh.verifiedCalls[0] != (kind == "review") || gh.commentCalls != 0 || !publicationWriteWake(store, now).IsZero() {
+					t.Fatalf("reconciliation did not preserve observed effect: write=%+v reviews=%v comments=%d", got, gh.verifiedCalls, gh.commentCalls)
+				}
+			})
+		})
+	}
+}
+
+func TestReconcileIssuedReviewRequiresReviewMarker(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	marker := "<!-- linkdataminion:issued-job -->"
+	store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "review", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{{Body: "comment\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}}
+	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+	if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Data.PublicationWrites["issued-job"]; got.Status != state.PublicationWritePending || len(gh.verifiedCalls) != 1 {
+		t.Fatalf("issue comment satisfied issued review: write=%+v lookups=%d", got, len(gh.verifiedCalls))
+	}
+}
+
+func TestReconcilePublicationWriteExpiresWithoutRepost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now)
+		jobID := "issued-job"
+		store.Data.PublicationWrites[jobID] = state.PublicationWrite{
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			Marker: "<!-- linkdataminion:issued-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{}
+		m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+		if err := m.reconcilePublicationWrites(t.Context(), store, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Data.PublicationWrites[jobID]; got.Status != state.PublicationWritePending ||
+			!withPublicationWriteWake(now.Add(time.Hour), store, now).Equal(now.Add(publicationRecheckInterval)) {
+			t.Fatalf("pending write lost its fixed wake: %+v", got)
+		}
+		time.Sleep(time.Minute)
+		if err := m.reconcilePublicationWrites(t.Context(), store, "", ""); err != nil {
+			t.Fatal(err)
+		}
+		got := store.Data.PublicationWrites[jobID]
+		if got.Status != state.PublicationWriteUncertain || got.ResolvedAt.IsZero() || len(gh.verifiedCalls) != 2 ||
+			gh.commentCalls != 0 || !publicationWriteWake(store, time.Now()).IsZero() {
+			t.Fatalf("expired write was retried or not recorded: write=%+v checks=%d comments=%d", got, len(gh.verifiedCalls), gh.commentCalls)
+		}
+	})
+}
+
+func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now)
+		marker := "<!-- linkdataminion:issued-job -->"
+		store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			Marker: marker, Since: now, StartedAt: now,
+			Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{}
+		m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+		time.Sleep(2 * time.Minute)
+		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Data.PublicationWrites["issued-job"]; got.Status != state.PublicationWriteObserved ||
+			len(gh.verifiedCalls) != 1 || gh.commentCalls != 0 {
+			t.Fatalf("late one-pass check missed published marker: write=%+v checks=%d comments=%d", got, len(gh.verifiedCalls), gh.commentCalls)
+		}
+	})
+}
+
+func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		path := filepath.Join(t.TempDir(), "state.json")
+		store := openStateAt(t, path, now)
+		ids := []string{"job-a", "job-b", "job-c"}
+		for _, id := range ids {
+			store.Data.PublicationWrites[id] = state.PublicationWrite{
+				AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+				Marker: "<!-- linkdataminion:" + id + " -->", Since: now.Add(-time.Minute),
+				StartedAt: now.Add(-2 * time.Minute), Deadline: now.Add(-time.Minute), Status: state.PublicationWritePending,
+			}
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{beforeVerify: func(ctx context.Context, _ bool) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}}
+		m := &Monitor{Config: config.Config{BotLogin: "bot", Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}, GitHub: gh}
+		for pass, id := range ids {
+			start := time.Now()
+			if pass == 0 {
+				if _, err := m.RunOnce(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				if len(gh.notificationCalls) != 1 {
+					t.Fatalf("bounded reconciliation did not reach notification polling: %d calls", len(gh.notificationCalls))
+				}
+			} else {
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if elapsed := time.Since(start); elapsed != publicationReconcileBudget {
+				t.Fatalf("pass %d occupied monitor for %s, want %s", pass, elapsed, publicationReconcileBudget)
+			}
+			if len(gh.verifiedCalls) != pass+1 || store.Data.PublicationScanCursor != id ||
+				store.Data.PublicationWrites[id].Status != state.PublicationWriteUncertain {
+				t.Fatalf("pass %d did not advance one write: checks=%d cursor=%q write=%+v",
+					pass, len(gh.verifiedCalls), store.Data.PublicationScanCursor, store.Data.PublicationWrites[id])
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, time.Now())
+		}
+		if !publicationWriteWake(store, time.Now()).IsZero() {
+			t.Fatal("resolved backlog still schedules publication checks")
+		}
+	})
+}
+
+func TestRunOnceNormalPollWakesForIssuedPublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now)
+		store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			Marker: "<!-- linkdataminion:issued-job -->", Since: now, StartedAt: now,
+			Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+		}
+		store.Data.NextInviteCheckAt = now.Add(time.Hour)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &fakeGitHub{}
+		m := &Monitor{Config: config.Config{BotLogin: "bot", PollIntervalSeconds: 600}, GitHub: gh}
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.Equal(now.Add(publicationRecheckInterval)) || len(gh.verifiedCalls) != 1 {
+			t.Fatalf("normal poll skipped publication wake: next=%s err=%v checks=%d", next, err, len(gh.verifiedCalls))
+		}
+	})
+}
+
+func TestRunOnceAcceptedRetryChecksOlderIssuedPublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		store.Data.Accepted.RetryAt = now.Add(5 * time.Minute)
+		store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
+			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "bot", Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now, StartedAt: now,
+			Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.Equal(now.Add(publicationRecheckInterval)) || len(gh.verifiedCalls) != 2 ||
+			store.Data.Accepted == nil || store.Data.Accepted.JobID != accepted.JobID ||
+			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
+			t.Fatalf("accepted retry starved older write: next=%s err=%v checks=%d accepted=%+v write=%+v",
+				next, err, len(gh.verifiedCalls), store.Data.Accepted, store.Data.PublicationWrites["old-job"])
+		}
+	})
+}
+
+func TestSelectedCapacityWaitRechecksIssuedPublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now)
+		marker := "<!-- linkdataminion:issued-job -->"
+		store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			Marker: marker, Since: now, StartedAt: now,
+			Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+		}
+		store.Data.NextInviteCheckAt = now.Add(time.Hour)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh := &synchronizedRecoveryGitHub{fakeGitHub: &fakeGitHub{}}
+		handler := &heldCapacityHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh, Handler: handler, SelectedExecutorID: "local"}
+		finished := make(chan error, 1)
+		go func() { _, err := m.RunOnce(t.Context(), store); finished <- err }()
+		<-handler.entered
+		synctest.Wait()
+		gh.mu.Lock()
+		initialChecks := len(gh.verifiedCalls)
+		gh.mu.Unlock()
+		if initialChecks != 1 {
+			t.Fatalf("initial issued write check count = %d, want 1", initialChecks)
+		}
+		time.Sleep(45 * time.Second)
+		gh.mu.Lock()
+		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}
+		gh.mu.Unlock()
+		time.Sleep(30 * time.Second)
+		synctest.Wait()
+		var got state.PublicationWrite
+		_ = store.WithLock(func() error { got = store.Data.PublicationWrites["issued-job"]; return nil })
+		gh.mu.Lock()
+		checks, polls := len(gh.verifiedCalls), len(gh.notificationCalls)
+		gh.mu.Unlock()
+		if got.Status != state.PublicationWriteObserved || checks < 2 || polls != 0 {
+			t.Fatalf("capacity wait skipped marker checks: write=%+v checks=%d polls=%d", got, checks, polls)
+		}
+		close(handler.release)
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestReconcilePublicationWritesPrioritizesAcceptedJob(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	for _, id := range []string{"old-job", "active-job"} {
+		store.Data.PublicationWrites[id] = state.PublicationWrite{
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			Marker: "<!-- linkdataminion:" + id + " -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n<!-- linkdataminion:active-job -->", Author: github.User{Login: "bot"}, UpdatedAt: now}}}
+	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+	if err := m.reconcilePublicationWrites(t.Context(), store, "active-job", ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.verifiedCalls) != 1 || store.Data.PublicationWrites["active-job"].Status != state.PublicationWriteObserved ||
+		store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
+		t.Fatalf("unrelated marker lookup delayed active recovery: calls=%d writes=%+v", len(gh.verifiedCalls), store.Data.PublicationWrites)
+	}
+}
+
+func TestIssuedTaskWriteSuppressesFailureReply(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	job := Job{
+		ID: "issued-job", Repository: config.Repository{Name: "owner/repo"}, SubjectType: "Issue", Number: 7,
+		Source: github.Item{Key: "source", UpdatedAt: now}, Command: command.Command{Name: "ask", Action: command.Comment},
+	}
+	store.Data.PublicationWrites[job.ID] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: job.Repository.Name, Number: job.Number,
+		Marker: job.Marker(), Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	failure := state.JobFailure{Attempts: maxJobAttempts}
+	store.Data.JobFailures[job.ID] = failure
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{}
+	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+	if err := m.finishFailedJob(t.Context(), store, job, now, failure); err != nil {
+		t.Fatal(err)
+	}
+	if gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 || store.Data.Processed[job.ID].IsZero() ||
+		store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
+		t.Fatalf("issued write caused a second reply or was lost: comments=%d checks=%d processed=%v write=%+v",
+			gh.commentCalls, len(gh.verifiedCalls), store.Data.Processed[job.ID], store.Data.PublicationWrites[job.ID])
+	}
+}
+
+func TestIssuedReviewStillSuppressesReplyAfterCommandRemap(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	job := Job{ID: "issued-job", Repository: config.Repository{Name: "owner/repo"}, SubjectType: "PullRequest", Number: 7,
+		Source: github.Item{Key: "source", UpdatedAt: now}, Command: command.Command{Name: "ask", Action: command.Comment}}
+	store.Data.PublicationWrites[job.ID] = state.PublicationWrite{
+		AttemptID: "old-attempt", Kind: "review", BotLogin: "bot", Repository: job.Repository.Name, Number: job.Number,
+		Marker: job.Marker(), Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	failure := state.JobFailure{Attempts: maxJobAttempts}
+	store.Data.JobFailures[job.ID] = failure
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{}
+	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+	if err := m.finishFailedJob(t.Context(), store, job, now, failure); err != nil {
+		t.Fatal(err)
+	}
+	if gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 || store.Data.Processed[job.ID].IsZero() ||
+		store.Data.PublicationWrites[job.ID].Kind != "review" {
+		t.Fatalf("remapped command duplicated or lost the old review: comments=%d checks=%d write=%+v",
+			gh.commentCalls, len(gh.verifiedCalls), store.Data.PublicationWrites[job.ID])
+	}
+}
+
+func TestRunOnceReconcilesWriteAfterTaskCleanup(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	jobID := "issued-job"
+	marker := "<!-- linkdataminion:issued-job -->"
+	store.Data.Processed[jobID] = now
+	store.Data.PublicationWrites[jobID] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	store.Data.NextPollAt = now.Add(time.Hour)
+	store.Data.NextInviteCheckAt = now.Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}}
+	handler := &fakeHandler{}
+	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh, Handler: handler}
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Data.PublicationWrites[jobID]; got.Status != state.PublicationWriteObserved ||
+		len(handler.jobs) != 0 || gh.commentCalls != 0 || store.Data.Processed[jobID].IsZero() {
+		t.Fatalf("processed action did not reconcile independently: write=%+v jobs=%d comments=%d", got, len(handler.jobs), gh.commentCalls)
+	}
+}
+
+func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		m.Now = time.Now
+		synchronizedGitHub := &synchronizedRecoveryGitHub{fakeGitHub: gh}
+		m.GitHub = synchronizedGitHub
+		store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
+			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion",
+			Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+		}
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		started := make(chan struct{})
+		release := make(chan struct{})
+		finished := make(chan error, 1)
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+		defer cancel()
+		go func() {
+			finished <- m.runSelectedWithControls(ctx, store, jobFromAccepted(accepted), "", nil,
+				func(context.Context, Job) error { close(started); <-release; return nil }, func(err error) error { return err })
+		}()
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("selected worker ended before it started: %v", err)
+		}
+		synctest.Wait()
+		synchronizedGitHub.mu.Lock()
+		initialChecks := len(gh.verifiedCalls)
+		synchronizedGitHub.mu.Unlock()
+		time.Sleep(publicationRecheckInterval + time.Second)
+		synctest.Wait()
+		synchronizedGitHub.mu.Lock()
+		periodicChecks := len(gh.verifiedCalls)
+		synchronizedGitHub.mu.Unlock()
+		completedEarly := false
+		var runErr error
+		select {
+		case runErr = <-finished:
+			completedEarly = true
+		default:
+		}
+		close(release)
+		if !completedEarly {
+			runErr = <-finished
+		}
+		if initialChecks != 1 || periodicChecks < 3 || completedEarly || runErr != nil ||
+			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
+			t.Fatalf("active write was redundantly checked or older write was not rechecked: initial=%d periodic=%d completed_early=%t err=%v write=%+v",
+				initialChecks, periodicChecks, completedEarly, runErr, store.Data.PublicationWrites["old-job"])
+		}
+	})
+}
+
+func TestRecoveredIssuedReviewSkipsLiveSourceRevalidation(t *testing.T) {
+	for _, change := range []string{"source edited", "command remapped"} {
+		t.Run(change, func(t *testing.T) {
+			now := time.Now().UTC()
+			store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+			marker := "<!-- linkdataminion:" + accepted.JobID + " -->"
+			store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
+				AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion",
+				Repository: accepted.Repository, Number: accepted.SubjectNumber,
+				Marker: marker, Since: accepted.SourceUpdatedAt, StartedAt: now,
+				Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+			}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh.reviewReplies = []github.Item{{Key: "review:1", Body: "published\n\n" + marker,
+				Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}}
+			var sourceRead bool
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				if item.Key == accepted.SourceKey {
+					sourceRead = true
+					item.Edited = true
+				}
+				return item, nil
+			}
+			if change == "command remapped" {
+				m.Config.Commands[accepted.CommandName] = config.CommandMapping{Action: "comment"}
+			}
+			handler := &recoveredResultHandler{publish: func(Job) error { return nil }}
+			m.Handler = handler
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			if sourceRead || handler.publications != 1 || store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWriteObserved ||
+				store.Data.TerminalDecisions[accepted.JobID].Outcome == "lost" || store.Data.Processed[accepted.JobID].IsZero() {
+				t.Fatalf("issued review was revalidated or discarded: sourceRead=%t publications=%d write=%+v decision=%+v processed=%v",
+					sourceRead, handler.publications, store.Data.PublicationWrites[accepted.JobID],
+					store.Data.TerminalDecisions[accepted.JobID], store.Data.Processed[accepted.JobID])
+			}
+		})
+	}
+}

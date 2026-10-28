@@ -250,6 +250,9 @@ func (f *actionMonitorGitHub) CurrentItem(_ context.Context, item github.Item) (
 func (f *actionMonitorGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error) {
 	return false, nil
 }
+func (f *actionMonitorGitHub) HasVerifiedBotPublication(context.Context, string, int, time.Time, github.User, string, string) (bool, error) {
+	return false, nil
+}
 func (f *actionMonitorGitHub) Permission(_ context.Context, _, login string) (github.Permission, error) {
 	return github.Permission{Permission: "write", User: github.User{ID: 7, Login: login}}, nil
 }
@@ -325,7 +328,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL, testAuditSkillURL)
 	var reviewRuns, auditRuns int
 	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-		BotLogin: "linkdataminion",
+		BotLogin: "linkdataminion", BotID: 8,
 		Commands: commands,
 		Runner: Runner{
 			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
@@ -347,6 +350,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 		},
 	}
 	store := openState(t, now.Add(-time.Minute))
+	orchestrator.Store = store
 	var journal bytes.Buffer
 	m := monitor.Monitor{Logger: log.New(&journal, "", 0), Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
@@ -944,9 +948,9 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "test-token")
-	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Store: openState(t, time.Now()),
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-		BotLogin: "linkdataminion",
+		BotLogin: "linkdataminion", BotID: 8,
 		Runner: Runner{
 			runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				prompt := modelRequest.prompt

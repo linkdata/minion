@@ -128,6 +128,34 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("close state: %v", err)
 		}
 	}()
+	var client *github.Client
+	var user github.User
+	authenticateGitHub := func() bool {
+		if client != nil {
+			return true
+		}
+		token, err := githubToken(ctx)
+		if err != nil {
+			logger.Printf("GitHub authentication: %v", err)
+			return false
+		}
+		candidate := github.New(token)
+		user, err = candidate.AuthenticatedUser(ctx)
+		if err != nil {
+			logger.Printf("GitHub identity check: %v", err)
+			return false
+		}
+		if user.ID <= 0 {
+			logger.Printf("GitHub identity check: authenticated account ID is missing")
+			return false
+		}
+		if !strings.EqualFold(user.Login, cfg.BotLogin) {
+			logger.Printf("GitHub identity is @%s; config requires @%s", user.Login, cfg.BotLogin)
+			return false
+		}
+		client = candidate
+		return true
+	}
 	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
 	preflight := func() bool {
 		if err := checkWorkRoot(); err != nil {
@@ -145,25 +173,29 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return true
 	}
 	failedPreflight := !terminalRecovery && !preflight()
+	if failedPreflight && !*check {
+		for _, write := range store.Data.PublicationWrites {
+			if write.Status != state.PublicationWritePending {
+				continue
+			}
+			if !authenticateGitHub() {
+				return 1
+			}
+			watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
+			if err := watcher.ReconcilePublicationWrites(ctx, store); err != nil {
+				logger.Printf("reconcile issued publication after preflight failure: %s", monitor.InertLogText(err.Error()))
+				return 1
+			}
+			break
+		}
+	}
 	if failedPreflight {
 		if *check || !terminalRecoveryPendingAt(store, now()) {
 			return 1
 		}
 		terminalRecovery = true
 	}
-	token, err := githubToken(ctx)
-	if err != nil {
-		logger.Printf("GitHub authentication: %v", err)
-		return 1
-	}
-	client := github.New(token)
-	user, err := client.AuthenticatedUser(ctx)
-	if err != nil {
-		logger.Printf("GitHub identity check: %v", err)
-		return 1
-	}
-	if !strings.EqualFold(user.Login, cfg.BotLogin) {
-		logger.Printf("GitHub identity is @%s; config requires @%s", user.Login, cfg.BotLogin)
+	if !authenticateGitHub() {
 		return 1
 	}
 	if *check {
@@ -178,6 +210,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
 	if terminalRecovery {
 		recovery := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
+		recovery.BotID = user.ID
 		bindPublicationValidation(recovery, watcher)
 		watcher.Handler = recovery
 		code := recoverTerminalService(ctx, watcher, store, *loop && !failedPreflight, logger)
@@ -193,6 +226,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
+	orchestrator.BotID = user.ID
 	bindPublicationValidation(orchestrator, watcher)
 	watcher.Config, watcher.Handler = cfg, orchestrator
 	if *mode == "orchestrate" {
@@ -277,6 +311,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
 		CheckWorkRoot:         checkWorkRoot,
 		MaxRuntime:            time.Duration(cfg.MaxRuntimeMinutes) * time.Minute,
+		PublicationGrace:      time.Duration(cfg.PublicationGraceSeconds) * time.Second,
 		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
 		Commands:              cfg.Commands,
 		Main:                  cfg.Main,
@@ -396,7 +431,7 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		}
 		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
 	}
-	logger.Printf("AI roles: main=%s adversarial=%s inactivity_timeout_minutes=%d max_runtime_minutes=%d", cfg.Main, cfg.Adversarial, cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes)
+	logger.Printf("AI roles: main=%s adversarial=%s inactivity_timeout_minutes=%d max_runtime_minutes=%d publication_grace_seconds=%d", cfg.Main, cfg.Adversarial, cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes, cfg.PublicationGraceSeconds)
 	if cfg.Adversarial != "" {
 		maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := cfg.CriticStopping.Resolve()
 		logger.Printf("critic policy: max_rounds=%d nonblocking_after_round=%d consecutive_no_blocker_rounds=%d", maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds)

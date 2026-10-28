@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	liveCommentQuery        = `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } } editor { login } lastEditedAt } } }`
+	liveCommentQuery        = `query($id: ID!) { node(id: $id) { ... on Comment { body author { login ... on User { id: databaseId } ... on Bot { id: databaseId } } editor { login } lastEditedAt } } }`
 	liveIssueQuery          = `query($id: ID!) { node(id: $id) { ... on Issue { title bodyText lastEditedAt } } }`
 	liveReviewTimelineQuery = `query($owner: String!, $name: String!, $number: Int!, $since: DateTime, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -27,7 +27,7 @@ const (
       timelineItems(first: 100, after: $after, since: $since, itemTypes: [PULL_REQUEST_REVIEW]) {
         nodes { ... on PullRequestReview {
           id fullDatabaseId body state submittedAt url
-          author { login ... on User { id: databaseId } }
+          author { login ... on User { id: databaseId } ... on Bot { id: databaseId } }
         } }
         pageInfo { hasNextPage endCursor }
       }

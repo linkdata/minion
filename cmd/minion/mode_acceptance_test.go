@@ -198,6 +198,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		var logs bytes.Buffer
 		logger := log.New(&logs, "", 0)
 		owner := newOrchestrator(cfg, client, store, logger, nil)
+		owner.BotID = 8
 		watcher := &monitor.Monitor{Config: cfg, GitHub: client, Handler: owner, Now: func() time.Time { return at }}
 		if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, worker, 40*time.Second); code != 0 {
 			t.Fatalf("orchestrate poll returned %d: %s", code, logs.String())

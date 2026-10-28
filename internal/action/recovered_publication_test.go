@@ -300,7 +300,7 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatal(err)

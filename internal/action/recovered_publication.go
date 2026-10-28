@@ -32,6 +32,9 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}()
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
 	defer cancel()
+	if handled, err := e.resumeTaskPublication(ctx, request); handled || err != nil {
+		return err
+	}
 	if !request.Deadline.IsZero() {
 		if !time.Now().Before(request.Deadline) {
 			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)

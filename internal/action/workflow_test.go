@@ -44,8 +44,8 @@ func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "github-secret")
-	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high",
-		BotLogin: "linkdataminion",
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Store: openState(t, time.Now()), Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high",
+		BotLogin: "linkdataminion", BotID: 8,
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),

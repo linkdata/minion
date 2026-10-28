@@ -22,7 +22,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
 		cfg.CriticStopping.NonblockingAfterRound != nil || cfg.CriticStopping.ConsecutiveNoBlockerRounds != nil ||
-		cfg.InactivityTimeoutMinutes != 10 || cfg.MaxRuntimeMinutes != 240 ||
+		cfg.InactivityTimeoutMinutes != 10 || cfg.MaxRuntimeMinutes != 240 || cfg.PublicationGraceSeconds != DefaultPublicationGraceSeconds ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
@@ -114,6 +114,39 @@ func TestLoadMaxGitHubContextBytes(t *testing.T) {
 			}
 			if err != nil || cfg.MaxGitHubContextBytes != tt.want {
 				t.Fatalf("Load() = (%d, %v), want (%d, nil)", cfg.MaxGitHubContextBytes, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadPublicationGraceSeconds(t *testing.T) {
+	for _, test := range []struct {
+		name, field string
+		want        int
+		invalid     bool
+	}{
+		{name: "default", want: DefaultPublicationGraceSeconds},
+		{name: "custom", field: `,"publication_grace_seconds":42`, want: 42},
+		{name: "minimum", field: `,"publication_grace_seconds":1`, want: 1},
+		{name: "maximum", field: `,"publication_grace_seconds":3600`, want: MaxPublicationGraceSeconds},
+		{name: "negative", field: `,"publication_grace_seconds":-1`, invalid: true},
+		{name: "above maximum", field: `,"publication_grace_seconds":3601`, invalid: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]` + test.field + `}`
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if test.invalid {
+				if err == nil || !strings.Contains(err.Error(), "publication_grace_seconds") {
+					t.Fatalf("Load() error = %v, want publication grace validation error", err)
+				}
+				return
+			}
+			if err != nil || cfg.PublicationGraceSeconds != test.want {
+				t.Fatalf("Load() = (%d, %v), want (%d, nil)", cfg.PublicationGraceSeconds, err, test.want)
 			}
 		})
 	}
