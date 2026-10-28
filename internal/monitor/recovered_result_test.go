@@ -304,6 +304,30 @@ func TestUncommittedStoredResultDoesNotPublishAfterRestart(t *testing.T) {
 	}
 }
 
+func TestUncommittedStoredResultDoesNotDeferLiveFailure(t *testing.T) {
+	store, _, accepted, gh, monitor := storedRecoveryFixture(t)
+	store.Data.Accepted.ResultReady = false
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	job := jobFromAccepted(accepted)
+	failure := errors.Join(ErrPostModelPublication, errors.New("publication failed"))
+	outcome, err := selectedCompletedOutcome(store, job, failure, nil, time.Now().UTC(), time.Time{})
+	if err != nil || outcome != "failed" {
+		t.Fatalf("uncommitted result deferred worker failure: outcome=%q error=%v", outcome, err)
+	}
+	if err := monitor.completeSelected(t.Context(), store, job, time.Now().UTC(), failure); err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.TerminalDecisions[job.ID].Outcome != "failed" || store.Data.Accepted != nil ||
+		store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
+		t.Fatalf("uncommitted result stayed retryable: state=%+v comments=%v", store.Data, gh.comments)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("uncommitted sidecar survived terminal cleanup: present=%t error=%v", present, err)
+	}
+}
+
 func TestRunOnceRemovesCompletedResultSidecarAfterRestart(t *testing.T) {
 	store, path, accepted, _, monitor := storedRecoveryFixture(t)
 	store.Data.Processed[accepted.JobID] = time.Now().UTC()

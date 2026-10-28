@@ -1997,7 +1997,7 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		}
 		assigned = accepted.Assigned
 		modelCallStarted = failure.ModelCallStarted
-		if result != nil {
+		if result != nil && accepted.ResultReady {
 			var err error
 			stored, err = store.HasAcceptedResult()
 			return err
@@ -2282,9 +2282,13 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		}
 		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
-	stored, receiptErr := store.HasAcceptedResult()
-	if receiptErr != nil {
-		return fmt.Errorf("%w: inspect stored result after execution: %w", ErrAcceptanceState, receiptErr)
+	stored := false
+	if accepted.ResultReady {
+		var receiptErr error
+		stored, receiptErr = store.HasAcceptedResult()
+		if receiptErr != nil {
+			return fmt.Errorf("%w: inspect stored result after execution: %w", ErrAcceptanceState, receiptErr)
+		}
 	}
 	if stored {
 		if !errors.Is(err, ErrTerminalJob) || errors.Is(err, context.Canceled) ||
