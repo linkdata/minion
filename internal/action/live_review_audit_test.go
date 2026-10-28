@@ -35,8 +35,8 @@ func TestLiveReviewAction(t *testing.T) {
 	pull := liveReviewAuditPull(t, ctx, fixture.owner, fixture.cfg)
 	job := liveReviewAuditJob(t, fixture.cfg, fixture.repo, fixture.ownerUser, command.Review, "PullRequest", pull.Number, pull.HTMLURL)
 	var calls int
-	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,
-		BotLogin: fixture.cfg.BotLogin,
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot, Store: openState(t, time.Now()),
+		BotLogin: fixture.cfg.BotLogin, BotID: fixture.botUser.ID,
 		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {
@@ -106,8 +106,8 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 			})
 			report := "Minion live audit fixture " + job.ID[:12] + ".\n"
 			var calls int
-			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot,
-				BotLogin: fixture.cfg.BotLogin,
+			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: fixture.bot, Store: openState(t, time.Now()),
+				BotLogin: fixture.cfg.BotLogin, BotID: fixture.botUser.ID,
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				Runner: Runner{
 					runModel: func(ctx context.Context, modelRequest modelRun) (aicli.Result, error) {

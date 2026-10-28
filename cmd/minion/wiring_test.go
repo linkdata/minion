@@ -24,7 +24,7 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		WorkRoot: "/private/work", StatePath: "/private/state.json", BotLogin: "bot",
 		Main: "claude", Adversarial: "codex",
 		CriticStopping:           config.CriticStopping{MaxRounds: 5, NonblockingAfterRound: &strict, ConsecutiveNoBlockerRounds: &consecutive},
-		InactivityTimeoutMinutes: 3, MaxRuntimeMinutes: 7, MaxGitHubContextBytes: 1234,
+		InactivityTimeoutMinutes: 3, MaxRuntimeMinutes: 7, PublicationGraceSeconds: 11, MaxGitHubContextBytes: 1234,
 		AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection},
 		Commands:       map[string]config.CommandMapping{"inspect": {Action: "review"}},
 		Codex:          config.CodexConfig{APIKey: "codex-test-key", Model: "codex-pinned", ReasoningEffort: "high", Skills: []string{"stale-host-skill"}},
@@ -48,7 +48,8 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		orchestrator.ClaudeModel != cfg.Claude.Model || orchestrator.ClaudeEffort != cfg.Claude.Effort {
 		t.Fatal("service lost pinned provider roles, models, efforts or critic budget")
 	}
-	if orchestrator.MaxRuntime != 7*time.Minute || orchestrator.MaxGitHubContextBytes != cfg.MaxGitHubContextBytes ||
+	if orchestrator.MaxRuntime != 7*time.Minute || orchestrator.PublicationGrace != 11*time.Second ||
+		orchestrator.MaxGitHubContextBytes != cfg.MaxGitHubContextBytes ||
 		!slices.Equal(orchestrator.AlwaysOnSkills, cfg.AlwaysOnSkills) ||
 		!reflect.DeepEqual(orchestrator.Commands, cfg.Commands) || orchestrator.BotLogin != cfg.BotLogin ||
 		orchestrator.Usage == nil || orchestrator.Usage.Dir != filepath.Join(filepath.Dir(cfg.StatePath), "usage") {

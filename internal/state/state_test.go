@@ -121,6 +121,98 @@ func TestOpenInitializesMissingTerminalDecisions(t *testing.T) {
 	}
 }
 
+func TestPublicationWritesPersistWithoutAcceptedAction(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := PublicationWrite{
+		AttemptID: "attempt-1", Kind: "review", BotLogin: "bot[bot]", BotID: 8, Repository: "owner/repo", Number: 7,
+		Marker: "<!-- linkdataminion:job-1 -->", Since: at, StartedAt: at,
+		Deadline: at.Add(2 * time.Minute), Status: PublicationWritePending,
+	}
+	store.Data.PublicationWrites["job-1"] = write
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if got := reopened.Data.PublicationWrites["job-1"]; !reflect.DeepEqual(got, write) || reopened.Data.Accepted != nil {
+		t.Fatalf("publication write changed after restart: got=%+v accepted=%+v", got, reopened.Data.Accepted)
+	}
+}
+
+func TestOpenInitializesMissingPublicationWrites(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	data, err := json.Marshal(Data{Cursor: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Data.PublicationWrites == nil {
+		t.Fatal("missing publication writes map")
+	}
+}
+
+func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	valid := PublicationWrite{Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+		Marker: "<!-- linkdataminion:job-1 -->", Since: at, StartedAt: at,
+		Deadline: at.Add(2 * time.Minute), Status: PublicationWritePending}
+	for _, test := range []struct {
+		name, jobID string
+		change      func(*PublicationWrite)
+	}{
+		{name: "bad job", jobID: "../job"},
+		{name: "bad attempt", jobID: "job-1", change: func(w *PublicationWrite) { w.AttemptID = "../attempt" }},
+		{name: "bad kind", jobID: "job-1", change: func(w *PublicationWrite) { w.Kind = "push" }},
+		{name: "missing bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "" }},
+		{name: "empty bot account", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "[bot]" }},
+		{name: "bad bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "owner/bot" }},
+		{name: "bad bot ID", jobID: "job-1", change: func(w *PublicationWrite) { w.BotID = -1 }},
+		{name: "bad target", jobID: "job-1", change: func(w *PublicationWrite) { w.Repository = "../repo" }},
+		{name: "wrong marker", jobID: "job-1", change: func(w *PublicationWrite) { w.Marker = "<!-- linkdataminion:other -->" }},
+		{name: "renewed backwards", jobID: "job-1", change: func(w *PublicationWrite) { w.Deadline = at }},
+		{name: "invalid status", jobID: "job-1", change: func(w *PublicationWrite) { w.Status = "complete" }},
+		{name: "pending with resolution", jobID: "job-1", change: func(w *PublicationWrite) { w.ResolvedAt = at }},
+		{name: "observed without resolution", jobID: "job-1", change: func(w *PublicationWrite) { w.Status = PublicationWriteObserved }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			write := valid
+			if test.change != nil {
+				test.change(&write)
+			}
+			data, err := json.Marshal(Data{Cursor: at, PublicationWrites: map[string]PublicationWrite{test.jobID: write}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := Open(path, at); store != nil || err == nil || !strings.Contains(err.Error(), "invalid publication write") {
+				t.Fatalf("Open() = %v, %v; want invalid publication write", store, err)
+			}
+		})
+	}
+}
+
 func TestOpenRejectsInvalidTerminalDecision(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	valid := TerminalDecision{AttemptID: "attempt-1", Outcome: "succeeded", DecidedAt: at}

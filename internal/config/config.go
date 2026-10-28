@@ -33,6 +33,10 @@ const (
 	DefaultMaxRuntime = 4 * time.Hour
 	// MaxActionRuntime is the largest configurable hard action runtime.
 	MaxActionRuntime = 24 * time.Hour
+	// DefaultPublicationGraceSeconds is the fixed window to reconcile an issued GitHub write.
+	DefaultPublicationGraceSeconds = 120
+	// MaxPublicationGraceSeconds bounds that reconciliation window.
+	MaxPublicationGraceSeconds = 3600
 	// DefaultCriticMaxRounds is the default proposal/revision round limit.
 	DefaultCriticMaxRounds = 5
 	// MaxCriticMaxRounds is the largest configurable proposal/revision round limit.
@@ -174,6 +178,7 @@ type Config struct {
 	PollIntervalSeconds      int      `json:"poll_interval_seconds,omitempty"`
 	InactivityTimeoutMinutes int      `json:"inactivity_timeout_minutes,omitempty"`
 	MaxRuntimeMinutes        int      `json:"max_runtime_minutes,omitempty"`
+	PublicationGraceSeconds  int      `json:"publication_grace_seconds,omitempty"`
 	// MaxGitHubContextBytes limits the combined UTF-8 bytes of trimmed GitHub text in one action.
 	//
 	// Zero selects [DefaultMaxGitHubContextBytes].
@@ -364,6 +369,12 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if c.MaxRuntimeMinutes < 1 || c.MaxRuntimeMinutes > int(MaxActionRuntime/time.Minute) {
 		return fmt.Errorf("max_runtime_minutes must be between 1 and %d", int(MaxActionRuntime/time.Minute))
+	}
+	if c.PublicationGraceSeconds == 0 {
+		c.PublicationGraceSeconds = DefaultPublicationGraceSeconds
+	}
+	if c.PublicationGraceSeconds < 1 || c.PublicationGraceSeconds > MaxPublicationGraceSeconds {
+		return fmt.Errorf("publication_grace_seconds must be between 1 and %d", MaxPublicationGraceSeconds)
 	}
 	if c.MaxGitHubContextBytes == 0 {
 		c.MaxGitHubContextBytes = DefaultMaxGitHubContextBytes

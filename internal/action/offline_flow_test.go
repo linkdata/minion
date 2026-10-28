@@ -179,7 +179,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 		t.Helper()
 		client := testGitHub(server, "offline-token")
 		orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-			BotLogin: "linkdataminion",
+			BotLogin: "linkdataminion", BotID: 8,
 			Store:    store,
 			Commands: commands,
 			Runner: Runner{
@@ -225,7 +225,8 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	run(now.Add(time.Minute), store)
 	allEvents, allReviews := snapshot()
 	if !slices.Equal(allEvents, []string{"verify request", "permission", "reaction", "model", "publish",
-		"verify request", "permission", "reaction", "verify review"}) || len(allReviews) != 1 || len(store.Data.Processed) != 1 {
+		"verify request", "permission", "reaction"}) || len(allReviews) != 1 || len(store.Data.Processed) != 1 ||
+		store.Data.PublicationWrites[fmt.Sprintf("%x", jobID)].Status != state.PublicationWriteObserved {
 		t.Fatalf("replayed poll: events=%v reviews=%v processed=%v", allEvents, allReviews, store.Data.Processed)
 	}
 }

@@ -37,6 +37,10 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		logger.Printf("sync selected state path: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
+	if err := watcher.ReconcilePublicationWrites(ctx, store); err != nil {
+		logger.Printf("reconcile issued publication before worker startup: %s", monitor.InertLogText(err.Error()))
+		return 1
+	}
 	done, closeWorker, err := attachSelectedLocalWorker(ctx, owner, watcher, path, []string{"-mode=execute"}, readyTimeout)
 	if err != nil {
 		logger.Printf("start selected worker: %s", monitor.InertLogText(err.Error()))

@@ -90,7 +90,7 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 				request := monitor.Job{ID: job.Identity.JobID, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: job.Identity.SubjectType, Number: 7,
 					Source: github.Item{Author: github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}, UpdatedAt: time.Now()}, Command: command.Command{Name: job.Command, Action: action}}
 				root := t.TempDir()
-				orchestrator := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token")}
+				orchestrator := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now())}
 				if err := orchestrator.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, result); err != nil {
 					t.Fatal(err)
 				}

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -110,8 +111,8 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 			skill := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "SKILL.md")
 			var calls int
 			var sourceDir, reportsDir string
-			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
-				BotLogin:    "linkdataminion",
+			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Store: openState(t, time.Now()),
+				BotLogin: "linkdataminion", BotID: 8,
 				Usage:       usageStore,
 				Commands:    map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 				CodexModel:  "test-model",

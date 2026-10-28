@@ -94,7 +94,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			}))
 			defer githubServer.Close()
 			var journal bytes.Buffer
-			owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), Logger: log.New(&journal, "", 0)}
+			owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0)}
 			request := usageJob()
 			request.SubjectType = job.Identity.SubjectType
 			request.Source.Author = github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}
@@ -524,6 +524,9 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	}))
 	defer server.Close()
 	f.owner.GitHub = testGitHub(server, "fixture-token")
+	f.owner.Store = openState(t, time.Now())
+	f.owner.BotLogin = "linkdataminion"
+	f.owner.BotID = 8
 	request := usageJob()
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
 	if err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result); err != nil {

@@ -197,29 +197,46 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 }
 
 func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
-	f.verifiedCalls = append(f.verifiedCalls, includeReviews)
+	return f.hasVerifiedBotReply(ctx, since, github.User{Login: botLogin}, marker, true, includeReviews)
+}
+
+func (f *fakeGitHub) HasVerifiedBotPublication(ctx context.Context, _ string, _ int, since time.Time, bot github.User, marker, kind string) (bool, error) {
+	return f.hasVerifiedBotReply(ctx, since, bot, marker, kind == "comment", kind == "review")
+}
+
+func (f *fakeGitHub) hasVerifiedBotReply(ctx context.Context, since time.Time, bot github.User, marker string, scanComments, scanReviews bool) (bool, error) {
+	matchesBot := func(author github.User) bool {
+		if bot.ID > 0 {
+			return author.ID == bot.ID
+		}
+		return strings.EqualFold(author.Login, bot.Login)
+	}
+	f.verifiedCalls = append(f.verifiedCalls, scanReviews)
 	f.verifiedSince = append(f.verifiedSince, since)
 	if f.beforeVerify != nil {
-		if err := f.beforeVerify(ctx, includeReviews); err != nil {
+		if err := f.beforeVerify(ctx, scanReviews); err != nil {
 			return false, err
 		}
 	}
-	items := f.items
-	if includeReviews {
+	var items []github.Item
+	if scanComments {
+		items = f.items
+	}
+	if scanReviews {
 		items = append(append([]github.Item(nil), items...), f.reviewReplies...)
 	}
 	for _, item := range items {
 		if !since.IsZero() && !item.UpdatedAt.IsZero() && item.UpdatedAt.Before(since.Add(-time.Second)) {
 			continue
 		}
-		if !strings.EqualFold(item.Author.Login, botLogin) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+		if !matchesBot(item.Author) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
 			continue
 		}
 		current, err := f.CurrentItem(ctx, item)
 		if err != nil {
 			return false, err
 		}
-		if !current.Edited && strings.EqualFold(current.Author.Login, botLogin) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker) {
+		if !current.Edited && matchesBot(current.Author) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker) {
 			return true, nil
 		}
 	}

@@ -842,7 +842,7 @@ func TestCommentPublishesCompletedCriticResultWithActualOutcome(t *testing.T) {
 			}))
 			defer server.Close()
 			client := testGitHub(server, "test-token")
-			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()),
 				Commands:       map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Adversarial:    "claude",
 				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &zero},
