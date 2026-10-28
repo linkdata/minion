@@ -177,7 +177,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
 	if terminalRecovery {
-		watcher.Handler = newOrchestrator(cfg, client, store, logger, checkWorkRoot)
+		recovery := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
+		bindPublicationValidation(recovery, watcher)
+		watcher.Handler = recovery
 		code := recoverTerminalService(ctx, watcher, store, *loop && !failedPreflight, logger)
 		if failedPreflight {
 			return 1
@@ -191,6 +193,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
+	bindPublicationValidation(orchestrator, watcher)
 	watcher.Config, watcher.Handler = cfg, orchestrator
 	if *mode == "orchestrate" {
 		path, err := os.Executable()

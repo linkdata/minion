@@ -199,7 +199,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal)
 	}
 	if store.Data.Accepted != nil {
-		if retryAt := store.Data.Accepted.RetryAt; time.Now().Before(retryAt) {
+		accepted := store.Data.Accepted
+		_, decided := store.Data.TerminalDecisions[accepted.JobID]
+		if retryAt := accepted.RetryAt; (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
 			if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
 				return wake(retryAt, false), err
 			}
@@ -1219,22 +1221,75 @@ func jobFromAccepted(accepted state.AcceptedAction) Job {
 	}
 }
 
-func (m *Monitor) terminalAccepted(ctx context.Context, store *state.Store, job Job, failure state.JobFailure) error {
-	if !store.Data.Accepted.Terminal || failure.Attempts < maxJobAttempts {
-		store.Data.Accepted.Terminal = true
-		failure.Attempts = maxJobAttempts
-		store.Data.JobFailures[job.ID] = failure
-		if err := saveAcceptanceState(store); err != nil {
-			return err
+func decideAccepted(store *state.Store, job Job, outcome string, at time.Time) (state.TerminalDecision, error) {
+	var decision state.TerminalDecision
+	err := store.WithLock(func() error {
+		accepted := store.Data.Accepted
+		if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
+			return fmt.Errorf("accepted action changed before terminal decision")
 		}
+		if !at.Before(job.Deadline) {
+			outcome = "expired"
+		}
+		var err error
+		decision, err = store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, at)
+		return err
+	})
+	if err != nil {
+		return state.TerminalDecision{}, fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 	}
-	return m.finishFailedJob(ctx, store, job, time.Now().UTC(), failure)
+	return decision, nil
+}
+
+func (m *Monitor) terminalAccepted(ctx context.Context, store *state.Store, job Job, failure state.JobFailure) error {
+	outcome := "failed"
+	if !time.Now().Before(job.Deadline) {
+		outcome = "expired"
+	} else if accepted := store.Data.Accepted; (accepted != nil && accepted.Assigned) || failure.ModelCallStarted {
+		outcome = "lost"
+	}
+	decision, err := decideAccepted(store, job, outcome, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
+}
+
+func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Store, job Job, at time.Time,
+	failure state.JobFailure, decision state.TerminalDecision) error {
+	// The first save may have failed before or after replacing state.json. A
+	// decision retained in memory cannot authorize a reply until confirmed.
+	if err := store.WithLock(func() error {
+		confirmed, err := store.DecideTerminalLocked(job.ID, job.AttemptID, decision.Outcome, decision.DecidedAt)
+		if err == nil {
+			decision = confirmed
+		}
+		return err
+	}); err != nil {
+		return fmt.Errorf("%w: confirm terminal decision: %w", ErrAcceptanceState, err)
+	}
+	switch decision.Outcome {
+	case "succeeded":
+		return m.finalizeSelectedSuccess(ctx, store, job, at, failure)
+	default:
+		if failure.Attempts < maxJobAttempts {
+			failure.Attempts = maxJobAttempts
+			store.Data.JobFailures[job.ID] = failure
+			if err := saveAcceptanceState(store); err != nil {
+				return err
+			}
+		}
+		return m.finishFailedJob(ctx, store, job, at, failure)
+	}
 }
 
 func discardAccepted(store *state.Store) error {
 	accepted := store.Data.Accepted
 	if accepted == nil {
 		return fmt.Errorf("%w: cannot discard a missing accepted action", ErrAcceptanceState)
+	}
+	if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", time.Now().UTC()); err != nil {
+		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 	}
 	processed, hadProcessed := store.Data.Processed[accepted.JobID]
 	failure, hadFailure := store.Data.JobFailures[accepted.JobID]
@@ -1446,6 +1501,100 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 	})
 }
 
+// RevalidatePublication checks the accepted request and live authority before a final write.
+func (m *Monitor) RevalidatePublication(ctx context.Context, store *state.Store, job Job, requireAssigned bool) error {
+	if m == nil || store == nil {
+		return fmt.Errorf("%w: missing accepted action before publication", ErrAcceptanceState)
+	}
+	var accepted state.AcceptedAction
+	check := func() error {
+		current := store.Data.Accepted
+		if current == nil || !AssignmentMatchesAccepted(job, *current) || requireAssigned && !current.Assigned {
+			return fmt.Errorf("%w: accepted assignment changed before publication", ErrAcceptanceState)
+		}
+		failure, ok := store.Data.JobFailures[job.ID]
+		if !ok || failure.Attempts <= 0 || !failure.AcceptedAt.Equal(job.AcceptedAt) || !failure.Deadline.Equal(job.Deadline) {
+			return fmt.Errorf("%w: accepted deadline changed before publication", ErrAcceptanceState)
+		}
+		if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
+			if decision.AttemptID != job.AttemptID {
+				return fmt.Errorf("%w: terminal decision belongs to another attempt", ErrAcceptanceState)
+			}
+			return fmt.Errorf("%w: accepted action already decided %s", ErrTerminalJob, decision.Outcome)
+		}
+		if current.Terminal {
+			return fmt.Errorf("%w: accepted action is terminal", ErrTerminalJob)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !time.Now().Before(job.Deadline) {
+			if _, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "expired", time.Now().UTC()); err != nil {
+				return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
+			}
+			return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
+		}
+		accepted = *current
+		return nil
+	}
+	if err := store.WithLock(check); err != nil {
+		return err
+	}
+	_, _, valid, validationErr := m.validateAcceptedSource(ctx, accepted, false)
+	return store.WithLock(func() error {
+		if err := check(); err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if validationErr != nil {
+			return fmt.Errorf("revalidate publication source: %w", validationErr)
+		}
+		if !valid {
+			if _, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "lost", time.Now().UTC()); err != nil {
+				return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
+			}
+			return fmt.Errorf("%w: publication authority is no longer valid", ErrTerminalJob)
+		}
+		return nil
+	})
+}
+
+// RevalidateInProcessPublication checks live authority for an action without a selected reservation.
+func (m *Monitor) RevalidateInProcessPublication(ctx context.Context, job Job) error {
+	if m == nil || m.GitHub == nil {
+		return fmt.Errorf("%w: publication validator is unavailable", ErrAcceptanceState)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
+		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
+	}
+	accepted := state.AcceptedAction{
+		Repository: job.Repository.Name, RepositoryID: job.Repository.ID, OwnerID: job.Repository.OwnerID,
+		SubjectType: job.SubjectType, SubjectNumber: job.Number,
+		SourceKey: job.Source.Key, SourceNodeID: job.Source.NodeID, SourceURL: job.Source.HTMLURL,
+		SourceUpdatedAt: job.Source.UpdatedAt, Requester: job.Source.Author.Login, RequesterID: job.Source.Author.ID,
+		CommandName: job.Command.Name, Action: string(job.Command.Action),
+	}
+	_, _, valid, err := m.validateAcceptedSource(ctx, accepted, false)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
+		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
+	}
+	if err != nil {
+		return fmt.Errorf("revalidate publication source: %w", err)
+	}
+	if !valid {
+		return fmt.Errorf("%w: publication source or requester is no longer valid", ErrTerminalJob)
+	}
+	return nil
+}
+
 func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error {
 	accepted := store.Data.Accepted
 	if err := accepted.Validate(); err != nil {
@@ -1465,12 +1614,21 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	} else if !failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
 		return fmt.Errorf("%w: accepted action deadline differs from its first acceptance", ErrAcceptanceState)
 	}
+	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
+		if decision.AttemptID != job.AttemptID {
+			return fmt.Errorf("%w: terminal decision belongs to another attempt", ErrAcceptanceState)
+		}
+		return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
+	}
+	if !time.Now().Before(job.Deadline) {
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
 	stored, err := store.HasAcceptedResult()
 	if err != nil {
 		return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
 	}
 	if stored {
-		return m.recoverStoredResult(ctx, store, job, *accepted)
+		return m.recoverStoredResult(ctx, store, job)
 	}
 	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
@@ -1507,7 +1665,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if !valid {
 		m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
-		return discardAccepted(store)
+		return store.WithLock(func() error { return discardAccepted(store) })
 	}
 	job.Repository, job.Source = repo, current
 	if err := m.GitHub.ReactEyes(resumeCtx, accepted.SourceNodeID); err != nil {
@@ -1522,34 +1680,21 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	return m.executeSelected(resumeCtx, store, job, time.Now().UTC())
 }
 
-func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, job Job, accepted state.AcceptedAction) error {
+func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, job Job) error {
 	publisher, ok := m.Handler.(StoredResultPublisher)
 	if !ok {
 		return fmt.Errorf("%w: stored result publisher is unavailable", ErrAcceptanceState)
 	}
 	// Copy the repository slice header before invitation handling may append to it.
 	validator := *m
-	invalidSource := errors.New("saved result source is no longer valid")
 	m.logf("recover publication of %s from %s", job.Command.Action, itemLocation(job.Source))
 	return m.runSelectedWithControls(ctx, store, job, "", nil,
 		func(runCtx context.Context, job Job) error {
-			repo, current, valid, err := validator.validateAcceptedSource(runCtx, accepted, false)
-			if err != nil {
-				return fmt.Errorf("revalidate saved result source: %w", err)
+			if err := validator.RevalidatePublication(runCtx, store, job, true); err != nil {
+				return err
 			}
-			if !valid {
-				return invalidSource
-			}
-			job.Repository, job.Source = repo, current
 			return publisher.PublishRecovered(runCtx, job)
 		}, func(err error) error {
-			if errors.Is(err, invalidSource) {
-				m.logf("discard accepted %s: source or requester is no longer valid before publication", itemLocation(job.Source))
-				if err := discardAccepted(store); err != nil {
-					return err
-				}
-				return ErrAcceptedDiscarded
-			}
 			if err != nil && !errors.Is(err, ErrAcceptanceState) {
 				err = fmt.Errorf("recover saved result: %w", err)
 			}
@@ -1572,6 +1717,9 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 
 func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Store, job Job,
 	cachedKey string, cachedItems []github.Item, run func(context.Context, Job) error, finish func(error) error) error {
+	if !time.Now().Before(job.Deadline) {
+		return finish(context.DeadlineExceeded)
+	}
 	checks, _ := terminalControlChecks(store, job.ID)
 	terminalChecks := make(map[string]time.Time, len(checks))
 	for key, check := range checks {
@@ -1583,13 +1731,53 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			commandSets[configured.Name] = m.controlCommands(configured)
 		}
 	}
-	actionCtx, cancel := context.WithCancel(ctx)
+	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
+	recordAssignedStop := func(stoppedAt time.Time, cause error) error {
+		parentDeadline, _ := ctx.Deadline()
+		outcome := selectedStopOutcome(cause, stoppedAt, job.Deadline, parentDeadline)
+		return store.WithLock(func() error {
+			accepted := store.Data.Accepted
+			if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
+				return fmt.Errorf("%w: accepted action changed during execution", ErrAcceptanceState)
+			}
+			if !accepted.Assigned {
+				return nil
+			}
+			_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, stoppedAt)
+			if err != nil {
+				return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
+			}
+			return nil
+		})
+	}
+	stopWorker := func(fallback error) error {
+		stoppedAt := time.Now().UTC()
+		cause := actionCtx.Err()
+		if cause == nil {
+			cause = ctx.Err()
+		}
+		if cause == nil {
+			cause = fallback
+		}
+		cancel()
+		return recordAssignedStop(stoppedAt, cause)
+	}
 	done := make(chan error, 1)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() { done <- result }()
 		result = run(actionCtx, job)
+		completedAt := time.Now().UTC()
+		parentDeadline, _ := ctx.Deadline()
+		outcome, err := selectedCompletedOutcome(store, job, result, actionCtx.Err(), completedAt, parentDeadline)
+		if err != nil {
+			result = err
+		} else if outcome != "" {
+			if _, err := decideAccepted(store, job, outcome, completedAt); err != nil {
+				result = err
+			}
+		}
 	}()
 	var result error
 	completed := false
@@ -1602,26 +1790,41 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			}
 		}
 	}
+	completedWithDecision := func() bool {
+		if !completed {
+			return false
+		}
+		var decided bool
+		_ = store.WithLock(func() error {
+			_, decided = store.Data.TerminalDecisions[job.ID]
+			return nil
+		})
+		return decided
+	}
 	abort := func(err error) error {
 		readDone()
 		if completed {
-			if ctx.Err() != nil {
+			if completedWithDecision() || ctx.Err() != nil {
 				return finish(result)
 			}
 			return errors.Join(finish(result), fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err))
 		}
-		cancel()
+		stopErr := stopWorker(err)
 		result = <-done // The state lock and store must outlive Execute.
+		completed = true
 		if ctx.Err() != nil {
-			return finish(result)
+			return errors.Join(finish(result), stopErr, ctx.Err())
 		}
-		return fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err)
+		return errors.Join(fmt.Errorf("%w: control state: %w", ErrAcceptanceState, err), stopErr)
 	}
 	nextCheck := make(map[string]time.Time)
 	for {
 		readDone()
+		if completedWithDecision() {
+			return finish(result)
+		}
 		completedAtStart := completed
-		if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+		if err := m.checkDueInvitations(actionCtx, store, m.now().UTC()); err != nil {
 			return abort(err)
 		}
 		var next time.Time
@@ -1664,7 +1867,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				items = cachedItems
 				cachedKey = "" // Retries read the current thread again.
 			}
-			checkAt := m.processTerminalNotification(ctx, store, job.ID, entry, commandSets, items)
+			checkAt := m.processTerminalNotification(actionCtx, store, job.ID, entry, commandSets, items)
 			nextCheck[entry.key] = checkAt
 			_ = store.WithLock(func() error {
 				if !hasTerminalReplay(store, entry.key, job.ID) {
@@ -1675,15 +1878,30 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if !checkAt.IsZero() && (next.IsZero() || checkAt.Before(next)) {
 				next = checkAt
 			}
-			if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+			if err := m.checkDueInvitations(actionCtx, store, m.now().UTC()); err != nil {
 				return abort(err)
 			}
 		}
+		readDone()
+		if completedWithDecision() {
+			return finish(result)
+		}
 		if err := ctx.Err(); err != nil {
 			if !completed {
+				stopErr := stopWorker(err)
 				result = <-done
+				completed = true
+				return errors.Join(finish(result), stopErr, err)
 			}
 			return finish(result)
+		}
+		if err := actionCtx.Err(); err != nil {
+			stopErr := stopWorker(err)
+			if !completed {
+				result = <-done
+				completed = true
+			}
+			return errors.Join(finish(result), stopErr, err)
 		}
 		readDone()
 		if completed {
@@ -1704,8 +1922,98 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		case <-ctx.Done():
 			timer.Stop()
 			return abort(ctx.Err())
+		case <-actionCtx.Done():
+			timer.Stop()
+			stopErr := stopWorker(actionCtx.Err())
+			result = <-done
+			completed = true
+			return errors.Join(finish(result), stopErr, actionCtx.Err())
 		}
 	}
+}
+
+// selectedStopOutcome preserves the cause observed before the state lock wait.
+func selectedStopOutcome(cause error, stoppedAt, deadline, parentDeadline time.Time) string {
+	if errors.Is(cause, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(cause, context.DeadlineExceeded) {
+		if !parentDeadline.IsZero() && parentDeadline.Before(deadline) {
+			return "canceled"
+		}
+		return "expired"
+	}
+	if stoppedAt.Before(deadline) {
+		return "canceled"
+	}
+	return "expired"
+}
+
+// selectedCompletedOutcome records a worker's terminal result before unrelated
+// invitation checks can consume the remaining action deadline. A saved result
+// with retryable publication failure is left for the normal recovery path.
+func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, completedAt, parentDeadline time.Time) (string, error) {
+	if result == nil && cause == nil {
+		return "succeeded", nil
+	}
+	if errors.Is(result, ErrAcceptanceState) || errors.Is(result, ErrAcceptedDiscarded) || errors.Is(result, ErrAcceptedRetry) {
+		return "", nil
+	}
+	var assigned, modelCallStarted, stored bool
+	if err := store.WithLock(func() error {
+		accepted := store.Data.Accepted
+		if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
+			return fmt.Errorf("%w: accepted action changed after worker completion", ErrAcceptanceState)
+		}
+		failure, exists := store.Data.JobFailures[job.ID]
+		if !exists || failure.Attempts <= 0 || !failure.AcceptedAt.Equal(job.AcceptedAt) || !failure.Deadline.Equal(job.Deadline) {
+			return fmt.Errorf("%w: accepted attempt changed after worker completion", ErrAcceptanceState)
+		}
+		assigned = accepted.Assigned
+		modelCallStarted = failure.ModelCallStarted
+		if result != nil {
+			var err error
+			stored, err = store.HasAcceptedResult()
+			return err
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("%w: inspect result after worker completion: %w", ErrAcceptanceState, err)
+	}
+	if result == nil {
+		if errors.Is(cause, context.DeadlineExceeded) && completedAt.Before(job.Deadline) &&
+			(parentDeadline.IsZero() || !parentDeadline.Before(job.Deadline)) {
+			return "succeeded", nil // The original deadline fired after the run returned.
+		}
+		if assigned {
+			return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
+		}
+		return "succeeded", nil // A completed unassigned action has no worker to stop.
+	}
+	if errors.Is(result, ErrExecutionOutcomeUnknown) {
+		if !stored {
+			return "lost", nil
+		}
+		return "", nil
+	}
+	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled)) {
+		return "canceled", nil
+	}
+	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
+		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {
+		return "", nil // A canceled unused reservation still refunds its attempt.
+	}
+	if stored {
+		if !errors.Is(result, ErrTerminalJob) || errors.Is(result, context.Canceled) ||
+			errors.Is(result, context.DeadlineExceeded) {
+			return "", nil
+		}
+		return "failed", nil
+	}
+	if assigned || modelCallStarted || errors.Is(result, ErrTerminalJob) {
+		return "failed", nil
+	}
+	return "", nil
 }
 
 func (m *Monitor) processTerminalNotification(ctx context.Context, store *state.Store, activeJobID string,
@@ -1918,6 +2226,23 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 	if !exists || failure.Attempts <= 0 || !failure.AcceptedAt.Equal(job.AcceptedAt) || !failure.Deadline.Equal(job.Deadline) {
 		return fmt.Errorf("%w: selected action attempt or deadline changed during execution", ErrAcceptanceState)
 	}
+	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
+		if decision.AttemptID != job.AttemptID {
+			return fmt.Errorf("%w: terminal decision belongs to another attempt", ErrAcceptanceState)
+		}
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+	}
+	if !time.Now().Before(job.Deadline) {
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
+	if accepted.Assigned && !errors.Is(err, ErrExecutionOutcomeUnknown) &&
+		(ctx.Err() != nil || errors.Is(err, context.Canceled)) {
+		decision, decideErr := decideAccepted(store, job, "canceled", time.Now().UTC())
+		if decideErr != nil {
+			return decideErr
+		}
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+	}
 	if errors.Is(err, ErrAcceptedRetry) {
 		if accepted.Assigned || failure.ModelCallStarted {
 			return fmt.Errorf("%w: deferred assignment was already delivered", ErrAcceptanceState)
@@ -1925,29 +2250,11 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		return err // RunOnce preserves this attempt for recovery with its original deadline.
 	}
 	if err == nil {
-		previousProcessed, hadProcessed := store.Data.Processed[job.ID]
-		previousFix, hadFix := store.Data.PendingFixes[job.ID]
-		store.Data.Processed[job.ID] = at
-		delete(store.Data.JobFailures, job.ID)
-		delete(store.Data.PendingFixes, job.ID)
-		store.Data.Accepted = nil
-		if err := saveAcceptanceState(store); err != nil {
-			if hadProcessed {
-				store.Data.Processed[job.ID] = previousProcessed
-			} else {
-				delete(store.Data.Processed, job.ID)
-			}
-			store.Data.JobFailures[job.ID] = failure
-			if hadFix {
-				store.Data.PendingFixes[job.ID] = previousFix
-			}
-			store.Data.Accepted = accepted
-			return err
+		decision, decideErr := decideAccepted(store, job, "succeeded", time.Now().UTC())
+		if decideErr != nil {
+			return decideErr
 		}
-		if err := store.ClearAcceptedResult(); err != nil {
-			return fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
-		}
-		return ctx.Err()
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
 	stored, receiptErr := store.HasAcceptedResult()
 	if receiptErr != nil {
@@ -1990,10 +2297,18 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		return fmt.Errorf("%w: selected action attempt was over-refunded", ErrAcceptanceState)
 	}
 	if failure.Attempts >= maxJobAttempts {
-		accepted.Terminal = true
+		outcome := "failed"
+		if outcomeUnknown {
+			outcome = "lost"
+		}
+		decision, decideErr := decideAccepted(store, job, outcome, time.Now().UTC())
+		if decideErr != nil {
+			return decideErr
+		}
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
 	store.Data.JobFailures[job.ID] = failure // Keep the first deadline after a proven unused attempt.
-	if failure.Attempts < maxJobAttempts && !accepted.Assigned {
+	if !accepted.Assigned {
 		store.Data.Accepted = nil
 	}
 	if saveErr := saveAcceptanceState(store); saveErr != nil {
@@ -2004,10 +2319,41 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		return failureErr
 	}
 	m.logf("%s from %s failed (attempt %d/%d): %v", job.Command.Action, itemLocation(job.Source), failure.Attempts, maxJobAttempts, err)
-	if failure.Attempts >= maxJobAttempts {
-		return m.finishFailedJob(ctx, store, job, at, failure)
-	}
 	return failureErr
+}
+
+func (m *Monitor) finalizeSelectedSuccess(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
+	accepted := store.Data.Accepted
+	if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
+		return fmt.Errorf("%w: selected action changed before completion", ErrAcceptanceState)
+	}
+	decision, decided := store.Data.TerminalDecisions[job.ID]
+	if !decided || decision.AttemptID != job.AttemptID || decision.Outcome != "succeeded" {
+		return fmt.Errorf("%w: selected action has no successful decision", ErrAcceptanceState)
+	}
+	previousProcessed, hadProcessed := store.Data.Processed[job.ID]
+	previousFix, hadFix := store.Data.PendingFixes[job.ID]
+	store.Data.Processed[job.ID] = at
+	delete(store.Data.JobFailures, job.ID)
+	delete(store.Data.PendingFixes, job.ID)
+	store.Data.Accepted = nil
+	if err := saveAcceptanceState(store); err != nil {
+		if hadProcessed {
+			store.Data.Processed[job.ID] = previousProcessed
+		} else {
+			delete(store.Data.Processed, job.ID)
+		}
+		store.Data.JobFailures[job.ID] = failure
+		if hadFix {
+			store.Data.PendingFixes[job.ID] = previousFix
+		}
+		store.Data.Accepted = accepted
+		return err
+	}
+	if err := store.ClearAcceptedResult(); err != nil {
+		return fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
+	}
+	return ctx.Err()
 }
 
 func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
@@ -2155,6 +2501,11 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		return nil
 	})
 	if err == nil {
+		if accepted != nil {
+			if clearErr := store.ClearAcceptedResult(); clearErr != nil {
+				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
+			}
+		}
 		m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
 	}
 	return err

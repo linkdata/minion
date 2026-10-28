@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
@@ -104,6 +105,60 @@ func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T
 	if failure := reopened.Data.JobFailures[f.job.Identity.JobID]; failure.Attempts != 1 || !failure.ModelCallStarted {
 		t.Fatalf("reopen lost admitted model call: %+v", failure)
 	}
+}
+
+func TestExecutionBeforeCallRechecksSelectedStateAfterUsageSave(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := openState(t, time.Now())
+	f.owner.Store = store
+	f.owner.assignmentRequired = true
+	f.sink.assignmentContext = t.Context()
+	accepted := acceptedForJob(f.job)
+	accepted.Assigned = true
+	store.Data.Accepted = accepted
+	store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.owner.usageCheckpoint = &usageCheckpoint{save: func() error {
+		return store.WithLock(func() error {
+			_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "canceled", time.Now())
+			return err
+		})
+	}}
+	err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
+	if !errors.Is(err, monitor.ErrTerminalJob) || f.sink.pending != nil ||
+		store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted ||
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "canceled" {
+		t.Fatalf("model call started after terminal decision during usage save: err=%v pending=%+v state=%+v", err, f.sink.pending, store.Data)
+	}
+}
+
+func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newExecutionAdapterFixture(t, testJob(command.Comment))
+		store := openState(t, time.Now())
+		f.owner.Store = store
+		f.owner.assignmentRequired = true
+		accepted := acceptedForJob(f.job)
+		accepted.Assigned = true
+		accepted.AcceptedAt = time.Now().UTC()
+		accepted.Deadline = accepted.AcceptedAt.Add(time.Second)
+		store.Data.Accepted = accepted
+		store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithDeadline(t.Context(), accepted.Deadline)
+		defer cancel()
+		f.sink.assignmentContext = ctx
+		f.owner.usageCheckpoint = &usageCheckpoint{save: func() error { time.Sleep(2 * time.Second); return nil }}
+		err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
+		if !errors.Is(err, context.DeadlineExceeded) || f.sink.pending != nil ||
+			store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {
+			t.Fatalf("model call started after deadline during usage save: err=%v pending=%+v state=%+v", err, f.sink.pending, store.Data)
+		}
+	})
 }
 
 func acceptedForJob(job Job) *state.AcceptedAction {

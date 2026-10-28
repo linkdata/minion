@@ -67,6 +67,274 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	}
 }
 
+func TestTerminalDecisionsPersistAcrossOpen(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.TerminalDecisions == nil {
+		t.Fatal("new state has no terminal decision map")
+	}
+	want := map[string]TerminalDecision{
+		"job-success": {AttemptID: "attempt-1", Outcome: "succeeded", DecidedAt: at},
+		"job-expiry":  {AttemptID: "attempt-2", Outcome: "expired", DecidedAt: at},
+		"job-stop":    {AttemptID: "attempt-3", Outcome: "canceled", DecidedAt: at},
+		"job-loss":    {AttemptID: "attempt-4", Outcome: "lost", DecidedAt: at},
+		"job-failure": {AttemptID: "attempt-5", Outcome: "failed", DecidedAt: at},
+	}
+	store.Data.TerminalDecisions = want
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, at.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if !reflect.DeepEqual(reopened.Data.TerminalDecisions, want) {
+		t.Fatalf("terminal decisions changed after reopen: got=%+v want=%+v", reopened.Data.TerminalDecisions, want)
+	}
+}
+
+func TestOpenInitializesMissingTerminalDecisions(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "state.json")
+	data, err := json.Marshal(Data{Cursor: at})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Data.TerminalDecisions == nil {
+		t.Fatal("legacy state has no terminal decision map")
+	}
+}
+
+func TestOpenRejectsInvalidTerminalDecision(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	valid := TerminalDecision{AttemptID: "attempt-1", Outcome: "succeeded", DecidedAt: at}
+	for _, test := range []struct {
+		name, jobID string
+		decision    TerminalDecision
+	}{
+		{name: "missing job ID", decision: valid},
+		{name: "invalid job ID", jobID: "../job", decision: valid},
+		{name: "missing attempt ID", jobID: "job-1", decision: TerminalDecision{Outcome: "succeeded", DecidedAt: at}},
+		{name: "invalid attempt ID", jobID: "job-1", decision: TerminalDecision{AttemptID: "../attempt", Outcome: "succeeded", DecidedAt: at}},
+		{name: "unknown outcome", jobID: "job-1", decision: TerminalDecision{AttemptID: "attempt-1", Outcome: "unknown", DecidedAt: at}},
+		{name: "missing decision time", jobID: "job-1", decision: TerminalDecision{AttemptID: "attempt-1", Outcome: "succeeded"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			data, err := json.Marshal(Data{Cursor: at, TerminalDecisions: map[string]TerminalDecision{test.jobID: test.decision}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := Open(path, at); store != nil || err == nil || !strings.Contains(err.Error(), "invalid terminal decision") {
+				t.Fatalf("Open() = %v, %v; want invalid terminal decision", store, err)
+			}
+		})
+	}
+}
+
+func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
+	accepted := acceptedActionFixture()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var first, second TerminalDecision
+	if err := store.WithLock(func() error {
+		var err error
+		first, err = store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "expired", accepted.Deadline)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		var err error
+		second, err = store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", accepted.Deadline.Add(time.Minute))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if first != second || first.Outcome != "expired" || !store.Data.Accepted.Terminal {
+		t.Fatalf("later outcome changed first terminal decision: first=%+v second=%+v accepted=%+v", first, second, store.Data.Accepted)
+	}
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(accepted.JobID, "other-attempt", "failed", accepted.Deadline)
+		return err
+	}); err == nil || store.Data.TerminalDecisions[accepted.JobID] != first {
+		t.Fatalf("another attempt reused first decision: err=%v decision=%+v", err, store.Data.TerminalDecisions[accepted.JobID])
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.TerminalDecisions[accepted.JobID] != first || reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal {
+		t.Fatalf("first terminal decision lost after reopen: decision=%+v accepted=%+v", reopened.Data.TerminalDecisions[accepted.JobID], reopened.Data.Accepted)
+	}
+}
+
+func TestDecideTerminalLockedRejectsInvalidNewDecision(t *testing.T) {
+	accepted := acceptedActionFixture()
+	for _, test := range []struct {
+		name, jobID, attemptID, outcome string
+		at                              time.Time
+	}{
+		{name: "invalid job", jobID: "../job", attemptID: accepted.AttemptID, outcome: "failed", at: accepted.Deadline},
+		{name: "invalid attempt", jobID: accepted.JobID, attemptID: "../attempt", outcome: "failed", at: accepted.Deadline},
+		{name: "unknown outcome", jobID: accepted.JobID, attemptID: accepted.AttemptID, outcome: "unknown", at: accepted.Deadline},
+		{name: "missing time", jobID: accepted.JobID, attemptID: accepted.AttemptID, outcome: "failed"},
+		{name: "different accepted job", jobID: "other-job", attemptID: accepted.AttemptID, outcome: "failed", at: accepted.Deadline},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, err := Open(filepath.Join(t.TempDir(), "state.json"), accepted.AcceptedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			copy := accepted
+			store.Data.Accepted = &copy
+			if err := store.WithLock(func() error {
+				_, err := store.DecideTerminalLocked(test.jobID, test.attemptID, test.outcome, test.at)
+				return err
+			}); err == nil || copy.Terminal || len(store.Data.TerminalDecisions) != 0 {
+				t.Fatalf("invalid terminal decision changed state: err=%v accepted=%+v decisions=%+v", err, copy, store.Data.TerminalDecisions)
+			}
+		})
+	}
+}
+
+func TestDecideTerminalLockedKeepsFirstOutcomeAfterFailedSave(t *testing.T) {
+	accepted := acceptedActionFixture()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	backup := path + ".saved"
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "expired", accepted.Deadline)
+		return err
+	}); err == nil || !accepted.Terminal || store.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+		t.Fatalf("failed save forgot terminal decision: err=%v accepted=%+v decisions=%+v", err, accepted, store.Data.TerminalDecisions)
+	}
+	if err := store.WithLock(func() error {
+		decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", accepted.Deadline.Add(time.Minute))
+		if err == nil && decision.Outcome != "expired" {
+			t.Fatalf("failed save allowed a different in-memory outcome: %+v", decision)
+		}
+		return err
+	}); err == nil {
+		t.Fatal("failed save allowed a caller to act on an unconfirmed decision")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", accepted.Deadline.Add(time.Minute))
+		if err == nil && decision.Outcome != "expired" {
+			t.Fatalf("retry changed the first decision: %+v", decision)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal || reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+		t.Fatalf("retry did not persist the first decision: accepted=%+v decisions=%+v", reopened.Data.Accepted, reopened.Data.TerminalDecisions)
+	}
+}
+
+func TestDecideTerminalLockedKeepsFirstOutcomeAfterPostRenameSyncFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows skips directory sync")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	accepted := acceptedActionFixture()
+	store, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	store.syncDir = filepath.Join(dir, "missing-sync")
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "expired", accepted.Deadline)
+		return err
+	}); !errors.Is(err, os.ErrNotExist) || !accepted.Terminal || store.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+		t.Fatalf("post-rename save error forgot first decision: err=%v state=%+v", err, store.Data)
+	}
+	store.syncDir = ""
+	if err := store.WithLock(func() error {
+		decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", accepted.Deadline.Add(time.Minute))
+		if err == nil && decision.Outcome != "expired" {
+			t.Fatalf("post-rename error allowed a different outcome: %+v", decision)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal || reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+		t.Fatalf("post-rename decision changed on restart: %+v", reopened.Data)
+	}
+}
+
 func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	const childMarker = "minion-state-restart-child"

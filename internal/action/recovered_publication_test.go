@@ -78,6 +78,44 @@ func TestPublishRecoveredRequiresGitHubClient(t *testing.T) {
 	}
 }
 
+func TestPublishRecoveredRejectsExpiredOriginalDeadline(t *testing.T) {
+	job := testJob(command.Comment)
+	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	data, err := store.ReadAcceptedResult(AcceptedResultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeAcceptedResultRecord(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Deadline = time.Now().Add(-time.Minute)
+	request.AcceptedAt = request.Deadline.Add(-time.Minute)
+	store.Data.Accepted.Deadline, store.Data.Accepted.AcceptedAt = request.Deadline, request.AcceptedAt
+	record.Accepted = *store.Data.Accepted
+	data, err = httpEncode(record, int(AcceptedResultMaxBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Errorf("expired recovery reached GitHub: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
+		!errors.Is(err, context.DeadlineExceeded) || requests.Load() != 0 {
+		t.Fatalf("expired recovery was publishable: err=%v requests=%d", err, requests.Load())
+	}
+}
+
 func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *testing.T) {
 	job := testJob(command.Comment)
 	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
@@ -412,6 +450,62 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 	if parent != base || parent == moved || content != "reviewed change" || store.Data.PendingFixes[request.ID].SHA != tip ||
 		!strings.Contains(comment, request.Marker()) {
 		t.Fatalf("replayed fix used moved default: tip=%s parent=%s base=%s moved=%s content=%q checkpoint=%+v comment=%q", tip, parent, base, moved, content, store.Data.PendingFixes[request.ID], comment)
+	}
+}
+
+func TestPublishRecoveredFixRevalidatesBeforePush(t *testing.T) {
+	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")})
+	root := t.TempDir()
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := checkout.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forkRemote := filepath.Join(filepath.Dir(remote), "fork.git")
+	source := filepath.Join(filepath.Dir(remote), "source")
+	modelGit(t, source, "clone", "--bare", remote, forkRemote)
+	modelGit(t, source, "config", "--file", filepath.Join(filepath.Dir(remote), "gitconfig"), "url."+forkRemote+".insteadOf", "https://github.com/bot/r.git")
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	job.Identity.Repository = "o/r"
+	job.Source = snapshot
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
+	store, _, request := savedRecoveryFixture(t, job, result)
+	var comment string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case serveFixFlowFixture(t, w, r):
+		case captureComment(t, w, r, &comment):
+		default:
+			t.Errorf("unexpected fix publication request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	denied := errors.New("requester no longer has permission")
+	var checks int
+	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+		ValidatePublication: func(_ context.Context, got monitor.Job, requireAssigned bool) error {
+			checks++
+			if got.ID != request.ID || !requireAssigned {
+				t.Errorf("fix push checked the wrong reservation: job=%+v assigned=%t", got, requireAssigned)
+			}
+			return denied
+		}}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, denied) || checks != 1 || comment != "" {
+		t.Fatalf("rejected fix reached publication: err=%v checks=%d comment=%q", err, checks, comment)
+	}
+	if output, err := testsupport.ModelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"); err == nil {
+		t.Fatalf("rejected fix reached fork remote: %s", output)
 	}
 }
 

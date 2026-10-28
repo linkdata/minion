@@ -60,6 +60,8 @@ type Orchestrator struct {
 	CheckWorkRoot func() error
 	// ValidateAssignment rechecks an accepted action immediately before worker delivery.
 	ValidateAssignment func(context.Context, monitor.Job) error
+	// ValidatePublication rechecks an accepted action before a new external write.
+	ValidatePublication func(context.Context, monitor.Job, bool) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.

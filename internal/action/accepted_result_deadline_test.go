@@ -5,9 +5,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
 )
 
 type resultContextAfterCheck struct {
@@ -89,5 +91,101 @@ func TestSelectedResultRechecksIdentityAtFinalStoreLock(t *testing.T) {
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || present {
 		t.Fatalf("changed identity saved result: present=%t error=%v", present, err)
+	}
+}
+
+func TestSelectedResultSaveCrossingDeadlineCannotPublishAfterRestart(t *testing.T) {
+	f, store, path := selectedHTTPResultFixture(t, nil)
+	result := completeHTTPResult(t, f).Result
+	sink := f.tx.sink.(*executionCheckpoints)
+	synctest.Test(t, func(t *testing.T) {
+		accepted := store.Data.Accepted
+		accepted.AcceptedAt = time.Now()
+		accepted.Deadline = accepted.AcceptedAt.Add(time.Second)
+		sink.assignmentRequest.AcceptedAt = accepted.AcceptedAt
+		sink.assignmentRequest.Deadline = accepted.Deadline
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		sink.writeAcceptedResult = func(data []byte) error {
+			if err := store.WriteAcceptedResult(data); err != nil {
+				return err
+			}
+			time.Sleep(2 * time.Second)
+			return nil
+		}
+		err := sink.ReceiveCompletedResult(result)
+		if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("late save was acknowledged: %v", err)
+		}
+	})
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("late result was not retained as evidence: present=%t error=%v", present, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	accepted := reopened.Data.Accepted
+	if accepted == nil || !accepted.Terminal || reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+		t.Fatalf("expired decision was not durable: accepted=%+v decisions=%+v", accepted, reopened.Data.TerminalDecisions)
+	}
+}
+
+func TestSelectedResultCancellationBeforeDeadlineWinsDuringLateSave(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	result := completeHTTPResult(t, f).Result
+	sink := f.tx.sink.(*executionCheckpoints)
+	synctest.Test(t, func(t *testing.T) {
+		accepted := store.Data.Accepted
+		accepted.AcceptedAt = time.Now().UTC()
+		accepted.Deadline = accepted.AcceptedAt.Add(time.Second)
+		sink.assignmentRequest.AcceptedAt = accepted.AcceptedAt
+		sink.assignmentRequest.Deadline = accepted.Deadline
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithDeadline(t.Context(), accepted.Deadline)
+		defer cancel()
+		sink.assignmentContext = ctx
+		sink.writeAcceptedResult = func(data []byte) error {
+			if err := store.WriteAcceptedResult(data); err != nil {
+				return err
+			}
+			cancel()
+			time.Sleep(2 * time.Second)
+			return nil
+		}
+		err := sink.ReceiveCompletedResult(result)
+		decision := store.Data.TerminalDecisions[accepted.JobID]
+		if !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			decision.Outcome != "canceled" || !accepted.Terminal {
+			t.Fatalf("cancellation before deadline became expiry after save: err=%v decision=%+v accepted=%+v", err, decision, accepted)
+		}
+	})
+}
+
+func TestSelectedResultInnerDeadlineAfterSaveDoesNotExpireAction(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	result := completeHTTPResult(t, f).Result
+	sink := f.tx.sink.(*executionCheckpoints)
+	sink.writeAcceptedResult = func(data []byte) error {
+		if err := store.WriteAcceptedResult(data); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		t.Cleanup(cancel)
+		sink.assignmentContext = ctx
+		return nil
+	}
+	err := sink.ReceiveCompletedResult(result)
+	decision := store.Data.TerminalDecisions[store.Data.Accepted.JobID]
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) ||
+		!time.Now().Before(store.Data.Accepted.Deadline) || decision.Outcome != "failed" {
+		t.Fatalf("inner deadline was treated as original expiry: err=%v decision=%+v accepted=%+v", err, decision, store.Data.Accepted)
 	}
 }

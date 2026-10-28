@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -31,6 +32,14 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}()
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
 	defer cancel()
+	if !request.Deadline.IsZero() {
+		if !time.Now().Before(request.Deadline) {
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		}
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(ctx, request.Deadline)
+		defer stop()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -44,10 +53,17 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 			return errors.New("accepted action is missing")
 		}
 		accepted = *e.Store.Data.Accepted
+		_, decided := e.Store.Data.TerminalDecisions[request.ID]
+		if accepted.Terminal || decided {
+			return fmt.Errorf("%w: accepted action is already terminal", monitor.ErrTerminalJob)
+		}
 		var err error
 		data, err = e.Store.ReadAcceptedResult(AcceptedResultMaxBytes)
 		return err
 	}); err != nil {
+		if errors.Is(err, monitor.ErrTerminalJob) {
+			return err
+		}
 		return fmt.Errorf("%w: read accepted result: %w", monitor.ErrAcceptanceState, err)
 	}
 	record, err := DecodeAcceptedResultRecord(data)

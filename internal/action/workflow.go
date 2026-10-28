@@ -204,7 +204,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 // publish validates a worker result before applying data or issuing GitHub writes.
 func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Result) error {
 	if p.reply != "" {
-		if err := ctx.Err(); err != nil {
+		if err := e.publicationAllowed(ctx, p.request, false); err != nil {
 			return err
 		}
 		return e.acknowledge(ctx, p.request, p.reply)
@@ -228,12 +228,19 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		if _, err = e.verifiedRepository(ctx, request.Repository); err != nil {
 			break
 		}
+		if err = e.publicationAllowed(ctx, request, true); err != nil {
+			break
+		}
 		body := fmt.Sprintf("Automated review requested by @%s:\n\n%s\n\n%s", request.Source.Author.Login, inertModelOutput(published.answer), request.Marker())
 		_, err = e.GitHub.CreatePullRequestReview(ctx, request.Repository.Name, request.Number, body, p.job.Source.Head)
 	case command.Comment:
-		err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
+		if err = e.publicationAllowed(ctx, request, true); err == nil {
+			err = e.acknowledge(ctx, request, fmt.Sprintf("`%s` requested by @%s at commit `%s`:\n\n%s", request.Command.Name, request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
+		}
 	case command.SecurityAudit:
-		err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
+		if err = e.publicationAllowed(ctx, request, true); err == nil {
+			err = e.acknowledge(ctx, request, fmt.Sprintf("Security audit requested by @%s at commit `%s`:\n\n%s", request.Source.Author.Login, p.job.Source.Head, inertModelOutput(published.answer)))
+		}
 	case command.Fix:
 		return e.publishFix(ctx, p, result, published)
 	default:
@@ -243,6 +250,57 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 		return fmt.Errorf("%w: %w", monitor.ErrPostModelPublication, err)
 	}
 	return nil
+}
+
+// publicationAllowed checks the selected reservation immediately before a new write.
+func (e *Orchestrator) publicationAllowed(ctx context.Context, job monitor.Job, requireAssigned bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
+		return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	}
+	if job.AttemptID == "" {
+		if e.assignmentRequired {
+			return fmt.Errorf("%w: selected action attempt is missing before publication", monitor.ErrAcceptanceState)
+		}
+		if e.ValidatePublication != nil {
+			if err := e.ValidatePublication(ctx, job, false); err != nil {
+				return err
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		}
+		return nil // In-process actions have no selected reservation.
+	}
+	if e.Store == nil {
+		return fmt.Errorf("%w: accepted state store is missing before publication", monitor.ErrAcceptanceState)
+	}
+	if e.ValidatePublication == nil {
+		if e.assignmentRequired {
+			return fmt.Errorf("%w: publication revalidation is unavailable", monitor.ErrAcceptanceState)
+		}
+	} else if err := e.ValidatePublication(ctx, job, requireAssigned); err != nil {
+		return err
+	}
+	return e.Store.WithLock(func() error {
+		accepted := e.Store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || requireAssigned && !accepted.Assigned {
+			return fmt.Errorf("%w: selected assignment changed before publication", monitor.ErrAcceptanceState)
+		}
+		_, decided := e.Store.Data.TerminalDecisions[job.ID]
+		if accepted.Terminal || decided {
+			return fmt.Errorf("%w: selected action is already terminal", monitor.ErrTerminalJob)
+		}
+		if !time.Now().Before(accepted.Deadline) {
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		}
+		return ctx.Err()
+	})
 }
 
 func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction, result Result) (publication, error) {
@@ -590,8 +648,14 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	request := p.request
 	if len(result.Changes) == 0 {
 		if _, err := e.currentFixIssue(ctx, p); errors.Is(err, errFixIssueChanged) {
+			if err := e.publicationAllowed(ctx, request, true); err != nil {
+				return err
+			}
 			return e.acknowledge(ctx, request, fixIssueChangedReply)
 		} else if err != nil {
+			return err
+		}
+		if err := e.publicationAllowed(ctx, request, true); err != nil {
 			return err
 		}
 		return e.acknowledge(ctx, request, "AI returned a response without changing files.\n\n"+inertModelOutput(published.answer))
@@ -620,6 +684,9 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		if _, err := e.currentFixIssue(ctx, p); err != nil {
 			return err
 		}
+		if err := e.publicationAllowed(ctx, request, true); err != nil {
+			return err
+		}
 		if p.recoverFix.SHA != "" && sha != p.recoverFix.SHA {
 			return fmt.Errorf("%w: rebuilt fix commit %s differs from recorded %s", monitor.ErrAcceptanceState, sha, p.recoverFix.SHA)
 		}
@@ -638,6 +705,9 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		})
 	}); err != nil {
 		if errors.Is(err, errFixIssueChanged) {
+			if gateErr := e.publicationAllowed(ctx, request, true); gateErr != nil {
+				return gateErr
+			}
 			return e.acknowledge(ctx, request, fixIssueChangedReply)
 		}
 		if errors.Is(err, gitwork.ErrNoChanges) {
@@ -688,6 +758,9 @@ func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) e
 	}
 	if notice != "" {
 		reply = notice + "\n\n" + reply
+	}
+	if err := e.publicationAllowed(ctx, request, p.needsExecution()); err != nil {
+		return err
 	}
 	return e.acknowledge(ctx, request, reply)
 }
