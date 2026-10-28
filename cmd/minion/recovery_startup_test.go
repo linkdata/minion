@@ -229,7 +229,7 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 			mu.Unlock()
 			return nil
 		})
-	}, "-mode=orchestrate", "-loop")
+	}, "-loop")
 	// The test binary cannot serve as an execute-mode worker, so startup exits 1 after preflight.
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "Claude settings: model=claude-test") ||
 		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
@@ -246,5 +246,17 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 	preflight := slices.Index(observedRequests, "git preflight")
 	if observedPublications != 2 || secondPublish < 0 || preflight < 0 || secondPublish >= preflight {
 		t.Fatalf("loop did not recover the saved result before preflight: requests=%v publications=%d", observedRequests, observedPublications)
+	}
+
+	// With recovery complete, a default one-pass start still selects the local worker.
+	gitChecks = 0
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			gitChecks++
+			return nil
+		})
+	})
+	if code != 1 || gitChecks != 1 || !strings.Contains(output, "start selected worker:") {
+		t.Fatalf("default startup did not select the local worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
 }

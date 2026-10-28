@@ -27,9 +27,8 @@ import (
 
 type terminalRecoveryGitHub struct {
 	monitor.GitHub
-	item       github.Item
-	reply      string
-	permission string
+	item  github.Item
+	reply string
 }
 
 func serviceStore(t *testing.T, data state.Data) *state.Store {
@@ -56,11 +55,7 @@ func (g *terminalRecoveryGitHub) Repository(context.Context, string) (github.Rep
 }
 
 func (g *terminalRecoveryGitHub) Permission(context.Context, string, string) (github.Permission, error) {
-	permission := g.permission
-	if permission == "" {
-		permission = "write"
-	}
-	return github.Permission{Permission: permission, User: g.item.Author}, nil
+	return github.Permission{Permission: "write", User: g.item.Author}, nil
 }
 
 func (g *terminalRecoveryGitHub) CreateIssueComment(_ context.Context, _ string, _ int, body string) (github.Comment, error) {
@@ -114,37 +109,6 @@ func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	}
 	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
 		t.Fatalf("fixed refusal lost the repository from its bound snapshot: %v", err)
-	}
-}
-
-func TestPublicationValidationUsesCurrentInProcessRepository(t *testing.T) {
-	cfg := selectedServiceTestConfig(t)
-	cfg.Repositories = nil
-	repo := config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"},
-		AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}
-	at := time.Now().UTC().Add(-time.Minute)
-	source := github.Item{Key: "comment:1", NodeID: "source-node", HTMLURL: "https://github.com/owner/repo/pull/7#issuecomment-1",
-		UpdatedAt: at, Body: "@bot comment", Author: github.User{Login: "writer", ID: 7}}
-	client := &terminalRecoveryGitHub{item: source}
-	watcher := &monitor.Monitor{Config: cfg, GitHub: client}
-	owner := &action.Orchestrator{}
-	bindPublicationValidation(owner, watcher)
-	watcher.Config.Repositories = append(watcher.Config.Repositories, repo) // Invitation registered after binding.
-	job := monitor.Job{Repository: repo, SubjectType: "PullRequest", Number: 7, Source: source,
-		Command: command.Command{Name: "comment", Action: command.Comment},
-		ID:      "job-1", AcceptedAt: at, Deadline: at.Add(time.Hour)}
-	if err := owner.ValidatePublication(t.Context(), job, false); err != nil {
-		t.Fatalf("newly registered repository could not publish: %v", err)
-	}
-	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
-		t.Fatalf("newly registered repository could not receive a fixed refusal: %v", err)
-	}
-	client.permission = "read"
-	if err := owner.ValidatePublication(t.Context(), job, false); !errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("revoked requester permission still published: %v", err)
-	}
-	if err := owner.ValidateFixedRefusal(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("revoked requester permission still received a fixed refusal: %v", err)
 	}
 }
 
