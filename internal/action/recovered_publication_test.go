@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workroot"
@@ -54,6 +55,10 @@ func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, s
 	if err := store.WriteAcceptedResult(data); err != nil {
 		t.Fatal(err)
 	}
+	accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	request := monitor.Job{
 		Repository:  config.Repository{Name: accepted.Repository, ID: accepted.RepositoryID, OwnerID: accepted.OwnerID},
 		SubjectType: accepted.SubjectType, Number: accepted.SubjectNumber,
@@ -75,6 +80,68 @@ func TestPublishRecoveredRequiresGitHubClient(t *testing.T) {
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
 	if err := (&Orchestrator{Store: store}).PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "GitHub client is missing") {
 		t.Fatalf("missing GitHub client did not stop recovery with state intact: %v", err)
+	}
+}
+
+func TestPublishRecoveredRejectsUncommittedSidecar(t *testing.T) {
+	job := testJob(command.Comment)
+	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	store.Data.Accepted.ResultReady = false
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("test sidecar: present=%t error=%v", present, err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+	}))
+	defer server.Close()
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || requests.Load() != 0 {
+		t.Fatalf("uncommitted sidecar was publishable: err=%v requests=%d", err, requests.Load())
+	}
+	if saved, err := e.hasSavedResult(job); err != nil || saved {
+		t.Fatalf("uncommitted sidecar authorized retry: saved=%t error=%v", saved, err)
+	}
+}
+
+func TestPublishRecoveredRejectsExpiredOriginalDeadline(t *testing.T) {
+	job := testJob(command.Comment)
+	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	data, err := store.ReadAcceptedResult(AcceptedResultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeAcceptedResultRecord(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Deadline = time.Now().Add(-time.Minute)
+	request.AcceptedAt = request.Deadline.Add(-time.Minute)
+	store.Data.Accepted.Deadline, store.Data.Accepted.AcceptedAt = request.Deadline, request.AcceptedAt
+	record.Accepted = *store.Data.Accepted
+	data, err = httpEncode(record, int(AcceptedResultMaxBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Errorf("expired recovery reached GitHub: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
+		!errors.Is(err, context.DeadlineExceeded) || requests.Load() != 0 {
+		t.Fatalf("expired recovery was publishable: err=%v requests=%d", err, requests.Load())
 	}
 }
 
@@ -116,8 +183,64 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || reads.Load() != 2 || writes.Load() != 0 || rootChecks != 0 {
 		t.Fatalf("posted marker was not reconciled: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
 	}
+	if decision := store.Data.TerminalDecisions[request.ID]; decision.Outcome != "succeeded" || !store.Data.Accepted.Terminal {
+		t.Fatalf("reconciled publication did not record success before monitor cleanup: %+v", store.Data)
+	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("reconciliation removed result before monitor state save: present=%t error=%v", present, err)
+	}
+}
+
+func TestSelectedExecuteAlreadyAcknowledgedPersistsSuccessWithoutWorker(t *testing.T) {
+	job := testJob(command.Comment)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	request.Repository.Actions = []string{"comment"}
+	markerBody := "Completed before restart\n\n" + request.Marker()
+	var reads, writes, executions atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && !(r.Method == http.MethodPost && r.URL.Path == "/graphql") {
+			writes.Add(1)
+			t.Errorf("already acknowledged action wrote again: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		reads.Add(1)
+		switch r.URL.Path {
+		case "/repos/owner/repo/issues/7/comments":
+			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
+		case "/graphql":
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, markerBody)
+		default:
+			t.Errorf("unexpected read: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion",
+		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Executor: executorFunc(func(context.Context, Job, Checkpoints) (Result, error) {
+			executions.Add(1)
+			return Result{}, errors.New("already acknowledged action ran worker")
+		}),
+	}
+	if err := e.Execute(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 || writes.Load() != 0 || executions.Load() != 0 ||
+		store.Data.TerminalDecisions[request.ID].Outcome != "succeeded" {
+		t.Fatalf("reconciled action ran again or lacked success: reads=%d writes=%d executions=%d state=%+v",
+			reads.Load(), writes.Load(), executions.Load(), store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.TerminalDecisions[request.ID].Outcome != "succeeded" {
+		t.Fatalf("reconciled success was not durable: %+v", reopened.Data.TerminalDecisions)
 	}
 }
 
@@ -182,7 +305,10 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
+	// A separate state file models restart before the first publication decision was saved.
+	retryStore, _, retryRequest := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	orchestrator.Store = retryStore
+	if err := orchestrator.PublishRecovered(t.Context(), retryRequest); err != nil {
 		t.Fatal(err)
 	}
 	review := posted.Load()
@@ -412,6 +538,62 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 	if parent != base || parent == moved || content != "reviewed change" || store.Data.PendingFixes[request.ID].SHA != tip ||
 		!strings.Contains(comment, request.Marker()) {
 		t.Fatalf("replayed fix used moved default: tip=%s parent=%s base=%s moved=%s content=%q checkpoint=%+v comment=%q", tip, parent, base, moved, content, store.Data.PendingFixes[request.ID], comment)
+	}
+}
+
+func TestPublishRecoveredFixRevalidatesBeforePush(t *testing.T) {
+	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")})
+	root := t.TempDir()
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := checkout.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	forkRemote := filepath.Join(filepath.Dir(remote), "fork.git")
+	source := filepath.Join(filepath.Dir(remote), "source")
+	modelGit(t, source, "clone", "--bare", remote, forkRemote)
+	modelGit(t, source, "config", "--file", filepath.Join(filepath.Dir(remote), "gitconfig"), "url."+forkRemote+".insteadOf", "https://github.com/bot/r.git")
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	job.Identity.Repository = "o/r"
+	job.Source = snapshot
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
+	store, _, request := savedRecoveryFixture(t, job, result)
+	var comment string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case serveFixFlowFixture(t, w, r):
+		case captureComment(t, w, r, &comment):
+		default:
+			t.Errorf("unexpected fix publication request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	denied := errors.New("requester no longer has permission")
+	var checks int
+	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+		ValidatePublication: func(_ context.Context, got monitor.Job, requireAssigned bool) error {
+			checks++
+			if got.ID != request.ID || !requireAssigned {
+				t.Errorf("fix push checked the wrong reservation: job=%+v assigned=%t", got, requireAssigned)
+			}
+			return denied
+		}}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, denied) || checks != 1 || comment != "" {
+		t.Fatalf("rejected fix reached publication: err=%v checks=%d comment=%q", err, checks, comment)
+	}
+	if output, err := testsupport.ModelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"); err == nil {
+		t.Fatalf("rejected fix reached fork remote: %s", output)
 	}
 }
 

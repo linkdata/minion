@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -98,4 +100,85 @@ func TestOrchestratorAllowsQuotedRequestNotesButRejectsNewPrivateText(t *testing
 			}
 		})
 	}
+}
+
+func TestPublicationValidationStopsGitHubWrites(t *testing.T) {
+	for _, selected := range []bool{false, true} {
+		for _, action := range []command.Action{command.Review, command.Comment} {
+			name := string(action) + "/in-process"
+			if selected {
+				name = string(action) + "/selected"
+			}
+			t.Run(name, func(t *testing.T) {
+				job := testJob(action)
+				result := completedRecoveryResult(job)
+				store, _, request := savedRecoveryFixture(t, job, result)
+				if !selected {
+					request.AttemptID = ""
+				}
+				var writes atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo" {
+						_, _ = w.Write([]byte(`{"id":1,"full_name":"owner/repo","owner":{"id":2,"login":"owner"},"default_branch":"main"}`))
+						return
+					}
+					if r.Method != http.MethodGet {
+						writes.Add(1)
+					}
+					t.Errorf("unexpected GitHub request after publication rejection: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}))
+				defer server.Close()
+				denied := errors.New("requester no longer has permission")
+				var checks int
+				e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), WorkRoot: t.TempDir(), BotLogin: "bot",
+					ValidatePublication: func(_ context.Context, got monitor.Job, requireAssigned bool) error {
+						checks++
+						if got.ID != request.ID || got.AttemptID != request.AttemptID || requireAssigned != selected {
+							t.Errorf("publication checked the wrong reservation: job=%+v assigned=%t", got, requireAssigned)
+						}
+						return denied
+					}}
+				err := e.publish(t.Context(), &preparedAction{job: job, request: request}, result)
+				if !errors.Is(err, denied) || checks != 1 || writes.Load() != 0 {
+					t.Fatalf("rejected publication wrote to GitHub: err=%v checks=%d writes=%d", err, checks, writes.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestInProcessPublicationAllowedRechecksAfterValidation(t *testing.T) {
+	t.Run("missing selected attempt", func(t *testing.T) {
+		e := &Orchestrator{assignmentRequired: true, ValidatePublication: func(context.Context, monitor.Job, bool) error {
+			t.Fatal("malformed selected result reached in-process validation")
+			return nil
+		}}
+		if err := e.publicationAllowed(t.Context(), monitor.Job{}, true); !errors.Is(err, monitor.ErrAcceptanceState) {
+			t.Fatalf("selected result without an attempt was accepted: %v", err)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		e := &Orchestrator{ValidatePublication: func(context.Context, monitor.Job, bool) error {
+			cancel()
+			return nil
+		}}
+		if err := e.publicationAllowed(ctx, monitor.Job{}, false); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation during validation was ignored: %v", err)
+		}
+	})
+	t.Run("deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			job := monitor.Job{Deadline: time.Now().Add(time.Second)}
+			e := &Orchestrator{ValidatePublication: func(context.Context, monitor.Job, bool) error {
+				time.Sleep(2 * time.Second)
+				return nil
+			}}
+			if err := e.publicationAllowed(t.Context(), job, false); !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("deadline during validation was ignored: %v", err)
+			}
+		})
+	})
 }

@@ -60,6 +60,10 @@ type Orchestrator struct {
 	CheckWorkRoot func() error
 	// ValidateAssignment rechecks an accepted action immediately before worker delivery.
 	ValidateAssignment func(context.Context, monitor.Job) error
+	// ValidatePublication rechecks an accepted action before a new external write.
+	ValidatePublication func(context.Context, monitor.Job, bool) error
+	// ValidateFixedRefusal checks live authority without the action runtime deadline.
+	ValidateFixedRefusal func(context.Context, monitor.Job) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.
@@ -131,7 +135,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	if done {
 		e.logf("already completed %s", job.ID)
-		return nil
+		return e.recordPublishedOutcome(job)
 	}
 	attempt := *e
 	e = &attempt
@@ -167,8 +171,19 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 			limits += fmt.Sprintf(" and %d bytes per title", maxActionTitleBytes)
 			shorten = "the title, thread text or requester notes"
 		}
-		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
+		if e.assignmentRequired && job.AttemptID == "" {
+			resultErr = fmt.Errorf("%w: selected action attempt is missing before fixed refusal", monitor.ErrAcceptanceState)
+		} else if e.ValidateFixedRefusal == nil {
+			resultErr = fmt.Errorf("%w: fixed refusal validator is unavailable", monitor.ErrAcceptanceState)
+		} else if err := e.ValidateFixedRefusal(replyCtx, job); err != nil {
+			resultErr = err
+		} else {
+			resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
+		}
 		replyCancel()
+		if resultErr == nil {
+			resultErr = e.recordPublishedOutcome(job)
+		}
 		returned = true
 		return resultErr
 	}
@@ -182,6 +197,39 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	returned = true
 	return resultErr
+}
+
+// recordPublishedOutcome records publication before local cleanup can observe a later stop.
+func (e *Orchestrator) recordPublishedOutcome(job monitor.Job) error {
+	if job.AttemptID == "" { // In-process actions have no selected reservation.
+		return nil
+	}
+	if e.Store == nil {
+		return fmt.Errorf("%w: selected action state is missing after publication", monitor.ErrAcceptanceState)
+	}
+	at := time.Now().UTC()
+	return e.Store.WithLock(func() error {
+		accepted := e.Store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) {
+			return fmt.Errorf("%w: selected action changed after publication", monitor.ErrAcceptanceState)
+		}
+		outcome := "succeeded"
+		if !at.Before(accepted.Deadline) {
+			outcome = "expired"
+		}
+		decision, err := e.Store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, at)
+		if err != nil {
+			return fmt.Errorf("%w: save published action decision: %w", monitor.ErrAcceptanceState, err)
+		}
+		switch decision.Outcome {
+		case "succeeded":
+			return nil
+		case "expired":
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		default:
+			return fmt.Errorf("%w: earlier %s decision won before publication completed", monitor.ErrTerminalJob, decision.Outcome)
+		}
+	})
 }
 
 func terminalGitworkFailure(err error) bool {

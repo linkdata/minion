@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -25,12 +26,20 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 			resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 		}
 		if resultErr == nil {
-			e.completeRecoveredUsage(request)
+			e.CompleteTerminalUsage(request, "succeeded", time.Now().UTC())
 		}
 		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
 	}()
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
 	defer cancel()
+	if !request.Deadline.IsZero() {
+		if !time.Now().Before(request.Deadline) {
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		}
+		var stop context.CancelFunc
+		ctx, stop = context.WithDeadline(ctx, request.Deadline)
+		defer stop()
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -39,16 +48,35 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}
 	var accepted state.AcceptedAction
 	var data []byte
+	var completed bool
 	if err := e.Store.WithLock(func() error {
 		if e.Store.Data.Accepted == nil {
 			return errors.New("accepted action is missing")
 		}
 		accepted = *e.Store.Data.Accepted
+		decision, decided := e.Store.Data.TerminalDecisions[request.ID]
+		if accepted.Terminal || decided {
+			if decided && decision.AttemptID == request.AttemptID && decision.Outcome == "succeeded" &&
+				monitor.AssignmentMatchesAccepted(request, accepted) {
+				completed = true
+				return nil
+			}
+			return fmt.Errorf("%w: accepted action is already terminal", monitor.ErrTerminalJob)
+		}
+		if !accepted.ResultReady {
+			return errors.New("accepted result was not committed")
+		}
 		var err error
 		data, err = e.Store.ReadAcceptedResult(AcceptedResultMaxBytes)
 		return err
 	}); err != nil {
+		if errors.Is(err, monitor.ErrTerminalJob) {
+			return err
+		}
 		return fmt.Errorf("%w: read accepted result: %w", monitor.ErrAcceptanceState, err)
+	}
+	if completed {
+		return nil
 	}
 	record, err := DecodeAcceptedResultRecord(data)
 	if err != nil {
@@ -58,8 +86,11 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		return fmt.Errorf("%w: accepted result differs from current action", monitor.ErrAcceptanceState)
 	}
 	acknowledged, err := e.alreadyAcknowledged(ctx, request)
-	if err != nil || acknowledged {
+	if err != nil {
 		return err
+	}
+	if acknowledged {
+		return e.recordPublishedOutcome(request)
 	}
 	if e.CheckWorkRoot != nil {
 		if err := e.CheckWorkRoot(); err != nil {
@@ -75,9 +106,14 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}
 	p := &preparedAction{request: request, job: record.Job}
 	if p.job.Action != command.Fix {
-		return e.publish(ctx, p, record.Result)
+		err = e.publish(ctx, p, record.Result)
+	} else {
+		err = e.publishRecoveredFix(ctx, p, record.Result, record.FixDestination)
 	}
-	return e.publishRecoveredFix(ctx, p, record.Result, record.FixDestination)
+	if err != nil {
+		return err
+	}
+	return e.recordPublishedOutcome(request)
 }
 
 func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedAction, result Result, original *FixDestination) error {

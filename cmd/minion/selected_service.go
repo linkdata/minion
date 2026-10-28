@@ -43,6 +43,7 @@ func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, 
 		}
 		return watcher.RevalidateAssignment(ctx, owner.Store, job)
 	}
+	bindPublicationValidation(owner, watcher)
 	watcher.Handler = owner
 	watcher.SelectedExecutorID = action.LocalExecutorID
 	watcher.SelectedCommands = make(map[string]bool, len(selected.Commands))
@@ -50,6 +51,23 @@ func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, 
 		watcher.SelectedCommands[name] = true
 	}
 	return done, closeWorker, nil
+}
+
+func bindPublicationValidation(owner *action.Orchestrator, watcher *monitor.Monitor) {
+	validator := *watcher // Keep startup recovery's repository list while invitations append to watcher.
+	owner.ValidatePublication = func(ctx context.Context, job monitor.Job, requireAssigned bool) error {
+		if job.AttemptID == "" {
+			// In-process jobs pause invitation checks, so this sees newly registered repositories.
+			return watcher.RevalidateInProcessPublication(ctx, job)
+		}
+		return validator.RevalidatePublication(ctx, owner.Store, job, requireAssigned)
+	}
+	owner.ValidateFixedRefusal = func(ctx context.Context, job monitor.Job) error {
+		if job.AttemptID == "" {
+			return watcher.RevalidateFixedRefusal(ctx, nil, job)
+		}
+		return validator.RevalidateFixedRefusal(ctx, owner.Store, job)
+	}
 }
 
 // runSelectedLocalService owns the selected child across the monitor loop.

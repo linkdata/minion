@@ -31,7 +31,25 @@ type Data struct {
 	JobFailures          map[string]JobFailure          `json:"job_failures,omitempty"`
 	PendingNotifications map[string]PendingNotification `json:"pending_notifications,omitempty"`
 	PendingFixes         map[string]PendingFix          `json:"pending_fixes,omitempty"`
+	TerminalDecisions    map[string]TerminalDecision    `json:"terminal_decisions,omitempty"`
 	Accepted             *AcceptedAction                `json:"accepted,omitempty"`
+}
+
+// TerminalDecision records the first outcome for one accepted attempt.
+type TerminalDecision struct {
+	AttemptID string    `json:"attempt_id"`
+	Outcome   string    `json:"outcome"`
+	DecidedAt time.Time `json:"decided_at"`
+}
+
+func validTerminalDecision(jobID string, decision TerminalDecision) bool {
+	switch decision.Outcome {
+	case "succeeded", "expired", "canceled", "lost", "failed":
+	default:
+		return false
+	}
+	return workspace.ValidIdentitySegment(jobID) && workspace.ValidIdentitySegment(decision.AttemptID) &&
+		!decision.DecidedAt.IsZero()
 }
 
 // AcceptedAction retains the one selected action across process restarts.
@@ -56,6 +74,7 @@ type AcceptedAction struct {
 	Deadline        time.Time `json:"deadline"`
 	RetryAt         time.Time `json:"retry_at,omitzero"`
 	Assigned        bool      `json:"assigned"`
+	ResultReady     bool      `json:"result_ready,omitempty"`
 	Terminal        bool      `json:"terminal,omitempty"`
 }
 
@@ -142,6 +161,40 @@ func (s *Store) WithLock(fn func() error) error {
 	return fn()
 }
 
+// DecideTerminalLocked persists the first terminal outcome while the caller holds WithLock.
+func (s *Store) DecideTerminalLocked(jobID, attemptID, outcome string, at time.Time) (TerminalDecision, error) {
+	if decision, exists := s.Data.TerminalDecisions[jobID]; exists {
+		if decision.AttemptID != attemptID {
+			return TerminalDecision{}, fmt.Errorf("terminal decision for %q belongs to another attempt", jobID)
+		}
+		// A previous save may have failed before or after replacement. Persist the
+		// winning decision again before any caller acts on it.
+		if err := s.Save(); err != nil {
+			return TerminalDecision{}, fmt.Errorf("save terminal decision: %w", err)
+		}
+		return decision, nil
+	}
+	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC()}
+	if !validTerminalDecision(jobID, decision) {
+		return TerminalDecision{}, errors.New("invalid terminal decision")
+	}
+	accepted := s.Data.Accepted
+	if accepted == nil || accepted.JobID != jobID || accepted.AttemptID != attemptID {
+		return TerminalDecision{}, fmt.Errorf("terminal decision for %q has no matching accepted attempt", jobID)
+	}
+	if s.Data.TerminalDecisions == nil {
+		s.Data.TerminalDecisions = map[string]TerminalDecision{}
+	}
+	accepted.Terminal = true
+	s.Data.TerminalDecisions[jobID] = decision
+	if err := s.Save(); err != nil {
+		// A directory-sync error can follow replacement of the state file.
+		// Keep the decision in memory so this process cannot overwrite it.
+		return TerminalDecision{}, fmt.Errorf("save terminal decision: %w", err)
+	}
+	return decision, nil
+}
+
 // Open loads state while holding an exclusive lock until [Store.Close].
 //
 // The lock prevents overlapping cron invocations from executing the same command.
@@ -159,7 +212,7 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	store := &Store{path: path, lock: lock}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]PendingFix{}}
+		store.Data = Data{Cursor: initialCursor.UTC(), RepositoryCursors: map[string]time.Time{}, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{}, PendingNotifications: map[string]PendingNotification{}, PendingFixes: map[string]PendingFix{}, TerminalDecisions: map[string]TerminalDecision{}}
 		if err := store.Save(); err != nil {
 			return nil, errors.Join(err, store.Close())
 		}
@@ -196,6 +249,11 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 			return nil, errors.Join(fmt.Errorf("invalid job failure %q: %w", jobID, err), store.Close())
 		}
 	}
+	for jobID, decision := range store.Data.TerminalDecisions {
+		if !validTerminalDecision(jobID, decision) {
+			return nil, errors.Join(fmt.Errorf("invalid terminal decision %q", jobID), store.Close())
+		}
+	}
 	if store.Data.Processed == nil {
 		store.Data.Processed = map[string]time.Time{}
 	}
@@ -210,6 +268,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	}
 	if store.Data.PendingFixes == nil {
 		store.Data.PendingFixes = map[string]PendingFix{}
+	}
+	if store.Data.TerminalDecisions == nil {
+		store.Data.TerminalDecisions = map[string]TerminalDecision{}
 	}
 	return store, nil
 }

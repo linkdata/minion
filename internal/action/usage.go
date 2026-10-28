@@ -104,35 +104,42 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	return finish, nil
 }
 
-// completeRecoveredUsage updates only an existing attempt after saved publication succeeds.
-func (e *Orchestrator) completeRecoveredUsage(job monitor.Job) {
+// CompleteTerminalUsage reconciles an existing attempt before terminal state is removed.
+func (e *Orchestrator) CompleteTerminalUsage(job monitor.Job, outcome string, at time.Time) {
 	if e.Usage == nil || job.AttemptID == "" {
 		return
 	}
 	record, found, err := e.Usage.Load(job.AttemptID)
 	if err != nil {
-		e.logf("load recovered action usage checkpoint failed: %q", err)
+		e.logf("load action usage checkpoint failed: %q", err)
 		return
 	}
 	if !found {
 		return
 	}
 	if record.JobID != job.ID {
-		e.logf("recovered action usage attempt %s belongs to another job", job.AttemptID)
+		e.logf("action usage attempt %s belongs to another job", job.AttemptID)
 		return
 	}
-	if record.Status == "succeeded" {
+	status := "failed"
+	if outcome == "succeeded" {
+		status = "succeeded"
+	}
+	if record.Status == status {
 		return
 	}
-	finished := time.Now().UTC()
+	finished := at.UTC()
+	if finished.IsZero() {
+		finished = time.Now().UTC()
+	}
 	if finished.Before(record.StartedAt) {
 		finished = record.StartedAt
 	}
 	if record.FinishedAt != nil && finished.Before(*record.FinishedAt) {
 		finished = *record.FinishedAt
 	}
-	record.FinishedAt, record.Status = &finished, "succeeded"
+	record.FinishedAt, record.Status = &finished, status
 	if err := e.Usage.Save(record); err != nil {
-		e.logf("final recovered action usage checkpoint failed: %q", err)
+		e.logf("final action usage checkpoint failed: %q", err)
 	}
 }

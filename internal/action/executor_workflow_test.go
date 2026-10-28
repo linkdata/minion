@@ -90,6 +90,71 @@ func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
 	}
 }
 
+func TestSelectedExecuteRecordsPublicationBeforeMonitorCleanup(t *testing.T) {
+	gitFixtureRemote(t)
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	request.Repository.Actions = []string{"comment"}
+	request.AttemptID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	accepted := acceptedForJob(Job{Identity: Identity{
+		JobID: request.ID, AttemptID: request.AttemptID, ExecutorID: LocalExecutorID,
+		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
+		SubjectType: request.SubjectType, Number: request.Number,
+		Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
+	}, Command: request.Command.Name, Action: command.Comment})
+	request.Source.Key, request.Source.NodeID = accepted.SourceKey, accepted.SourceNodeID
+	request.Source.UpdatedAt = accepted.SourceUpdatedAt
+	request.AcceptedAt, request.Deadline = accepted.AcceptedAt, accepted.Deadline
+	store := openState(t, accepted.AcceptedAt)
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var reply string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveIssueFixture(t, w, r) && !captureComment(t, w, r, &reply) {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Store: store,
+		Commands:            map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		assignmentRequired:  true,
+		ValidateAssignment:  func(context.Context, monitor.Job) error { return nil },
+		ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },
+		Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+			sink := checkpoints.(*executionCheckpoints)
+			if err := sink.BeforeAssignment(job); err != nil {
+				return Result{}, err
+			}
+			call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
+			fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}
+			if err := sink.BeforeCall(fact); err != nil {
+				return Result{}, err
+			}
+			call.Complete = true
+			fact.Call = call
+			if err := sink.AfterCall(fact); err != nil {
+				return Result{}, err
+			}
+			result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+				Calls: []CallUsage{call}, Answer: "Published answer"}
+			if err := sink.ReceiveCompletedResult(result); err != nil {
+				return Result{}, err
+			}
+			return result, nil
+		}),
+	}
+	if err := e.Execute(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Published answer") || store.Data.TerminalDecisions[request.ID].Outcome != "succeeded" ||
+		store.Data.Accepted == nil || !store.Data.Accepted.Terminal || !store.Data.Accepted.ResultReady {
+		t.Fatalf("selected publication was not terminal before monitor cleanup: reply=%q state=%+v", reply, store.Data)
+	}
+}
+
 func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T) {
 	for _, mode := range []string{"omitted", "unacknowledged suffix", "changed refutation", "unacknowledged decision", "failed After", "acknowledged decision"} {
 		t.Run(mode, func(t *testing.T) {

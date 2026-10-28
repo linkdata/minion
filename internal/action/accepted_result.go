@@ -152,8 +152,12 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	if err := c.owner.Store.WithLock(func() error {
 		a := c.owner.Store.Data.Accepted
 		if a == nil || !jobMatchesAccepted(c.job, *a) || !monitor.AssignmentMatchesAccepted(c.assignmentRequest, *a) ||
-			!a.Assigned || a.Terminal {
+			!a.Assigned {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))
+		}
+		_, decided := c.owner.Store.Data.TerminalDecisions[a.JobID]
+		if a.Terminal || decided {
+			return c.fail(fmt.Errorf("%w: selected action is already terminal", monitor.ErrTerminalJob))
 		}
 		if !time.Now().Before(a.Deadline) {
 			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
@@ -181,16 +185,63 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 				return c.fail(cause)
 			}
 		}
-		if a == nil || !record.MatchesAccepted(*a) || !a.Assigned || a.Terminal {
+		if a == nil || !record.MatchesAccepted(*a) || !a.Assigned {
 			return c.fail(fmt.Errorf("%w: selected action changed before result save", monitor.ErrAcceptanceState))
+		}
+		_, decided := c.owner.Store.Data.TerminalDecisions[a.JobID]
+		if a.Terminal || decided {
+			return c.fail(fmt.Errorf("%w: selected action is already terminal", monitor.ErrTerminalJob))
 		}
 		if !time.Now().Before(a.Deadline) {
 			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
 		}
-		if err := c.owner.Store.WriteAcceptedResult(data); err != nil {
+		writeResult := c.owner.Store.WriteAcceptedResult
+		if c.writeAcceptedResult != nil {
+			writeResult = c.writeAcceptedResult
+		}
+		if err := writeResult(data); err != nil {
 			return c.fail(fmt.Errorf("%w: save accepted result: %w", monitor.ErrAcceptanceState, err))
 		}
-		return nil
+		// Both durable writes may cross the deadline; check again before an ACK.
+		checkEnded := func() error {
+			var outcome string
+			var cause error
+			if c.assignmentContext != nil {
+				cause = httpExecutionContextError(c.assignmentContext)
+			}
+			if errors.Is(cause, context.Canceled) {
+				outcome = "canceled" // The context retains a cancellation that won before its deadline.
+			} else if errors.Is(cause, context.DeadlineExceeded) {
+				if inner, ok := c.assignmentContext.Deadline(); ok && inner.Before(a.Deadline) {
+					outcome = "canceled" // The assignment context inherits an earlier parent deadline.
+				}
+			}
+			if outcome == "" && !time.Now().Before(a.Deadline) {
+				outcome, cause = "expired", errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+			} else if outcome == "" && cause != nil {
+				outcome = "failed"
+			}
+			if outcome == "" {
+				return nil
+			}
+			if _, err := c.owner.Store.DecideTerminalLocked(c.job.Identity.JobID, c.job.Identity.AttemptID, outcome, time.Now()); err != nil {
+				return c.fail(fmt.Errorf("%w: save terminal result decision: %w", monitor.ErrAcceptanceState, err))
+			}
+			return c.fail(cause)
+		}
+		if err := checkEnded(); err != nil {
+			return err
+		}
+		a.ResultReady = true
+		saveResult := c.owner.Store.Save
+		if c.saveAcceptedResult != nil {
+			saveResult = c.saveAcceptedResult
+		}
+		if err := saveResult(); err != nil {
+			a.ResultReady = false
+			return c.fail(fmt.Errorf("%w: commit accepted result: %w", monitor.ErrAcceptanceState, err))
+		}
+		return checkEnded()
 	}); err != nil {
 		return err
 	}

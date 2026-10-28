@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -73,7 +74,7 @@ func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
 		default:
 			t.Fatalf("unhandled accepted-action field %s", field.Name)
 		}
-		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "Terminal"
+		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "ResultReady" || field.Name == "Terminal"
 		if got := record.MatchesAccepted(changed); got != want {
 			t.Errorf("changed %s matched=%t, want %t", field.Name, got, want)
 		}
@@ -189,6 +190,7 @@ func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {
 type acceptedResultACKWriter struct {
 	http.ResponseWriter
 	store *state.Store
+	path  string
 	check chan error
 }
 
@@ -199,6 +201,17 @@ func (w acceptedResultACKWriter) WriteHeader(status int) {
 		record, err := readSavedResult(w.store)
 		if err == nil && !record.Accepted.Assigned {
 			err = errors.New("saved result lacks assigned marker")
+		}
+		if err == nil {
+			var persisted state.Data
+			var data []byte
+			data, err = os.ReadFile(w.path)
+			if err == nil {
+				err = json.Unmarshal(data, &persisted)
+			}
+			if err == nil && (persisted.Accepted == nil || !persisted.Accepted.ResultReady) {
+				err = errors.New("successful ACK preceded durable result commit")
+			}
 		}
 		w.check <- err
 	}
@@ -272,16 +285,18 @@ func TestSelectedCanceledOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T
 
 func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	var store *state.Store
+	var path string
 	checked := make(chan error, 1)
-	f, savedStore, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
+	f, savedStore, savedPath := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/outcome" {
-				w = acceptedResultACKWriter{ResponseWriter: w, store: store, check: checked}
+				w = acceptedResultACKWriter{ResponseWriter: w, store: store, path: path, check: checked}
 			}
 			next.ServeHTTP(w, r)
 		})
 	})
 	store = savedStore
+	path = savedPath
 	outcome := completeHTTPResult(t, f)
 	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
 	select {
@@ -493,6 +508,68 @@ func TestSelectedHTTPOutcomeLostACKKeepsDurableRecord(t *testing.T) {
 	}
 	if record, err := readSavedResult(store); err != nil || !reflect.DeepEqual(record.Result, outcome.Result) {
 		t.Fatalf("lost ACK erased durable result: record=%+v error=%v", record, err)
+	}
+}
+
+func TestSelectedResultCommitFailureLeavesSidecarUnreadyOnRestart(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		cancel bool
+	}{
+		{name: "result commit save failure"},
+		{name: "cancel decision save failure", cancel: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, store, path := selectedHTTPResultFixture(t, nil)
+			result := completeHTTPResult(t, f).Result
+			sink := f.tx.sink.(*executionCheckpoints)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			sink.assignmentContext = ctx
+			backup := path + ".before-result"
+			sink.writeAcceptedResult = func(data []byte) error {
+				if err := store.WriteAcceptedResult(data); err != nil {
+					return err
+				}
+				if test.cancel {
+					cancel()
+				}
+				if err := os.Rename(path, backup); err != nil {
+					return err
+				}
+				return os.Mkdir(path, 0700) // Block the state replacement after the sidecar is durable.
+			}
+			if err := sink.ReceiveCompletedResult(result); !errors.Is(err, monitor.ErrAcceptanceState) {
+				t.Fatalf("failed state save: %v", err)
+			}
+			if store.Data.Accepted.ResultReady {
+				t.Fatal("failed save left result ready in memory")
+			}
+			if test.cancel && store.Data.TerminalDecisions[store.Data.Accepted.JobID].Outcome != "canceled" {
+				t.Fatalf("canceled outcome was not retained in memory: %+v", store.Data.TerminalDecisions)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(backup, path); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := state.Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			if reopened.Data.Accepted == nil || reopened.Data.Accepted.ResultReady ||
+				len(reopened.Data.TerminalDecisions) != 0 {
+				t.Fatalf("failed save became committed on restart: accepted=%+v decisions=%+v", reopened.Data.Accepted, reopened.Data.TerminalDecisions)
+			}
+			if present, err := reopened.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("test sidecar lost: present=%t error=%v", present, err)
+			}
+		})
 	}
 }
 

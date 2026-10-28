@@ -53,18 +53,20 @@ type ReviewCheckpoint struct {
 
 // executionCheckpoints binds local persistence and acknowledgements to one attempt.
 type executionCheckpoints struct {
-	job               Job
-	owner             *Orchestrator
-	pending           *CallUsage
-	returned          *CallUsage
-	calls             []CallUsage
-	review            ReviewCheckpoint
-	reviewed          bool
-	failure           error
-	assigned          bool
-	assignmentContext context.Context
-	assignmentRequest monitor.Job
-	fixDestination    *FixDestination
+	job                 Job
+	owner               *Orchestrator
+	pending             *CallUsage
+	returned            *CallUsage
+	calls               []CallUsage
+	review              ReviewCheckpoint
+	reviewed            bool
+	failure             error
+	assigned            bool
+	assignmentContext   context.Context
+	assignmentRequest   monitor.Job
+	fixDestination      *FixDestination
+	writeAcceptedResult func([]byte) error // Test seam for a save that crosses the deadline.
+	saveAcceptedResult  func() error       // Test seam for the result commit crossing the deadline.
 }
 
 func newExecutionCheckpoints(owner *Orchestrator, job Job) *executionCheckpoints {
@@ -146,6 +148,22 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 		if !c.acceptedAssignment(job) {
 			return c.fail(fmt.Errorf("%w: accepted action changed during assignment revalidation", monitor.ErrAcceptanceState))
 		}
+		accepted := c.owner.Store.Data.Accepted
+		_, decided := c.owner.Store.Data.TerminalDecisions[accepted.JobID]
+		if accepted.Terminal || decided {
+			return c.fail(fmt.Errorf("%w: accepted action is already terminal", monitor.ErrTerminalJob))
+		}
+		if !time.Now().Before(accepted.Deadline) {
+			if _, err := c.owner.Store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "expired", time.Now()); err != nil {
+				return c.fail(fmt.Errorf("%w: save expired assignment: %w", monitor.ErrAcceptanceState, err))
+			}
+			return c.fail(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
+		}
+		if c.assignmentContext != nil {
+			if err := c.assignmentContext.Err(); err != nil {
+				return fmt.Errorf("%w: %w", monitor.ErrAcceptedRetry, err)
+			}
+		}
 		if c.assigned {
 			if !c.owner.Store.Data.Accepted.Assigned {
 				return c.fail(fmt.Errorf("%w: assigned action marker changed before re-pull", monitor.ErrAcceptanceState))
@@ -197,6 +215,35 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	if err := (Result{Calls: calls}).validateCalls(c.job, false); err != nil {
 		return c.fail(fmt.Errorf("%w: %w", checkpointContractError(), err))
 	}
+	var selectedCallAllowed func() error
+	if c.AssignmentRequired() {
+		if c.assignmentContext == nil || c.owner.Store == nil {
+			return c.fail(fmt.Errorf("%w: selected action context or state is missing before model call", monitor.ErrAcceptanceState))
+		}
+		selectedCallAllowed = func() error {
+			if cause := httpExecutionContextError(c.assignmentContext); cause != nil {
+				return cause
+			}
+			accepted := c.owner.Store.Data.Accepted
+			if accepted == nil || !jobMatchesAccepted(c.job, *accepted) || !accepted.Assigned {
+				return fmt.Errorf("%w: selected assignment changed before model call", monitor.ErrAcceptanceState)
+			}
+			_, decided := c.owner.Store.Data.TerminalDecisions[accepted.JobID]
+			if accepted.Terminal || decided {
+				return fmt.Errorf("%w: selected action is already terminal", monitor.ErrTerminalJob)
+			}
+			if !time.Now().Before(accepted.Deadline) {
+				if _, err := c.owner.Store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "expired", time.Now()); err != nil {
+					return fmt.Errorf("%w: save expired model call: %w", monitor.ErrAcceptanceState, err)
+				}
+				return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+			}
+			return nil
+		}
+		if err := c.owner.Store.WithLock(selectedCallAllowed); err != nil {
+			return c.fail(err)
+		}
+	}
 	if c.owner.usageCheckpoint != nil {
 		c.owner.usageCheckpoint.record.ExecutorID = c.job.Identity.ExecutorID
 		c.owner.usageCheckpoint.record.SourceRef = c.job.Source.Head
@@ -206,6 +253,11 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	}
 	if c.owner.Store != nil {
 		if err := c.owner.Store.WithLock(func() error {
+			if selectedCallAllowed != nil {
+				if err := selectedCallAllowed(); err != nil {
+					return err
+				}
+			}
 			failure, exists := c.owner.Store.Data.JobFailures[c.job.Identity.JobID]
 			if !failure.ModelCallStarted {
 				failure.ModelCallStarted = true
@@ -217,12 +269,15 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 					} else {
 						delete(c.owner.Store.Data.JobFailures, c.job.Identity.JobID)
 					}
-					return c.fail(fmt.Errorf("save model call start: %w", err))
+					return fmt.Errorf("save model call start: %w", err)
 				}
+			}
+			if selectedCallAllowed != nil {
+				return selectedCallAllowed()
 			}
 			return nil
 		}); err != nil {
-			return err
+			return c.fail(err)
 		}
 	}
 	call := fact.Call

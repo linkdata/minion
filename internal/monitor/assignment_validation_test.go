@@ -192,7 +192,7 @@ func TestFinalDiscardStopsSelectedDiscoveryUntilWorkerRestarts(t *testing.T) {
 	calls := 0
 	m.Handler = selectedHandler(func(Job) error {
 		calls++
-		if err := store.WithLock(func() error { return discardAccepted(store) }); err != nil {
+		if err := store.WithLock(func() error { return m.discardAccepted(store) }); err != nil {
 			return err
 		}
 		return ErrAcceptedDiscarded
@@ -214,7 +214,7 @@ func TestSelectedDiscardDoesNotHideControlStateFailure(t *testing.T) {
 	monitor := selectedMonitor(t, at, gh, nil)
 	controlErr := errors.New("control state unavailable")
 	monitor.Handler = selectedHandler(func(Job) error {
-		if err := store.WithLock(func() error { return discardAccepted(store) }); err != nil {
+		if err := store.WithLock(func() error { return monitor.discardAccepted(store) }); err != nil {
 			return err
 		}
 		return errors.Join(ErrAcceptedDiscarded, ErrAcceptanceState, controlErr)

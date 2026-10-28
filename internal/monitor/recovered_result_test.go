@@ -21,6 +21,15 @@ type recoveredResultHandler struct {
 	publish      func(Job) error
 }
 
+type terminalUsageRecoveryHandler struct {
+	recoveredResultHandler
+	onTerminal func(Job, string, time.Time)
+}
+
+func (h *terminalUsageRecoveryHandler) CompleteTerminalUsage(job Job, outcome string, at time.Time) {
+	h.onTerminal(job, outcome, at)
+}
+
 // fakeGitHub counts these reads without locking; recovery and terminal controls run concurrently.
 type synchronizedRecoveryGitHub struct {
 	*fakeGitHub
@@ -74,6 +83,43 @@ func storedRecoveryFixture(t *testing.T) (*state.Store, string, state.AcceptedAc
 	return storedRecoveryFixtureAt(t, time.Now().UTC())
 }
 
+func TestRecoveredTerminalDecisionReconcilesUsageBeforeCleanup(t *testing.T) {
+	for _, outcome := range []string{"succeeded", "canceled"} {
+		t.Run(outcome, func(t *testing.T) {
+			store, path, accepted, _, monitor := storedRecoveryFixture(t)
+			if err := store.WithLock(func() error {
+				_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, outcome, time.Now().UTC())
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+			calls := 0
+			handler := &terminalUsageRecoveryHandler{onTerminal: func(job Job, got string, at time.Time) {
+				calls++
+				if got != outcome || job.ID != accepted.JobID || at.IsZero() || reopened.Data.Accepted == nil {
+					t.Errorf("terminal usage ran after cleanup or with wrong decision: job=%+v outcome=%q state=%+v", job, got, reopened.Data)
+				}
+			}}
+			monitor.Handler = handler
+			if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || handler.executions != 0 || handler.publications != 0 ||
+				reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() {
+				t.Fatalf("terminal decision reran work or skipped cleanup: usage=%d executions=%d publications=%d state=%+v",
+					calls, handler.executions, handler.publications, reopened.Data)
+			}
+			if present, err := reopened.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("terminal decision retained accepted result: present=%t err=%v", present, err)
+			}
+		})
+	}
+}
+
 func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -90,6 +136,10 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 		t.Fatal(err)
 	}
 	if err := store.WriteAcceptedResult([]byte(`{"result":"opaque-to-monitor"}`)); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted.ResultReady = true
+	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
 	gh := &fakeGitHub{
@@ -132,7 +182,11 @@ func TestSelectedExecutionKeepsSavedResultAfterPublicationError(t *testing.T) {
 			if err := store.Save(); err != nil {
 				return err
 			}
-			return store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`))
+			if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`)); err != nil {
+				return err
+			}
+			store.Data.Accepted.ResultReady = true
+			return store.Save()
 		}); err != nil {
 			return err
 		}
@@ -168,7 +222,11 @@ func TestSelectedExecutionEndsPermanentSavedResult(t *testing.T) {
 			if err := store.Save(); err != nil {
 				return err
 			}
-			return store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`))
+			if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-error"}`)); err != nil {
+				return err
+			}
+			store.Data.Accepted.ResultReady = true
+			return store.Save()
 		}); err != nil {
 			return err
 		}
@@ -228,6 +286,51 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 	if err != nil || present || finished.Data.Accepted != nil ||
 		finished.Data.Processed[accepted.JobID].IsZero() || len(finished.Data.JobFailures) != 0 {
 		t.Fatalf("publication was not durably completed: present=%t err=%v state=%+v", present, err, finished.Data)
+	}
+}
+
+func TestUncommittedStoredResultDoesNotPublishAfterRestart(t *testing.T) {
+	store, path, accepted, _, monitor := storedRecoveryFixture(t)
+	store.Data.Accepted.ResultReady = false // The sidecar write was not accepted before cancellation.
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+	handler := &recoveredResultHandler{}
+	monitor.Handler = handler
+	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+		t.Fatal(err)
+	}
+	if handler.executions != 0 || handler.publications != 0 ||
+		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "lost" {
+		t.Fatalf("uncommitted sidecar authorized publication: handler=%+v state=%+v", handler, reopened.Data)
+	}
+}
+
+func TestUncommittedStoredResultDoesNotDeferLiveFailure(t *testing.T) {
+	store, _, accepted, gh, monitor := storedRecoveryFixture(t)
+	store.Data.Accepted.ResultReady = false
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	job := jobFromAccepted(accepted)
+	failure := errors.Join(ErrPostModelPublication, errors.New("publication failed"))
+	outcome, err := selectedCompletedOutcome(store, job, failure, nil, time.Now().UTC(), time.Time{})
+	if err != nil || outcome != "failed" {
+		t.Fatalf("uncommitted result deferred worker failure: outcome=%q error=%v", outcome, err)
+	}
+	if err := monitor.completeSelected(t.Context(), store, job, time.Now().UTC(), failure); err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.TerminalDecisions[job.ID].Outcome != "failed" || store.Data.Accepted != nil ||
+		store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
+		t.Fatalf("uncommitted result stayed retryable: state=%+v comments=%v", store.Data, gh.comments)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("uncommitted sidecar survived terminal cleanup: present=%t error=%v", present, err)
 	}
 }
 
@@ -297,11 +400,12 @@ func TestSelectedCompletionSaveFailureRetainsReceiptForRestart(t *testing.T) {
 	if err := monitor.completeSelected(t.Context(), store, job, time.Now().UTC(), nil); !errors.Is(err, ErrAcceptanceState) {
 		t.Fatalf("failed completion save did not stop publication: %v", err)
 	}
-	if store.Data.Accepted == nil || *store.Data.Accepted != accepted ||
+	if store.Data.Accepted == nil || !store.Data.Accepted.Terminal ||
+		store.Data.TerminalDecisions[job.ID].Outcome != "succeeded" ||
 		store.Data.JobFailures[job.ID].Attempts != 1 ||
 		store.Data.PendingFixes[job.ID].SHA != "reviewed-commit" ||
 		!store.Data.Processed[job.ID].IsZero() {
-		t.Fatalf("failed completion save did not roll back in-memory state: %+v", store.Data)
+		t.Fatalf("failed completion save forgot the first decision or changed completion state: %+v", store.Data)
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("failed completion save lost receipt: present=%t err=%v", present, err)
@@ -331,7 +435,7 @@ func TestSelectedCompletionSaveFailureRetainsReceiptForRestart(t *testing.T) {
 	}
 }
 
-func TestStoredResultRecoveryPublishesAfterAcceptedDeadline(t *testing.T) {
+func TestStoredResultRecoveryExpiresBeforePublication(t *testing.T) {
 	at := time.Now().UTC().Add(-8 * time.Minute)
 	store, path, accepted, gh, monitor := storedRecoveryFixtureAt(t, at)
 	if !accepted.Deadline.Before(time.Now()) {
@@ -342,24 +446,20 @@ func TestStoredResultRecoveryPublishesAfterAcceptedDeadline(t *testing.T) {
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
 	monitor.Now = time.Now
-	handler := &recoveredResultHandler{publish: func(job Job) error {
-		if job.AttemptID != accepted.AttemptID || !job.Deadline.Equal(accepted.Deadline) {
-			t.Errorf("publication lost expired accepted attempt: %+v", job)
-			return errors.New("publication lost expired accepted attempt")
-		}
-		return nil
-	}}
+	handler := &recoveredResultHandler{}
 	monitor.Handler = handler
 	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
 		t.Fatal(err)
 	}
-	if handler.executions != 0 || handler.publications != 1 || gh.currentChecks != 1 || gh.checks != 1 ||
-		len(gh.comments) != 0 || reopened.Data.Accepted != nil ||
+	decision := reopened.Data.TerminalDecisions[accepted.JobID]
+	if handler.executions != 0 || handler.publications != 0 || decision.Outcome != "expired" ||
+		decision.AttemptID != accepted.AttemptID || gh.currentChecks != 1 || gh.checks != 1 ||
+		len(gh.comments) != 1 || reopened.Data.Accepted != nil ||
 		reopened.Data.Processed[accepted.JobID].IsZero() || len(reopened.Data.JobFailures) != 0 {
-		t.Fatalf("expired accepted result did not take publication path: handler=%+v github=%+v state=%+v", handler, gh, reopened.Data)
+		t.Fatalf("expired accepted result reached publication: handler=%+v github=%+v state=%+v", handler, gh, reopened.Data)
 	}
 	if present, err := reopened.HasAcceptedResult(); err != nil || present {
-		t.Fatalf("completed result kept receipt: present=%t err=%v", present, err)
+		t.Fatalf("expired result kept receipt: present=%t err=%v", present, err)
 	}
 }
 
@@ -569,25 +669,26 @@ func TestStoredResultRecoveryEndsPermanentPublicationFailure(t *testing.T) {
 	}
 }
 
-func TestStoredResultRecoveryRetainsReceiptOnPublicationDeadline(t *testing.T) {
+func TestStoredResultRecoveryDoesNotRetryAfterAcceptedDeadline(t *testing.T) {
 	at := time.Now().UTC().Add(-8 * time.Minute)
 	store, _, accepted, _, monitor := storedRecoveryFixtureAt(t, at)
+	monitor.Now = time.Now
 	handler := &recoveredResultHandler{publish: func(Job) error {
-		return errors.Join(ErrTerminalJob, ErrPostModelPublication, context.DeadlineExceeded)
+		t.Fatal("expired result reached publisher")
+		return nil
 	}}
 	monitor.Handler = handler
-	next, err := monitor.RunOnce(t.Context(), store)
-	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, ErrPostModelPublication) ||
-		store.Data.Accepted == nil || !next.Equal(store.Data.Accepted.RetryAt) ||
-		store.Data.JobFailures[accepted.JobID].Attempts != 1 || handler.executions != 0 || handler.publications != 1 {
-		t.Fatalf("publication timeout lost receipt: next=%s err=%v state=%+v handler=%+v", next, err, store.Data, handler)
+	if _, err := monitor.RunOnce(t.Context(), store); err != nil ||
+		store.Data.Accepted != nil || store.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" ||
+		handler.executions != 0 || handler.publications != 0 {
+		t.Fatalf("expired publication was retried: err=%v state=%+v handler=%+v", err, store.Data, handler)
 	}
-	if present, err := store.HasAcceptedResult(); err != nil || !present {
-		t.Fatalf("publication timeout lost receipt: present=%t err=%v", present, err)
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("expired result retained receipt: present=%t err=%v", present, err)
 	}
 }
 
-func TestCompleteSelectedRetainsSavedResultOnCancellation(t *testing.T) {
+func TestCompleteSelectedCancelsAssignedSavedResult(t *testing.T) {
 	for _, name := range []string{"publisher canceled", "parent canceled"} {
 		t.Run(name, func(t *testing.T) {
 			store, _, accepted, _, monitor := storedRecoveryFixture(t)
@@ -599,14 +700,15 @@ func TestCompleteSelectedRetainsSavedResultOnCancellation(t *testing.T) {
 			} else {
 				cancel()
 			}
-			err := monitor.completeSelected(ctx, store, jobFromAccepted(accepted), time.Now().UTC(), failure)
-			if !errors.Is(err, ErrPostModelPublication) || !errors.Is(err, failure) ||
-				store.Data.Accepted == nil || store.Data.Accepted.AttemptID != accepted.AttemptID ||
-				!store.Data.Processed[accepted.JobID].IsZero() {
-				t.Fatalf("cancellation cleared a saved result: err=%v state=%+v", err, store.Data)
+			if err := monitor.completeSelected(ctx, store, jobFromAccepted(accepted), time.Now().UTC(), failure); err != nil {
+				t.Fatal(err)
 			}
-			if present, err := store.HasAcceptedResult(); err != nil || !present {
-				t.Fatalf("cancellation lost saved receipt: present=%t err=%v", present, err)
+			if store.Data.TerminalDecisions[accepted.JobID].Outcome != "canceled" ||
+				store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+				t.Fatalf("cancellation did not end assigned result: %+v", store.Data)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("canceled result retained receipt: present=%t err=%v", present, err)
 			}
 		})
 	}
@@ -632,14 +734,21 @@ func TestStoredResultRecoveryDiscardsInvalidSourceOrRequester(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store, path, accepted, gh, monitor := storedRecoveryFixture(t)
 			test.change(gh, accepted.AcceptedAt)
-			handler := &recoveredResultHandler{}
+			usageCalls := 0
+			handler := &terminalUsageRecoveryHandler{onTerminal: func(job Job, outcome string, at time.Time) {
+				usageCalls++
+				if job.ID != accepted.JobID || outcome != "lost" || at.IsZero() || store.Data.Accepted == nil {
+					t.Errorf("discard skipped terminal usage before cleanup: job=%+v outcome=%q state=%+v", job, outcome, store.Data)
+				}
+			}}
 			monitor.Handler = handler
 			if _, err := monitor.RunOnce(t.Context(), store); err != nil {
 				t.Fatal(err)
 			}
-			if handler.executions != 0 || handler.publications != 0 || gh.currentChecks != 1 ||
-				gh.checks != test.permissionChecks || len(gh.comments) != 0 {
-				t.Fatalf("invalid command reached publisher: handler=%+v github=%+v", handler, gh)
+			if handler.executions != 0 || handler.publications != 0 || usageCalls == 0 || gh.currentChecks == 0 ||
+				gh.checks < test.permissionChecks || len(gh.comments) != 0 ||
+				store.Data.TerminalDecisions[accepted.JobID].Outcome != "lost" {
+				t.Fatalf("invalid command reached publisher: usage_calls=%d handler=%+v github=%+v", usageCalls, handler, gh)
 			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)

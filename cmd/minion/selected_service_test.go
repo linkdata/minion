@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
@@ -26,8 +27,9 @@ import (
 
 type terminalRecoveryGitHub struct {
 	monitor.GitHub
-	item  github.Item
-	reply string
+	item       github.Item
+	reply      string
+	permission string
 }
 
 func serviceStore(t *testing.T, data state.Data) *state.Store {
@@ -54,7 +56,11 @@ func (g *terminalRecoveryGitHub) Repository(context.Context, string) (github.Rep
 }
 
 func (g *terminalRecoveryGitHub) Permission(context.Context, string, string) (github.Permission, error) {
-	return github.Permission{Permission: "write", User: g.item.Author}, nil
+	permission := g.permission
+	if permission == "" {
+		permission = "write"
+	}
+	return github.Permission{Permission: permission, User: g.item.Author}, nil
 }
 
 func (g *terminalRecoveryGitHub) CreateIssueComment(_ context.Context, _ string, _ int, body string) (github.Comment, error) {
@@ -73,6 +79,72 @@ func selectedServiceTestConfig(t *testing.T) config.Config {
 		Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}},
 		Codex:        config.CodexConfig{APIKey: "selected-config-key", Model: "main-1", ReasoningEffort: "high"},
 		Claude:       config.ClaudeConfig{APIKey: "unselected-config-key"},
+	}
+}
+
+func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
+	cfg := selectedServiceTestConfig(t)
+	repo := &cfg.Repositories[0]
+	repo.ID, repo.OwnerID = 1, 2
+	repo.AllowedActors = []string{"writer"}
+	repo.AllowedActorIDs = map[string]int64{"writer": 7}
+	at := time.Now().UTC().Add(-time.Minute)
+	source := github.Item{Key: "comment:1", NodeID: "source-node", HTMLURL: "https://github.com/owner/repo/pull/7#issuecomment-1",
+		UpdatedAt: at, Body: "@bot comment", Author: github.User{Login: "writer", ID: 7}}
+	accepted := state.AcceptedAction{
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
+		Repository: repo.Name, RepositoryID: repo.ID, OwnerID: repo.OwnerID,
+		SubjectType: "PullRequest", SubjectNumber: 7,
+		SourceKey: source.Key, SourceNodeID: source.NodeID, SourceURL: source.HTMLURL, SourceUpdatedAt: at,
+		Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+		AcceptedAt: at, Deadline: at.Add(time.Hour), Assigned: true,
+	}
+	store := serviceStore(t, state.Data{Accepted: &accepted, JobFailures: map[string]state.JobFailure{
+		accepted.JobID: {Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline},
+	}})
+	watcher := &monitor.Monitor{Config: cfg, GitHub: &terminalRecoveryGitHub{item: source}}
+	owner := newOrchestrator(cfg, nil, store, nil, nil)
+	bindPublicationValidation(owner, watcher)
+	watcher.Config.Repositories = nil // Invitation registration may replace the slice during recovery.
+	job := monitor.Job{Repository: *repo, SubjectType: accepted.SubjectType, Number: accepted.SubjectNumber,
+		Source: source, Command: command.Command{Name: "comment", Action: command.Comment},
+		ID: accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: at, Deadline: accepted.Deadline}
+	if err := owner.ValidatePublication(t.Context(), job, true); err != nil {
+		t.Fatalf("publication lost the repository from its bound snapshot: %v", err)
+	}
+	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
+		t.Fatalf("fixed refusal lost the repository from its bound snapshot: %v", err)
+	}
+}
+
+func TestPublicationValidationUsesCurrentInProcessRepository(t *testing.T) {
+	cfg := selectedServiceTestConfig(t)
+	cfg.Repositories = nil
+	repo := config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"},
+		AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}
+	at := time.Now().UTC().Add(-time.Minute)
+	source := github.Item{Key: "comment:1", NodeID: "source-node", HTMLURL: "https://github.com/owner/repo/pull/7#issuecomment-1",
+		UpdatedAt: at, Body: "@bot comment", Author: github.User{Login: "writer", ID: 7}}
+	client := &terminalRecoveryGitHub{item: source}
+	watcher := &monitor.Monitor{Config: cfg, GitHub: client}
+	owner := &action.Orchestrator{}
+	bindPublicationValidation(owner, watcher)
+	watcher.Config.Repositories = append(watcher.Config.Repositories, repo) // Invitation registered after binding.
+	job := monitor.Job{Repository: repo, SubjectType: "PullRequest", Number: 7, Source: source,
+		Command: command.Command{Name: "comment", Action: command.Comment},
+		ID:      "job-1", AcceptedAt: at, Deadline: at.Add(time.Hour)}
+	if err := owner.ValidatePublication(t.Context(), job, false); err != nil {
+		t.Fatalf("newly registered repository could not publish: %v", err)
+	}
+	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
+		t.Fatalf("newly registered repository could not receive a fixed refusal: %v", err)
+	}
+	client.permission = "read"
+	if err := owner.ValidatePublication(t.Context(), job, false); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("revoked requester permission still published: %v", err)
+	}
+	if err := owner.ValidateFixedRefusal(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("revoked requester permission still received a fixed refusal: %v", err)
 	}
 }
 
@@ -111,7 +183,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 				t.Fatal("attached child has no exit signal")
 			}
 			t.Cleanup(func() { _ = closeWorker() })
-			if watcher.Handler != owner || watcher.SelectedExecutorID != action.LocalExecutorID || len(watcher.SelectedCommands) != 1 || !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
+			if watcher.Handler != owner || owner.ValidatePublication == nil || watcher.SelectedExecutorID != action.LocalExecutorID || len(watcher.SelectedCommands) != 1 || !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
 				t.Fatalf("monitor did not receive exact frozen selection: handler=%v commands=%v", watcher.Handler, watcher.SelectedCommands)
 			}
 			data, err := os.ReadFile(report)

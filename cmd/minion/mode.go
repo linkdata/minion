@@ -54,7 +54,8 @@ func terminalRecoveryPendingAt(store *state.Store, now time.Time) bool {
 	if accepted == nil {
 		return false
 	}
-	return accepted.Assigned || accepted.Terminal || store.Data.JobFailures[accepted.JobID].ModelCallStarted || !now.Before(accepted.Deadline)
+	_, decided := store.Data.TerminalDecisions[accepted.JobID]
+	return accepted.Assigned || accepted.Terminal || decided || store.Data.JobFailures[accepted.JobID].ModelCallStarted || !now.Before(accepted.Deadline)
 }
 
 func recoverTerminalService(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger) int {
