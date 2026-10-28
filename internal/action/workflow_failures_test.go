@@ -491,7 +491,7 @@ exec %s "$@"
 			fakeOnPath(t, "git", script)
 			job := testJob(command.Fix)
 			job.Source.Head = base
-			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
+			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC()}}
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)

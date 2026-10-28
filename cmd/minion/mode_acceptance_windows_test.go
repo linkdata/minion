@@ -157,11 +157,6 @@ func windowsModeCodexProbe() {
 	os.Exit(99) // This fixture never starts a paid model call.
 }
 
-func windowsModeLinkExecutable(t *testing.T, dir, name string) {
-	t.Helper()
-	testsupport.LinkTestExecutable(t, filepath.Join(dir, name+".exe"))
-}
-
 func offlineModeWorkerPath(t *testing.T, binary string) string {
 	t.Helper()
 	t.Setenv("MINION_WINDOWS_EXECUTE_CHILD", "1")
@@ -171,7 +166,7 @@ func offlineModeWorkerPath(t *testing.T, binary string) string {
 func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 	t.Helper()
 	bin := t.TempDir()
-	windowsModeLinkExecutable(t, bin, "git")
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "git.exe"))
 	// Git readiness strips fixture environment variables before calling git.exe.
 	data, err := json.Marshal(windowsModeGitProxyConfig{RealGit: realGit, Rewrite: rewrite})
 	if err != nil {
@@ -186,7 +181,7 @@ func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 func offlineModeCodex(t *testing.T, modelCalls string) {
 	t.Helper()
 	bin := filepath.Dir(modelCalls)
-	windowsModeLinkExecutable(t, bin, "codex")
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "codex.exe"))
 	if err := os.WriteFile(modelCalls, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +194,7 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	windowsModeLinkExecutable(t, bin, "codex")
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "codex.exe"))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := t.TempDir()
 	t.Setenv("HOME", home)

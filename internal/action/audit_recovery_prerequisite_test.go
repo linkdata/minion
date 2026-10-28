@@ -272,6 +272,7 @@ func TestAuditValidationHostIOClassification(t *testing.T) {
 		{"validator missing", os.ErrNotExist, true},
 		{"invalid content", errors.New("audit metadata is invalid"), false},
 		{"invalid content and I/O", errors.Join(errors.New("audit metadata is invalid"), syscall.ENOSPC), false},
+		{"invalid content and missing validator", errors.Join(errors.New("audit metadata is invalid"), os.ErrNotExist), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := fmt.Errorf("audit validation: %w", test.cause)
@@ -279,5 +280,20 @@ func TestAuditValidationHostIOClassification(t *testing.T) {
 				t.Fatalf("host I/O classification = %t for %v", got, err)
 			}
 		})
+	}
+}
+
+func TestInvalidAuditInputFailsBeforeUnavailableValidator(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	files := completeAuditResult(job).Artifacts
+	for i := range files {
+		if files[i].Path == "REPORT.md" {
+			files[i].Data = nil
+		}
+	}
+	e := &Orchestrator{WorkRoot: t.TempDir()}
+	err := e.validateAuditForPublication(t.Context(), job, files)
+	if err == nil || errors.Is(err, errAuditPublicationUnavailable) || !strings.Contains(err.Error(), "REPORT.md") {
+		t.Fatalf("invalid report with unavailable validator: %v", err)
 	}
 }

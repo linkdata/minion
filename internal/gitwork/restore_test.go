@@ -38,7 +38,7 @@ func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recorded string
-	if err := restored.commitAndPush(t.Context(), fixture.remote, branch, "example-bot", "Fix from saved result", func(sha string) error {
+	if err := restored.commitAndPush(t.Context(), fixture.remote, branch, "example-bot", "Fix from saved result", testCommitDate, func(sha string) error {
 		recorded = sha
 		return nil
 	}); err != nil {

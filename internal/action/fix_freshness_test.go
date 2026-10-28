@@ -39,7 +39,7 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 				SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64),
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix", UpdatedAt: requestAt},
-				Command: command.Command{Name: "fix", Action: command.Fix},
+				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: requestAt,
 			}
 			store := openState(t, requestAt)
 			var modelRan atomic.Bool

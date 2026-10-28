@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
@@ -242,18 +243,21 @@ func (c *Checkout) NewBranch(ctx context.Context, name string) error {
 // It bounds the staged patch, commits without hooks or signing, and uses the
 // validated repository URL. Unstaged files are never added here.
 // beforePush must persist the new commit SHA for later recovery.
-func (c *Checkout) CommitAndPush(ctx context.Context, repo, branch, botLogin, message string, beforePush func(string) error) error {
+func (c *Checkout) CommitAndPush(ctx context.Context, repo, branch, botLogin, message string, commitDate time.Time, beforePush func(string) error) error {
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return err
 	}
-	return c.commitAndPush(ctx, url, branch, botLogin, message, beforePush)
+	return c.commitAndPush(ctx, url, branch, botLogin, message, commitDate, beforePush)
 }
 
 // The URL entry point lets local fixtures exercise publication without network calls.
-func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin, message string, beforePush func(string) error) error {
+func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin, message string, commitDate time.Time, beforePush func(string) error) error {
 	if beforePush == nil {
 		return errors.New("before-push recorder is required")
+	}
+	if commitDate.IsZero() {
+		return errors.New("commit date is required")
 	}
 	if err := validateBranch(branch); err != nil {
 		return err
@@ -285,7 +289,9 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	if err := c.checkPatchSize(ctx); err != nil {
 		return err
 	}
-	if _, err := runGit(ctx, c.path, "-c", "user.name="+botLogin, "-c", "user.email="+botLogin+"@users.noreply.github.com", "commit", "--no-verify", "-m", message); err != nil {
+	date := fmt.Sprintf("@%d +0000", commitDate.Unix())
+	if err := runGitInputToEnv(ctx, c.path, nil, io.Discard, []string{"GIT_AUTHOR_DATE=" + date, "GIT_COMMITTER_DATE=" + date},
+		"-c", "user.name="+botLogin, "-c", "user.email="+botLogin+"@users.noreply.github.com", "commit", "--no-verify", "-m", message); err != nil {
 		return err
 	}
 	c.expectedHead, err = c.head(ctx)
@@ -385,6 +391,10 @@ func gitCommand(ctx context.Context, binary, dir string, env []string, args ...s
 }
 
 func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, args ...string) error {
+	return runGitInputToEnv(ctx, dir, stdin, stdout, nil, args...)
+}
+
+func runGitInputToEnv(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, extraEnv []string, args ...string) error {
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		return err
@@ -399,7 +409,7 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 	if helper := resolveCredentialHelperGH(); helper != "" {
 		gitArgs = append(gitArgs, "-c", credentialHelperConfig(helper))
 	}
-	cmd := gitCommand(ctx, binary, dir, cleanGitEnvironment(), append(gitArgs, args...)...)
+	cmd := gitCommand(ctx, binary, dir, append(cleanGitEnvironment(), extraEnv...), append(gitArgs, args...)...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	diagnostic := bounded.Buffer{Limit: bounded.DiagnosticBytes}

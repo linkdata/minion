@@ -44,6 +44,11 @@ func TestRetentionFailureClassification(t *testing.T) {
 		})
 	}
 	if runtime.GOOS == "windows" {
+		for _, code := range []syscall.Errno{4, 8, 14, 21, 23, 29, 30, 31, 1117, 1450, 1455} {
+			if err := retainedRecordFailure("retain record", &os.PathError{Op: "write", Path: "record", Err: code}); !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("Win32 resource or device I/O classification for %d: %v", code, err)
+			}
+		}
 		for _, code := range []syscall.Errno{39, 112, 1295} {
 			if err := retainedRecordFailure("retain record", &os.PathError{Op: "write", Path: "record", Err: code}); !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
 				t.Fatalf("Win32 disk-full classification for %d: %v", code, err)

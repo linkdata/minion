@@ -39,9 +39,12 @@ func retryableHostIO(err error) bool {
 		return true
 	}
 	if runtime.GOOS == "windows" {
-		// Win32 sharing/lock contention and disk-full/quota errors.
-		return errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)) ||
-			errors.Is(err, syscall.Errno(39)) || errors.Is(err, syscall.Errno(112)) || errors.Is(err, syscall.Errno(1295))
+		// Win32 resource, device I/O, sharing and disk-capacity failures.
+		for _, code := range []syscall.Errno{4, 8, 14, 21, 23, 29, 30, 31, 32, 33, 39, 112, 1117, 1295, 1450, 1455} {
+			if errors.Is(err, code) {
+				return true
+			}
+		}
 	}
 	return false
 }

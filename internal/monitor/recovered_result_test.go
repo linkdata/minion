@@ -45,6 +45,12 @@ func (g *synchronizedRecoveryGitHub) Permission(ctx context.Context, repo, login
 	return g.fakeGitHub.Permission(ctx, repo, login)
 }
 
+func (g *synchronizedRecoveryGitHub) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.fakeGitHub.HasVerifiedBotReply(ctx, repo, number, since, botLogin, marker, includeReviews)
+}
+
 func (h *recoveredResultHandler) Execute(_ context.Context, job Job) error {
 	h.executions++
 	if h.execute != nil {

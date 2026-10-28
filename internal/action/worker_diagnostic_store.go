@@ -62,17 +62,6 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 		return retainedRecordFailure("read private worker diagnostics", err)
 	}
 	if err == nil {
-		if !cleanupUnverified && !bytes.Equal(previous, data) {
-			var saved retainedWorkerDiagnostics
-			if json.Unmarshal(previous, &saved) == nil && saved.CleanupUnverifiedWorkRoot == filepath.Dir(root) {
-				// Recovery must preserve a parent-observed cleanup failure in the first record.
-				record.CleanupUnverifiedWorkRoot = saved.CleanupUnverifiedWorkRoot
-				data, err = json.Marshal(record)
-				if err != nil {
-					return fmt.Errorf("%w: encode private worker diagnostics: %w", monitor.ErrTerminalJob, err)
-				}
-			}
-		}
 		if !bytes.Equal(previous, data) {
 			return fmt.Errorf("%w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob)
 		}

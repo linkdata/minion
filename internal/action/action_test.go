@@ -673,7 +673,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			job := monitor.Job{
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
 				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix\n\nCheck the failing error path.", HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
-				Command: command.Command{Name: "fix", Action: command.Fix},
+				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC(),
 			}
 			store, err := state.Open(statePath, time.Now())
 			if err != nil {
@@ -810,6 +810,24 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if test.saveFailure {
 				if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "record commit before push") || commentBody != "" {
 					t.Fatalf("checkpoint save failure did not stop publication: %v", err)
+				}
+				if _, exists := store.Data.PendingFixes[job.ID]; exists {
+					t.Fatalf("failed save left an in-memory fix checkpoint: %+v", store.Data.PendingFixes[job.ID])
+				}
+				store.Data.Cursor = time.Time{}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var durable state.Data
+				if err := json.Unmarshal(data, &durable); err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := durable.PendingFixes[job.ID]; exists {
+					t.Fatalf("later save persisted a phantom fix checkpoint: %+v", durable.PendingFixes[job.ID])
 				}
 				if _, err := os.Stat(beforePushState); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("push ran after checkpoint save failure: %v", err)

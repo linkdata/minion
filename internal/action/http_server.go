@@ -195,7 +195,12 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 			runErr = errors.Join(runErr, tx.transportErr)
 		}
 		if tx.requiredControlErr != nil {
-			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredControlErr)
+			if !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) {
+				runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
+			}
+			if !errors.Is(runErr, tx.requiredControlErr) {
+				runErr = errors.Join(runErr, tx.requiredControlErr)
+			}
 		}
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
@@ -745,11 +750,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 					checkpointErr, controlErr := tx.checkpointErr, tx.requiredControlErr
 					tx.mu.Unlock()
 					if checkpointErr != nil {
-						if errors.Is(checkpointErr, monitor.ErrTerminalJob) && !errors.Is(checkpointErr, monitor.ErrAcceptanceState) {
-							terminalResult = errors.Join(terminalResult, checkpointErr, controlErr)
-						} else {
-							terminalResult = errors.Join(terminalResult, monitor.ErrAcceptanceState, checkpointErr, controlErr)
+						marker := monitor.ErrTerminalJob
+						if errors.Is(checkpointErr, monitor.ErrAcceptanceState) {
+							marker = monitor.ErrAcceptanceState
 						}
+						terminalResult = errors.Join(terminalResult, marker, checkpointErr, controlErr)
 					} else if controlErr != nil {
 						terminalResult = errors.Join(terminalResult, monitor.ErrExecutionOutcomeUnknown, controlErr)
 					} else if err := httpExecutionContextError(tx.budget); err != nil {
@@ -769,8 +774,10 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr, savedRetry, terminalResult)
-			if savedRetry != nil || terminalResult != nil {
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), savedRetry, terminalResult)
+			if terminalResult == nil {
+				tx.runErr = errors.Join(tx.runErr, tx.checkpointErr)
+			} else {
 				tx.quarantine = true // The worker receives a failed outcome ACK.
 			}
 			for _, diagnostic := range outcome.Result.Diagnostics {
@@ -785,11 +792,15 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				tx.quarantine = true
 			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
-			tx.runErr = errors.Join(tx.runErr, httpExecutionContextError(tx.budget))
+			if budgetErr := httpExecutionContextError(tx.budget); budgetErr != nil {
+				if cause := tx.budget.Err(); cause == nil || !errors.Is(tx.runErr, cause) {
+					tx.runErr = errors.Join(tx.runErr, budgetErr)
+				}
+			}
 			tx.outcome, tx.fenced = true, true
 			close(tx.done)
 			tx.mu.Unlock()
-			return errors.Join(savedRetry, terminalResult)
+			return terminalResult
 		}
 	}
 	if err == nil {

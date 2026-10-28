@@ -126,7 +126,7 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 		t.Fatalf("exact combined transfer lost merge-base bytes: bytes=%d", len(snapshot.BaseFiles[0].Data))
 	}
 	if err := workspace.ValidateSnapshot(snapshot); err != nil {
-		t.Fatalf("snapshot violates production protocol boundary: %v", err)
+		t.Fatalf("snapshot fails workspace validation: %v", err)
 	}
 	if _, err := checkout.snapshotWithSourceLimit(t.Context(), sourceLimit-1); !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined source exceeds byte limit") {
 		t.Fatalf("combined source limit +1 was accepted: %v", err)

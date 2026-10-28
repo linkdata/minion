@@ -73,7 +73,7 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	}
 }
 
-func TestRecoveredUsageSaveFailureOnlyLogs(t *testing.T) {
+func TestRecoveredUsageValidationFailureOnlyLogs(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	job := usageJob()
 	job.AttemptID = strings.Repeat("b", 32)
@@ -87,6 +87,7 @@ func TestRecoveredUsageSaveFailureOnlyLogs(t *testing.T) {
 	}
 	var journal bytes.Buffer
 	e := &Orchestrator{Usage: store, Logger: log.New(&journal, "", 0)}
+	// A running record without attributed usage fails validation before Save.
 	e.completeRecoveredUsage(job)
 	got, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || !reflect.DeepEqual(got, prior) || !strings.Contains(journal.String(), "final recovered action usage checkpoint failed:") {

@@ -179,6 +179,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	request := usageJob()
 	request.Source.UpdatedAt = time.Now()
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	request.AcceptedAt = time.Now().UTC()
 	job := testJob(command.Fix)
 	job.Identity.JobID = request.ID
 	job.Identity.Repository = request.Repository.Name

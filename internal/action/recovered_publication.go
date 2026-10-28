@@ -35,7 +35,7 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		return err
 	}
 	if e.GitHub == nil {
-		return errors.New("GitHub client is missing")
+		return fmt.Errorf("%w: GitHub client is missing", monitor.ErrAcceptanceState)
 	}
 	var accepted state.AcceptedAction
 	var data []byte
@@ -106,12 +106,10 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return err
 	}
 	var expected state.PendingFix
-	if err := e.Store.WithLock(func() error {
+	_ = e.Store.WithLock(func() error {
 		expected = e.Store.Data.PendingFixes[request.ID]
 		return nil
-	}); err != nil {
-		return err
-	}
+	})
 	remote, err := e.GitHub.Branch(ctx, p.fork.FullName, p.branch)
 	if err == nil {
 		if remote.Name != p.branch || expected.SHA == "" || remote.Commit.SHA != expected.SHA {
@@ -133,7 +131,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
 	if expected.SHA != "" {
-		return fmt.Errorf("branch %s is unavailable with recorded bot commit %s; refusing to replace the checkpoint", p.branch, expected.SHA)
+		p.recoverFix = expected
 	}
 	if err := gitwork.Check(ctx, e.WorkRoot); err != nil {
 		return fmt.Errorf("Git readiness before recovered fix: %w", err)

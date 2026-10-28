@@ -52,7 +52,7 @@ func httpDecode(reader io.Reader, limit int, value any) error {
 }
 
 func httpDecodeBytes(data []byte, limit int, value any) error {
-	if limit < 0 || int64(limit) == math.MaxInt64 || len(data) > limit {
+	if limit < 0 || len(data) > limit {
 		return errHTTPBodyLimit
 	}
 	if !utf8.Valid(data) {

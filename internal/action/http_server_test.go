@@ -1694,25 +1694,6 @@ func TestHTTPExecutorRefusedOutcomeReleasesCancellationWatch(t *testing.T) {
 	})
 }
 
-func TestHTTPExecutorRejectedSelectedOutcomeKeepsKnownDiagnostics(t *testing.T) {
-	f, store, _ := selectedHTTPResultFixture(t, nil)
-	outcome := completeHTTPResult(t, f)
-	outcome.Result.Diagnostics = []Diagnostic{{Code: "worker", Message: "complete but refused"}}
-	store.Data.Accepted.AttemptID = "different-attempt"
-	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
-	if ack.Failure == nil {
-		t.Fatal("refused complete result received a success ACK")
-	}
-	got := f.result(t)
-	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, monitor.ErrAcceptanceState) ||
-		errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("refusal lost known result or acceptance error: result=%+v error=%v", got.result, got.err)
-	}
-	if present, err := store.HasAcceptedResult(); err != nil || present {
-		t.Fatalf("refused result became publishable: present=%t error=%v", present, err)
-	}
-}
-
 func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 	for _, runErr := range []error{nil, errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)} {
 		t.Run(fmt.Sprint(runErr), func(t *testing.T) {

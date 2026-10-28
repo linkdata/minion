@@ -25,7 +25,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// The copied test binary redirects production Git URLs to local bare fixtures.
+// The linked or copied test binary redirects production Git URLs to local bare fixtures.
 func TestMain(m *testing.M) {
 	if realGit := os.Getenv("MINION_WINDOWS_GIT_PROXY"); realGit != "" {
 		args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "include.path=" + filepath.ToSlash(os.Getenv("MINION_WINDOWS_GIT_CONFIG"))}, os.Args[1:]...)

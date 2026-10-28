@@ -200,6 +200,27 @@ func TestSelectedTerminalCheckpointRefusalDoesNotBecomeAcceptanceFailure(t *test
 	}
 }
 
+func TestSelectedCheckpointRefusalWithoutMarkerRemainsJobFailure(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	outcome := completeHTTPResult(t, f)
+	checkpointErr := errors.New("checkpoint save failed")
+	f.tx.mu.Lock()
+	f.tx.checkpointErr = checkpointErr // Model claims success after a parent-owned checkpoint refusal.
+	f.tx.mu.Unlock()
+	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+	if ack.Failure == nil || !ack.Failure.Terminal {
+		t.Fatalf("checkpoint refusal was not terminal for this job: %+v", ack)
+	}
+	got := f.result(t)
+	if !errors.Is(got.err, checkpointErr) || !errors.Is(got.err, monitor.ErrTerminalJob) ||
+		errors.Is(got.err, monitor.ErrAcceptanceState) || !reflect.DeepEqual(got.result, outcome.Result) {
+		t.Fatalf("checkpoint refusal became service failure or lost result: result=%+v error=%v", got.result, got.err)
+	}
+	if saved, err := store.HasAcceptedResult(); err != nil || saved {
+		t.Fatalf("refused checkpoint saved a result: saved=%t error=%v", saved, err)
+	}
+}
+
 func TestSelectedLateOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T) {
 	f, store, _ := selectedHTTPResultFixture(t, nil)
 	outcome := completeHTTPResult(t, f)
@@ -249,7 +270,7 @@ func TestSelectedHTTPOutcomePersistsCompleteRecordBeforeACK(t *testing.T) {
 	}
 }
 
-func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutSuccessACK(t *testing.T) {
+func TestSelectedAuditUnavailableSavesResultForRecoveryWithSuccessACK(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	nodePath := os.Getenv("PATH")
@@ -264,8 +285,8 @@ func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutSuccessACK(t *test
 	}
 	t.Setenv("PATH", t.TempDir()) // The publishing validator disappears after model work.
 	ack := f.request("/outcome", outcome)
-	if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || ack.ack.Failure.Terminal {
-		t.Fatalf("unavailable validator received a successful or terminal ACK: %+v", ack)
+	if ack.err != nil || ack.status != http.StatusOK || ack.ack.Failure != nil {
+		t.Fatalf("saved result did not receive success ACK: %+v", ack)
 	}
 	record, err := readSavedResult(store)
 	if err != nil || !reflect.DeepEqual(record.Result, outcome.Result) {
@@ -279,8 +300,8 @@ func TestSelectedAuditUnavailableSavesResultForRecoveryWithoutSuccessACK(t *test
 	f.executor.mu.Lock()
 	unavailable := f.executor.unavailable
 	f.executor.mu.Unlock()
-	if !unavailable {
-		t.Fatal("failed audit ACK left worker capacity reusable")
+	if unavailable {
+		t.Fatal("parent-side audit outage retired healthy worker capacity")
 	}
 	if err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
@@ -366,6 +387,7 @@ func TestSelectedHTTPOutcomeRejectsChangedAttemptAndSaveFailure(t *testing.T) {
 			outcome := completeHTTPResult(t, f)
 			switch change {
 			case "foreign attempt":
+				outcome.Result.Diagnostics = []Diagnostic{{Code: "worker", Message: "complete but refused"}}
 				store.Data.Accepted.AttemptID = "other-attempt"
 			case "changed deadline":
 				store.Data.Accepted.Deadline = store.Data.Accepted.Deadline.Add(time.Minute)

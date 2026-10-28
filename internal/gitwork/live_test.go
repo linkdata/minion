@@ -218,14 +218,14 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if err := checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: unchanged branch", testCommitDate, func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("unchanged branch=%v", err)
 	}
 	name := "minion-live-gitwork-" + id + ".txt"
 	if err := checkout.Import(ctx, base, []workspace.Change{{Path: name, Mode: workspace.Regular, Data: []byte("Minion live Gitwork test.\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: Gitwork live publish "+id, func(sha string) error {
+	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: Gitwork live publish "+id, testCommitDate, func(sha string) error {
 		recordedHead = sha
 		return nil
 	}); err != nil {
@@ -234,7 +234,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 	if head, err := checkout.verifiedHead(ctx); err != nil || head != recordedHead || head == base {
 		t.Fatalf("committed HEAD = %q, recorded = %q, base = %q: %v", head, recordedHead, base, err)
 	}
-	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: unchanged branch", func(string) error { t.Fatal("unchanged committed tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+	if err := checkout.CommitAndPush(ctx, forkName, branch, cfg.BotLogin, "test: unchanged branch", testCommitDate, func(string) error { t.Fatal("unchanged committed tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("committed branch=%v", err)
 	}
 	remote, err := bot.Branch(ctx, forkName, branch)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -34,6 +35,7 @@ type preparedAction struct {
 	branch      string
 	existing    *github.PullRequest
 	reply       string
+	recoverFix  state.PendingFix
 }
 
 // needsExecution distinguishes supplied work from fixed replies and publication recovery.
@@ -568,8 +570,11 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		return err
 	}
 	repo, fork := p.repository, p.fork
-	if currentRepo.ID != repo.ID || currentRepo.DefaultBranch != repo.DefaultBranch || currentRepo.Private != repo.Private || currentRepo.Visibility != repo.Visibility || currentFork.ID != fork.ID || !strings.EqualFold(currentFork.FullName, fork.FullName) {
+	if !originalFixDestination(repo, fork).matches(currentRepo, currentFork) {
 		return fmt.Errorf("%w: repository or fork changed during fix; refusing to push", monitor.ErrTerminalJob)
+	}
+	if p.recoverFix.SHA != "" && !reflect.DeepEqual(p.recoverFix.Cap, published.cap) {
+		return fmt.Errorf("%w: saved fix review decision differs from completed result", monitor.ErrAcceptanceState)
 	}
 	if err := p.checkout.Import(ctx, p.job.Source.Head, result.Changes); err != nil {
 		if ctx.Err() != nil {
@@ -580,13 +585,25 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		}
 		return fmt.Errorf("%w: import action result: %w", monitor.ErrTerminalJob, err)
 	}
-	if err := p.checkout.CommitAndPush(ctx, fork.FullName, p.branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", request.Number, e.BotLogin), func(sha string) error {
+	if err := p.checkout.CommitAndPush(ctx, fork.FullName, p.branch, e.BotLogin, fmt.Sprintf("Fix #%d via %s", request.Number, e.BotLogin), request.AcceptedAt, func(sha string) error {
 		if _, err := e.currentFixIssue(ctx, p); err != nil {
 			return err
 		}
+		if p.recoverFix.SHA != "" && sha != p.recoverFix.SHA {
+			return fmt.Errorf("%w: rebuilt fix commit %s differs from recorded %s", monitor.ErrAcceptanceState, sha, p.recoverFix.SHA)
+		}
 		return e.Store.WithLock(func() error {
+			prior, hadPrior := e.Store.Data.PendingFixes[request.ID]
 			e.Store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: sha, Cap: published.cap}
-			return e.Store.Save()
+			if err := e.Store.Save(); err != nil {
+				if hadPrior {
+					e.Store.Data.PendingFixes[request.ID] = prior
+				} else {
+					delete(e.Store.Data.PendingFixes, request.ID)
+				}
+				return err
+			}
+			return nil
 		})
 	}); err != nil {
 		if errors.Is(err, errFixIssueChanged) {
@@ -609,7 +626,7 @@ func retryableImportIO(err error) bool {
 	var exit *exec.ExitError
 	return errors.As(err, &exit) &&
 		(errors.Is(err, syscall.ENOSPC) || errors.Is(err, syscall.EDQUOT)) &&
-		!errors.Is(err, gitwork.ErrUnsupportedSource)
+		!terminalGitworkFailure(err)
 }
 
 func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) error {

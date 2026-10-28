@@ -1082,12 +1082,9 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 			}
 			var workerErr error
-			if test.early || test.duringOutcome {
-				// Keep fixture startup outside the watch-drain deadline.
-				gate := started
-				if test.duringOutcome {
-					gate = outcomeEntered
-				}
+			// Keep fixture startup outside the watch-drain deadline.
+			waitForGate := func(gate <-chan struct{}, phase string) {
+				t.Helper()
 				select {
 				case <-gate:
 				case workerErr = <-done:
@@ -1095,25 +1092,21 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					select {
 					case <-gate:
 					default:
-						t.Fatalf("worker returned before gated watch phase: %v", workerErr)
+						t.Fatalf("worker returned before %s: %v", phase, workerErr)
 					}
 				case <-time.After(30 * time.Second):
-					t.Fatal("worker did not reach gated watch phase")
+					t.Fatalf("worker did not reach %s", phase)
 				}
 			}
-			if test.externalCause && !finished {
-				select {
-				case <-outcomeACKClosed:
-				case workerErr = <-done:
-					finished = true
-					select {
-					case <-outcomeACKClosed:
-					default:
-						t.Fatalf("worker returned before closing outcome ACK: %v", workerErr)
-					}
-				case <-time.After(30 * time.Second):
-					t.Fatal("worker did not close outcome ACK")
+			if test.early || test.duringOutcome {
+				gate := started
+				if test.duringOutcome {
+					gate = outcomeEntered
 				}
+				waitForGate(gate, "gated watch phase")
+			}
+			if test.externalCause && !finished {
+				waitForGate(outcomeACKClosed, "closing outcome ACK")
 			}
 			wait := 5 * time.Second
 			if test.expiredAfterWatch {

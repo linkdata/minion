@@ -122,7 +122,7 @@ func TestChangedFilesPreservesSeparateTransferLimits(t *testing.T) {
 		t.Fatalf("public candidate check rejected the separate limits: %v", err)
 	}
 	byteOverflow := append(slices.Clone(base[:MaxBytes/len(data)]), File{Path: changes[0].Path, Mode: Regular, Data: data})
-	if err := validateFiles(byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
+	if err := CheckUnchanged(t.Context(), root, byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
 		t.Fatalf("candidate canary widened source byte limit: %v", err)
 	}
 }
