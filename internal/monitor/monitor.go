@@ -1583,6 +1583,62 @@ func (m *Monitor) RevalidateInProcessPublication(ctx context.Context, job Job) e
 	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
 		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
 	}
+	if err := m.revalidateJobSource(ctx, job); err != nil {
+		return err
+	}
+	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
+		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
+	}
+	return nil
+}
+
+// RevalidateFixedRefusal checks live authority for the bounded fixed reply.
+// This reply has its own budget, so the original action deadline is not checked.
+func (m *Monitor) RevalidateFixedRefusal(ctx context.Context, store *state.Store, job Job) error {
+	if m == nil || m.GitHub == nil {
+		return fmt.Errorf("%w: fixed refusal validator is unavailable", ErrAcceptanceState)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if job.AttemptID != "" {
+		if store == nil {
+			return fmt.Errorf("%w: selected action state is missing before fixed refusal", ErrAcceptanceState)
+		}
+		if err := store.WithLock(func() error { return validateFixedRefusalReservation(store, job) }); err != nil {
+			return err
+		}
+	}
+	if err := m.revalidateJobSource(ctx, job); err != nil {
+		return err
+	}
+	if job.AttemptID != "" {
+		return store.WithLock(func() error {
+			if err := validateFixedRefusalReservation(store, job); err != nil {
+				return err
+			}
+			return ctx.Err()
+		})
+	}
+	return ctx.Err()
+}
+
+func validateFixedRefusalReservation(store *state.Store, job Job) error {
+	if accepted := store.Data.Accepted; accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
+		return fmt.Errorf("%w: selected action changed before fixed refusal", ErrAcceptanceState)
+	}
+	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
+		if decision.AttemptID != job.AttemptID {
+			return fmt.Errorf("%w: fixed refusal decision belongs to another attempt", ErrAcceptanceState)
+		}
+		if decision.Outcome == "succeeded" {
+			return fmt.Errorf("%w: selected action already published", ErrTerminalJob)
+		}
+	}
+	return nil
+}
+
+func (m *Monitor) revalidateJobSource(ctx context.Context, job Job) error {
 	accepted := state.AcceptedAction{
 		Repository: job.Repository.Name, RepositoryID: job.Repository.ID, OwnerID: job.Repository.OwnerID,
 		SubjectType: job.SubjectType, SubjectNumber: job.Number,
@@ -1593,9 +1649,6 @@ func (m *Monitor) RevalidateInProcessPublication(ctx context.Context, job Job) e
 	_, _, valid, err := m.validateAcceptedSource(ctx, accepted, false)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return ctxErr
-	}
-	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
-		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
 	}
 	if err != nil {
 		return fmt.Errorf("revalidate publication source: %w", err)

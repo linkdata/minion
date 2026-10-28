@@ -62,6 +62,8 @@ type Orchestrator struct {
 	ValidateAssignment func(context.Context, monitor.Job) error
 	// ValidatePublication rechecks an accepted action before a new external write.
 	ValidatePublication func(context.Context, monitor.Job, bool) error
+	// ValidateFixedRefusal checks live authority without the action runtime deadline.
+	ValidateFixedRefusal func(context.Context, monitor.Job) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.
@@ -169,7 +171,15 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 			limits += fmt.Sprintf(" and %d bytes per title", maxActionTitleBytes)
 			shorten = "the title, thread text or requester notes"
 		}
-		resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
+		if e.assignmentRequired && job.AttemptID == "" {
+			resultErr = fmt.Errorf("%w: selected action attempt is missing before fixed refusal", monitor.ErrAcceptanceState)
+		} else if e.ValidateFixedRefusal == nil {
+			resultErr = fmt.Errorf("%w: fixed refusal validator is unavailable", monitor.ErrAcceptanceState)
+		} else if err := e.ValidateFixedRefusal(replyCtx, job); err != nil {
+			resultErr = err
+		} else {
+			resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
+		}
 		replyCancel()
 		if resultErr == nil {
 			resultErr = e.recordPublishedOutcome(job)

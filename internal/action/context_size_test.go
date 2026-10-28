@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -75,8 +76,8 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 		{name: "security audit pull request", commandName: "security-audit", subject: "PullRequest", skill: testAuditSkillURL, action: command.SecurityAudit},
 		{name: "fix", commandName: "fix", subject: "Issue", skill: testFixSkillURL, action: command.Fix},
 	} {
-		for _, mode := range []string{"exact", "combined over", "description over", "notes over", "reply retry"} {
-			if mode == "reply retry" && tt.name != "comment issue" {
+		for _, mode := range []string{"exact", "combined over", "description over", "notes over", "reply retry", "refusal authority lost"} {
+			if (mode == "reply retry" || mode == "refusal authority lost") && tt.name != "comment issue" {
 				continue
 			}
 			t.Run(tt.name+"/"+mode, func(t *testing.T) {
@@ -90,7 +91,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				}
 				description, requestNotes := exactDescription, notes
 				switch mode {
-				case "combined over", "reply retry":
+				case "combined over", "reply retry", "refusal authority lost":
 					description += "x"
 				case "description over":
 					description = strings.Repeat("x", limit+1)
@@ -215,7 +216,13 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					BotLogin:              "linkdataminion",
 					Store:                 store,
 					MaxGitHubContextBytes: limit,
-					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
+					ValidateFixedRefusal: func(context.Context, monitor.Job) error {
+						if mode == "refusal authority lost" {
+							return fmt.Errorf("%w: requester permission changed", monitor.ErrTerminalJob)
+						}
+						return nil
+					},
+					Commands: map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
 					Runner: Runner{
 						runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 							prompt := modelRequest.prompt
@@ -229,6 +236,15 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					},
 				}
 				err := orchestrator.Execute(t.Context(), job)
+				if mode == "refusal authority lost" {
+					mu.Lock()
+					replyCount := len(replies)
+					mu.Unlock()
+					if !errors.Is(err, monitor.ErrTerminalJob) || modelCalls != 0 || replyCount != 0 {
+						t.Fatalf("refusal wrote after authority loss: err=%v model_calls=%d replies=%d", err, modelCalls, replyCount)
+					}
+					return
+				}
 				if mode == "exact" {
 					if !errors.Is(err, modelErr) || modelCalls != 1 {
 						t.Fatalf("exact-limit execution = %v, model calls = %d; want model error and one call", err, modelCalls)

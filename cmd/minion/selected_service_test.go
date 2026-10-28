@@ -112,6 +112,9 @@ func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	if err := owner.ValidatePublication(t.Context(), job, true); err != nil {
 		t.Fatalf("publication lost the repository from its bound snapshot: %v", err)
 	}
+	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
+		t.Fatalf("fixed refusal lost the repository from its bound snapshot: %v", err)
+	}
 }
 
 func TestPublicationValidationUsesCurrentInProcessRepository(t *testing.T) {
@@ -133,9 +136,15 @@ func TestPublicationValidationUsesCurrentInProcessRepository(t *testing.T) {
 	if err := owner.ValidatePublication(t.Context(), job, false); err != nil {
 		t.Fatalf("newly registered repository could not publish: %v", err)
 	}
+	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
+		t.Fatalf("newly registered repository could not receive a fixed refusal: %v", err)
+	}
 	client.permission = "read"
 	if err := owner.ValidatePublication(t.Context(), job, false); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("revoked requester permission still published: %v", err)
+	}
+	if err := owner.ValidateFixedRefusal(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("revoked requester permission still received a fixed refusal: %v", err)
 	}
 }
 
