@@ -29,7 +29,7 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	job := usageJob()
 	job.AttemptID = strings.Repeat("b", 32)
 	started := time.Now().UTC().Add(-time.Hour)
-	failedAt := started.Add(5 * time.Minute)
+	failedAt := time.Now().UTC().Add(time.Hour) // Simulate a clock rollback before replay.
 	prior := usage.Record{
 		ID: job.AttemptID, JobID: job.ID, Repo: job.Repository.Name, User: job.Source.Author.Login,
 		Action: string(job.Command.Action), Provider: "codex", Model: "default", StartedAt: started,

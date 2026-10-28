@@ -128,6 +128,9 @@ func (e *Orchestrator) completeRecoveredUsage(job monitor.Job) {
 	if finished.Before(record.StartedAt) {
 		finished = record.StartedAt
 	}
+	if record.FinishedAt != nil && finished.Before(*record.FinishedAt) {
+		finished = *record.FinishedAt
+	}
 	record.FinishedAt, record.Status = &finished, "succeeded"
 	if err := e.Usage.Save(record); err != nil {
 		e.logf("final recovered action usage checkpoint failed: %q", err)
