@@ -20,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workroot"
@@ -187,6 +188,59 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || !present {
 		t.Fatalf("reconciliation removed result before monitor state save: present=%t error=%v", present, err)
+	}
+}
+
+func TestSelectedExecuteAlreadyAcknowledgedPersistsSuccessWithoutWorker(t *testing.T) {
+	job := testJob(command.Comment)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	request.Repository.Actions = []string{"comment"}
+	markerBody := "Completed before restart\n\n" + request.Marker()
+	var reads, writes, executions atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && !(r.Method == http.MethodPost && r.URL.Path == "/graphql") {
+			writes.Add(1)
+			t.Errorf("already acknowledged action wrote again: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		reads.Add(1)
+		switch r.URL.Path {
+		case "/repos/owner/repo/issues/7/comments":
+			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
+		case "/graphql":
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, markerBody)
+		default:
+			t.Errorf("unexpected read: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion",
+		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Executor: executorFunc(func(context.Context, Job, Checkpoints) (Result, error) {
+			executions.Add(1)
+			return Result{}, errors.New("already acknowledged action ran worker")
+		}),
+	}
+	if err := e.Execute(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if reads.Load() != 2 || writes.Load() != 0 || executions.Load() != 0 ||
+		store.Data.TerminalDecisions[request.ID].Outcome != "succeeded" {
+		t.Fatalf("reconciled action ran again or lacked success: reads=%d writes=%d executions=%d state=%+v",
+			reads.Load(), writes.Load(), executions.Load(), store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if reopened.Data.TerminalDecisions[request.ID].Outcome != "succeeded" {
+		t.Fatalf("reconciled success was not durable: %+v", reopened.Data.TerminalDecisions)
 	}
 }
 

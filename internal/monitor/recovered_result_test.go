@@ -21,6 +21,15 @@ type recoveredResultHandler struct {
 	publish      func(Job) error
 }
 
+type terminalUsageRecoveryHandler struct {
+	recoveredResultHandler
+	onTerminal func(Job, string, time.Time)
+}
+
+func (h *terminalUsageRecoveryHandler) CompleteTerminalUsage(job Job, outcome string, at time.Time) {
+	h.onTerminal(job, outcome, at)
+}
+
 // fakeGitHub counts these reads without locking; recovery and terminal controls run concurrently.
 type synchronizedRecoveryGitHub struct {
 	*fakeGitHub
@@ -72,6 +81,37 @@ func (*recoveredResultHandler) WaitCapacity(context.Context) error { return nil 
 func storedRecoveryFixture(t *testing.T) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
 	t.Helper()
 	return storedRecoveryFixtureAt(t, time.Now().UTC())
+}
+
+func TestRecoveredTerminalDecisionReconcilesUsageBeforeCleanup(t *testing.T) {
+	for _, outcome := range []string{"succeeded", "canceled"} {
+		t.Run(outcome, func(t *testing.T) {
+			store, path, accepted, _, monitor := storedRecoveryFixture(t)
+			if err := store.WithLock(func() error {
+				_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, outcome, time.Now().UTC())
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+			calls := 0
+			monitor.Handler = &terminalUsageRecoveryHandler{onTerminal: func(job Job, got string, at time.Time) {
+				calls++
+				if got != outcome || job.ID != accepted.JobID || at.IsZero() || reopened.Data.Accepted == nil {
+					t.Errorf("terminal usage ran after cleanup or with wrong decision: job=%+v outcome=%q state=%+v", job, got, reopened.Data)
+				}
+			}}
+			if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || reopened.Data.Accepted != nil {
+				t.Fatalf("terminal usage was not reconciled once before cleanup: calls=%d state=%+v", calls, reopened.Data)
+			}
+		})
+	}
 }
 
 func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
@@ -663,15 +703,21 @@ func TestStoredResultRecoveryDiscardsInvalidSourceOrRequester(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			store, path, accepted, gh, monitor := storedRecoveryFixture(t)
 			test.change(gh, accepted.AcceptedAt)
-			handler := &recoveredResultHandler{}
+			usageCalls := 0
+			handler := &terminalUsageRecoveryHandler{onTerminal: func(job Job, outcome string, at time.Time) {
+				usageCalls++
+				if job.ID != accepted.JobID || outcome != "lost" || at.IsZero() || store.Data.Accepted == nil {
+					t.Errorf("discard skipped terminal usage before cleanup: job=%+v outcome=%q state=%+v", job, outcome, store.Data)
+				}
+			}}
 			monitor.Handler = handler
 			if _, err := monitor.RunOnce(t.Context(), store); err != nil {
 				t.Fatal(err)
 			}
-			if handler.executions != 0 || handler.publications != 0 || gh.currentChecks == 0 ||
+			if handler.executions != 0 || handler.publications != 0 || usageCalls == 0 || gh.currentChecks == 0 ||
 				gh.checks < test.permissionChecks || len(gh.comments) != 0 ||
 				store.Data.TerminalDecisions[accepted.JobID].Outcome != "lost" {
-				t.Fatalf("invalid command reached publisher: handler=%+v github=%+v", handler, gh)
+				t.Fatalf("invalid command reached publisher: usage_calls=%d handler=%+v github=%+v", usageCalls, handler, gh)
 			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)

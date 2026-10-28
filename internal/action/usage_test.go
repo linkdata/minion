@@ -74,6 +74,50 @@ func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	}
 }
 
+func TestTerminalUsageRecoveryFinishesRunningAttempt(t *testing.T) {
+	for _, test := range []struct {
+		outcome string
+		status  string
+		source  string
+	}{
+		{outcome: "succeeded", status: "succeeded", source: "executor_reported"},
+		{outcome: "canceled", status: "failed"},
+	} {
+		t.Run(test.outcome, func(t *testing.T) {
+			store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+			job := usageJob()
+			job.AttemptID = strings.Repeat("b", 32)
+			started := time.Now().UTC().Add(-time.Hour)
+			prior := usage.Record{
+				ID: job.AttemptID, JobID: job.ID, Repo: job.Repository.Name, User: job.Source.Author.Login,
+				Action: string(job.Command.Action), Provider: "codex", Model: "default", StartedAt: started,
+				Status: "running", ExecutorID: "local", SourceRef: strings.Repeat("a", 40),
+				CodexCalls: 1, UsageSource: test.source, UsageComplete: false,
+			}
+			if err := store.Save(prior); err != nil {
+				t.Fatal(err)
+			}
+			e := &Orchestrator{Usage: store}
+			decidedAt := started.Add(30 * time.Minute)
+			e.CompleteTerminalUsage(job, test.outcome, decidedAt)
+			got, found, err := store.Load(job.AttemptID)
+			if err != nil || !found {
+				t.Fatalf("load reconciled usage: found=%t error=%v", found, err)
+			}
+			want := prior
+			want.Status, want.FinishedAt = test.status, &decidedAt
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("terminal recovery changed usage evidence: got=%+v want=%+v", got, want)
+			}
+			e.CompleteTerminalUsage(job, test.outcome, decidedAt.Add(time.Hour))
+			again, _, err := store.Load(job.AttemptID)
+			if err != nil || !reflect.DeepEqual(again, got) {
+				t.Fatalf("repeated terminal recovery changed usage: got=%+v again=%+v error=%v", got, again, err)
+			}
+		})
+	}
+}
+
 func TestRecoveredUsageValidationFailureOnlyLogs(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	job := usageJob()

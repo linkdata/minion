@@ -1270,6 +1270,7 @@ func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Stor
 	}); err != nil {
 		return fmt.Errorf("%w: confirm terminal decision: %w", ErrAcceptanceState, err)
 	}
+	m.completeTerminalUsage(job, decision)
 	switch decision.Outcome {
 	case "succeeded":
 		return m.finalizeSelectedSuccess(ctx, store, job, at, failure)
@@ -1285,14 +1286,22 @@ func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Stor
 	}
 }
 
-func discardAccepted(store *state.Store) error {
+func (m *Monitor) completeTerminalUsage(job Job, decision state.TerminalDecision) {
+	if usage, ok := m.Handler.(interface{ CompleteTerminalUsage(Job, string, time.Time) }); ok {
+		usage.CompleteTerminalUsage(job, decision.Outcome, decision.DecidedAt)
+	}
+}
+
+func (m *Monitor) discardAccepted(store *state.Store) error {
 	accepted := store.Data.Accepted
 	if accepted == nil {
 		return fmt.Errorf("%w: cannot discard a missing accepted action", ErrAcceptanceState)
 	}
-	if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", time.Now().UTC()); err != nil {
+	decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", time.Now().UTC())
+	if err != nil {
 		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 	}
+	m.completeTerminalUsage(jobFromAccepted(*accepted), decision)
 	processed, hadProcessed := store.Data.Processed[accepted.JobID]
 	failure, hadFailure := store.Data.JobFailures[accepted.JobID]
 	// Keep the fix checkpoint for operator inspection if a branch was already pushed.
@@ -1494,7 +1503,7 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 		}
 		if !valid {
 			m.logf("discard accepted %s: source or requester is no longer valid before assignment", itemLocation(job.Source))
-			if err := discardAccepted(store); err != nil {
+			if err := m.discardAccepted(store); err != nil {
 				return err
 			}
 			return ErrAcceptedDiscarded
@@ -1667,7 +1676,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if !valid {
 		m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
-		return store.WithLock(func() error { return discardAccepted(store) })
+		return store.WithLock(func() error { return m.discardAccepted(store) })
 	}
 	job.Repository, job.Source = repo, current
 	if err := m.GitHub.ReactEyes(resumeCtx, accepted.SourceNodeID); err != nil {
@@ -2390,7 +2399,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	if accepted != nil {
 		if _, ok := m.acceptedRepository(*accepted); !ok {
 			m.logf("discard accepted %s: repository, command, or requester is no longer eligible", itemLocation(job.Source))
-			return store.WithLock(func() error { return discardAccepted(store) })
+			return store.WithLock(func() error { return m.discardAccepted(store) })
 		}
 	}
 	marker := job.Marker()
@@ -2403,7 +2412,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		}
 		if !present {
 			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-			return store.WithLock(func() error { return discardAccepted(store) })
+			return store.WithLock(func() error { return m.discardAccepted(store) })
 		}
 	}
 	lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -2413,7 +2422,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	if err != nil {
 		if accepted != nil && githubResourceMovedOrGone(err) {
 			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-			return store.WithLock(func() error { return discardAccepted(store) })
+			return store.WithLock(func() error { return m.discardAccepted(store) })
 		}
 		return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
 	}
@@ -2431,7 +2440,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			}
 			if !valid {
 				m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
-				return store.WithLock(func() error { return discardAccepted(store) })
+				return store.WithLock(func() error { return m.discardAccepted(store) })
 			}
 			job.Repository, job.Source = configured, current
 		}
