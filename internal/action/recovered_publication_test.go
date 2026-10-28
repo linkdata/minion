@@ -576,8 +576,23 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *te
 		t.Fatal(err)
 	}
 	orchestrator.Store = store
+	wrong := store.Data.PendingFixes[request.ID]
+	wrong.Cap = &state.CriticCap{MaxRounds: 1, HasBlockers: true}
+	store.Data.PendingFixes[request.ID] = wrong
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) ||
+		replies.Load() != 0 || branchLookups.Load() != 2 || store.Data.PendingFixes[request.ID] != wrong {
+		t.Fatalf("matching branch reused with different review decision: lookups=%d replies=%d checkpoint=%+v error=%v", branchLookups.Load(), replies.Load(), store.Data.PendingFixes[request.ID], err)
+	}
+	wrong.Cap = nil
+	store.Data.PendingFixes[request.ID] = wrong
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies.Load() != 1 ||
-		branchLookups.Load() != 2 || !strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
+		branchLookups.Load() != 3 || !strings.Contains(comment, sha) || !strings.HasSuffix(comment, request.Marker()) || store.Data.PendingFixes[request.ID].SHA != sha {
 		t.Fatalf("matching checkpoint was not reused: branch_lookups=%d replies=%d comment=%q checkpoint=%+v error=%v", branchLookups.Load(), replies.Load(), comment, store.Data.PendingFixes[request.ID], err)
 	}
 }
@@ -716,7 +731,7 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 				t.Fatalf("changed destination was used: writes=%d error=%v", writes.Load(), err)
 			}
 			if present, err := store.HasAcceptedResult(); err != nil || !present {
-				t.Fatalf("destination drift lost accepted result: present=%t error=%v", present, err)
+				t.Fatalf("direct publisher cleared receipt before monitor handled terminal error: present=%t error=%v", present, err)
 			}
 		})
 	}

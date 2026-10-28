@@ -64,25 +64,25 @@ func TestRetentionFailureNeedsSavedResultForPublicationRetry(t *testing.T) {
 	job := testJob(command.Comment)
 	cause := retainedRecordFailure("save private record", syscall.EMFILE)
 	e := &Orchestrator{}
-	if err := e.retentionForSavedResult(job, cause); !errors.Is(err, monitor.ErrTerminalJob) ||
+	if err := e.requireSavedResultForRetry(job, cause); !errors.Is(err, monitor.ErrTerminalJob) ||
 		!errors.Is(err, monitor.ErrPostModelPublication) {
 		t.Fatalf("in-process retention failure was not terminal: %v", err)
 	}
 	store, _, _ := savedRecoveryFixture(t, job, completedRecoveryResult(job))
 	e.Store = store
-	if err := e.retentionForSavedResult(job, cause); errors.Is(err, monitor.ErrTerminalJob) ||
+	if err := e.requireSavedResultForRetry(job, cause); errors.Is(err, monitor.ErrTerminalJob) ||
 		!errors.Is(err, monitor.ErrPostModelPublication) {
 		t.Fatalf("saved-result retention failure was not retryable: %v", err)
 	}
 	other := job
 	other.Identity.AttemptID = "another-attempt"
-	if err := e.retentionForSavedResult(other, cause); !errors.Is(err, monitor.ErrTerminalJob) {
+	if err := e.requireSavedResultForRetry(other, cause); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("foreign saved result enabled retry: %v", err)
 	}
 	if err := store.ClearAcceptedResult(); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.retentionForSavedResult(job, cause); !errors.Is(err, monitor.ErrTerminalJob) {
+	if err := e.requireSavedResultForRetry(job, cause); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("missing saved result enabled retry: %v", err)
 	}
 }
@@ -183,6 +183,40 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 			}
 			if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
 				t.Fatalf("restored retention did not publish: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
+
+func TestSavedPrivateRetentionRetriesDirectoryLayoutFailure(t *testing.T) {
+	for _, name := range []string{"worker-diagnostics", "reviews"} {
+		t.Run(name, func(t *testing.T) {
+			job := withClaudeCritic(testJob(command.Comment))
+			job.Identity.Repository = "o/r"
+			result := privateReviewResult(job)
+			result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			root := t.TempDir()
+			blocked := filepath.Join(root, name)
+			if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+				Runner: Runner{runModel: forbidModel(t)}}
+			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
+				t.Fatalf("saved result did not survive private directory fault: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("saved result lost before retry: present=%t error=%v", present, err)
+			}
+			if err := os.Remove(blocked); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored directory did not publish: posts=%d error=%v", posts.Load(), err)
 			}
 		})
 	}

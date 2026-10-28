@@ -262,9 +262,13 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		}
 		return result, err
 	}
+	var stopDone <-chan struct{}
+	if stopContext != nil {
+		stopDone = stopContext.Done()
+	}
 	select {
 	case <-tx.done:
-	case <-stopContext.Done():
+	case <-stopDone:
 	}
 	return result, httpExecutionContextError(actionCtx)
 }

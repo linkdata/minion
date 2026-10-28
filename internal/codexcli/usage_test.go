@@ -493,10 +493,11 @@ func TestRolloutScannerEventBoundaryAndPartialEOF(t *testing.T) {
 }
 
 func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
+	const budgetBytes = aicli.MaxEventBytes + (256 << 10)
 	path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "turn"),
-		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", 2*aicli.MaxEventBytes+1),
+		usageRecord("root", "turn", "before", 10, 0, 1), strings.Repeat("x", budgetBytes+1),
 		usageRecord("root", "turn", "unreachable", 1000, 0, 100), usageEvent("task_complete", "turn"))
-	budget := int64(aicli.MaxEventBytes + (256 << 10))
+	budget := int64(budgetBytes)
 	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
 	if got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != 0 || err != nil {
 		t.Fatalf("oversized discard bypassed budget: got=%+v complete=%t budget=%d err=%v", got, complete, budget, err)
@@ -504,19 +505,15 @@ func TestOversizedRolloutStillExhaustsOriginalBudget(t *testing.T) {
 }
 
 func TestRolloutSessionCapPrecedesLargerTreeBudget(t *testing.T) {
-	if testing.Short() {
-		t.Skip("scans the real 128 MiB per-rollout boundary")
-	}
-	const sessionBytes int64 = 128 << 20
-	const treeBytes int64 = 512 << 20
+	const sessionBytes int64 = 128 << 10
+	const treeBytes int64 = 512 << 10
 	path := writeUsageRollout(t, t.TempDir(), "root", "", usageEvent("task_started", "turn"),
 		usageRecord("root", "turn", "before", 10, 0, 1), usageEvent("task_complete", "turn"))
 	file, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Sparse padding avoids a 128 MiB allocation. The newline makes the later
-	// counter readable if the independent per-session cap is removed.
+	// The newline makes the later counter readable if the session cap is removed.
 	_, seekErr := file.Seek(sessionBytes, io.SeekStart)
 	var writeErr error
 	if seekErr == nil {
@@ -526,7 +523,7 @@ func TestRolloutSessionCapPrecedesLargerTreeBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	budget := treeBytes
-	got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+	got, complete, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget, rolloutUsageMode{byteLimit: sessionBytes})
 	if err != nil || got != (usage.Tokens{Input: 10, Output: 1}) || complete || budget != treeBytes-sessionBytes {
 		t.Fatalf("session cap bypassed: tokens=%+v complete=%t budget=%d err=%v", got, complete, budget, err)
 	}

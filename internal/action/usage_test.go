@@ -88,7 +88,7 @@ func TestRecoveredUsageValidationFailureOnlyLogs(t *testing.T) {
 	}
 	var journal bytes.Buffer
 	e := &Orchestrator{Usage: store, Logger: log.New(&journal, "", 0)}
-	// A running record without attributed usage fails validation before Save.
+	// Completing a record with model calls but no usage source fails validation.
 	e.completeRecoveredUsage(job)
 	got, found, err := store.Load(job.AttemptID)
 	if err != nil || !found || !reflect.DeepEqual(got, prior) || !strings.Contains(journal.String(), "final recovered action usage checkpoint failed:") {

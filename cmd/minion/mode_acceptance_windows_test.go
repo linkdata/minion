@@ -208,7 +208,7 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 	owner := newOrchestrator(cfg, nil, nil, logger, nil)
 	watcher := &monitor.Monitor{Config: cfg}
 	now := time.Now().UTC()
-	store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 	if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, binary, 40*time.Second); code != 0 {
 		t.Fatalf("public orchestrate/execute mode returned %d: %s", code, logs.String())
 	}

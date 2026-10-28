@@ -152,7 +152,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 		}
 	}
 	if c.assignmentContext != nil {
-		if cause := c.assignmentContext.Err(); cause != nil {
+		if cause := httpExecutionContextError(c.assignmentContext); cause != nil {
 			return c.fail(cause)
 		}
 	}
@@ -191,7 +191,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	if err := c.owner.Store.WithLock(func() error {
 		a := c.owner.Store.Data.Accepted
 		if c.assignmentContext != nil {
-			if cause := c.assignmentContext.Err(); cause != nil {
+			if cause := httpExecutionContextError(c.assignmentContext); cause != nil {
 				return c.fail(cause)
 			}
 		}

@@ -196,6 +196,59 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	}
 }
 
+func TestSavedAuditRetriesCompletedRetentionDirectoryLayoutFailure(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	job.Identity.Repository = "o/r"
+	result := completeAuditResult(job)
+	store, _, request := savedRecoveryFixture(t, job, result)
+	var posts atomic.Int32
+	server := auditRecoveryServer(t, &posts)
+	root := t.TempDir()
+	blocked := filepath.Join(root, "audits")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+		Runner: Runner{runModel: forbidModel(t)}}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
+		t.Fatalf("saved audit did not survive retention directory fault: posts=%d error=%v", posts.Load(), err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("saved audit lost before retry: present=%t error=%v", present, err)
+	}
+	if err := os.Remove(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+		t.Fatalf("restored directory did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+	}
+}
+
+func TestUnsavedAuditRetainsIncompleteCopyWhenDiagnosticsDirectoryFails(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "worker-diagnostics"), []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := &Orchestrator{WorkRoot: root}
+	_, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result)
+	if !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("unsaved diagnostics failure was not terminal: %v", err)
+	}
+	dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*"))
+	if err != nil || len(dirs) != 1 {
+		t.Fatalf("audit artifacts were not retained as incomplete: dirs=%v error=%v", dirs, err)
+	}
+	if _, err := os.Stat(filepath.Join(dirs[0], "INCOMPLETE.txt")); err != nil {
+		t.Fatalf("incomplete audit marker missing: %v", err)
+	}
+}
+
 func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("script permission fixture requires a non-root Unix account")

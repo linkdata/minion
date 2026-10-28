@@ -160,6 +160,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
 	present, err := store.HasAcceptedResult()
 	if err != nil || present || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(store.Data.JobFailures) != 0 {
 		t.Fatalf("recovered result was not durably completed: present=%t err=%v state=%+v", present, err, store.Data)

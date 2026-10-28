@@ -39,7 +39,9 @@ func retryableHostIO(err error) bool {
 		return true
 	}
 	if runtime.GOOS == "windows" {
-		// Win32 resource, write-protect, device I/O, sharing and disk-capacity failures.
+		// Win32: 4 too many files; 8/14 memory; 19 write-protect; 21 not ready;
+		// 23 CRC; 29/30 write/read fault; 31 general failure; 32/33 sharing/lock;
+		// 39/112 disk full; 1117 device I/O; 1295 quota; 1450/1455 resources.
 		// Numeric values keep this common file buildable on non-Windows hosts.
 		for _, code := range []syscall.Errno{4, 8, 14, 19, 21, 23, 29, 30, 31, 32, 33, 39, 112, 1117, 1295, 1450, 1455} {
 			if errors.Is(err, code) {
@@ -52,7 +54,7 @@ func retryableHostIO(err error) bool {
 
 func retainedRecordFailure(stage string, err error) error {
 	marker := monitor.ErrTerminalJob
-	if retryableHostIO(err) {
+	if retryableHostIO(err) || errors.Is(err, errPrivateRecordsUnavailable) {
 		marker = monitor.ErrPostModelPublication
 	}
 	return fmt.Errorf("%w: %s: %w", marker, stage, err)

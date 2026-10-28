@@ -1238,6 +1238,7 @@ func discardAccepted(store *state.Store) error {
 	}
 	processed, hadProcessed := store.Data.Processed[accepted.JobID]
 	failure, hadFailure := store.Data.JobFailures[accepted.JobID]
+	// Keep the fix checkpoint for operator inspection if a branch was already pushed.
 	store.Data.Processed[accepted.JobID] = time.Now().UTC()
 	delete(store.Data.JobFailures, accepted.JobID)
 	store.Data.Accepted = nil
@@ -1526,6 +1527,7 @@ func (m *Monitor) recoverStoredResult(ctx context.Context, store *state.Store, j
 	if !ok {
 		return fmt.Errorf("%w: stored result publisher is unavailable", ErrAcceptanceState)
 	}
+	// Copy the repository slice header before invitation handling may append to it.
 	validator := *m
 	invalidSource := errors.New("saved result source is no longer valid")
 	m.logf("recover publication of %s from %s", job.Command.Action, itemLocation(job.Source))

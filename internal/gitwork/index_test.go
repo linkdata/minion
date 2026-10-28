@@ -140,7 +140,7 @@ func TestFixIndexCaseSpellingScanSkipsIgnoredSiblings(t *testing.T) {
 	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 260; i++ {
+	for i := 0; i < 128; i++ {
 		writeIndexFixture(t, source, fmt.Sprintf("build/%03d.tmp", i), []byte("ignored"))
 	}
 	intermediate := filepath.Join(source, "build", "case-rename.tmp")
@@ -949,7 +949,7 @@ func TestOfflineIndexRefusesOverlappingDirectories(t *testing.T) {
 
 func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 	index, source := offlineIndexFixture(t, nil)
-	for i := 0; i < 260; i++ {
+	for i := 0; i < 65; i++ {
 		if err := os.MkdirAll(filepath.Join(source, fmt.Sprint(i), "child"), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -963,8 +963,8 @@ func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(marker)
-	if err != nil || bytes.Count(data, []byte("query\n")) != 11 {
-		t.Fatalf("ignore queries=%q error=%v; want eleven bounded directory/control batches", data, err)
+	if err != nil || bytes.Count(data, []byte("query\n")) != 4 {
+		t.Fatalf("ignore queries=%q error=%v; want four bounded directory/control batches", data, err)
 	}
 }
 

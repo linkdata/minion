@@ -99,7 +99,7 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 	return store, path, accepted, gh, selectedMonitor(t, at, gh, nil)
 }
 
-func TestMonitorPreservesControlFailureJoinedWithStoredResultDiscard(t *testing.T) {
+func TestMonitorPreservesControlFailureFromStoredResultPublisher(t *testing.T) {
 	store, _, _, _, monitor := storedRecoveryFixture(t)
 	controlErr := errors.New("control state unavailable")
 	handler := &recoveredResultHandler{publish: func(Job) error {

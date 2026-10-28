@@ -3,6 +3,7 @@ package action
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -28,6 +29,10 @@ const executorClaimOrigin = "executor_reported"
 
 var syncPrivateRecordDirectories = workspace.SyncDirectories
 
+// A private record directory can become unavailable independently of its
+// contents. A saved action result can retry after the host layout is repaired.
+var errPrivateRecordsUnavailable = errors.New("private records directory unavailable")
+
 // retainReviewEvidence validates and saves private review history for an accepted Job.
 // A failed call may leave a valid prefix; answer/change validation must not erase it.
 func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
@@ -46,14 +51,14 @@ func privateRecordsDir(workRoot, name string) (string, error) {
 	}
 	workRoot, err := workspace.CanonicalPath(workRoot)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errPrivateRecordsUnavailable, err)
 	}
 	root := filepath.Join(workRoot, name)
 	if err := os.MkdirAll(root, 0700); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errPrivateRecordsUnavailable, err)
 	}
 	if err := workspace.CheckRoot(root); err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %w", errPrivateRecordsUnavailable, err)
 	}
 	return root, nil
 }
@@ -110,7 +115,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 			return errors.New("review evidence changed or discarded a saved prefix")
 		}
 		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {
-			return syncPrivateRecordDirectories(filepath.Dir(path), filepath.Dir(root))
+			return syncPrivateRecordDirectories(root, filepath.Dir(root))
 		}
 	}
 	data, err := json.Marshal(record)

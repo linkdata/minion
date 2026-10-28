@@ -632,11 +632,8 @@ func TestCatalogueEventAcceptsExactLimitAndRejectsNextByte(t *testing.T) {
 	for _, size := range []int{aicli.MaxEventBytes, aicli.MaxEventBytes + 1, aicli.MaxEventBytes + 10} {
 		for _, ending := range []string{"\n", "\r\n", ""} {
 			t.Run(fmt.Sprintf("bytes%d/ending%q", size, ending), func(t *testing.T) {
-				binary := installFakeCodex(t, "#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{\"id\":1,\"result\":{}}'\nIFS= read -r request\nIFS= read -r request\ncat \"$0.response\"\n")
-				response := prefix + strings.Repeat("x", size-len(prefix)-len(suffix)) + suffix + ending
-				if err := os.WriteFile(binary+".response", []byte(response), 0600); err != nil {
-					t.Fatal(err)
-				}
+				padding := size - len(prefix) - len(suffix)
+				installFakeCodex(t, "#!/bin/sh\nIFS= read -r request\nprintf '%s\\n' '{\"id\":1,\"result\":{}}'\nIFS= read -r request\nIFS= read -r request\nprintf '%s' '"+prefix+"'\nprintf '%*s' "+fmt.Sprint(padding)+" ''\nprintf '%s' '"+suffix+ending+"'\n")
 				models, err := listModels(t.Context(), config.CodexConfig{})
 				if size == aicli.MaxEventBytes {
 					if err != nil || len(models) != 1 || models[0].Model != "fixture" {

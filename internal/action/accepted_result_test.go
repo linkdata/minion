@@ -48,6 +48,38 @@ func TestChangedFixResultRequiresOriginalDestination(t *testing.T) {
 	}
 }
 
+func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
+	accepted := *acceptedForJob(testJob(command.Comment))
+	record := AcceptedResultRecord{Accepted: accepted}
+	if !record.MatchesAccepted(accepted) {
+		t.Fatal("identical selected action did not match")
+	}
+	for i := range reflect.TypeOf(accepted).NumField() {
+		field := reflect.TypeOf(accepted).Field(i)
+		changed := accepted
+		value := reflect.ValueOf(&changed).Elem().Field(i)
+		switch value.Kind() {
+		case reflect.String:
+			value.SetString(value.String() + "x")
+		case reflect.Int, reflect.Int64:
+			value.SetInt(value.Int() + 1)
+		case reflect.Bool:
+			value.SetBool(!value.Bool())
+		case reflect.Struct:
+			if value.Type() != reflect.TypeOf(time.Time{}) {
+				t.Fatalf("unhandled accepted-action field %s: %s", field.Name, value.Type())
+			}
+			value.Set(reflect.ValueOf(value.Interface().(time.Time).Add(time.Nanosecond)))
+		default:
+			t.Fatalf("unhandled accepted-action field %s", field.Name)
+		}
+		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "Terminal"
+		if got := record.MatchesAccepted(changed); got != want {
+			t.Errorf("changed %s matched=%t, want %t", field.Name, got, want)
+		}
+	}
+}
+
 func selectedHTTPResultFixture(t *testing.T, wrap func(http.Handler) http.Handler, server ...func(http.Handler) *httptest.Server) (*httpServerTest, *state.Store, string) {
 	return selectedHTTPResultFixtureForJob(t, testJob(command.Comment), wrap, server...)
 }

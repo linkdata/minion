@@ -125,9 +125,15 @@ func TestWorkerDiagnosticsRetrySyncsIdenticalRecord(t *testing.T) {
 		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, syscall.EIO) || calls != 1 {
 		t.Fatalf("identical record skipped failed sync: calls=%d error=%v", calls, err)
 	}
-	syncPrivateRecordDirectories = originalSync
+	syncPrivateRecordDirectories = func(dirs ...string) error {
+		calls++
+		return originalSync(dirs...)
+	}
 	if err := e.retainWorkerDiagnostics(job, result, nil); err != nil {
 		t.Fatalf("retry did not sync retained record: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("retry skipped directory sync: calls=%d", calls)
 	}
 }
 

@@ -72,9 +72,14 @@ func TestRepositoryCarriesCompleteHistoryOffline(t *testing.T) {
 	fixture.git(fixture.source, "rm", "deleted")
 	fixture.git(fixture.source, "commit", "-m", "delete old contents")
 	// Full history must extend beyond the removed 100-commit excerpt boundary.
-	for i := 0; i < 101; i++ {
-		fixture.git(fixture.source, "commit", "--allow-empty", "-m", "complete history")
+	var history strings.Builder
+	parent := fixture.git(fixture.source, "rev-parse", "HEAD")
+	for i := 1; i <= 101; i++ {
+		fmt.Fprintf(&history, "commit refs/heads/main\nmark :%d\ncommitter Test <test@example.invalid> %d +0000\ndata %d\ncomplete history\nfrom %s\n\n",
+			i, testCommitDate.Unix(), len("complete history"), parent)
+		parent = fmt.Sprintf(":%d", i)
 	}
+	fixture.gitInput(fixture.source, history.String(), "fast-import", "--quiet")
 	tagBlob := fixture.gitInput(fixture.source, "tag-only historical contents\n", "hash-object", "-w", "--stdin")
 	tagTree := fixture.gitInput(fixture.source, "100644 blob "+tagBlob+"\ttag-only\n", "mktree")
 	tagOnly := fixture.gitInput(fixture.source, "tag-only root\n", "commit-tree", tagTree)

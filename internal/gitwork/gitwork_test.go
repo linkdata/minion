@@ -351,11 +351,10 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	if err := restored.commitAndPush(ctx, fixture.remote, restoredBranch, "bot", "fix", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"sub", "omitted-link"} {
-		if original, recovered := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, path),
-			fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+restoredBranch, path); recovered != original {
-			t.Fatalf("restored push changed omitted %s: got=%q want=%q", path, recovered, original)
-		}
+	original := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+branch)
+	recovered := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+restoredBranch)
+	if recovered != original {
+		t.Fatalf("restored push changed recorded commit: got=%s want=%s", recovered, original)
 	}
 }
 
@@ -460,10 +459,12 @@ func TestCommitAndPushBoundsDirectlyStagedPathCount(t *testing.T) {
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
+	blob := fixture.gitInput(fixture.checkout.path, "x", "hash-object", "-w", "--stdin")
+	var staged strings.Builder
 	for i := 0; i <= workspace.MaxChanges; i++ {
-		writeFile(t, filepath.Join(fixture.checkout.path, fmt.Sprintf("f%d", i)), "x")
+		fmt.Fprintf(&staged, "100644 %s\tf%d\n", blob, i)
 	}
-	fixture.git(fixture.checkout.path, "add", ".")
+	fixture.gitInput(fixture.checkout.path, staged.String(), "update-index", "--index-info")
 	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "too many paths", testCommitDate, func(string) error {
 		t.Fatal("oversized stage reached before-push recorder")
 		return nil

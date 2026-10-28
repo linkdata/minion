@@ -47,8 +47,8 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if _, err := run("init", "--quiet", "--template=", "--object-format=sha1", "--ref-format=files"); err != nil {
 		return nil, err
 	}
-	// Keep Git's filesystem probes from this fresh init, not configuration from the source repository.
-	localConfig, err := index.run(ctx, workspace.MaxBytes, nil, "config", "--local", "--null", "--list")
+	// Keep only this fresh init's case and Unicode filesystem probes.
+	localConfig, err := run("config", "--local", "--null", "--list")
 	if err != nil {
 		return nil, err
 	}
@@ -59,12 +59,14 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if err := disableAttributes(dir); err != nil {
 		return nil, err
 	}
-	// Only fixed offline settings reach model commands; refs need neither reflogs nor a host identity.
+	// Fixed offline settings and two fresh filesystem probes reach model commands.
+	// Refs need neither reflogs nor a host identity.
 	config := strings.ReplaceAll(`[core]
 repositoryformatversion = 0
 bare = false
 filemode = %s
-%shooksPath = /dev/null
+%s
+hooksPath = /dev/null
 fsmonitor = false
 excludesFile = /dev/null
 attributesFile = /dev/null

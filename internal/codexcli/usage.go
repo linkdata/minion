@@ -406,7 +406,8 @@ type rolloutUsageMode struct {
 	allowUnchanged  bool
 	latest          *usage.Tokens
 	seenLatest      *bool
-	recordLimit     int // Test-only lower cap; zero keeps the production limit.
+	recordLimit     int   // Test-only lower cap; zero keeps the production limit.
+	byteLimit       int64 // Test-only lower cap; zero keeps the production limit.
 }
 
 // A boundary excludes previous turns even when their final records arrive late.
@@ -430,6 +431,9 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		return usage.Tokens{}, false, nil, childError
 	}
 	limit := min(int64(maxUsageRolloutBytes), *budget)
+	if mode.byteLimit > 0 {
+		limit = min(limit, mode.byteLimit)
+	}
 	reader := &io.LimitedReader{R: f, N: limit + 1}
 	hash := sha256.New()
 	if before != nil {

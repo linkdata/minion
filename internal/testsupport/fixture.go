@@ -19,21 +19,22 @@ func LinkTestExecutable(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Link(source, path); err == nil {
+	linkErr := os.Link(source, path)
+	if linkErr == nil {
 		return
 	}
 	from, err := os.Open(source)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(errors.Join(linkErr, err))
 	}
 	defer from.Close()
 	to, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0700)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal(errors.Join(linkErr, err))
 	}
 	_, copyErr := io.Copy(to, from)
 	if err := errors.Join(copyErr, to.Close()); err != nil {
-		t.Fatal(err)
+		t.Fatal(errors.Join(linkErr, err))
 	}
 }
 
