@@ -83,6 +83,9 @@ func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
+		if err := store.WriteAcceptedResult([]byte("accepted result after process exit")); err != nil {
+			t.Fatal(err)
+		}
 		return // Process exit releases the lock without Store.Close.
 	}
 	unrelated := filepath.Join(t.TempDir(), "unrelated-state.json")
@@ -111,6 +114,9 @@ func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 	want.SourceUpdatedAt = time.Time{}
 	if !store.Data.Cursor.Equal(initial) || !store.Data.Processed["job"].Equal(initial) || !reflect.DeepEqual(store.Data.Accepted, &want) {
 		t.Fatalf("state lost after process exit: %+v", store.Data)
+	}
+	if result, err := store.ReadAcceptedResult(1024); err != nil || string(result) != "accepted result after process exit" {
+		t.Fatalf("accepted result lost after process exit: %q, %v", result, err)
 	}
 }
 

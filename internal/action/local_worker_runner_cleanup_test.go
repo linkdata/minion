@@ -8,8 +8,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -246,12 +248,14 @@ func localWorkerReport(t *testing.T, ctx context.Context, report, suffix string)
 		if err == nil {
 			return string(data)
 		}
-		if !errors.Is(err, os.ErrNotExist) {
+		// Win32 32 and 33 are sharing and lock violations while the worker renames a marker into place.
+		if !errors.Is(err, os.ErrNotExist) &&
+			!(runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)))) {
 			t.Fatalf("read worker marker %s: %v", path, err)
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("wait worker marker %s: %v", path, ctx.Err())
+			t.Fatalf("wait worker marker %s: %v (last read: %v)", path, ctx.Err(), err)
 		case <-ticker.C:
 		}
 	}

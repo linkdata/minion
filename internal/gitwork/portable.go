@@ -187,6 +187,10 @@ func readBatchBlobs(data []byte, entries []sourceEntry) ([]workspace.File, error
 
 // Snapshot exports pinned source, comparison data and complete Git history without configuration.
 func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err error) {
+	return c.snapshotWithSourceLimit(ctx, workspace.MaxBytes)
+}
+
+func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int64) (s workspace.Snapshot, err error) {
 	if s.Head, err = c.verifiedHead(ctx); err != nil {
 		return s, err
 	}
@@ -246,7 +250,7 @@ func (c *Checkout) Snapshot(ctx context.Context) (s workspace.Snapshot, err erro
 	// Bound regular-file transfer before reading contents or rendering a diff. Omitted
 	// symlink blobs are bounded separately by each complete tree's metadata check.
 	// sourceFiles separately sizes its bounded batch response.
-	if total > workspace.MaxBytes {
+	if total > sourceLimit {
 		return s, fmt.Errorf("%w: combined source exceeds byte limit", ErrCheckoutTooLarge)
 	}
 	if s.Repository, _, err = c.boundedGit(ctx, nil, workspace.MaxBytes, false, "bundle", "create", "-", "--all"); err != nil {

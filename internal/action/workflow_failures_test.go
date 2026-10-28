@@ -439,7 +439,7 @@ func TestPublishFixRevalidatesForkAndImportBeforePush(t *testing.T) {
 			script := fmt.Sprintf(`#!/bin/sh
 case " $* " in
  *" add --all "*)
-  if test %s = 'canceled import'; then touch %s; sleep 30; exit 1; fi
+  if test %s = 'canceled import'; then touch %s; exec sleep 30; fi
   ;;
  *" diff --cached --raw "*)
   if test %s = import; then touch %s; exit 0; fi
@@ -491,7 +491,7 @@ exec %s "$@"
 			fakeOnPath(t, "git", script)
 			job := testJob(command.Fix)
 			job.Source.Head = base
-			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}}}
+			prepared := &preparedAction{job: job, checkout: checkout, repository: repo, fork: fork, branch: branch, request: monitor.Job{ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC()}}
 			orchestrator := Orchestrator{GitHub: client, BotLogin: "bot", WorkRoot: root}
 			result := Result{Changes: []workspace.Change{{Path: "reviewed.txt", Mode: workspace.Regular, Data: []byte("reviewed change")}}}
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -521,7 +521,7 @@ exec %s "$@"
 				return
 			}
 			if stage == "fork changed" {
-				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || writes != 0 {
+				if err == nil || !strings.Contains(err.Error(), "repository or fork changed") || !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 					t.Fatalf("changed fork reached publication: writes=%d err=%v", writes, err)
 				}
 				return

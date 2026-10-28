@@ -241,7 +241,7 @@ func TestImportRejectsIdentityAndMetadataAndPreservesBytes(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("returned control files executed during import: %v", err)
 	}
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed data", func(string) error { return nil }); err != nil {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed data", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -330,7 +330,7 @@ func TestPublishIgnoresDefaultGlobalExcludesAndAttributes(t *testing.T) {
 	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "notes.local", Mode: workspace.Regular, Data: data}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "include new source", func(string) error { return nil }); err != nil {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "include new source", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command("git", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":notes.local")

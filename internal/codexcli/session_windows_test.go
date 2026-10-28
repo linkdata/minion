@@ -8,22 +8,13 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 func TestWindowsSessionRunWithNativeFakeCodex(t *testing.T) {
-	// TestMain turns the copied Go test binary into an inert Codex JSONL stub.
-	testBinary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(testBinary)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// TestMain turns the linked Go test binary into an inert Codex JSONL stub.
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "codex.exe"), data, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "codex.exe"))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("CODEX_API_KEY", "")

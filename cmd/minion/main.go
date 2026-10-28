@@ -177,6 +177,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
 	if terminalRecovery {
+		watcher.Handler = newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 		code := recoverTerminalService(ctx, watcher, store, *loop && !failedPreflight, logger)
 		if failedPreflight {
 			return 1
@@ -184,6 +185,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if code != 0 || !*loop || ctx.Err() != nil {
 			return code
 		}
+		cfg = watcher.Config
 		if !preflight() {
 			return 1
 		}
@@ -259,6 +261,9 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 	if codexAuth.APIKey == "" {
 		codexAuth.NativeAPIKey = cfg.Codex.NativeAPIKey
 		codexAuth.NativeAccessToken = cfg.Codex.NativeAccessToken
+		if cfg.Main == "codex" || cfg.Adversarial == "codex" {
+			codexAuth = codexcli.CaptureAmbientNativeCredentials(codexAuth)
+		}
 	}
 	return &action.Orchestrator{
 		WorkRoot:              cfg.WorkRoot,

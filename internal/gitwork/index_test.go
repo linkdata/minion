@@ -140,7 +140,7 @@ func TestFixIndexCaseSpellingScanSkipsIgnoredSiblings(t *testing.T) {
 	if _, err := index.run(t.Context(), 128, nil, "config", "core.ignoreCase", "true"); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 260; i++ {
+	for i := 0; i < 128; i++ {
 		writeIndexFixture(t, source, fmt.Sprintf("build/%03d.tmp", i), []byte("ignored"))
 	}
 	intermediate := filepath.Join(source, "build", "case-rename.tmp")
@@ -344,7 +344,7 @@ func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 		{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("before")},
 	})
 	writeIndexFixture(t, source, "tracked.log", []byte("after"))
-	writeIndexFixture(t, source, "runtime.log", make([]byte, workspace.MaxChangeBytes+1))
+	writeSparse(t, filepath.Join(source, "runtime.log"), workspace.MaxChangeBytes+1)
 	writeIndexFixture(t, source, "target/cache/.git/config", []byte("untrusted nested metadata"))
 	for i := 0; i < workspace.MaxChanges+10; i++ {
 		writeIndexFixture(t, source, fmt.Sprintf("__pycache__/%d.pyc", i), []byte("cache"))
@@ -473,8 +473,8 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "aggregate oversized":
-				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
-				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
+				writeSparse(t, filepath.Join(source, "first"), workspace.MaxChangeBytes/2+1)
+				writeSparse(t, filepath.Join(source, "second"), workspace.MaxChangeBytes/2+1)
 			case "too many":
 				for i := 0; i <= workspace.MaxChanges; i++ {
 					writeIndexFixture(t, source, fmt.Sprintf("file-%d", i), nil)
@@ -558,18 +558,19 @@ func TestFixIndexRejectsSelfIgnoringToolCachesUntilRemoved(t *testing.T) {
 }
 
 func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
+	const scanLimit = 129 // Cross the 128-entry ReadDir batch boundary.
 	index, source := offlineIndexFixture(t, []workspace.File{{Path: ".gitignore", Mode: workspace.Regular, Data: []byte("*.cache\n")}})
 	marker := filepath.Join(t.TempDir(), "add-ran")
 	script := "#!/bin/sh\nfor argument in \"$@\"; do\n if [ \"$argument\" = add ]; then touch " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-	// The tracked ignore file and intended change bring this to exactly 100000.
-	for i := 0; i < workspace.MaxEntries-2; i++ {
+	// The tracked ignore file and intended change bring this to exactly scanLimit.
+	for i := 0; i < scanLimit-2; i++ {
 		if err := os.WriteFile(filepath.Join(source, fmt.Sprintf("entry-%06d.cache", i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	writeIndexFixture(t, source, "fix.txt", []byte("reviewed"))
-	changes, err := index.Changes(t.Context())
+	changes, err := index.changesWithControlLimit(t.Context(), scanLimit)
 	want := []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("reviewed")}}
 	if err != nil || !reflect.DeepEqual(changes, want) {
 		t.Fatalf("exact control-scan bound refused the intended fix: changes=%+v error=%v", changes, err)
@@ -581,7 +582,7 @@ func TestFixIndexBoundsActualControlScanBeforeStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeIndexFixture(t, source, "overflow.cache", nil)
-	if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
+	if changes, err := index.changesWithControlLimit(t.Context(), scanLimit); err == nil || !strings.Contains(err.Error(), "fix directory scan exceeds entry limit") {
 		t.Fatalf("oversized control scan was accepted: changes=%+v error=%v", changes, err)
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -615,7 +616,7 @@ func TestFixIndexBoundsBinaryAndDeletionDiffs(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			var files []workspace.File
 			if kind == "large deletion" {
-				files = []workspace.File{{Path: "deleted", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", 2<<20))}}
+				files = []workspace.File{{Path: "deleted", Mode: workspace.Regular, Data: []byte(strings.Repeat("x", MaxPatchBytes+1))}}
 			}
 			index, source := offlineIndexFixture(t, files)
 			switch kind {
@@ -700,11 +701,11 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 			var data []byte
 			if kind == "single file growth" {
 				data = make([]byte, workspace.MaxChangeBytes+1)
-				writeIndexFixture(t, source, "first", data)
+				writeSparse(t, filepath.Join(source, "first"), int64(len(data)))
 			} else {
 				data = make([]byte, workspace.MaxChangeBytes/2+1)
-				writeIndexFixture(t, source, "first", data)
-				writeIndexFixture(t, source, "second", data)
+				writeSparse(t, filepath.Join(source, "first"), int64(len(data)))
+				writeSparse(t, filepath.Join(source, "second"), int64(len(data)))
 			}
 			if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
 				t.Fatalf("tracked growth returned %+v, %v", changes, err)
@@ -948,7 +949,7 @@ func TestOfflineIndexRefusesOverlappingDirectories(t *testing.T) {
 
 func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 	index, source := offlineIndexFixture(t, nil)
-	for i := 0; i < 260; i++ {
+	for i := 0; i < 65; i++ {
 		if err := os.MkdirAll(filepath.Join(source, fmt.Sprint(i), "child"), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -958,12 +959,12 @@ func TestFixIndexBatchesIgnoreQueriesAcrossDirectories(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "queries")
 	script := "#!/bin/sh\nfor arg do\n if [ \"$arg\" = check-ignore ]; then printf 'query\\n' >> " + shellQuote(marker) + "; fi\ndone\nexec " + shellQuote(index.binary) + " \"$@\"\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
-	if err := index.checkControlFiles(t.Context()); err != nil {
+	if err := index.checkControlFilesWithLimit(t.Context(), workspace.MaxEntries); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(marker)
-	if err != nil || bytes.Count(data, []byte("query\n")) != 11 {
-		t.Fatalf("ignore queries=%q error=%v; want eleven bounded directory/control batches", data, err)
+	if err != nil || bytes.Count(data, []byte("query\n")) != 4 {
+		t.Fatalf("ignore queries=%q error=%v; want four bounded directory/control batches", data, err)
 	}
 }
 

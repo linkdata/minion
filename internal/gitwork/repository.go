@@ -47,14 +47,25 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if _, err := run("init", "--quiet", "--template=", "--object-format=sha1", "--ref-format=files"); err != nil {
 		return nil, err
 	}
+	// Keep only this fresh init's case and Unicode filesystem probes.
+	localConfig, err := run("config", "--local", "--null", "--list")
+	if err != nil {
+		return nil, err
+	}
+	filesystemConfig, err := initFilesystemConfig(localConfig)
+	if err != nil {
+		return nil, err
+	}
 	if err := disableAttributes(dir); err != nil {
 		return nil, err
 	}
-	// Only fixed offline settings reach model commands; refs need neither reflogs nor a host identity.
+	// Fixed offline settings and two fresh filesystem probes reach model commands.
+	// Refs need neither reflogs nor a host identity.
 	config := strings.ReplaceAll(`[core]
 repositoryformatversion = 0
 bare = false
 filemode = %s
+%s
 hooksPath = /dev/null
 fsmonitor = false
 excludesFile = /dev/null
@@ -72,7 +83,7 @@ auto = 0
 [maintenance]
 auto = false
 `, "/dev/null", os.DevNull)
-	config = fmt.Sprintf(config, gitFileMode())
+	config = fmt.Sprintf(config, gitFileMode(), filesystemConfig)
 	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(config), 0600); err != nil {
 		return nil, err
 	}
@@ -184,6 +195,31 @@ auto = false
 		return nil, err
 	}
 	return repo, nil
+}
+
+// initFilesystemConfig retains only bools Git detected for the new worktree.
+func initFilesystemConfig(data []byte) (string, error) {
+	var settings strings.Builder
+	for _, entry := range bytes.Split(data, []byte{0}) {
+		key, value, ok := bytes.Cut(entry, []byte{'\n'})
+		if !ok {
+			continue
+		}
+		var setting string
+		switch string(key) {
+		case "core.ignorecase":
+			setting = "ignoreCase"
+		case "core.precomposeunicode":
+			setting = "precomposeUnicode"
+		default:
+			continue
+		}
+		if !bytes.Equal(value, []byte("true")) && !bytes.Equal(value, []byte("false")) {
+			return "", fmt.Errorf("invalid fresh Git filesystem setting %s", setting)
+		}
+		fmt.Fprintf(&settings, "%s = %s\n", setting, value)
+	}
+	return settings.String(), nil
 }
 
 // Verify detects changes without executing model-visible Git configuration.

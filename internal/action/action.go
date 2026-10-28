@@ -69,6 +69,8 @@ type Orchestrator struct {
 	Commands              map[string]config.CommandMapping
 }
 
+var _ monitor.StoredResultPublisher = (*Orchestrator)(nil)
+
 // WaitCapacity gates discovery when the selected executor owns readiness.
 func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	ready, ok := e.Executor.(interface{ WaitCapacity(context.Context) error })
@@ -93,6 +95,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		}
 		deadline = job.Deadline
 	}
+	job.AcceptedAt = acceptedAt
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -169,13 +172,21 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 		returned = true
 		return resultErr
 	}
-	if resultErr != nil && (errors.Is(ctx.Err(), context.DeadlineExceeded) ||
-		errors.Is(resultErr, gitwork.ErrTooManyFiles) ||
-		errors.Is(resultErr, gitwork.ErrDiffTooLarge) || errors.Is(resultErr, gitwork.ErrCheckoutTooLarge) || errors.Is(resultErr, gitwork.ErrUnsupportedSource) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
+	deadlineErr := ctx.Err()
+	if resultErr != nil && (errors.Is(deadlineErr, context.DeadlineExceeded) ||
+		terminalGitworkFailure(resultErr) || errors.Is(resultErr, aicli.ErrOutputLimit)) {
+		if errors.Is(deadlineErr, context.DeadlineExceeded) && !errors.Is(resultErr, context.DeadlineExceeded) {
+			resultErr = errors.Join(resultErr, deadlineErr)
+		}
 		resultErr = fmt.Errorf("%w: %w", monitor.ErrTerminalJob, resultErr)
 	}
 	returned = true
 	return resultErr
+}
+
+func terminalGitworkFailure(err error) bool {
+	return errors.Is(err, gitwork.ErrTooManyFiles) || errors.Is(err, gitwork.ErrDiffTooLarge) ||
+		errors.Is(err, gitwork.ErrCheckoutTooLarge) || errors.Is(err, gitwork.ErrUnsupportedSource)
 }
 
 func runtimeDeadline(acceptedAt time.Time, maxRuntime time.Duration) time.Time {

@@ -573,6 +573,10 @@ func ReadChanges(ctx context.Context, root string, selected []Change) ([]Change,
 // walk visits bounded source entries without following directory symlinks.
 // Repository mode excludes only the separately verified top-level .git directory.
 func walk(ctx context.Context, root string, repository bool, visit func(string, fs.DirEntry) error) error {
+	return walkWithLimit(ctx, root, repository, MaxEntries, visit)
+}
+
+func walkWithLimit(ctx context.Context, root string, repository bool, limit int, visit func(string, fs.DirEntry) error) error {
 	root = filepath.Clean(root)
 	dirs := []string{root}
 	entries := 0
@@ -600,7 +604,7 @@ func walk(ctx context.Context, root string, repository bool, visit func(string, 
 						continue
 					}
 					entries++
-					if entries > MaxEntries {
+					if entries > limit {
 						return errors.New("workspace scan exceeds entry limit")
 					}
 					name := filepath.Join(dir, entry.Name())

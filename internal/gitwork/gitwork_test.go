@@ -9,10 +9,13 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+var testCommitDate = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -309,10 +312,10 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "160000,"+fixture.base+",sub")
-	symlinkOrSkip(t, "README.md", filepath.Join(fixture.source, "omitted-link"))
-	fixture.git(fixture.source, "add", "omitted-link")
+	// An index-only symlink avoids requiring Windows symlink privileges.
+	linkBlob := fixture.gitInput(fixture.source, "README.md", "hash-object", "-w", "--stdin")
+	fixture.git(fixture.source, "update-index", "--add", "--cacheinfo", "120000,"+linkBlob+",omitted-link")
 	fixture.git(fixture.source, "commit", "-m", "add gitlink and symlink")
-	linkBlob := fixture.git(fixture.source, "rev-parse", "HEAD:omitted-link")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/heads/main")
 
 	checkout := fixture.clone()
@@ -328,7 +331,7 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	if err := checkout.Import(ctx, snapshot.Head, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", func(string) error { return nil }); err != nil {
+	if err := checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "fix", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "sub"); got != "160000 commit "+fixture.base+"\tsub" {
@@ -336,6 +339,22 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "omitted-link"); got != "120000 blob "+linkBlob+"\tomitted-link" {
 		t.Fatalf("published symlink changed: %q", got)
+	}
+	restored := fixture.keepCheckout(RestoreCheckout(ctx, t.TempDir(), snapshot))
+	const restoredBranch = "minion/fix-restored-gitlink"
+	if err := restored.NewBranch(ctx, restoredBranch); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.Import(ctx, snapshot.Head, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.commitAndPush(ctx, fixture.remote, restoredBranch, "bot", "fix", testCommitDate, func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	original := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+branch)
+	recovered := fixture.git("", "--git-dir="+fixture.remote, "rev-parse", "refs/heads/"+restoredBranch)
+	if recovered != original {
+		t.Fatalf("restored push changed recorded commit: got=%s want=%s", recovered, original)
 	}
 }
 
@@ -350,7 +369,7 @@ func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recordedHead string
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix issue 123", func(sha string) error {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix issue 123", testCommitDate, func(sha string) error {
 		recordedHead = sha
 		return nil
 	}); err != nil {
@@ -365,7 +384,11 @@ func TestCommitAndPushPublishesRecordedBotCommit(t *testing.T) {
 	if want := "example-bot <example-bot@users.noreply.github.com>|example-bot <example-bot@users.noreply.github.com>"; identity != want {
 		t.Fatalf("commit identity = %q, want %q", identity, want)
 	}
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "no changes", func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
+	if dates, want := fixture.git(fixture.checkout.path, "show", "-s", "--format=%ad|%cd", "--date=raw", "HEAD"),
+		fmt.Sprintf("%d +0000|%d +0000", testCommitDate.Unix(), testCommitDate.Unix()); dates != want {
+		t.Fatalf("commit author and committer raw dates = %q, want %q", dates, want)
+	}
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "no changes", testCommitDate, func(string) error { t.Fatal("unchanged tree reached push"); return nil }); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("repeat publication=%v", err)
 	}
 	path := fixture.checkout.path
@@ -414,7 +437,7 @@ func TestImportAndCommitBoundsChanges(t *testing.T) {
 			if kind == "file count" && (err == nil || !strings.Contains(err.Error(), "changed file limit")) {
 				t.Fatalf("oversized import lost file count limit: %v", err)
 			}
-			err = fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", func(string) error { t.Fatal("oversized changes reached before-push recorder"); return nil })
+			err = fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", testCommitDate, func(string) error { t.Fatal("oversized changes reached before-push recorder"); return nil })
 			want := ErrNoChanges
 			if kind == "patch bytes" {
 				want = ErrDiffTooLarge
@@ -436,11 +459,13 @@ func TestCommitAndPushBoundsDirectlyStagedPathCount(t *testing.T) {
 	if err := fixture.checkout.NewBranch(ctx, branch); err != nil {
 		t.Fatal(err)
 	}
+	blob := fixture.gitInput(fixture.checkout.path, "x", "hash-object", "-w", "--stdin")
+	var staged strings.Builder
 	for i := 0; i <= workspace.MaxChanges; i++ {
-		writeFile(t, filepath.Join(fixture.checkout.path, fmt.Sprintf("f%d", i)), "x")
+		fmt.Fprintf(&staged, "100644 %s\tf%d\n", blob, i)
 	}
-	fixture.git(fixture.checkout.path, "add", ".")
-	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "too many paths", func(string) error {
+	fixture.gitInput(fixture.checkout.path, staged.String(), "update-index", "--index-info")
+	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "too many paths", testCommitDate, func(string) error {
 		t.Fatal("oversized stage reached before-push recorder")
 		return nil
 	})
@@ -487,7 +512,7 @@ func TestChangedGitConfigStopsPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.git(fixture.checkout.path, "config", "url.https://example.invalid/.insteadOf", "https://github.com/")
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, "minion/fix-config", "example-bot", "Minion: fix", func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "Git config changed") {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, "minion/fix-config", "example-bot", "Minion: fix", testCommitDate, func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "Git config changed") {
 		t.Fatalf("CommitAndPush() error = %v, want config change refusal", err)
 	}
 }
@@ -503,7 +528,7 @@ func TestCommitAndPushStopsWhenRecordFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	recordFailure := errors.New("cannot persist commit SHA")
-	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", func(string) error { return recordFailure })
+	err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "example-bot", "Minion: fix", testCommitDate, func(string) error { return recordFailure })
 	if !errors.Is(err, recordFailure) {
 		t.Fatalf("CommitAndPush() error = %v, want recorder error", err)
 	}

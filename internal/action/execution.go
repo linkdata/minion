@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/monitor"
@@ -65,6 +64,7 @@ type executionCheckpoints struct {
 	assigned          bool
 	assignmentContext context.Context
 	assignmentRequest monitor.Job
+	fixDestination    *FixDestination
 }
 
 func newExecutionCheckpoints(owner *Orchestrator, job Job) *executionCheckpoints {
@@ -102,13 +102,7 @@ func (c *executionCheckpoints) acceptedAssignment(job Job) bool {
 	if c.owner == nil || c.owner.Store == nil || c.owner.Store.Data.Accepted == nil || job.Identity != c.job.Identity {
 		return false
 	}
-	a := c.owner.Store.Data.Accepted
-	i := job.Identity
-	return a.JobID == i.JobID && a.AttemptID == i.AttemptID && a.ExecutorID == i.ExecutorID &&
-		a.Repository == i.Repository && a.RepositoryID == i.RepositoryID && a.OwnerID == i.OwnerID &&
-		strings.EqualFold(a.Requester, i.Requester) && a.RequesterID == i.RequesterID &&
-		a.SubjectNumber == i.Number && a.SubjectType == i.SubjectType &&
-		a.CommandName == job.Command && a.Action == string(job.Action)
+	return jobMatchesAccepted(job, *c.owner.Store.Data.Accepted)
 }
 
 func (c *executionCheckpoints) BeforeAssignment(job Job) error {
@@ -309,7 +303,8 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 	if !claimedSuccess {
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
-		if !errors.Is(runErr, monitor.ErrTerminalJob) && (c.pending != nil || c.returned != nil || len(c.calls) != 0) {
+		if !errors.Is(runErr, monitor.ErrTerminalJob) &&
+			(c.pending != nil || c.returned != nil || len(c.calls) != 0) {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
 		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.

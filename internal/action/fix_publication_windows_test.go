@@ -25,7 +25,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// The copied test binary redirects production Git URLs to local bare fixtures.
+// The linked or copied test binary redirects production Git URLs to local bare fixtures.
 func TestMain(m *testing.M) {
 	if realGit := os.Getenv("MINION_WINDOWS_GIT_PROXY"); realGit != "" {
 		args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "include.path=" + filepath.ToSlash(os.Getenv("MINION_WINDOWS_GIT_CONFIG"))}, os.Args[1:]...)
@@ -76,18 +76,8 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 	git("config", "--file", configFile, "url."+filepath.ToSlash(baseRemote)+".insteadOf", "https://github.com/o/r.git")
 	git("config", "--file", configFile, "url."+filepath.ToSlash(forkRemote)+".insteadOf", "https://github.com/linkdataminion/r.git")
 
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	proxyDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(proxyDir, "git.exe"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
+	testsupport.LinkTestExecutable(t, filepath.Join(proxyDir, "git.exe"))
 	t.Setenv("PATH", proxyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MINION_WINDOWS_GIT_PROXY", realGit)
 	t.Setenv("MINION_WINDOWS_GIT_CONFIG", configFile)
@@ -135,8 +125,9 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 	request := monitor.Job{
 		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2},
 		SubjectType: "Issue", Number: 7,
-		Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: time.Now()},
-		Command: command.Command{Name: "fix", Action: command.Fix},
+		Source:     github.Item{Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: time.Now()},
+		Command:    command.Command{Name: "fix", Action: command.Fix},
+		AcceptedAt: time.Now().UTC(),
 	}
 	orchestrator := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", Store: store, WorkRoot: workRoot}
 	repo, fork, err := orchestrator.fixFork(t.Context(), request.Repository)

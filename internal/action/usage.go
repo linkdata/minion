@@ -103,3 +103,36 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	}
 	return finish, nil
 }
+
+// completeRecoveredUsage updates only an existing attempt after saved publication succeeds.
+func (e *Orchestrator) completeRecoveredUsage(job monitor.Job) {
+	if e.Usage == nil || job.AttemptID == "" {
+		return
+	}
+	record, found, err := e.Usage.Load(job.AttemptID)
+	if err != nil {
+		e.logf("load recovered action usage checkpoint failed: %q", err)
+		return
+	}
+	if !found {
+		return
+	}
+	if record.JobID != job.ID {
+		e.logf("recovered action usage attempt %s belongs to another job", job.AttemptID)
+		return
+	}
+	if record.Status == "succeeded" {
+		return
+	}
+	finished := time.Now().UTC()
+	if finished.Before(record.StartedAt) {
+		finished = record.StartedAt
+	}
+	if record.FinishedAt != nil && finished.Before(*record.FinishedAt) {
+		finished = *record.FinishedAt
+	}
+	record.FinishedAt, record.Status = &finished, "succeeded"
+	if err := e.Usage.Save(record); err != nil {
+		e.logf("final recovered action usage checkpoint failed: %q", err)
+	}
+}

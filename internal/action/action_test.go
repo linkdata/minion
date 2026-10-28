@@ -434,6 +434,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		oversizedNotes      bool
 		wantComment         bool
 		wantPostPublication bool
+		wantTerminal        bool
 		wantError           string
 	}{
 		{name: "recorded commit", remoteSHA: strings.Repeat("a", 40), wantComment: true},
@@ -444,9 +445,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 		{name: "recorded commit with oversized notes", remoteSHA: strings.Repeat("a", 40), oversizedNotes: true, wantComment: true},
 		{name: "changed branch", remoteSHA: strings.Repeat("b", 40), wantError: "without a matching recorded bot commit"},
 		{name: "PR without branch", existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantError: "has a pull request but no remote branch"},
-		{name: "other PR creator", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
-		{name: "changed PR head", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
-		{name: "bot PR", wantPostPublication: true, remoteSHA: strings.Repeat("a", 40), existingUser: "linkdataminion", existingID: 9, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
+		{name: "other PR creator", wantPostPublication: true, wantTerminal: true, remoteSHA: strings.Repeat("a", 40), existingUser: "other-writer", existingID: 8, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
+		{name: "changed PR head", wantPostPublication: true, wantTerminal: true, remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("b", 40), wantError: "without matching requester authorship"},
+		{name: "bot PR", wantPostPublication: true, wantTerminal: true, remoteSHA: strings.Repeat("a", 40), existingUser: "linkdataminion", existingID: 9, existingSHA: strings.Repeat("a", 40), wantError: "without matching requester authorship"},
 		{name: "requester PR recovery", remoteSHA: strings.Repeat("a", 40), existingUser: "writer", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true},
 		{name: "renamed requester PR", remoteSHA: strings.Repeat("a", 40), existingUser: "new-login", existingID: 7, existingSHA: strings.Repeat("a", 40), wantComment: true},
 	} {
@@ -598,6 +599,9 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 			if errors.Is(err, monitor.ErrPostModelPublication) != tt.wantPostPublication {
 				t.Fatalf("fix() publication classification = %v, want post-publication=%t", err, tt.wantPostPublication)
 			}
+			if errors.Is(err, monitor.ErrTerminalJob) != tt.wantTerminal {
+				t.Fatalf("fix() terminal classification = %v, want terminal=%t", err, tt.wantTerminal)
+			}
 			if (commentBody != "") != tt.wantComment {
 				t.Fatalf("comment = %q, want comment=%t", commentBody, tt.wantComment)
 			}
@@ -621,10 +625,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 		t.Skip("Unix shell wrapper and executable mode are required")
 	}
 	for _, test := range []struct {
-		name                        string
-		critic, capped, saveFailure bool
+		name                                    string
+		critic, capped, saveFailure, runExecute bool
 	}{
-		{name: "no critic"},
+		{name: "no critic", runExecute: true},
 		{name: "approved", critic: true},
 		{name: "capped blockers", critic: true, capped: true},
 		{name: "capped save failure", critic: true, capped: true, saveFailure: true},
@@ -669,7 +673,10 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			job := monitor.Job{
 				Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}}, SubjectType: "Issue", Number: 7,
 				ID: strings.Repeat("a", 64), Source: github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix\n\nCheck the failing error path.", HTMLURL: "https://github.com/o/r/issues/7#issuecomment-1", UpdatedAt: time.Now()},
-				Command: command.Command{Name: "fix", Action: command.Fix},
+				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC(),
+			}
+			if test.runExecute {
+				job.AcceptedAt = time.Time{} // Exercise Execute's default accepted time through the commit path.
 			}
 			store, err := state.Open(statePath, time.Now())
 			if err != nil {
@@ -688,6 +695,8 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			var rulesetChecks int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+					_, _ = fmt.Fprint(w, `[]`)
 				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
 					_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Bug","body":"Details"}`)
 				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
@@ -802,10 +811,32 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if withCritic {
 				orchestrator.Adversarial = "claude"
 			}
-			err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			if test.runExecute {
+				err = attemptFixture(orchestrator).Execute(t.Context(), job)
+			} else {
+				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			}
 			if test.saveFailure {
 				if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "record commit before push") || commentBody != "" {
 					t.Fatalf("checkpoint save failure did not stop publication: %v", err)
+				}
+				if _, exists := store.Data.PendingFixes[job.ID]; exists {
+					t.Fatalf("failed save left an in-memory fix checkpoint: %+v", store.Data.PendingFixes[job.ID])
+				}
+				store.Data.Cursor = time.Time{}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(statePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var durable state.Data
+				if err := json.Unmarshal(data, &durable); err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := durable.PendingFixes[job.ID]; exists {
+					t.Fatalf("later save persisted a phantom fix checkpoint: %+v", durable.PendingFixes[job.ID])
 				}
 				if _, err := os.Stat(beforePushState); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("push ran after checkpoint save failure: %v", err)

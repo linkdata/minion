@@ -99,7 +99,11 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 
 // Changes captures bounded regular-file changes using the candidate's current ignore rules.
 func (index *OfflineIndex) Changes(ctx context.Context) ([]workspace.Change, error) {
-	if err := index.checkControlFiles(ctx); err != nil {
+	return index.changesWithControlLimit(ctx, workspace.MaxEntries)
+}
+
+func (index *OfflineIndex) changesWithControlLimit(ctx context.Context, limit int) ([]workspace.Change, error) {
+	if err := index.checkControlFilesWithLimit(ctx, limit); err != nil {
 		return nil, err
 	}
 	total := int64(0)
@@ -385,10 +389,6 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 // Check control-file shapes before Git can open FIFOs while discovering output.
 // Ignored directories are skipped unless they contain supplied tracked files.
 // shortcut: live writers can race these checks; isolate and quiesce executors in #96.
-func (index *OfflineIndex) checkControlFiles(ctx context.Context) error {
-	return index.checkControlFilesWithLimit(ctx, workspace.MaxEntries)
-}
-
 func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit int) error {
 	trackedDirs := map[string]bool{}
 	trackedChildren := map[string][]string{}

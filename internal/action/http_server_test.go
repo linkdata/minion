@@ -48,6 +48,12 @@ type httpServerTest struct {
 	done     chan httpServerTestResult
 }
 
+type refusingOutcomeCheckpoints struct{ runnerExecutionCheckpoints }
+
+func (refusingOutcomeCheckpoints) ReceiveCompletedResult(Result) error {
+	return monitor.ErrTerminalJob
+}
+
 type httpDeadlineAfterCheck struct {
 	context.Context
 	checks atomic.Int32
@@ -1659,6 +1665,33 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHTTPExecutorRefusedOutcomeReleasesCancellationWatch(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		f := newHTTPServerTestInMemory(t, t.Context(), testJob(command.Comment), refusingOutcomeCheckpoints{})
+		f.pull(t)
+		body, err := json.Marshal(f.tx.binding)
+		if err != nil {
+			t.Fatal(err)
+		}
+		watch, err := f.server.Client().Post(f.server.URL+"/cancel", "application/json", bytes.NewReader(body))
+		if err != nil || watch.StatusCode != http.StatusOK {
+			t.Fatalf("cancellation watch admission: response=%v error=%v", watch, err)
+		}
+		defer watch.Body.Close()
+		ack := f.ack(t, "/outcome", f.outcome(1, nil), http.StatusInternalServerError, 1)
+		if ack.Failure == nil {
+			t.Fatal("refused outcome was acknowledged as success")
+		}
+		if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) {
+			t.Fatalf("refused outcome did not finish promptly: %v", got.err)
+		}
+		var cancellation httpCancellation
+		if err := httpDecode(watch.Body, httpControlBytes, &cancellation); err != nil || cancellation.Reason != "completed" {
+			t.Fatalf("cancellation watch did not finish: %+v error=%v", cancellation, err)
+		}
+	})
 }
 
 func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {

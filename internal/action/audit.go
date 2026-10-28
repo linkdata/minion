@@ -33,15 +33,8 @@ type auditTools struct {
 }
 
 func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
-	for _, validator := range auditValidators {
-		script := filepath.Join(filepath.Dir(skill), validator.script)
-		info, err := os.Stat(script)
-		if err != nil {
-			return auditTools{}, fmt.Errorf("audit validator %q: %w", script, err)
-		}
-		if !info.Mode().IsRegular() {
-			return auditTools{}, fmt.Errorf("audit validator %q is not a regular file", script)
-		}
+	if err := checkAuditValidatorScripts(skill); err != nil {
+		return auditTools{}, err
 	}
 	binary, err := aicli.AbsoluteExecutable("node")
 	if err != nil {
@@ -49,6 +42,27 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 	}
 	flag, err := auditNodePermissionFlag(ctx, dir, binary)
 	return auditTools{binary: binary, permissionFlag: flag}, err
+}
+
+func checkAuditValidatorScripts(skill string) error {
+	for _, validator := range auditValidators {
+		script := filepath.Join(filepath.Dir(skill), validator.script)
+		info, err := os.Stat(script)
+		if err != nil {
+			return fmt.Errorf("audit validator %q: %w", script, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("audit validator %q is not a regular file", script)
+		}
+		file, err := os.Open(script)
+		if err != nil {
+			return fmt.Errorf("read audit validator %q: %w", script, err)
+		}
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close audit validator %q: %w", script, err)
+		}
+	}
+	return nil
 }
 
 func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {
@@ -230,6 +244,14 @@ func auditArtifactMayBeEmpty(name string) bool {
 }
 
 func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) error {
+	byPath, err := validateAuditArtifactInput(files, repo, target, head)
+	if err != nil {
+		return err
+	}
+	return runAuditValidators(ctx, byPath, validationDir, skill, tools)
+}
+
+func validateAuditArtifactInput(files []workspace.File, repo, target, head string) (map[string][]byte, error) {
 	byPath := make(map[string][]byte, len(files))
 	for _, file := range files {
 		byPath[file.Path] = file.Data
@@ -238,12 +260,16 @@ func validateAuditFiles(ctx context.Context, files []workspace.File, validationD
 		data, present := byPath[name]
 		if !present || len(data) == 0 && !auditArtifactMayBeEmpty(name) || name == "REPORT.md" && strings.TrimSpace(string(data)) == "" ||
 			name == "architecture.md" && !auditVisibleText(string(data)) {
-			return fmt.Errorf("audit %s is missing or empty", name)
+			return nil, fmt.Errorf("audit %s is missing or empty", name)
 		}
 	}
 	if _, err := validateAuditMetadata(byPath["run-metadata.json"], repo, target, head); err != nil {
-		return err
+		return nil, err
 	}
+	return byPath, nil
+}
+
+func runAuditValidators(ctx context.Context, byPath map[string][]byte, validationDir, skill string, tools auditTools) error {
 	for _, validator := range auditValidators {
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
 			return fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)

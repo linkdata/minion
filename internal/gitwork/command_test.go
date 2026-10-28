@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -84,7 +85,7 @@ func TestImportPreservesExecutableModeAndCommitIgnoresUnstagedFiles(t *testing.T
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(fixture.checkout.path, "unreviewed"), "not imported\n")
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed mode", func(string) error { return nil }); err != nil {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed mode", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	mode := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "run")
@@ -106,7 +107,7 @@ func TestCommitAndPushPreservesUnicodeBranchSuffix(t *testing.T) {
 	if err := fixture.checkout.Import(ctx, fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
+	if err := fixture.checkout.commitAndPush(ctx, fixture.remote, branch, "bot", "reviewed", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":README.md"); got != "reviewed" {
@@ -129,7 +130,7 @@ func TestCloneIncludesTagsAndPublicationAcceptsAmbiguousShortName(t *testing.T) 
 	if err := checkout.Import(t.Context(), fixture.base, []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkout.commitAndPush(t.Context(), fixture.remote, branch, "bot", "reviewed", func(string) error { return nil }); err != nil {
+	if err := checkout.commitAndPush(t.Context(), fixture.remote, branch, "bot", "reviewed", testCommitDate, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := fixture.git("", "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":README.md"); got != "reviewed" {
@@ -172,7 +173,7 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 }
 
 func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
-	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch", "nil recorder"} {
+	for _, kind := range []string{"branch", "blank message", "NUL message", "moved HEAD", "detached HEAD", "wrong branch", "nil recorder", "zero commit date"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newFixture(t)
 			ctx := t.Context()
@@ -184,6 +185,7 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 				t.Fatal(err)
 			}
 			pushBranch, message, want := branch, "reviewed fix", ""
+			commitDate := testCommitDate
 			switch kind {
 			case "branch":
 				pushBranch, want = "bad:ref", "invalid branch"
@@ -201,6 +203,8 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 				want = "does not match push branch"
 			case "nil recorder":
 				want = "before-push recorder is required"
+			case "zero commit date":
+				commitDate, want = time.Time{}, "commit date is required"
 			}
 			head := f.git(f.checkout.path, "rev-parse", "HEAD")
 			refs := f.git(f.checkout.path, "for-each-ref", "--format=%(refname) %(objectname)")
@@ -213,7 +217,7 @@ func TestCommitAndPushRefusesInvalidArgumentsAndHead(t *testing.T) {
 			if kind == "nil recorder" {
 				recorder = nil
 			}
-			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, recorder)
+			err := f.checkout.commitAndPush(ctx, f.remote, pushBranch, "bot", message, commitDate, recorder)
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("%s was not refused: %v", kind, err)
 			}
@@ -252,7 +256,7 @@ func TestCommitAndPushPreservesDivergentRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recorded string
-	err := f.checkout.commitAndPush(ctx, f.remote, branch, "bot", "local fix", func(sha string) error {
+	err := f.checkout.commitAndPush(ctx, f.remote, branch, "bot", "local fix", testCommitDate, func(sha string) error {
 		recorded = sha
 		return nil
 	})
@@ -280,7 +284,7 @@ func TestCommitAndPushPreservesPreexistingAncestorRemote(t *testing.T) {
 		t.Fatal(err)
 	}
 	var recorded string
-	err := f.checkout.commitAndPush(ctx, f.remote, branch, "bot", "local fix", func(sha string) error {
+	err := f.checkout.commitAndPush(ctx, f.remote, branch, "bot", "local fix", testCommitDate, func(sha string) error {
 		recorded = sha
 		return nil
 	})
@@ -325,7 +329,7 @@ func TestCommitAndPushRequiresValidatedDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	const destination = "../repo"
-	err := fixture.checkout.CommitAndPush(ctx, destination, branch, "bot", "reviewed", func(string) error {
+	err := fixture.checkout.CommitAndPush(ctx, destination, branch, "bot", "reviewed", testCommitDate, func(string) error {
 		t.Fatal("invalid destination reached commit checkpoint")
 		return nil
 	})
@@ -339,7 +343,7 @@ func TestCommitAndPushRequiresValidatedDestination(t *testing.T) {
 		t.Fatal("invalid destination pushed a branch")
 	}
 	var recorded string
-	if err := fixture.checkout.CommitAndPush(ctx, repo, branch, "bot", "reviewed", func(sha string) error {
+	if err := fixture.checkout.CommitAndPush(ctx, repo, branch, "bot", "reviewed", testCommitDate, func(sha string) error {
 		recorded = sha
 		return nil
 	}); err != nil {

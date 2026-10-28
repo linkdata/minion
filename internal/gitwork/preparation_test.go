@@ -2,6 +2,7 @@ package gitwork
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -95,7 +96,9 @@ func TestSnapshotAcceptsExactDiffByteLimit(t *testing.T) {
 func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 	fixture := newFixture(t)
 	fixture.git(fixture.source, "rm", "README.md")
-	data := bytes.Repeat([]byte{'a', 0}, workspace.MaxBytes/4)
+	// A smaller limit keeps this real-Git boundary test fast on Windows.
+	const sourceLimit = 1 << 20
+	data := bytes.Repeat([]byte{'a', 0}, sourceLimit/4)
 	filename := filepath.Join(fixture.source, "payload.bin")
 	if err := os.WriteFile(filename, data, 0600); err != nil {
 		t.Fatal(err)
@@ -109,11 +112,11 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 	}
 	head := fixture.commit("refs/pull/7/head", "half-budget head file")
 	checkout := fixture.keepCheckout(clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head))
-	snapshot, err := checkout.Snapshot(t.Context())
+	snapshot, err := checkout.snapshotWithSourceLimit(t.Context(), sourceLimit)
 	if err != nil || snapshot.Base != base || len(snapshot.Files) != 1 || len(snapshot.BaseFiles) != 1 {
 		t.Fatalf("exact combined transfer failed: head-files=%d base-files=%d base=%s error=%v", len(snapshot.Files), len(snapshot.BaseFiles), snapshot.Base, err)
 	}
-	if len(snapshot.Files[0].Data)+len(snapshot.BaseFiles[0].Data) != workspace.MaxBytes || !bytes.Equal(snapshot.Files[0].Data, data) {
+	if len(snapshot.Files[0].Data)+len(snapshot.BaseFiles[0].Data) != sourceLimit || !bytes.Equal(snapshot.Files[0].Data, data) {
 		t.Fatalf("exact combined transfer lost head bytes: head=%d base=%d", len(snapshot.Files[0].Data), len(snapshot.BaseFiles[0].Data))
 	}
 	for i := 0; i < len(data); i += 2 {
@@ -123,9 +126,12 @@ func TestSnapshotAcceptsExactCombinedSourceByteLimit(t *testing.T) {
 		t.Fatalf("exact combined transfer lost merge-base bytes: bytes=%d", len(snapshot.BaseFiles[0].Data))
 	}
 	if err := workspace.ValidateSnapshot(snapshot); err != nil {
-		t.Fatalf("64 MiB snapshot violates protocol boundary: %v", err)
+		t.Fatalf("snapshot fails workspace validation: %v", err)
+	}
+	if _, err := checkout.snapshotWithSourceLimit(t.Context(), sourceLimit-1); !errors.Is(err, ErrCheckoutTooLarge) || !strings.Contains(err.Error(), "combined source exceeds byte limit") {
+		t.Fatalf("combined source limit +1 was accepted: %v", err)
 	}
 	if entries, err := os.ReadDir(checkout.path); err != nil || len(entries) != 1 || entries[0].Name() != ".git" {
-		t.Fatalf("large read-only preparation materialized a second worktree: %v,%v", entries, err)
+		t.Fatalf("snapshot materialized worktree files: %v, %v", entries, err)
 	}
 }

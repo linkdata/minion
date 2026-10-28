@@ -30,6 +30,17 @@ type terminalRecoveryGitHub struct {
 	reply string
 }
 
+func serviceStore(t *testing.T, data state.Data) *state.Store {
+	t.Helper()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.Data = data
+	return store
+}
+
 func (g *terminalRecoveryGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error) {
 	return false, nil
 }
@@ -115,7 +126,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 				t.Fatalf("child startup differed from parent selection: work_root=%q endpoint=%q command_count=%d comment_action=%q", startup.WorkRoot, startup.Endpoint.BaseURL, len(startup.Selection.Commands), startup.Selection.Commands["comment"].Action)
 			}
 			now := time.Now().UTC()
-			store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}
+			store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 			if code := runSelectedLocalService(t.Context(), watcher, store, false, done, logger, closeWorker); code != 0 {
 				t.Fatalf("clean selected child shutdown returned %d: %s", code, logs.String())
 			}
@@ -314,7 +325,7 @@ func (*unavailableSelectedHandler) Execute(context.Context, monitor.Job) error {
 func TestSelectedLocalServiceStopsAfterWorkerLoss(t *testing.T) {
 	handler := &unavailableSelectedHandler{}
 	watcher := &monitor.Monitor{Handler: handler, SelectedExecutorID: action.LocalExecutorID}
-	store := &state.Store{Data: state.Data{NextInviteCheckAt: time.Now().Add(time.Hour)}}
+	store := serviceStore(t, state.Data{NextInviteCheckAt: time.Now().Add(time.Hour)})
 	var logs bytes.Buffer
 	closed := 0
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -327,7 +338,7 @@ func TestSelectedLocalServiceStopsAfterWorkerLoss(t *testing.T) {
 }
 
 func TestRunMonitorLoopStopsOnUncertainAcceptanceState(t *testing.T) {
-	store := &state.Store{Data: state.Data{Accepted: &state.AcceptedAction{}}}
+	store := serviceStore(t, state.Data{Accepted: &state.AcceptedAction{}})
 	var logs bytes.Buffer
 	if code := runMonitorLoop(t.Context(), &monitor.Monitor{}, store, true, nil, log.New(&logs, "", 0), false); code != 1 {
 		t.Fatalf("uncertain acceptance kept polling: code=%d logs=%q", code, logs.String())
@@ -336,7 +347,7 @@ func TestRunMonitorLoopStopsOnUncertainAcceptanceState(t *testing.T) {
 
 func TestSelectedLocalServiceReportsCloseFailure(t *testing.T) {
 	now := time.Now().UTC()
-	store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 	watcher := &monitor.Monitor{Handler: &action.Orchestrator{}}
 	var logs bytes.Buffer
 	closed := 0
@@ -352,7 +363,7 @@ func TestSelectedLocalServiceReportsCloseFailure(t *testing.T) {
 func TestSelectedLocalServiceStopsDuringScheduledSleep(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
-		store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}
+		store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 		watcher := &monitor.Monitor{}
 		done := make(chan struct{})
 		result := make(chan int, 1)

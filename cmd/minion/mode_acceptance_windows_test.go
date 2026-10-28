@@ -19,6 +19,7 @@ import (
 
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 // The test executable doubles as the public execute-mode child and a native
@@ -156,21 +157,6 @@ func windowsModeCodexProbe() {
 	os.Exit(99) // This fixture never starts a paid model call.
 }
 
-func windowsModeCopyExecutable(t *testing.T, dir, name string) {
-	t.Helper()
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name+".exe"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func offlineModeWorkerPath(t *testing.T, binary string) string {
 	t.Helper()
 	t.Setenv("MINION_WINDOWS_EXECUTE_CHILD", "1")
@@ -180,7 +166,7 @@ func offlineModeWorkerPath(t *testing.T, binary string) string {
 func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 	t.Helper()
 	bin := t.TempDir()
-	windowsModeCopyExecutable(t, bin, "git")
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "git.exe"))
 	// Git readiness strips fixture environment variables before calling git.exe.
 	data, err := json.Marshal(windowsModeGitProxyConfig{RealGit: realGit, Rewrite: rewrite})
 	if err != nil {
@@ -195,7 +181,7 @@ func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 func offlineModeCodex(t *testing.T, modelCalls string) {
 	t.Helper()
 	bin := filepath.Dir(modelCalls)
-	windowsModeCopyExecutable(t, bin, "codex")
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "codex.exe"))
 	if err := os.WriteFile(modelCalls, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +194,7 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	windowsModeCopyExecutable(t, bin, "codex")
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "codex.exe"))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -222,7 +208,7 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 	owner := newOrchestrator(cfg, nil, nil, logger, nil)
 	watcher := &monitor.Monitor{Config: cfg}
 	now := time.Now().UTC()
-	store := &state.Store{Data: state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)}}
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 	if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, binary, 40*time.Second); code != 0 {
 		t.Fatalf("public orchestrate/execute mode returned %d: %s", code, logs.String())
 	}

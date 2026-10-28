@@ -1,0 +1,33 @@
+package action
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
+)
+
+func TestCanceledSelectedAuditDoesNotSaveResult(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	job := testJob(command.SecurityAudit)
+	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)
+	outcome := completeHTTPResult(t, f)
+	audit := completeAuditResult(f.job)
+	outcome.Result.Answer, outcome.Result.Artifacts = audit.Answer, audit.Artifacts
+	if err := outcome.Result.Validate(f.job); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // The parent has canceled before the completed result reaches storage.
+	sink := f.tx.sink.(*executionCheckpoints)
+	sink.assignmentContext = ctx
+	err := sink.ReceiveCompletedResult(outcome.Result)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("canceled selected result became a publication retry: %v", err)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("canceled validator saved a publishable result: present=%t error=%v", present, err)
+	}
+}

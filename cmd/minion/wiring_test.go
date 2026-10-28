@@ -65,11 +65,19 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 func TestServiceWiringSnapshotsNativeCodexCredentials(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "native-key")
 	t.Setenv("CODEX_ACCESS_TOKEN", "native-token")
-	got := newOrchestrator(config.Config{}, nil, nil, nil, nil).Runner.Codex
+	got := newOrchestrator(config.Config{Main: "claude"}, nil, nil, nil, nil).Runner.Codex
 	if got.NativeAPIKey != "" || got.NativeAccessToken != "" || got.APIKey != "" {
 		t.Fatalf("unselected ambient Codex credentials were retained: %+v", got)
 	}
-	got = newOrchestrator(config.Config{Codex: config.CodexConfig{NativeAPIKey: "validated-key", NativeAccessToken: "validated-token"}}, nil, nil, nil, nil).Runner.Codex
+	got = newOrchestrator(config.Config{Main: "codex"}, nil, nil, nil, nil).Runner.Codex
+	if got.NativeAPIKey != "native-key" || got.NativeAccessToken != "native-token" {
+		t.Fatal("selected startup recovery lost ambient Codex credentials")
+	}
+	got = newOrchestrator(config.Config{Main: "claude", Adversarial: "codex"}, nil, nil, nil, nil).Runner.Codex
+	if got.NativeAPIKey != "native-key" || got.NativeAccessToken != "native-token" {
+		t.Fatal("selected Codex critic lost ambient credentials")
+	}
+	got = newOrchestrator(config.Config{Main: "codex", Codex: config.CodexConfig{NativeAPIKey: "validated-key", NativeAccessToken: "validated-token"}}, nil, nil, nil, nil).Runner.Codex
 	if got.NativeAPIKey != "validated-key" || got.NativeAccessToken != "validated-token" {
 		t.Fatalf("validated Codex credentials changed before dispatch: %+v", got)
 	}

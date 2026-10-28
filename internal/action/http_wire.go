@@ -48,6 +48,13 @@ func httpDecode(reader io.Reader, limit int, value any) error {
 	if err != nil {
 		return err
 	}
+	return httpDecodeBytes(data, limit, value)
+}
+
+func httpDecodeBytes(data []byte, limit int, value any) error {
+	if limit < 0 || len(data) > limit {
+		return errHTTPBodyLimit
+	}
 	if !utf8.Valid(data) {
 		return errors.New("HTTP body is not valid UTF-8")
 	}

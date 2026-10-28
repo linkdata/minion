@@ -976,6 +976,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			parent := newHTTPServerTest(t, parentContext, f.job, f.sink, nil)
 			started := make(chan struct{})
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
+			outcomeACKClosed := make(chan struct{}, 1)
 			uploadEntered := make(chan struct{})
 			closeUpload := sync.OnceFunc(func() { close(uploadEntered) })
 			defer closeUpload()
@@ -1035,7 +1036,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 				if err == nil && r.URL.Path == "/outcome" && test.externalCause {
 					// post closes the actual ACK after decoding it, before RunHTTP stops its watch.
-					response.Body = httpClientCancelOnCloseBody{ReadCloser: response.Body, cancel: cancel, cause: externalCause}
+					response.Body = httpClientCancelOnCloseBody{ReadCloser: response.Body, cancel: cancel, cause: externalCause, closed: outcomeACKClosed}
 				}
 				if err == nil && r.URL.Path == "/outcome" && test.malformedACK {
 					_ = response.Body.Close()
@@ -1081,12 +1082,9 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 			}
 			var workerErr error
-			if test.early || test.duringOutcome {
-				// Keep fixture startup outside the watch-drain deadline.
-				gate := started
-				if test.duringOutcome {
-					gate = outcomeEntered
-				}
+			// Keep fixture startup outside the watch-drain deadline.
+			waitForGate := func(gate <-chan struct{}, phase string) {
+				t.Helper()
 				select {
 				case <-gate:
 				case workerErr = <-done:
@@ -1094,11 +1092,21 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					select {
 					case <-gate:
 					default:
-						t.Fatalf("worker returned before gated watch phase: %v", workerErr)
+						t.Fatalf("worker returned before %s: %v", phase, workerErr)
 					}
 				case <-time.After(30 * time.Second):
-					t.Fatal("worker did not reach gated watch phase")
+					t.Fatalf("worker did not reach %s", phase)
 				}
+			}
+			if test.early || test.duringOutcome {
+				gate := started
+				if test.duringOutcome {
+					gate = outcomeEntered
+				}
+				waitForGate(gate, "gated watch phase")
+			}
+			if test.externalCause && !finished {
+				waitForGate(outcomeACKClosed, "closing outcome ACK")
 			}
 			wait := 5 * time.Second
 			if test.expiredAfterWatch {
@@ -1152,11 +1160,16 @@ type httpClientCancelOnCloseBody struct {
 	io.ReadCloser
 	cancel context.CancelCauseFunc
 	cause  error
+	closed chan<- struct{}
 }
 
 func (b httpClientCancelOnCloseBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.cancel(b.cause)
+	select {
+	case b.closed <- struct{}{}:
+	default:
+	}
 	return err
 }
 

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -27,9 +26,19 @@ import (
 // The accepted command is changed while the parent is preparing its checkout.
 // The real execute-mode child must not reach its model unless the final check passes.
 func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
+	offlineModeGitRemote(t)
+	modelCalls := filepath.Join(t.TempDir(), "model-calls")
+	offlineModeCodex(t, modelCalls)
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := offlineModeWorkerPath(t, binary)
 	for _, change := range []string{"valid", "edited", "revoked", "replaced repository", "transient lookup"} {
 		t.Run(change, func(t *testing.T) {
-			offlineModeGitRemote(t)
+			if err := os.WriteFile(modelCalls, nil, 0600); err != nil {
+				t.Fatal(err)
+			}
 			base := t.TempDir()
 			for _, dir := range []string{"home", "codex-home", "work"} {
 				if err := os.Mkdir(filepath.Join(base, dir), 0700); err != nil {
@@ -39,14 +48,6 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			t.Setenv("HOME", filepath.Join(base, "home"))
 			t.Setenv("USERPROFILE", filepath.Join(base, "home"))
 			t.Setenv("CODEX_HOME", filepath.Join(base, "codex-home"))
-			modelCalls := filepath.Join(base, "model-calls")
-			offlineModeCodex(t, modelCalls)
-			binary, err := os.Executable()
-			if err != nil {
-				t.Fatal(err)
-			}
-			worker := offlineModeWorkerPath(t, binary)
-
 			at := time.Now().UTC().Add(-time.Minute)
 			accepted := state.AcceptedAction{
 				JobID: "job-7", AttemptID: "0123456789abcdef0123456789abcdef", ExecutorID: action.LocalExecutorID,
@@ -190,7 +191,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 				t.Fatal(err)
 			}
 			modelData, err := os.ReadFile(modelCalls)
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
 				t.Fatal(err)
 			}
 			mu.Lock()

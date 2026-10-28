@@ -38,7 +38,7 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	if err := os.Remove(filepath.Join(source, "deleted")); err != nil {
 		t.Fatal(err)
 	}
-	writeFixtureFile(t, source, "runtime.log", make([]byte, workspace.MaxChangeBytes+1))
+	writeSparseFixtureFile(t, source, "runtime.log", workspace.MaxChangeBytes+1)
 	snapshot := mustFreeze(t, t.Context(), t.TempDir(), job, source, "", index)
 	if snapshot.source == source || snapshot.outputDir != "" || len(snapshot.changes) != 3 {
 		t.Fatalf("unexpected critic snapshot: %+v", snapshot)
@@ -177,7 +177,7 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 	if err := workspace.Materialize(source, job.Source.Files); err != nil {
 		t.Fatal(err)
 	}
-	writeFixtureFile(t, output, "findings.json", make([]byte, maxAuditArtifactBytes+1))
+	writeSparseFixtureFile(t, output, "findings.json", maxAuditArtifactBytes+1)
 	snapshot, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, output, nil, "")
 	if snapshot != nil {
 		t.Cleanup(func() {

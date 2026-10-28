@@ -520,8 +520,9 @@ func TestCollectionBoundsFileCountsAndBytes(t *testing.T) {
 }
 
 func TestWalkBoundsEntries(t *testing.T) {
+	const scanLimit = 129 // Cross the 128-entry ReadDir batch boundary.
 	root := t.TempDir()
-	for i := 0; i <= MaxEntries; i++ {
+	for i := 0; i <= scanLimit; i++ {
 		if err := os.WriteFile(filepath.Join(root, strconv.Itoa(i)), nil, 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -529,11 +530,11 @@ func TestWalkBoundsEntries(t *testing.T) {
 	check := func(repository, overflow bool) {
 		t.Helper()
 		visited := 0
-		err := walk(t.Context(), root, repository, func(string, os.DirEntry) error {
+		err := walkWithLimit(t.Context(), root, repository, scanLimit, func(string, os.DirEntry) error {
 			visited++
 			return nil
 		})
-		if visited != MaxEntries || (err != nil) != overflow || (err != nil && !strings.Contains(err.Error(), "entry limit")) {
+		if visited != scanLimit || (err != nil) != overflow || (err != nil && !strings.Contains(err.Error(), "entry limit")) {
 			t.Fatalf("entry-bound walk: repository=%t overflow=%t visited=%d error=%v", repository, overflow, visited, err)
 		}
 	}

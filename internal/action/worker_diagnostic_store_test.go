@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
@@ -94,6 +95,45 @@ func TestWorkerDiagnosticsRecordUnverifiedLocalCleanupWithoutWorkerClaims(t *tes
 	}
 	if !strings.Contains(journal.String(), "cleanup_unverified=true") || !strings.Contains(journal.String(), "private_path=") {
 		t.Fatalf("parent recovery scope was not logged as private evidence: %q", journal.String())
+	}
+}
+
+func TestWorkerDiagnosticsRetrySyncsIdenticalRecord(t *testing.T) {
+	job := testJob(command.Comment)
+	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Diagnostics: []Diagnostic{{Code: "private", Message: "worker message"}}}
+	root, err := workspace.CanonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{WorkRoot: root}
+	if err := e.retainWorkerDiagnostics(job, result, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "worker-diagnostics", job.Identity.AttemptID+".json")
+	originalSync := syncPrivateRecordDirectories
+	t.Cleanup(func() { syncPrivateRecordDirectories = originalSync })
+	calls := 0
+	syncPrivateRecordDirectories = func(dirs ...string) error {
+		calls++
+		if !reflect.DeepEqual(dirs, []string{filepath.Dir(path), root}) {
+			t.Errorf("wrong directories synced: %q", dirs)
+		}
+		return syscall.EIO
+	}
+	if err := e.retainWorkerDiagnostics(job, result, nil); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, syscall.EIO) || calls != 1 {
+		t.Fatalf("identical record skipped failed sync: calls=%d error=%v", calls, err)
+	}
+	syncPrivateRecordDirectories = func(dirs ...string) error {
+		calls++
+		return originalSync(dirs...)
+	}
+	if err := e.retainWorkerDiagnostics(job, result, nil); err != nil {
+		t.Fatalf("retry did not sync retained record: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("retry skipped directory sync: calls=%d", calls)
 	}
 }
 

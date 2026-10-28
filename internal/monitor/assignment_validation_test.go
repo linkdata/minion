@@ -201,3 +201,26 @@ func TestFinalDiscardStopsSelectedDiscoveryUntilWorkerRestarts(t *testing.T) {
 		t.Fatalf("retired worker accepted another action: calls=%d error=%v state=%+v", calls, err, store.Data)
 	}
 }
+
+func TestSelectedDiscardDoesNotHideControlStateFailure(t *testing.T) {
+	at := time.Now().UTC()
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{selectedItem(at)},
+		permission: github.Permission{Permission: "write"}}
+	store := openState(t, at.Add(-time.Minute))
+	store.Data.NextInviteCheckAt = at.Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	monitor := selectedMonitor(t, at, gh, nil)
+	controlErr := errors.New("control state unavailable")
+	monitor.Handler = selectedHandler(func(Job) error {
+		if err := store.WithLock(func() error { return discardAccepted(store) }); err != nil {
+			return err
+		}
+		return errors.Join(ErrAcceptedDiscarded, ErrAcceptanceState, controlErr)
+	})
+	_, err := monitor.RunOnce(t.Context(), store)
+	if !errors.Is(err, ErrAcceptanceState) || !errors.Is(err, controlErr) || store.Data.Accepted != nil {
+		t.Fatalf("selected discard hid control failure: err=%v accepted=%+v", err, store.Data.Accepted)
+	}
+}

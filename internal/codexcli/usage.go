@@ -148,6 +148,10 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 // usageFiles reads only bounded headers. Known paths bypass discovery timestamps,
 // so a resumed conversation remains visible after its original directory ages.
 func usageFiles(ctx context.Context, home, rootID string, started time.Time, known map[string]rolloutMeta) (map[string]rolloutMeta, map[string]bool, bool) {
+	return usageFilesWithLimit(ctx, home, rootID, started, known, maxUsageWalkEntries)
+}
+
+func usageFilesWithLimit(ctx context.Context, home, rootID string, started time.Time, known map[string]rolloutMeta, walkLimit int) (map[string]rolloutMeta, map[string]bool, bool) {
 	files := map[string]rolloutMeta{}
 	ambiguous := map[string]bool{}
 	complete := true
@@ -213,7 +217,7 @@ func usageFiles(ctx context.Context, home, rootID string, started time.Time, kno
 	if rootID != "" {
 		err := walkUsageFiles(ctx, filepath.Join(home, "sessions"), started, func(path string, entry fs.DirEntry) error {
 			entries++
-			if entries > maxUsageWalkEntries || candidates > maxUsageFiles {
+			if entries > walkLimit || candidates > maxUsageFiles {
 				complete = false
 				return fs.SkipAll
 			}
@@ -402,7 +406,8 @@ type rolloutUsageMode struct {
 	allowUnchanged  bool
 	latest          *usage.Tokens
 	seenLatest      *bool
-	recordLimit     int // Test-only lower cap; zero keeps the production limit.
+	recordLimit     int   // Test-only lower cap; zero keeps the production limit.
+	byteLimit       int64 // Test-only lower cap; zero keeps the production limit.
 }
 
 // A boundary excludes previous turns even when their final records arrive late.
@@ -426,6 +431,9 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		return usage.Tokens{}, false, nil, childError
 	}
 	limit := min(int64(maxUsageRolloutBytes), *budget)
+	if mode.byteLimit > 0 {
+		limit = min(limit, mode.byteLimit)
+	}
 	reader := &io.LimitedReader{R: f, N: limit + 1}
 	hash := sha256.New()
 	if before != nil {

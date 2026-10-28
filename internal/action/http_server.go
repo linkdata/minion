@@ -35,10 +35,11 @@ type HTTPExecutor struct {
 }
 
 type httpTransaction struct {
-	mu          sync.Mutex
-	mutation    sync.Mutex
-	observation sync.Mutex
-	handlers    sync.WaitGroup
+	mu           sync.Mutex
+	mutation     sync.Mutex
+	observation  sync.Mutex
+	handlers     sync.WaitGroup
+	requiredACKs sync.WaitGroup
 
 	job            Job
 	credentials    WorkerCredentials
@@ -194,7 +195,12 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 			runErr = errors.Join(runErr, tx.transportErr)
 		}
 		if tx.requiredControlErr != nil {
-			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown, tx.requiredControlErr)
+			if !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) {
+				runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
+			}
+			if !errors.Is(runErr, tx.requiredControlErr) {
+				runErr = errors.Join(runErr, tx.requiredControlErr)
+			}
 		}
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
@@ -256,9 +262,13 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		}
 		return result, err
 	}
+	var stopDone <-chan struct{}
+	if stopContext != nil {
+		stopDone = stopContext.Done()
+	}
 	select {
 	case <-tx.done:
-	case <-stopContext.Done():
+	case <-stopDone:
 	}
 	return result, httpExecutionContextError(actionCtx)
 }
@@ -728,8 +738,47 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
+			var terminalResult error
+			// A successful outcome is acknowledged only after its optional parent
+			// receiver has validated and saved the complete selected attempt.
+			if !failedOutcome {
+				receiver, hasReceiver := tx.sink.(interface{ ReceiveCompletedResult(Result) error })
+				if selected, ok := tx.sink.(assignmentCheckpoint); ok && selected.AssignmentRequired() {
+					if !hasReceiver {
+						terminalResult = fmt.Errorf("%w: selected HTTP outcome receiver is missing", monitor.ErrAcceptanceState)
+					}
+					// Earlier callbacks release mutation ownership before their ACK writes.
+					// Their delivery must be known before a complete result is saved.
+					tx.requiredACKs.Wait()
+					tx.mu.Lock()
+					checkpointErr, controlErr := tx.checkpointErr, tx.requiredControlErr
+					tx.mu.Unlock()
+					if checkpointErr != nil {
+						terminalResult = errors.Join(terminalResult, checkpointErr, controlErr)
+						if !errors.Is(terminalResult, monitor.ErrAcceptanceState) && !errors.Is(terminalResult, monitor.ErrTerminalJob) {
+							terminalResult = errors.Join(terminalResult, monitor.ErrTerminalJob)
+						}
+					} else if controlErr != nil {
+						terminalResult = errors.Join(terminalResult, monitor.ErrExecutionOutcomeUnknown, controlErr)
+					} else if err := httpExecutionContextError(tx.budget); err != nil {
+						// A late result cannot publish, but its diagnostics remain known.
+						terminalResult = errors.Join(terminalResult, err)
+					}
+				}
+				if hasReceiver && terminalResult == nil {
+					if err := receiver.ReceiveCompletedResult(outcome.Result); err != nil {
+						// The result is known but refused: retain its diagnostics without a success ACK.
+						terminalResult = err
+					}
+				}
+			}
 			tx.mu.Lock()
-			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), tx.checkpointErr)
+			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), terminalResult)
+			if terminalResult == nil {
+				tx.runErr = errors.Join(tx.runErr, tx.checkpointErr)
+			} else {
+				tx.quarantine = true // The worker receives a failed outcome ACK.
+			}
 			for _, diagnostic := range outcome.Result.Diagnostics {
 				if diagnostic.Code == "cleanup_failed" {
 					tx.quarantine = true
@@ -742,11 +791,19 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				tx.quarantine = true
 			}
 			// Preserve late paid facts without accepting a success beyond the fixed expiry.
-			tx.runErr = errors.Join(tx.runErr, httpExecutionContextError(tx.budget))
+			if budgetErr := httpExecutionContextError(tx.budget); budgetErr != nil {
+				cause := tx.budget.Err()
+				if cause == nil {
+					cause = context.DeadlineExceeded // Deadline passed before context notified its waiters.
+				}
+				if !errors.Is(tx.runErr, cause) {
+					tx.runErr = errors.Join(tx.runErr, budgetErr)
+				}
+			}
 			tx.outcome, tx.fenced = true, true
 			close(tx.done)
 			tx.mu.Unlock()
-			return nil
+			return terminalResult
 		}
 	}
 	if err == nil {
@@ -769,7 +826,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	var checkpointACK chan struct{}
 	if callbackErr != nil {
 		tx.mu.Lock()
-		if tx.checkpointErr == nil {
+		if kind != "outcome" && tx.checkpointErr == nil {
 			tx.checkpointErr = callbackErr
 			checkpointACK = make(chan struct{})
 			tx.checkpointACK = checkpointACK
@@ -781,6 +838,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		tx.phaseCeiling = max(tx.phaseCeiling, phaseProof)
 		tx.uploadReady = tx.uploadReady || allowUpload
 		tx.mu.Unlock()
+	}
+	if kind != "outcome" {
+		// Add while mutation is held, before a later outcome can begin waiting.
+		tx.requiredACKs.Add(1)
+		defer tx.requiredACKs.Done()
 	}
 	// Release mutation ownership before ACK bytes can let a sequential client send its next request.
 	tx.mutation.Unlock()

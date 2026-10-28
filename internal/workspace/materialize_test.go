@@ -45,6 +45,15 @@ func TestMaterializeChangesCreatesOnlyFinalFiles(t *testing.T) {
 	if err := CheckUnchanged(t.Context(), root, want); err != nil {
 		t.Fatalf("frozen candidate differs from final changes: %v", err)
 	}
+	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err != nil {
+		t.Fatalf("candidate differs from separate transfers: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "updated"), []byte("tampered candidate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed") {
+		t.Fatalf("candidate mutation went undetected: %v", err)
+	}
 }
 
 func TestMaterializeChangesHandlesUnicodeAliasesOnHostFilesystem(t *testing.T) {
@@ -74,7 +83,7 @@ func TestMaterializeChangesHandlesUnicodeAliasesOnHostFilesystem(t *testing.T) {
 	}
 }
 
-func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
+func TestChangedFilesPreservesSeparateTransferLimits(t *testing.T) {
 	data := make([]byte, 1<<20)
 	base := make([]File, MaxFiles)
 	for i := range base {
@@ -88,22 +97,33 @@ func TestMaterializeChangesPreservesSeparateTransferLimits(t *testing.T) {
 		changes[i] = Change{Path: fmt.Sprintf("added-%03d", i), Mode: Regular}
 	}
 	changes[0].Data = data
-	root := privateRoot(t)
-	if err := MaterializeChanges(root, base, changes); err != nil {
+	files, err := changedFiles(base, changes)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err != nil {
-		t.Fatalf("valid 65 MiB / 10,100-file candidate cannot be checked: %v", err)
+	if len(files) != MaxFiles+MaxChanges {
+		t.Fatalf("separate transfers lost files: got %d, want %d", len(files), MaxFiles+MaxChanges)
+	}
+	total := 0
+	for _, file := range files {
+		total += len(file.Data)
+	}
+	if total != MaxBytes+len(data) {
+		t.Fatalf("separate transfers lost bytes: got %d, want %d", total, MaxBytes+len(data))
+	}
+	root := privateRoot(t)
+	if err := os.WriteFile(filepath.Join(root, "occupied"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MaterializeChanges(root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace root is not empty") {
+		t.Fatalf("public materialization rejected the separate limits: %v", err)
+	}
+	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed: added") {
+		t.Fatalf("public candidate check rejected the separate limits: %v", err)
 	}
 	byteOverflow := append(slices.Clone(base[:MaxBytes/len(data)]), File{Path: changes[0].Path, Mode: Regular, Data: data})
 	if err := CheckUnchanged(t.Context(), root, byteOverflow); err == nil || !strings.Contains(err.Error(), "source exceeds byte limit") {
 		t.Fatalf("candidate canary widened source byte limit: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(root, changes[0].Path), []byte("tampered candidate"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckChangesUnchanged(t.Context(), root, base, changes); err == nil || !strings.Contains(err.Error(), "workspace changed") {
-		t.Fatalf("large candidate mutation went undetected: %v", err)
 	}
 }
 
