@@ -1,6 +1,8 @@
 package testsupport
 
 import (
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +11,31 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 )
+
+// LinkTestExecutable gives a native helper the current test binary's contents.
+func LinkTestExecutable(t *testing.T, path string) {
+	t.Helper()
+	source, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, path); err == nil {
+		return
+	}
+	from, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer from.Close()
+	to, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, copyErr := io.Copy(to, from)
+	if err := errors.Join(copyErr, to.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // FakeOnPath installs a complete script and returns its temporary bin directory.
 func FakeOnPath(t *testing.T, name, script string) string {

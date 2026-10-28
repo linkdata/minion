@@ -76,18 +76,8 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 	git("config", "--file", configFile, "url."+filepath.ToSlash(baseRemote)+".insteadOf", "https://github.com/o/r.git")
 	git("config", "--file", configFile, "url."+filepath.ToSlash(forkRemote)+".insteadOf", "https://github.com/linkdataminion/r.git")
 
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
 	proxyDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(proxyDir, "git.exe"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
+	testsupport.LinkTestExecutable(t, filepath.Join(proxyDir, "git.exe"))
 	t.Setenv("PATH", proxyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MINION_WINDOWS_GIT_PROXY", realGit)
 	t.Setenv("MINION_WINDOWS_GIT_CONFIG", configFile)

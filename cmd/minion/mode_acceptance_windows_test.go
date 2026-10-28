@@ -19,6 +19,7 @@ import (
 
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 // The test executable doubles as the public execute-mode child and a native
@@ -156,19 +157,9 @@ func windowsModeCodexProbe() {
 	os.Exit(99) // This fixture never starts a paid model call.
 }
 
-func windowsModeCopyExecutable(t *testing.T, dir, name string) {
+func windowsModeLinkExecutable(t *testing.T, dir, name string) {
 	t.Helper()
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name+".exe"), data, 0700); err != nil {
-		t.Fatal(err)
-	}
+	testsupport.LinkTestExecutable(t, filepath.Join(dir, name+".exe"))
 }
 
 func offlineModeWorkerPath(t *testing.T, binary string) string {
@@ -180,7 +171,7 @@ func offlineModeWorkerPath(t *testing.T, binary string) string {
 func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 	t.Helper()
 	bin := t.TempDir()
-	windowsModeCopyExecutable(t, bin, "git")
+	windowsModeLinkExecutable(t, bin, "git")
 	// Git readiness strips fixture environment variables before calling git.exe.
 	data, err := json.Marshal(windowsModeGitProxyConfig{RealGit: realGit, Rewrite: rewrite})
 	if err != nil {
@@ -195,7 +186,7 @@ func offlineModeGitProxy(t *testing.T, realGit, rewrite string) {
 func offlineModeCodex(t *testing.T, modelCalls string) {
 	t.Helper()
 	bin := filepath.Dir(modelCalls)
-	windowsModeCopyExecutable(t, bin, "codex")
+	windowsModeLinkExecutable(t, bin, "codex")
 	if err := os.WriteFile(modelCalls, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +199,7 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	windowsModeCopyExecutable(t, bin, "codex")
+	windowsModeLinkExecutable(t, bin, "codex")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := t.TempDir()
 	t.Setenv("HOME", home)

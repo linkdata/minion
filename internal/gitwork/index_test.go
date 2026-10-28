@@ -344,7 +344,7 @@ func TestFixIndexPreservesGitignoreAndTrackedIgnoredFiles(t *testing.T) {
 		{Path: "tracked.log", Mode: workspace.Regular, Data: []byte("before")},
 	})
 	writeIndexFixture(t, source, "tracked.log", []byte("after"))
-	writeIndexFixture(t, source, "runtime.log", make([]byte, workspace.MaxChangeBytes+1))
+	writeSparse(t, filepath.Join(source, "runtime.log"), workspace.MaxChangeBytes+1)
 	writeIndexFixture(t, source, "target/cache/.git/config", []byte("untrusted nested metadata"))
 	for i := 0; i < workspace.MaxChanges+10; i++ {
 		writeIndexFixture(t, source, fmt.Sprintf("__pycache__/%d.pyc", i), []byte("cache"))
@@ -473,8 +473,8 @@ func TestFixIndexRejectsNonIgnoredUnsafeOutput(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "aggregate oversized":
-				writeIndexFixture(t, source, "first", make([]byte, workspace.MaxChangeBytes/2+1))
-				writeIndexFixture(t, source, "second", make([]byte, workspace.MaxChangeBytes/2+1))
+				writeSparse(t, filepath.Join(source, "first"), workspace.MaxChangeBytes/2+1)
+				writeSparse(t, filepath.Join(source, "second"), workspace.MaxChangeBytes/2+1)
 			case "too many":
 				for i := 0; i <= workspace.MaxChanges; i++ {
 					writeIndexFixture(t, source, fmt.Sprintf("file-%d", i), nil)
@@ -701,11 +701,11 @@ func TestFixIndexRejectsTrackedGrowthBeforeHashing(t *testing.T) {
 			var data []byte
 			if kind == "single file growth" {
 				data = make([]byte, workspace.MaxChangeBytes+1)
-				writeIndexFixture(t, source, "first", data)
+				writeSparse(t, filepath.Join(source, "first"), int64(len(data)))
 			} else {
 				data = make([]byte, workspace.MaxChangeBytes/2+1)
-				writeIndexFixture(t, source, "first", data)
-				writeIndexFixture(t, source, "second", data)
+				writeSparse(t, filepath.Join(source, "first"), int64(len(data)))
+				writeSparse(t, filepath.Join(source, "second"), int64(len(data)))
 			}
 			if changes, err := index.Changes(t.Context()); err == nil || !strings.Contains(err.Error(), "tracked fix path") || !strings.Contains(err.Error(), "byte limit") {
 				t.Fatalf("tracked growth returned %+v, %v", changes, err)
