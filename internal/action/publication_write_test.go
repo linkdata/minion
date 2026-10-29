@@ -151,7 +151,7 @@ func TestFixPushDeadlineAfterCheckpointSaveRollsBackBothRecords(t *testing.T) {
 	}
 }
 
-func TestFixPushReconciliationRequiresExactRemoteSHA(t *testing.T) {
+func TestFixPushReconciliationRequiresExactRemoteBranchAndSHA(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)
 	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
@@ -173,15 +173,17 @@ func TestFixPushReconciliationRequiresExactRemoteSHA(t *testing.T) {
 		switch mode {
 		case "missing":
 			http.NotFound(w, r)
-		case "mismatch":
+		case "wrong SHA":
 			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, strings.Repeat("c", 40))
+		case "wrong branch":
+			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch+"-other", sha)
 		default:
 			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, sha)
 		}
 	}))
 	t.Cleanup(server.Close)
 	e.GitHub = testGitHub(server, "token")
-	for _, mismatch := range []string{"missing", "mismatch"} {
+	for _, mismatch := range []string{"missing", "wrong SHA", "wrong branch"} {
 		mode = mismatch
 		if err := e.reconcileFixPush(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) {
 			t.Fatalf("%s remote branch authorized publication: %v", mismatch, err)
@@ -201,10 +203,49 @@ func TestFixPushReconciliationRequiresExactRemoteSHA(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	e.Store = store
 	mode = "match"
-	if err := e.reconcileFixPush(t.Context(), request); err != nil || lookups != 3 ||
+	if err := e.reconcileFixPush(t.Context(), request); err != nil || lookups != 4 ||
 		store.Data.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWriteObserved {
 		t.Fatalf("matching remote SHA was not observed after restart: lookups=%d write=%+v error=%v", lookups,
 			store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
+	}
+}
+
+func TestUncertainFixPushCannotResumeAfterBranchAppears(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	sha := strings.Repeat("b", 40)
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	if err := e.beginFixPush(t.Context(), request, "bot/repo", branch, sha, nil); err != nil {
+		t.Fatal(err)
+	}
+	write := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
+	write.Status, write.ResolvedAt = state.PublicationWriteUncertain, time.Now().UTC()
+	store.Data.PublicationWrites[fixPushWriteKey(request.ID)] = write
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	e.Store = store
+	var lookups atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lookups.Add(1)
+		_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, sha)
+	}))
+	t.Cleanup(server.Close)
+	e.GitHub = testGitHub(server, "token")
+	if err := e.reconcileFixPush(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		lookups.Load() != 0 || store.Data.PublicationWrites[fixPushWriteKey(request.ID)] != write {
+		t.Fatalf("uncertain push was reused after branch appeared: lookups=%d write=%+v error=%v",
+			lookups.Load(), store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
 	}
 }
 

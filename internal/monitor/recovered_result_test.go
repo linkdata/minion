@@ -422,11 +422,9 @@ func TestPostHandlerObservedFixPushGetsOneImmediateRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		calls := 0
-		pushes := 0
 		handler := &recoveredResultHandler{publish: func(Job) error {
 			calls++
 			if calls == 1 {
-				pushes++
 				if err := store.WithLock(func() error {
 					store.Data.PendingFixes[accepted.JobID] = pending
 					store.Data.PublicationWrites[key] = push
@@ -450,11 +448,11 @@ func TestPostHandlerObservedFixPushGetsOneImmediateRecovery(t *testing.T) {
 		}}
 		m.Handler = handler
 		_, err := m.RunOnce(t.Context(), store)
-		if err != nil || time.Since(now) != 0 || calls != 2 || pushes != 1 ||
+		if err != nil || time.Since(now) != 0 || calls != 2 ||
 			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || gh.commentCalls != 0 ||
 			store.Data.PublicationWrites[key].Status != state.PublicationWriteObserved || len(gh.verifiedCalls) != 0 {
-			t.Fatalf("observed push waited, repeated push, or lost same-pass reply: err=%v elapsed=%s calls=%d pushes=%d accepted=%+v processed=%v comments=%d old checks=%d",
-				err, time.Since(now), calls, pushes, store.Data.Accepted, store.Data.Processed[accepted.JobID], gh.commentCalls, len(gh.verifiedCalls))
+			t.Fatalf("observed push waited or lost same-pass reply: err=%v elapsed=%s calls=%d accepted=%+v processed=%v comments=%d old checks=%d",
+				err, time.Since(now), calls, store.Data.Accepted, store.Data.Processed[accepted.JobID], gh.commentCalls, len(gh.verifiedCalls))
 		}
 	})
 }

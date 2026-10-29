@@ -117,11 +117,15 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 		}
 		cancel()
 		lastChecked = jobID
+		target := fmt.Sprintf("%s #%d", write.Repository, write.Number)
+		if write.Kind == "push" {
+			target = fmt.Sprintf("%s branch %s at %s", write.Repository, write.Branch, write.SHA)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			m.logf("check issued publication %s in %s #%d: %v", jobID, write.Repository, write.Number, err)
+			m.logf("check issued publication %s in %s: %v", jobID, target, err)
 			found = false
 		}
 		if found {
@@ -130,7 +134,7 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 				return fmt.Errorf("%w: record observed publication %s: %w", ErrAcceptanceState, jobID, err)
 			}
 			if changed {
-				m.logf("observed issued publication %s in %s #%d on GitHub", jobID, write.Repository, write.Number)
+				m.logf("observed issued publication %s in %s on GitHub", jobID, target)
 			}
 			continue
 		}
@@ -140,7 +144,7 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 				return fmt.Errorf("%w: close issued publication %s: %w", ErrAcceptanceState, jobID, err)
 			}
 			if changed {
-				m.logf("publication write %s in %s #%d reached its fixed reconciliation deadline; remote effect is uncertain", jobID, write.Repository, write.Number)
+				m.logf("publication write %s in %s reached its fixed reconciliation deadline; remote effect is uncertain", jobID, target)
 			}
 		}
 	}

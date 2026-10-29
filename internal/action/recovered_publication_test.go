@@ -690,6 +690,67 @@ func TestPublishRecoveredFixReconcilesLostPushResponseWithoutSecondPush(t *testi
 	}
 }
 
+func TestPublishRecoveredFixRejectsPushCheckpointForAnotherFork(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	job.Identity.Repository = "o/r"
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
+	store, path, request := savedRecoveryFixture(t, job, result)
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	sha := strings.Repeat("b", 40)
+	if err := e.beginFixPush(t.Context(), request, "bot/other", branch, sha, nil); err != nil {
+		t.Fatal(err)
+	}
+	write := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
+	write.Status, write.ResolvedAt = state.PublicationWriteObserved, time.Now().UTC()
+	store.Data.PublicationWrites[fixPushWriteKey(request.ID)] = write
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var writes, branchLookups atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case serveSafeForkChecks(w, r, "bot/r", false):
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/branches/"):
+			branchLookups.Add(1)
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected cross-fork recovery request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("PATH", t.TempDir()) // A mismatched checkpoint must stop before Git publication.
+	e.Store, e.GitHub, e.WorkRoot = store, testGitHub(server, "token"), t.TempDir()
+	e.Runner = Runner{runModel: forbidModel(t)}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) ||
+		writes.Load() != 0 || branchLookups.Load() != 0 || store.Data.PublicationWrites[fixPushWriteKey(request.ID)] != write {
+		t.Fatalf("cross-fork push checkpoint reached publication: writes=%d lookups=%d write=%+v error=%v",
+			writes.Load(), branchLookups.Load(), store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
+	}
+}
+
 func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchWithoutGitRetry(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)
