@@ -173,7 +173,7 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 			store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 			var want Result
 			executorErr := errors.New("executor stopped")
-			e := &Orchestrator{WorkRoot: work, Usage: store, BotLogin: "bot", Main: "codex", Adversarial: "claude", GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0),
+			e := &Orchestrator{WorkRoot: work, Usage: store, BotID: 8, BotLogin: "bot", Main: "codex", Adversarial: "claude", GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0),
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 					admitFixtureAssignment(t, checkpoints, job)

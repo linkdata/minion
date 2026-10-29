@@ -400,7 +400,7 @@ func TestSelectedAuditInvalidValidatorResultIsRejectedAfterACK(t *testing.T) {
 	var posts atomic.Int32
 	server := auditRecoveryServer(t, &posts)
 	checkpoints := f.tx.sink.(*executionCheckpoints)
-	recovered := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+	recovered := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot",
 		WorkRoot: checkpoints.owner.WorkRoot, Runner: Runner{runModel: forbidModel(t)}}
 	if err := recovered.PublishRecovered(t.Context(), checkpoints.assignmentRequest); !errors.Is(err, monitor.ErrTerminalJob) ||
 		errors.Is(err, monitor.ErrPostModelPublication) || posts.Load() != 0 {

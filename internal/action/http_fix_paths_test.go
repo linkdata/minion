@@ -56,6 +56,7 @@ func TestHostileHTTPFixPathsCannotPublish(t *testing.T) {
 			}
 			e := &Orchestrator{
 				WorkRoot: workRoot, Store: openState(t, time.Now()), Usage: &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")},
+				BotID:  8,
 				GitHub: testGitHub(server, "token"), BotLogin: "bot",
 				Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 			}

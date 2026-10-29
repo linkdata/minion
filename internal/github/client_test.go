@@ -470,6 +470,17 @@ func TestPullRequestItemsCoverEveryCommentSurface(t *testing.T) {
 	}
 }
 
+func TestHasVerifiedBotReplyRequiresAccountID(t *testing.T) {
+	client := testClient(httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("invalid bot ID reached GitHub: %s", r.URL)
+	})))
+	for _, id := range []int64{0, -1} {
+		if found, err := client.HasVerifiedBotReply(t.Context(), "o/r", 7, time.Time{}, id, "marker", false); err == nil || found {
+			t.Fatalf("bot ID %d: found=%t err=%v", id, found, err)
+		}
+	}
+}
+
 func TestHasVerifiedBotReplyUsesCommandTimeAndStopsAtMatch(t *testing.T) {
 	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	marker := "<!-- linkdataminion:job -->"
@@ -482,10 +493,10 @@ func TestHasVerifiedBotReplyUsesCommandTimeAndStopsAtMatch(t *testing.T) {
 				t.Errorf("precheck did not start at command time: %s", r.URL.RawQuery)
 			}
 			w.Header().Set("Link", `<https://api.github.com/repos/o/r/issues/7/comments?page=2>; rel="next"`)
-			_, _ = fmt.Fprintf(w, `[{"id":1,"body":"old","user":{"login":"linkdataminion"},"updated_at":"2026-10-09T07:59:58Z"},{"id":2,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":"2026-10-09T08:00:01Z"}]`, "done\n\n"+marker)
+			_, _ = fmt.Fprintf(w, `[{"id":1,"body":"old","user":{"login":"linkdataminion","id":8},"updated_at":"2026-10-09T07:59:58Z"},{"id":2,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion","id":8},"updated_at":"2026-10-09T08:00:01Z"}]`, "done\n\n"+marker)
 		case "/graphql":
 			provenance++
-			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, "done\n\n"+marker)
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion","id":8}}}}`, "done\n\n"+marker)
 		default:
 			t.Errorf("unexpected precheck request: %s %s", r.Method, r.URL)
 			http.NotFound(w, r)
@@ -493,7 +504,7 @@ func TestHasVerifiedBotReplyUsesCommandTimeAndStopsAtMatch(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testClient(server)
-	found, err := client.HasVerifiedBotReply(t.Context(), "o/r", 7, since, "linkdataminion", marker, false)
+	found, err := client.HasVerifiedBotReply(t.Context(), "o/r", 7, since, 8, marker, false)
 	if err != nil || !found || pages != 1 || provenance != 1 {
 		t.Fatalf("reply lookup: found=%t err=%v pages=%d provenance=%d", found, err, pages, provenance)
 	}
@@ -591,11 +602,11 @@ func TestHasVerifiedBotReplyStopsAtReviewMatch(t *testing.T) {
 			}
 			if strings.Contains(input.Query, "timelineItems") {
 				timelineCalls++
-				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"bot-review","fullDatabaseId":"5","body":%q,"author":{"login":"linkdataminion"},"state":"COMMENTED","submittedAt":"2026-10-09T08:01:00Z"}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}}}`, "done\n\n"+marker)
+				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[{"id":"bot-review","fullDatabaseId":"5","body":%q,"author":{"login":"linkdataminion","id":8},"state":"COMMENTED","submittedAt":"2026-10-09T08:01:00Z"}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}}}`, "done\n\n"+marker)
 				return
 			}
 			provenanceCalls++
-			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, "done\n\n"+marker)
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion","id":8}}}}`, "done\n\n"+marker)
 		default:
 			t.Errorf("unexpected request %s", r.URL)
 			http.NotFound(w, r)
@@ -603,7 +614,7 @@ func TestHasVerifiedBotReplyStopsAtReviewMatch(t *testing.T) {
 	}))
 	defer server.Close()
 	since := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	found, err := testClient(server).HasVerifiedBotReply(t.Context(), "o/r", 7, since, "linkdataminion", marker, true)
+	found, err := testClient(server).HasVerifiedBotReply(t.Context(), "o/r", 7, since, 8, marker, true)
 	if err != nil || !found || timelineCalls != 1 || provenanceCalls != 1 {
 		t.Fatalf("review precheck: found=%t err=%v timeline=%d provenance=%d", found, err, timelineCalls, provenanceCalls)
 	}
@@ -626,7 +637,6 @@ func TestHasVerifiedBotPublicationUsesRecordedSurface(t *testing.T) {
 			{name: "renamed account", author: User{ID: 8, Login: "renamed-bot"}, bot: User{ID: 8, Login: "linkdataminion"}, want: true, wantProvenance: 1},
 			{name: "reclaimed login", author: User{ID: 9, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}},
 			{name: "provenance changed", author: User{ID: 8, Login: "linkdataminion"}, provenanceAuthor: User{ID: 9, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}, wantProvenance: 1},
-			{name: "legacy login", author: User{ID: 8, Login: "linkdataminion"}, bot: User{Login: "linkdataminion"}, want: true, wantProvenance: 1},
 		} {
 			t.Run(presentKind+"/"+tc.name, func(t *testing.T) {
 				var comments, reviews, provenance int
@@ -686,6 +696,19 @@ func TestHasVerifiedBotPublicationUsesRecordedSurface(t *testing.T) {
 					t.Fatalf("recorded surface lookup: found=%t err=%v comments=%d reviews=%d provenance=%d", found, err, comments, reviews, provenance)
 				}
 			})
+		}
+	}
+}
+
+func TestHasVerifiedBotPublicationRequiresBotID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unpinned bot triggered GitHub request: %s", r.URL)
+	}))
+	defer server.Close()
+	for _, kind := range []string{"comment", "review"} {
+		found, err := testClient(server).HasVerifiedBotPublication(t.Context(), "o/r", 7, time.Time{}, User{Login: "linkdataminion"}, "<!-- linkdataminion:job -->", kind)
+		if err == nil || found {
+			t.Fatalf("%s with missing bot ID: found=%t err=%v", kind, found, err)
 		}
 	}
 }

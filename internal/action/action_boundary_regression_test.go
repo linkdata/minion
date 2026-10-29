@@ -46,7 +46,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 					}
 				}))
 				defer server.Close()
-				e := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, Runner: Runner{WorkRoot: other, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				e := &Orchestrator{WorkRoot: root, BotID: 8, GitHub: testGitHub(server, "fixture"), Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, Runner: Runner{WorkRoot: other, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
 					if filepath.Dir(request.dir) != root {
 						t.Fatalf("runner ignored orchestrator placement: %s", request.dir)

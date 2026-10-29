@@ -272,7 +272,7 @@ func (e *Orchestrator) logf(format string, args ...any) {
 
 func (e *Orchestrator) alreadyAcknowledged(ctx context.Context, job monitor.Job) (bool, error) {
 	includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
-	found, err := e.GitHub.HasVerifiedBotReply(ctx, job.Repository.Name, job.Number, job.Source.UpdatedAt, e.BotLogin, job.Marker(), includeReviews)
+	found, err := e.GitHub.HasVerifiedBotReply(ctx, job.Repository.Name, job.Number, job.Source.UpdatedAt, e.BotID, job.Marker(), includeReviews)
 	if err != nil {
 		return false, fmt.Errorf("check existing bot replies: %w", err)
 	}

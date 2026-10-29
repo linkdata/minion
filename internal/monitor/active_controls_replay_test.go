@@ -219,7 +219,7 @@ func TestSelectedActionChecksSiblingAtJobDeadline(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -301,7 +301,7 @@ func TestSelectedActionChecksTerminalDeadlineBeforePendingRetry(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -362,7 +362,7 @@ func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -472,7 +472,7 @@ func TestSelectedActionRetainsTerminalReplyAfterStateSaveFailure(t *testing.T) {
 				signals := controlReplyLog{failed: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
 				cfg := testConfig(t)
 				cfg.MaxRuntimeMinutes = 7
-				m := &Monitor{Config: cfg, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
+				m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
 					SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -601,7 +601,7 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
 		signals := controlReplyLog{failed: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -693,7 +693,7 @@ func TestSelectedActionChecksNewerPendingThreadBeforeRetryAt(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -769,7 +769,7 @@ func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -932,7 +932,7 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 					cfg.Repositories[0].AllowedActors = []string{"writer"}
 					cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 				}
-				m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+				m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 					SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -1028,7 +1028,7 @@ func TestSelectedReactionRecoveryServicesTerminalSibling(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) {
 			t.Fatalf("first run did not fail after acceptance: %v", err)
@@ -1189,7 +1189,7 @@ func TestSelectedActionChecksOnlyTerminalThreadInPendingBacklog(t *testing.T) {
 			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -1278,7 +1278,7 @@ func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
 			return ErrAcceptedRetry
 		})
 		clock := now
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return clock },
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: handler, Now: func() time.Time { return clock },
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		result := make(chan error, 1)
 		go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()
@@ -1347,7 +1347,7 @@ func TestSelectedReviewKeepsOlderTerminalFixForControlReply(t *testing.T) {
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -1428,7 +1428,7 @@ func TestSelectedTerminalReplyWaitsForPersistedRetryAt(t *testing.T) {
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -1521,7 +1521,7 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		result := make(chan error, 1)
 		go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()

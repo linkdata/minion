@@ -96,7 +96,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			}))
 			defer server.Close()
 			workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
-			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot",
 				Commands: map[string]config.CommandMapping{"security-audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}}},
 			}
 			executed := false

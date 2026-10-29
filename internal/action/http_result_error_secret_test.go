@@ -54,6 +54,7 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 			usageDir := filepath.Join(t.TempDir(), "usage")
 			e := &Orchestrator{
 				WorkRoot: t.TempDir(), Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
+				BotID:  8,
 				GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", Logger: log.New(&journal, "", 0),
 				Runner:   Runner{Codex: config.CodexConfig{APIKey: key}},
 				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},

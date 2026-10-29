@@ -58,13 +58,13 @@ func TestReconcileIssuedReviewRequiresReviewMarker(t *testing.T) {
 	store := openState(t, now)
 	marker := "<!-- linkdataminion:issued-job -->"
 	store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
-		AttemptID: "attempt-1", Kind: "review", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+		AttemptID: "attempt-1", Kind: "review", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 	}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	gh := &fakeGitHub{items: []github.Item{{Body: "comment\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}}
+	gh := &fakeGitHub{items: []github.Item{{Body: "comment\n\n" + marker, Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}}
 	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
 	if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
 		t.Fatal(err)
@@ -80,7 +80,7 @@ func TestReconcilePublicationWriteExpiresWithoutRepost(t *testing.T) {
 		store := openState(t, now)
 		jobID := "issued-job"
 		store.Data.PublicationWrites[jobID] = state.PublicationWrite{
-			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 			Marker: "<!-- linkdataminion:issued-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
@@ -220,7 +220,7 @@ func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
 		store := openState(t, now)
 		marker := "<!-- linkdataminion:issued-job -->"
 		store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
-			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 			Marker: marker, Since: now, StartedAt: now,
 			Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
@@ -230,7 +230,7 @@ func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
 		gh := &fakeGitHub{}
 		m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
 		time.Sleep(2 * time.Minute)
-		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}
+		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}
 		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
@@ -249,7 +249,7 @@ func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testin
 		ids := []string{"job-a", "job-b", "job-c"}
 		for _, id := range ids {
 			store.Data.PublicationWrites[id] = state.PublicationWrite{
-				AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+				AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 				Marker: "<!-- linkdataminion:" + id + " -->", Since: now.Add(-time.Minute),
 				StartedAt: now.Add(-2 * time.Minute), Deadline: now.Add(-time.Minute), Status: state.PublicationWritePending,
 			}
@@ -291,7 +291,7 @@ func TestRunOnceWithoutWorkerWakesForIssuedPublication(t *testing.T) {
 		now := time.Now().UTC()
 		store := openState(t, now)
 		store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
-			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 			Marker: "<!-- linkdataminion:issued-job -->", Since: now, StartedAt: now,
 			Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
 		}
@@ -314,12 +314,12 @@ func TestRunOnceAcceptedRetryChecksOlderIssuedPublication(t *testing.T) {
 		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
 		store.Data.Accepted.RetryAt = now.Add(5 * time.Minute)
 		store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
-			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "bot", Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "bot", BotID: 8, Repository: accepted.Repository, Number: accepted.SubjectNumber,
 			Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
 			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now, StartedAt: now,
 			Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
@@ -342,7 +342,7 @@ func TestSelectedCapacityWaitRechecksIssuedPublication(t *testing.T) {
 		store := openState(t, now)
 		marker := "<!-- linkdataminion:issued-job -->"
 		store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
-			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 			Marker: marker, Since: now, StartedAt: now,
 			Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
 		}
@@ -365,7 +365,7 @@ func TestSelectedCapacityWaitRechecksIssuedPublication(t *testing.T) {
 		}
 		time.Sleep(45 * time.Second)
 		gh.mu.Lock()
-		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}
+		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}
 		gh.mu.Unlock()
 		time.Sleep(30 * time.Second)
 		synctest.Wait()
@@ -389,7 +389,7 @@ func TestReconcilePublicationWritesPrioritizesAcceptedJob(t *testing.T) {
 	store := openState(t, now)
 	for _, id := range []string{"old-job", "active-job"} {
 		store.Data.PublicationWrites[id] = state.PublicationWrite{
-			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+			AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 			Marker: "<!-- linkdataminion:" + id + " -->", Since: now,
 			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
@@ -397,7 +397,7 @@ func TestReconcilePublicationWritesPrioritizesAcceptedJob(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n<!-- linkdataminion:active-job -->", Author: github.User{Login: "bot"}, UpdatedAt: now}}}
+	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n<!-- linkdataminion:active-job -->", Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}}
 	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
 	if err := m.reconcilePublicationWrites(t.Context(), store, "active-job", ""); err != nil {
 		t.Fatal(err)
@@ -416,7 +416,7 @@ func TestIssuedTaskWriteSuppressesFailureReply(t *testing.T) {
 		Source: github.Item{Key: "source", UpdatedAt: now}, Command: command.Command{Name: "ask", Action: command.Comment},
 	}
 	store.Data.PublicationWrites[job.ID] = state.PublicationWrite{
-		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: job.Repository.Name, Number: job.Number,
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: job.Repository.Name, Number: job.Number,
 		Marker: job.Marker(), Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 	}
 	failure := state.JobFailure{Attempts: maxJobAttempts}
@@ -442,7 +442,7 @@ func TestIssuedReviewStillSuppressesReplyAfterCommandRemap(t *testing.T) {
 	job := Job{ID: "issued-job", Repository: config.Repository{Name: "owner/repo"}, SubjectType: "PullRequest", Number: 7,
 		Source: github.Item{Key: "source", UpdatedAt: now}, Command: command.Command{Name: "ask", Action: command.Comment}}
 	store.Data.PublicationWrites[job.ID] = state.PublicationWrite{
-		AttemptID: "old-attempt", Kind: "review", BotLogin: "bot", Repository: job.Repository.Name, Number: job.Number,
+		AttemptID: "old-attempt", Kind: "review", BotLogin: "bot", BotID: 8, Repository: job.Repository.Name, Number: job.Number,
 		Marker: job.Marker(), Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 	}
 	failure := state.JobFailure{Attempts: maxJobAttempts}
@@ -469,7 +469,7 @@ func TestRunOnceReconcilesWriteAfterTaskCleanup(t *testing.T) {
 	marker := "<!-- linkdataminion:issued-job -->"
 	store.Data.Processed[jobID] = now
 	store.Data.PublicationWrites[jobID] = state.PublicationWrite{
-		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 	}
 	store.Data.NextPollAt = now.Add(time.Hour)
@@ -477,7 +477,7 @@ func TestRunOnceReconcilesWriteAfterTaskCleanup(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot"}, UpdatedAt: now}}}
+	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n" + marker, Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}}
 	handler := &fakeHandler{}
 	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh, Handler: handler}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
@@ -497,13 +497,13 @@ func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
 		synchronizedGitHub := &synchronizedRecoveryGitHub{fakeGitHub: gh}
 		m.GitHub = synchronizedGitHub
 		store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
-			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion",
+			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion", BotID: 8,
 			Repository: accepted.Repository, Number: accepted.SubjectNumber,
 			Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
 			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
 		}
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
 		}
@@ -608,7 +608,7 @@ func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 		push.Deadline = now.Add(10 * time.Second)
 		store.Data.PublicationWrites[key] = push
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(90 * time.Second), Status: state.PublicationWritePending,
 		}
@@ -680,7 +680,7 @@ func TestRecoveredIssuedReviewSkipsLiveSourceRevalidation(t *testing.T) {
 			store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
 			marker := "<!-- linkdataminion:" + accepted.JobID + " -->"
 			store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
-				AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion",
+				AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion", BotID: 8,
 				Repository: accepted.Repository, Number: accepted.SubjectNumber,
 				Marker: marker, Since: accepted.SourceUpdatedAt, StartedAt: now,
 				Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
@@ -689,7 +689,7 @@ func TestRecoveredIssuedReviewSkipsLiveSourceRevalidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			gh.reviewReplies = []github.Item{{Key: "review:1", Body: "published\n\n" + marker,
-				Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}}
+				Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
 			var sourceRead bool
 			gh.currentItem = func(item github.Item) (github.Item, error) {
 				if item.Key == accepted.SourceKey {

@@ -485,13 +485,13 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 						http.Error(w, "early provenance", http.StatusInternalServerError)
 						return
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]string{"login": "bot"}}}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]any{"login": "bot", "id": 8}}}})
 				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
 					var payload struct{ Body string }
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					comments = append(comments, github.Comment{NodeID: "completion-reply-1", Body: payload.Body, User: github.User{Login: "bot"}})
+					comments = append(comments, github.Comment{NodeID: "completion-reply-1", Body: payload.Body, User: github.User{Login: "bot", ID: 8}})
 					w.WriteHeader(http.StatusCreated)
 					if _, err := fmt.Fprint(w, `{"id":1}`); err != nil {
 						t.Error(err)
@@ -510,8 +510,8 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 				}
 			}
 			e := &Orchestrator{
-				GitHub:     client,
-				BotLogin:   "bot",
+				GitHub: client,
+				BotID:  8, BotLogin: "bot",
 				Usage:      &usage.Store{Dir: dir},
 				Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 				CodexModel: "test-model",

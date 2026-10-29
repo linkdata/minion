@@ -170,16 +170,16 @@ func TestPublishRecoveredReconcilesPostedMarkerWithoutModelOrSecondWrite(t *test
 		reads.Add(1)
 		switch r.URL.Path {
 		case "/repos/owner/repo/issues/7/comments":
-			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
+			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion","id":8},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
 		case "/graphql":
-			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, markerBody)
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion","id":8}}}}`, markerBody)
 		default:
 			t.Errorf("unexpected recovery read: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "linkdataminion", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, CheckWorkRoot: func() error { rootChecks++; return workroot.ErrUnsafe }}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || reads.Load() != 2 || writes.Load() != 0 || rootChecks != 0 {
 		t.Fatalf("posted marker was not reconciled: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
@@ -208,16 +208,16 @@ func TestSelectedExecuteAlreadyAcknowledgedPersistsSuccessWithoutWorker(t *testi
 		reads.Add(1)
 		switch r.URL.Path {
 		case "/repos/owner/repo/issues/7/comments":
-			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion"},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
+			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"linkdataminion","id":8},"updated_at":%q}]`, markerBody, request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339))
 		case "/graphql":
-			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion"}}}}`, markerBody)
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"linkdataminion","id":8}}}}`, markerBody)
 		default:
 			t.Errorf("unexpected read: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
 		}
 	}))
 	t.Cleanup(server.Close)
-	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion",
+	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "linkdataminion",
 		assignmentRequired: true,
 		Commands:           map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		Executor: executorFunc(func(context.Context, Job, Checkpoints) (Result, error) {
@@ -267,7 +267,7 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 				var nodes []map[string]any
 				if review := posted.Load(); review != nil {
 					nodes = []map[string]any{{"id": "review-node", "fullDatabaseId": "1", "body": review.body,
-						"author": map[string]string{"login": "bot"}, "state": "COMMENTED", "submittedAt": request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339)}}
+						"author": map[string]any{"login": "bot", "id": 8}, "state": "COMMENTED", "submittedAt": request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339)}}
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
 					"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
@@ -281,7 +281,7 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{
-				"body": review.body, "author": map[string]string{"login": "bot"}}}})
+				"body": review.body, "author": map[string]any{"login": "bot", "id": 8}}}})
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo":
 			_, _ = fmt.Fprint(w, `{"id":1,"full_name":"owner/repo","owner":{"id":2,"login":"owner"},"default_branch":"main","visibility":"public"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/pulls/7/reviews":
@@ -337,7 +337,7 @@ func TestPublishRecoveredChecksWorkRootBeforeNewPublication(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		CheckWorkRoot: func() error { rootChecks++; return workroot.ErrUnsafe }}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrTerminalJob) || reads.Load() != 1 || writes.Load() != 0 || rootChecks != 1 {
 		t.Fatalf("unsafe work root did not stop new publication: reads=%d writes=%d root_checks=%d error=%v", reads.Load(), writes.Load(), rootChecks, err)
@@ -359,7 +359,7 @@ func TestPublishRecoveredBoundsEachAttempt(t *testing.T) {
 		defer server.Close()
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), MaxRuntime: 20 * time.Millisecond}
+		orchestrator := Orchestrator{Store: store, BotID: 8, GitHub: testGitHub(server, "token"), MaxRuntime: 20 * time.Millisecond}
 		started := time.Now()
 		if err := orchestrator.PublishRecovered(ctx, request); !errors.Is(err, context.DeadlineExceeded) || time.Since(started) >= time.Second {
 			t.Fatalf("recovery did not stop at its attempt budget: elapsed=%s error=%v", time.Since(started), err)
@@ -472,7 +472,7 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{Codex: config.CodexConfig{APIKey: "configured-secret"}, runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
 		!strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
@@ -583,7 +583,7 @@ func TestPublishRecoveredFixRevalidatesBeforePush(t *testing.T) {
 	defer server.Close()
 	denied := errors.New("requester no longer has permission")
 	var checks int
-	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: root,
 		ValidatePublication: func(_ context.Context, got monitor.Job, requireAssigned bool) error {
 			checks++
 			if got.ID != request.ID || !requireAssigned {
@@ -869,7 +869,7 @@ func TestPublishRecoveredFixChecksGitBeforeRestoringSource(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := e.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git 2.45.1 or later") || writes.Load() != 0 {
 		t.Fatalf("unchecked Git reached recovery publication: writes=%d error=%v", writes.Load(), err)
@@ -915,7 +915,7 @@ func TestPublishRecoveredFixRejectsUnrecordedBranchSHA(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	err := orchestrator.PublishRecovered(t.Context(), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes.Load() != 0 {
@@ -963,7 +963,7 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			t.Setenv("PATH", t.TempDir()) // A destination mismatch must stop before Git publication.
-			orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+			orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 			err := orchestrator.PublishRecovered(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes.Load() != 0 {

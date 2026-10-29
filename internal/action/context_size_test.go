@@ -142,7 +142,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 						}
 						comment := github.Comment{
 							ID: 1, NodeID: "reply-node", Body: input.Body,
-							User: github.User{Login: "linkdataminion"}, UpdatedAt: time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC),
+							User: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC),
 						}
 						mu.Lock()
 						replies = append(replies, comment)
@@ -196,7 +196,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 							}
 							mu.Unlock()
 							respond(w, map[string]any{"data": map[string]any{"node": map[string]any{
-								"body": body, "author": map[string]any{"login": "linkdataminion"},
+								"body": body, "author": map[string]any{"login": "linkdataminion", "id": 8},
 							}}})
 						}
 					default:
@@ -209,6 +209,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				store := openState(t, job.Source.UpdatedAt)
 				var modelCalls int
 				orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
+					BotID:                 8,
 					BotLogin:              "linkdataminion",
 					Store:                 store,
 					MaxGitHubContextBytes: limit,

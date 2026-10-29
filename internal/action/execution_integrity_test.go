@@ -49,7 +49,7 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 			mainTokens, criticTokens := usage.Tokens{Input: 10, CachedInput: 2, Output: 3}, usage.Tokens{Input: 7, CachedInput: 1, Output: 2}
 			var journal bytes.Buffer
 			zero, calls := 0, 0
-			e := Orchestrator{WorkRoot: work, Usage: store, Store: openState(t, time.Now()), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Main: "codex", Adversarial: "claude", Logger: log.New(&journal, "", 0),
+			e := Orchestrator{WorkRoot: work, Usage: store, Store: openState(t, time.Now()), GitHub: testGitHub(server, "fixture"), BotID: 8, BotLogin: "bot", Main: "codex", Adversarial: "claude", Logger: log.New(&journal, "", 0),
 				CriticStopping: config.CriticStopping{MaxRounds: 3, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
 				Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
