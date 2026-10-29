@@ -31,6 +31,21 @@ type terminalRecoveryGitHub struct {
 	reply string
 }
 
+type pendingPushLoopGitHub struct {
+	monitor.GitHub
+	cancel context.CancelFunc
+	checks int
+}
+
+func (g *pendingPushLoopGitHub) Branch(context.Context, string, string) (github.Branch, error) {
+	g.checks++
+	if g.checks == 1 {
+		return github.Branch{}, &github.StatusError{StatusCode: http.StatusNotFound}
+	}
+	g.cancel()
+	return github.Branch{}, context.Canceled
+}
+
 func serviceStore(t *testing.T, data state.Data) *state.Store {
 	t.Helper()
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
@@ -291,6 +306,48 @@ func TestOrchestrateModeAttachesAfterExpiredAcceptanceRecovery(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMonitorLoopRechecksPendingPushBeforeSubsecondDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		deadline := now.Add(500 * time.Millisecond)
+		jobID := strings.Repeat("a", 64)
+		accepted := state.AcceptedAction{
+			JobID: jobID, AttemptID: strings.Repeat("b", 32), ExecutorID: action.LocalExecutorID,
+			Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+			SubjectType: "Issue", SubjectNumber: 7,
+			SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
+			Requester: "writer", RequesterID: 7, CommandName: "fix", Action: "fix",
+			AcceptedAt: now, Deadline: deadline, RetryAt: deadline, Assigned: true,
+		}
+		sha := strings.Repeat("c", 40)
+		store := serviceStore(t, state.Data{
+			Accepted: &accepted, JobFailures: map[string]state.JobFailure{
+				jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+			},
+			PendingFixes: map[string]state.PendingFix{jobID: {SHA: sha}},
+			PublicationWrites: map[string]state.PublicationWrite{jobID + "-push": {
+				AttemptID: accepted.AttemptID, Kind: "push", BotLogin: "bot", Repository: "bot/repo", Number: 7,
+				Marker: "<!-- linkdataminion:" + jobID + " -->", Branch: "minion/fix-7-" + jobID[:12], SHA: sha,
+				Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+			}},
+			NextPollAt: now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
+		})
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		gh := &pendingPushLoopGitHub{cancel: cancel}
+		watcher := &monitor.Monitor{GitHub: gh, Now: time.Now}
+		var logs bytes.Buffer
+		code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
+		if code != 0 || gh.checks != 2 || !time.Now().Before(deadline) {
+			t.Fatalf("loop missed pending push subsecond wake: code=%d checks=%d elapsed=%s logs=%q",
+				code, gh.checks, time.Since(now), logs.String())
+		}
+	})
 }
 
 func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {

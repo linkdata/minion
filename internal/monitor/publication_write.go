@@ -15,6 +15,7 @@ import (
 
 const publicationRecheckInterval = 30 * time.Second
 const publicationReconcileBudget = 10 * time.Second
+const publicationLastChanceInterval = 100 * time.Millisecond
 
 // ReconcilePublicationWrites checks issued writes without accepting or running a new action.
 func (m *Monitor) ReconcilePublicationWrites(ctx context.Context, store *state.Store) error {
@@ -182,16 +183,12 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 			if jobID == skipJobID || write.Status != state.PublicationWritePending {
 				continue
 			}
-			interval := publicationRecheckInterval
+			var actionDeadline time.Time
 			if accepted := store.Data.Accepted; accepted != nil && write.Kind == "push" &&
 				jobID == accepted.JobID+"-push" && at.Before(accepted.Deadline) {
-				// Recheck before the action deadline without polling faster than once a second.
-				interval = min(interval, max(time.Second, accepted.Deadline.Sub(at)/2))
+				actionDeadline = accepted.Deadline
 			}
-			checkAt := at.Add(interval)
-			if write.Deadline.Before(checkAt) {
-				checkAt = write.Deadline
-			}
+			checkAt := publicationWriteCheckAt(write, at, actionDeadline)
 			if next.IsZero() || checkAt.Before(next) {
 				next = checkAt
 			}
@@ -199,6 +196,24 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 		return nil
 	})
 	return next
+}
+
+func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
+	interval := publicationRecheckInterval
+	if !actionDeadline.IsZero() && at.Before(actionDeadline) {
+		remaining := actionDeadline.Sub(at)
+		if remaining > time.Second {
+			interval = min(interval, max(time.Second, remaining/2))
+		} else {
+			// Leave time for one last lookup without a rapid loop at expiry.
+			interval = min(remaining, max(publicationLastChanceInterval, remaining/2))
+		}
+	}
+	checkAt := at.Add(interval)
+	if write.Deadline.Before(checkAt) {
+		checkAt = write.Deadline
+	}
+	return checkAt
 }
 
 func withPublicationWriteWake(next time.Time, store *state.Store, at time.Time) time.Time {
