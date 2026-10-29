@@ -677,6 +677,43 @@ func TestPendingFixPushGetsSubsecondWakeBeforeDeadline(t *testing.T) {
 	}
 }
 
+func TestPendingFixPushWakeIgnoresOverdueOtherWriteAfterRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(500 * time.Millisecond)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = time.Time{}
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			return github.Branch{}, &github.StatusError{StatusCode: 404}
+		}
+		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		want := now.Add(250 * time.Millisecond)
+		if !errors.Is(err, ErrPostModelPublication) || !next.Equal(want) ||
+			branchChecks != 2 || handler.publications != 1 || len(gh.verifiedCalls) != 0 ||
+			store.Data.Accepted == nil || store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending {
+			t.Fatalf("overdue other write displaced pending push wake: next=%s want=%s err=%v branch checks=%d publications=%d old checks=%d accepted=%+v",
+				next, want, err, branchChecks, handler.publications, len(gh.verifiedCalls), store.Data.Accepted)
+		}
+	})
+}
+
 func TestRecoveredFixPushResultPreemptsOlderWriteNearDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

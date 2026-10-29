@@ -193,6 +193,18 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	now := m.now
 	wake := func(next time.Time, service bool) time.Time {
+		at := now().UTC()
+		if accepted := store.Data.Accepted; accepted != nil && at.Before(accepted.Deadline) {
+			push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+			if push.Status == state.PublicationWritePending {
+				// Do not let overdue unrelated writes delay the active push check.
+				pushWake := publicationWriteCheckAt(push, at, accepted.Deadline)
+				if !pushWake.After(at) {
+					pushWake = earlierWake(at.Add(publicationLastChanceInterval), accepted.Deadline)
+				}
+				return pushWake
+			}
+		}
 		var terminal time.Time
 		if service && ctx.Err() == nil {
 			terminal = m.serviceTerminalControls(ctx, store)
@@ -204,9 +216,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if !terminal.IsZero() && (next.IsZero() || terminal.Before(next)) {
 				next = terminal
 			}
-			return withPublicationWriteWake(next, store, now().UTC())
+			return withPublicationWriteWake(next, store, at)
 		}
-		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, now().UTC())
+		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, at)
 	}
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
