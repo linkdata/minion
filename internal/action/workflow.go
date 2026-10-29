@@ -642,14 +642,14 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 			if err := e.publicationAllowed(ctx, request, true); err != nil {
 				return err
 			}
-			return e.acknowledge(ctx, request, fixIssueChangedReply)
+			return e.publishTaskComment(ctx, request, fixIssueChangedReply)
 		} else if err != nil {
 			return err
 		}
 		if err := e.publicationAllowed(ctx, request, true); err != nil {
 			return err
 		}
-		return e.acknowledge(ctx, request, "AI returned a response without changing files.\n\n"+inertModelOutput(published.answer))
+		return e.publishTaskComment(ctx, request, "AI returned a response without changing files.\n\n"+inertModelOutput(published.answer))
 	}
 	currentRepo, currentFork, err := e.fixFork(ctx, request.Repository)
 	if err != nil {
@@ -699,7 +699,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 			if gateErr := e.publicationAllowed(ctx, request, true); gateErr != nil {
 				return gateErr
 			}
-			return e.acknowledge(ctx, request, fixIssueChangedReply)
+			return e.publishTaskComment(ctx, request, fixIssueChangedReply)
 		}
 		if errors.Is(err, gitwork.ErrNoChanges) {
 			return fmt.Errorf("%w: reviewed changes produced no commit: %w", monitor.ErrTerminalJob, err)
@@ -753,5 +753,8 @@ func (e *Orchestrator) publishFixReply(ctx context.Context, p *preparedAction) e
 	if err := e.publicationAllowed(ctx, request, p.needsExecution()); err != nil {
 		return err
 	}
-	return e.acknowledge(ctx, request, reply)
+	if !p.needsExecution() {
+		return e.acknowledge(ctx, request, reply)
+	}
+	return e.publishTaskComment(ctx, request, reply)
 }

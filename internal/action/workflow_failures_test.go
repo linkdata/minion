@@ -131,7 +131,7 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 			request.Command = command.Command{Name: "fix", Action: command.Fix}
 			reserveActionRequest(t, store, &request, kind == "model result")
 			prepared := &preparedAction{request: request, issueNodeID: "issue-node", repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
-			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot", ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil }}
+			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot", BotID: 8, ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil }}
 			var err error
 			switch kind {
 			case "fixed reply":
@@ -407,7 +407,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 	defer server.Close()
 	client := testGitHub(server, "fixture-token")
 	var journal bytes.Buffer
-	orchestrator := Orchestrator{WorkRoot: root, GitHub: client, BotLogin: "bot", Store: store, Logger: log.New(&journal, "", 0),
+	orchestrator := Orchestrator{WorkRoot: root, GitHub: client, BotLogin: "bot", BotID: 8, Store: store, Logger: log.New(&journal, "", 0),
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 			modelCalls++

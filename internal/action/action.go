@@ -78,11 +78,11 @@ type Orchestrator struct {
 
 var _ monitor.StoredResultPublisher = (*Orchestrator)(nil)
 
-// WaitCapacity gates discovery when the selected executor owns readiness.
+// WaitCapacity gates discovery on selected executor readiness.
 func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	ready, ok := e.Executor.(interface{ WaitCapacity(context.Context) error })
 	if !ok {
-		return nil
+		return fmt.Errorf("%w: selected executor readiness is unavailable", monitor.ErrAcceptanceState)
 	}
 	return redactActionError(ready.WaitCapacity(ctx), e.Runner.secretValues()...)
 }

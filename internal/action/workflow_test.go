@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
@@ -226,7 +227,7 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	defer server.Close()
 	client := testGitHub(server, "token")
 	store := openState(t, time.Now())
-	e := Orchestrator{GitHub: client, Store: store, ValidatePublication: permitSelectedPublication}
+	e := Orchestrator{GitHub: client, Store: store, BotLogin: "bot", BotID: 8, ValidatePublication: permitSelectedPublication}
 	request := usageJob()
 	request.Source.UpdatedAt = time.Now()
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
@@ -236,6 +237,9 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	}
 	if !strings.HasPrefix(body, "AI returned a response without changing files.\n\n") || !strings.Contains(body, "Tests passed.") || !strings.Contains(body, request.Marker()) {
 		t.Fatalf("no-change reply=%q", body)
+	}
+	if write := store.Data.PublicationWrites[request.ID]; write.Kind != "comment" || write.Status != state.PublicationWriteObserved {
+		t.Fatalf("no-change reply did not record observed publication: %+v", write)
 	}
 }
 

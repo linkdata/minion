@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 type readinessExecutor struct {
@@ -24,10 +25,25 @@ func (e *readinessExecutor) WaitCapacity(context.Context) error {
 	return e.err
 }
 
-func TestOrchestratorWaitCapacityDelegatesWithoutExposingSecrets(t *testing.T) {
-	if err := (&Orchestrator{}).WaitCapacity(t.Context()); err != nil {
-		t.Fatalf("orchestrator without an executor required readiness: %v", err)
+func TestOrchestratorWaitCapacityRequiresReadyExecutor(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		executor Executor
+	}{
+		{name: "missing executor"},
+		{name: "executor without readiness", executor: executorFunc(func(context.Context, Job, Checkpoints) (Result, error) {
+			panic("capacity test must not execute a Job")
+		})},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := (&Orchestrator{Executor: test.executor}).WaitCapacity(t.Context()); !errors.Is(err, monitor.ErrAcceptanceState) {
+				t.Fatalf("unavailable readiness was accepted: %v", err)
+			}
+		})
 	}
+}
+
+func TestOrchestratorWaitCapacityDelegatesWithoutExposingSecrets(t *testing.T) {
 	const secret = "selected-worker-secret"
 	cause := errors.New("worker unavailable")
 	worker := &readinessExecutor{err: fmt.Errorf("%w: %s", cause, secret)}

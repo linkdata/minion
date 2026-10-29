@@ -220,7 +220,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	defer server.Close()
 	root := t.TempDir()
 	var journal bytes.Buffer
-	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
+	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
 	reserveActionRequest(t, owner.Store, &request, true)
 	repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 	fork := github.Repository{ID: 4, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, Visibility: "public"}
@@ -344,7 +344,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	root := t.TempDir()
 	owner := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotLogin: "linkdataminion", Main: "codex",
 		Logger: parentLogger, Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}}}
-	owner.Executor = executorFunc(func(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
+	owner.Executor = readyExecutor{executorFunc(func(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
 		jobs = append(jobs, job)
 		assignment, ok := sink.(assignmentCheckpoint)
 		if !ok || !assignment.AssignmentRequired() {
@@ -371,7 +371,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 			t.Fatalf("received outcome lost failure or raw candidate: %+v", got)
 		}
 		return got.result, got.err
-	})
+	})}
 	now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
 	clock := now
 	store := openState(t, now.Add(-time.Minute))

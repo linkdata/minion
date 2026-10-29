@@ -19,6 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
@@ -77,7 +78,7 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 			}))
 			defer server.Close()
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"),
-				BotLogin: "linkdataminion", Store: store,
+				BotLogin: "linkdataminion", BotID: 8, Store: store,
 				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 					if modelRequest.role == roleCritic {
@@ -107,6 +108,11 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				}
 			} else if err != nil || !strings.Contains(reply, "issue changed after this `fix` request") || strings.Contains(reply, "stale model answer") {
 				t.Fatalf("stale issue was published: reply=%q err=%v", reply, err)
+			}
+			if !tc.queryFailure {
+				if write := store.Data.PublicationWrites[request.ID]; write.Kind != "comment" || write.Status != state.PublicationWriteObserved {
+					t.Fatalf("issue-changed reply bypassed publication ledger: %+v", write)
+				}
 			}
 			if !modelRan.Load() || queries.Load() != 2 || len(store.Data.PendingFixes) != 0 {
 				t.Fatalf("freshness checks or checkpoint wrong: model=%t queries=%d pending=%v", modelRan.Load(), queries.Load(), store.Data.PendingFixes)

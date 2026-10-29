@@ -440,7 +440,7 @@ func TestPublishRecoveredNoChangeFixRepliesWithoutFork(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies.Load() != 1 ||
 		!strings.Contains(comment, "AI returned a response without changing files.") || !strings.Contains(comment, "Saved complete answer") ||
@@ -527,7 +527,7 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatal(err)
@@ -635,7 +635,7 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || comment != "" {
 		t.Fatalf("failed fork push did not retain complete result: comment=%q error=%v", comment, err)
@@ -745,7 +745,7 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *te
 	}))
 	defer server.Close()
 	t.Setenv("PATH", t.TempDir()) // A missing branch needs Git before rebuilding from the saved result.
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git readiness before recovered fix") ||
 		replies.Load() != 0 || branchLookups.Load() != 1 || store.Data.PendingFixes[request.ID].SHA != sha {

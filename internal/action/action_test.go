@@ -319,8 +319,12 @@ func admitFixtureAssignment(t *testing.T, checkpoints Checkpoints, job Job) {
 	}
 }
 
+type readyExecutor struct{ Executor }
+
+func (readyExecutor) WaitCapacity(context.Context) error { return nil }
+
 func attachSelectedRunner(owner *Orchestrator) {
-	owner.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+	owner.Executor = readyExecutor{executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 		assignment, ok := checkpoints.(assignmentCheckpoint)
 		if !ok || !assignment.AssignmentRequired() {
 			return Result{}, fmt.Errorf("selected runner has no assignment checkpoint")
@@ -339,7 +343,7 @@ func attachSelectedRunner(owner *Orchestrator) {
 			err = receiver.ReceiveCompletedResult(result)
 		}
 		return result, err
-	})
+	})}
 }
 
 func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
@@ -824,6 +828,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 				Commands:       map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				BotLogin:       "linkdataminion",
+				BotID:          8,
 				Store:          store,
 				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &strict},
 				Runner: Runner{
