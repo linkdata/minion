@@ -552,6 +552,47 @@ func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
 	})
 }
 
+func TestSelectedReviewNearDeadlineReconcilesOverdueWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		accepted.Deadline = now.Add(5 * time.Second)
+		store.Data.Accepted.Deadline = accepted.Deadline
+		marker := "<!-- linkdataminion:old-job -->"
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8,
+			Repository: "owner/repo", Number: 9, Marker: marker, Since: now.Add(-time.Minute),
+			StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot", ID: 8}, UpdatedAt: now}}
+		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		ready := make(chan struct{})
+		var released, clockReads atomic.Int32
+		release := func() {
+			if released.CompareAndSwap(0, 1) {
+				close(ready)
+			}
+		}
+		gh.beforeVerify = func(context.Context, bool) error { release(); return nil }
+		m.Now = func() time.Time {
+			if clockReads.Add(1) == 100 {
+				release() // Stop the worker if a regression skips the overdue write and spins.
+			}
+			return time.Now()
+		}
+		err := m.runSelectedWithControls(t.Context(), store, jobFromAccepted(accepted), "", nil,
+			func(context.Context, Job) error { <-ready; return nil }, func(err error) error { return err })
+		if err != nil || store.Data.PublicationWrites["old-job"].Status != state.PublicationWriteObserved ||
+			len(gh.verifiedCalls) != 1 {
+			t.Fatalf("selected review skipped overdue write: err=%v write=%+v checks=%d clock reads=%d",
+				err, store.Data.PublicationWrites["old-job"], len(gh.verifiedCalls), clockReads.Load())
+		}
+	})
+}
+
 func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

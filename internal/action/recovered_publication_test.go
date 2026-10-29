@@ -635,11 +635,14 @@ func TestPublishRecoveredFixReconcilesLostPushResponseWithoutSecondPush(t *testi
 	store, path, request := savedRecoveryFixture(t, job, result)
 	branch := "minion/fix-7-aaaaaaaaaaaa"
 	var comment string
+	var forkCased atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r/branches/"+branch:
+		case forkCased.Load() && r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"BOT/R","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/bot/r/branches/"+branch || r.URL.Path == "/repos/BOT/R/branches/"+branch):
 			sha, err := exec.Command(realGit, "--git-dir="+forkRemote, "rev-parse", "refs/heads/"+branch).Output()
 			if err != nil {
 				http.NotFound(w, r)
@@ -674,12 +677,13 @@ func TestPublishRecoveredFixReconcilesLostPushResponseWithoutSecondPush(t *testi
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	orchestrator.Store = store
+	forkCased.Store(true)         // GitHub may return different casing for the same fork ID after restart.
 	t.Setenv("PATH", t.TempDir()) // Recovery must not run Git or issue another push.
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatalf("accepted remote push was not reconciled after restart: %v", err)
 	}
 	count, err := os.ReadFile(pushCount)
-	if err != nil || string(count) != "x" || !strings.Contains(comment, recorded) ||
+	if err != nil || string(count) != "x" || !strings.Contains(comment, recorded) || !strings.Contains(comment, "BOT/R") ||
 		store.Data.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWriteObserved {
 		t.Fatalf("recovery pushed twice or lost branch reply: pushes=%q comment=%q write=%+v error=%v", count, comment,
 			store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)

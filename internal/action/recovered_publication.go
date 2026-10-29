@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
@@ -149,7 +150,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		push, hasPush = e.Store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
 		return nil
 	})
-	if hasPush && (push.Repository != p.fork.FullName || push.Branch != p.branch) {
+	if hasPush && (!strings.EqualFold(push.Repository, p.fork.FullName) || push.Branch != p.branch) {
 		return fmt.Errorf("%w: issued fix push differs from the accepted destination", monitor.ErrAcceptanceState)
 	}
 	p.existing, err = e.GitHub.FindPullRequestByHead(ctx, p.repository.FullName, p.repository.DefaultBranch, e.BotLogin+":"+p.branch)

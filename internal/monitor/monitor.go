@@ -1950,8 +1950,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if completed && job.Command.Action == command.Fix {
 				return finish(result)
 			}
-			// Keep the publication reserve for the selected action before scanning older writes.
-			if !completed && time.Until(job.Deadline) > fixPublicationReserve {
+			// Keep the fix's publication reserve before scanning older writes.
+			if !completed && (job.Command.Action != command.Fix || time.Until(job.Deadline) > fixPublicationReserve) {
 				if err := m.reconcilePublicationWrites(controlCtx, store, "", skipJobID); err != nil && !deferredControl(err) {
 					if controlCanceledByWorker(err) {
 						return finish(result)
