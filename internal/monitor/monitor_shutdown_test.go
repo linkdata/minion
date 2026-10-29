@@ -152,7 +152,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			gh := &cancelDiscoveryGitHub{stage: "reply", fakeGitHub: &fakeGitHub{notifications: []github.Notification{first, tail}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}}, cancel: cancel, err: test.err}
 			store := openState(t, initial)
 			handler := &fakeHandler{}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
+			m := &Monitor{Config: testConfig(t), BotID: 8, GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
 			cmd, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, m.availableCommands(m.Config.Repositories[0]))
 			if err != nil {
 				t.Fatal(err)

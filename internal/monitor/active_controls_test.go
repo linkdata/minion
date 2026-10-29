@@ -112,7 +112,7 @@ func TestRunOnceServicesControlsWhileSelectedActionExecutes(t *testing.T) {
 				}
 			},
 		}
-		m := &Monitor{Config: cfg, ConfigPath: configPath, GitHub: gh, Handler: handler,
+		m := &Monitor{Config: cfg, ConfigPath: configPath, BotID: 8, GitHub: gh, Handler: handler,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
@@ -261,7 +261,7 @@ func TestSelectedUnknownOutcomeKeepsCompletedControlsAcrossRestart(t *testing.T)
 				FullName: "example-owner/new-repo", ID: 41, Owner: github.User{Login: "example-owner", ID: 2},
 			}, Permissions: "write"}},
 		}
-		m := &Monitor{Config: cfg, ConfigPath: configPath, GitHub: gh, Handler: handler,
+		m := &Monitor{Config: cfg, ConfigPath: configPath, BotID: 8, GitHub: gh, Handler: handler,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		result := make(chan error, 1)
 		go func() { _, err := m.RunOnce(t.Context(), store); result <- err }()

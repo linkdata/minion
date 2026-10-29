@@ -36,7 +36,7 @@ type GitHub interface {
 	DeclineRepositoryInvitation(context.Context, int64) error
 	ThreadItems(context.Context, string, string, int, time.Time) ([]github.Item, error)
 	CurrentItem(context.Context, github.Item) (github.Item, error)
-	HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error)
+	HasVerifiedBotReply(context.Context, string, int, time.Time, int64, string, bool) (bool, error)
 	HasVerifiedBotPublication(context.Context, string, int, time.Time, github.User, string, string) (bool, error)
 	Permission(context.Context, string, string) (github.Permission, error)
 	ReactEyes(context.Context, string) error
@@ -114,6 +114,7 @@ type Monitor struct {
 	Config                 config.Config
 	ConfigPath             string
 	GitHub                 GitHub
+	BotID                  int64
 	Handler                ActionHandler
 	Logger                 *log.Logger
 	Now                    func() time.Time
@@ -2616,7 +2617,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		lookupCtx, cancelLookup := context.WithTimeout(replyCtx, 10*time.Second)
 		defer cancelLookup()
 		includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
-		replied, err = m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
+		replied, err = m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.BotID, marker, includeReviews)
 		if err != nil {
 			if accepted != nil && githubResourceMovedOrGone(err) {
 				m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))

@@ -71,7 +71,7 @@ func TestRunOnceWithoutWorkerServicesTerminalReplyAndInvitationsOnly(t *testing.
 		}, Permissions: "write"}},
 	}
 	handler := &capacityHandler{failAt: 1, err: errors.New("capacity checked without a selected worker")}
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), BotID: 8, GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
 	next, err := m.RunOnce(t.Context(), store)
 	if err != nil {
 		t.Fatal(err)
@@ -457,7 +457,7 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		m := &Monitor{Config: cfg, GitHub: gh, Handler: held,
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()

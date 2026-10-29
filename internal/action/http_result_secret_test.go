@@ -112,7 +112,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			if tc.audit {
 				name, action, skill = "security-audit", command.SecurityAudit, testAuditSkillURL
 			}
-			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot",
 				Runner:   Runner{Codex: config.CodexConfig{APIKey: codexKey}, Claude: config.ClaudeConfig{APIKey: claudeKey}},
 				Commands: map[string]config.CommandMapping{name: {Action: string(action), Skills: []string{skill}}},
 			}
@@ -212,6 +212,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 	usageDir := filepath.Join(t.TempDir(), "usage")
 	e := &Orchestrator{
 		WorkRoot: t.TempDir(), Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
+		BotID:  8,
 		GitHub: testGitHub(server, "token"), BotLogin: "bot", Runner: Runner{Codex: config.CodexConfig{APIKey: key}},
 		Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}
@@ -275,6 +276,7 @@ func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 	workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
 	e := &Orchestrator{
 		WorkRoot: workRoot, Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
+		BotID:  8,
 		GitHub: testGitHub(server, "token"), BotLogin: "bot", Adversarial: "claude",
 		Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}

@@ -205,8 +205,11 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 	return item, nil
 }
 
-func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
-	return f.hasVerifiedBotReply(ctx, since, github.User{Login: botLogin}, marker, true, includeReviews)
+func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botID int64, marker string, includeReviews bool) (bool, error) {
+	if botID <= 0 {
+		return false, fmt.Errorf("invalid bot account ID %d", botID)
+	}
+	return f.hasVerifiedBotReply(ctx, since, github.User{ID: botID}, marker, true, includeReviews)
 }
 
 func (f *fakeGitHub) HasVerifiedBotPublication(ctx context.Context, _ string, _ int, since time.Time, bot github.User, marker, kind string) (bool, error) {
@@ -282,7 +285,7 @@ func (f *fakeGitHub) CreateIssueComment(ctx context.Context, _ string, _ int, bo
 	if f.commentErr != nil {
 		return github.Comment{}, f.commentErr
 	}
-	comment := github.Comment{Body: body, User: github.User{Login: "linkdataminion"}}
+	comment := github.Comment{Body: body, User: github.User{Login: "linkdataminion", ID: 8}}
 	f.comments = append(f.comments, comment)
 	f.items = append(f.items, github.Item{Body: body, Author: comment.User})
 	return comment, nil
@@ -655,7 +658,7 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 		job.Source = selectedItem(now)
 		job.AttemptID = "" // Terminal controls may outlive the selected reservation.
 		gh.permission = github.Permission{Permission: "write"}
-		m := &Monitor{Config: testConfig(t), GitHub: gh}
+		m := &Monitor{Config: testConfig(t), BotID: 8, GitHub: gh}
 		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{}); err != nil {
 			t.Fatal(err)
 		}
@@ -681,7 +684,7 @@ func TestPullRequestCommentAndFixFailureReplySkipsReviewLookup(t *testing.T) {
 			cfg := testConfig(t)
 			job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
 				Command: command.Command{Name: name, Action: command.Action(cfg.Commands[name].Action)}, ID: jobID(item.Key, name)}
-			m := &Monitor{Config: cfg, GitHub: gh}
+			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh}
 			if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil {
 				t.Fatal(err)
 			}
@@ -696,7 +699,7 @@ func TestFailureReplyChecksCurrentBotProvenance(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	request := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer", ID: 7}, UpdatedAt: now}
 	marker := (Job{ID: jobID(request.Key, "review")}).Marker()
-	stale := github.Item{Key: "comment:2", NodeID: "node:2", Body: "Earlier reply.\n\n" + marker, Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}
+	stale := github.Item{Key: "comment:2", NodeID: "node:2", Body: "Earlier reply.\n\n" + marker, Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: now}
 	gh := &fakeGitHub{items: []github.Item{request, stale}, permission: github.Permission{Permission: "write"}}
 	gh.currentItem = func(item github.Item) (github.Item, error) {
 		if item.Key == stale.Key {
@@ -708,12 +711,45 @@ func TestFailureReplyChecksCurrentBotProvenance(t *testing.T) {
 	cfg := testConfig(t)
 	job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: request,
 		Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(request.Key, "review")}
-	m := &Monitor{Config: cfg, GitHub: gh}
+	m := &Monitor{Config: cfg, GitHub: gh, BotID: 8}
 	if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
 		t.Fatalf("edited bot reply suppressed a current failure reply: comments=%d state=%+v", len(gh.comments), store.Data)
+	}
+}
+
+func TestFailureReplyMatchesPinnedBotID(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		author    github.User
+		wantReply bool
+	}{
+		{name: "same login different ID", author: github.User{Login: "linkdataminion", ID: 9}, wantReply: true},
+		{name: "same ID changed login", author: github.User{Login: "renamed-bot", ID: 8}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			request := github.Item{Key: "comment:1", NodeID: "node:1", Body: "@linkdataminion review", Author: github.User{Login: "writer", ID: 7}, UpdatedAt: now}
+			cfg := testConfig(t)
+			job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: request,
+				Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(request.Key, "review")}
+			reply := github.Item{Key: "comment:2", NodeID: "node:2", Body: "Earlier reply.\n\n" + job.Marker(), Author: test.author, UpdatedAt: now}
+			gh := &fakeGitHub{items: []github.Item{request, reply}, permission: github.Permission{Permission: "write"}}
+			store := openState(t, now.Add(-time.Minute))
+			m := &Monitor{Config: cfg, GitHub: gh, BotID: 8}
+			if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil {
+				t.Fatal(err)
+			}
+			wantPosts := 0
+			if test.wantReply {
+				wantPosts = 1
+			}
+			if gh.commentCalls != wantPosts || len(store.Data.Processed) != 1 {
+				t.Fatalf("failure reply: posts=%d state=%+v", gh.commentCalls, store.Data)
+			}
+		})
 	}
 }
 
@@ -725,9 +761,9 @@ func TestRunOnceLostPublicationResponseFindsSuccessfulReply(t *testing.T) {
 	id := jobID(item.Key, "review")
 	handler := &fakeHandler{executeErr: ErrPostModelPublication, onExecute: func() {
 		saveModelCallStart(t, store, id)
-		gh.reviewReplies = append(gh.reviewReplies, github.Item{Key: "review:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion"}, UpdatedAt: now})
+		gh.reviewReplies = append(gh.reviewReplies, github.Item{Key: "review:2", NodeID: "node:2", Body: "Review complete.\n\n" + (Job{ID: id}).Marker(), Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: now})
 	}}
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
+	m := &Monitor{Config: testConfig(t), BotID: 8, GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +837,7 @@ func TestFailureReplyStopsAfterFailedAttempts(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	m := &Monitor{Config: cfg, GitHub: gh, Now: func() time.Time { return now }}
+	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
 	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
 		failure := store.Data.JobFailures[job.ID]
 		err := m.finishFailedJobWithRetry(t.Context(), store, job, now, failure, &entry)

@@ -88,7 +88,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			if isAudit {
 				name, action, skill = "security-audit", command.SecurityAudit, testAuditSkillURL
 			}
-			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot",
 				Commands: map[string]config.CommandMapping{name: {Action: string(action), Skills: []string{skill}}},
 			}
 			if scenario.critic {

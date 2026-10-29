@@ -41,7 +41,7 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 	}))
 	defer server.Close()
 	workRoot := t.TempDir()
-	e := &Orchestrator{WorkRoot: workRoot, GitHub: testGitHub(server, "token"), BotLogin: "bot",
+	e := &Orchestrator{WorkRoot: workRoot, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot",
 		Commands: map[string]config.CommandMapping{"security-audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}}},
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {

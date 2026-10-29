@@ -86,7 +86,7 @@ func serviceStore(t *testing.T, data state.Data) *state.Store {
 	return store
 }
 
-func (g *terminalRecoveryGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error) {
+func (g *terminalRecoveryGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, int64, string, bool) (bool, error) {
 	return false, nil
 }
 

@@ -222,7 +222,7 @@ func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) 
 			}))
 			defer server.Close()
 			client := testGitHub(server, "token")
-			orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotLogin: "bot", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: client, BotID: 8, BotLogin: "bot", Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++
 				if limitCause != nil {
 					return aicli.Result{}, fmt.Errorf("wrapped native limit: %w", limitCause)

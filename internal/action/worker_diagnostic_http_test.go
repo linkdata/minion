@@ -346,7 +346,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	parentLogger := log.New(&journal, "", 0)
 	var jobs []Job
 	root := t.TempDir()
-	owner := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotLogin: "linkdataminion", Main: "codex",
+	owner := &Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotID: 8, BotLogin: "linkdataminion", Main: "codex",
 		Logger: parentLogger, Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}}}
 	owner.Executor = readyExecutor{executorFunc(func(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
 		jobs = append(jobs, job)
@@ -686,7 +686,7 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 	defer server.Close()
 	workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
 	var journal bytes.Buffer
-	e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotLogin: "bot", Adversarial: "claude",
+	e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", Adversarial: "claude",
 		Logger:   log.New(&journal, "", 0),
 		Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}

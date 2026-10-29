@@ -247,8 +247,11 @@ func eligible(updated, since time.Time) bool {
 // It scans issue comments and, when includeReviews is true, pull request
 // reviews. The since bound applies to comments and filters reviews by
 // submission time.
-func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
-	return c.hasVerifiedBotReply(ctx, repo, number, since, User{Login: botLogin}, marker, true, includeReviews)
+func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botID int64, marker string, includeReviews bool) (bool, error) {
+	if botID <= 0 {
+		return false, fmt.Errorf("invalid bot account ID %d", botID)
+	}
+	return c.hasVerifiedBotReply(ctx, repo, number, since, User{ID: botID}, marker, true, includeReviews)
 }
 
 // HasVerifiedBotPublication checks only the recorded comment or review surface.

@@ -74,10 +74,10 @@ func (g *synchronizedRecoveryGitHub) Permission(ctx context.Context, repo, login
 	return g.fakeGitHub.Permission(ctx, repo, login)
 }
 
-func (g *synchronizedRecoveryGitHub) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botLogin, marker string, includeReviews bool) (bool, error) {
+func (g *synchronizedRecoveryGitHub) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botID int64, marker string, includeReviews bool) (bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.fakeGitHub.HasVerifiedBotReply(ctx, repo, number, since, botLogin, marker, includeReviews)
+	return g.fakeGitHub.HasVerifiedBotReply(ctx, repo, number, since, botID, marker, includeReviews)
 }
 
 func (g *synchronizedRecoveryGitHub) HasVerifiedBotPublication(ctx context.Context, repo string, number int, since time.Time, bot github.User, marker, kind string) (bool, error) {

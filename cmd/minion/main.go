@@ -181,7 +181,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			if !authenticateGitHub() {
 				return 1
 			}
-			watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
+			watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}
 			if err := watcher.ReconcilePublicationWrites(ctx, store); err != nil {
 				logger.Printf("reconcile issued publication after preflight failure: %s", monitor.InertLogText(err.Error()))
 				return 1
@@ -207,7 +207,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 0
 	}
 
-	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, Logger: logger}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}
 	if terminalRecovery {
 		recovery := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 		recovery.BotID = user.ID

@@ -62,7 +62,7 @@ func TestExecuteDoesNotRunEmbeddedRunnerWithoutSelectedExecutor(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	e := &Orchestrator{Store: openState(t, time.Now()), GitHub: testGitHub(server, "token"), WorkRoot: t.TempDir(),
+	e := &Orchestrator{Store: openState(t, time.Now()), BotID: 8, GitHub: testGitHub(server, "token"), WorkRoot: t.TempDir(),
 		Commands:           map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		assignmentRequired: true,
 		Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
@@ -175,7 +175,7 @@ func TestSelectedExecutorCannotSkipAssignmentDelivery(t *testing.T) {
 			job.Command = command.Command{Name: "comment", Action: command.Comment}
 			job.Repository.Actions = []string{"comment"}
 			reserveActionRequest(t, store, &job, true) // A stale assigned marker cannot prove this delivery.
-			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), WorkRoot: t.TempDir(),
+			e := &Orchestrator{Store: store, BotID: 8, GitHub: testGitHub(server, "token"), WorkRoot: t.TempDir(),
 				Commands:            map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				assignmentRequired:  true,
 				ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },

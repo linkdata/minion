@@ -75,7 +75,7 @@ func selectedMonitor(t *testing.T, at time.Time, gh GitHub, handler ActionHandle
 	t.Helper()
 	cfg := testConfig(t)
 	cfg.MaxRuntimeMinutes = 7
-	return &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return at }, SelectedExecutorID: "local"}
+	return &Monitor{Config: cfg, GitHub: gh, BotID: 8, Handler: handler, Now: func() time.Time { return at }, SelectedExecutorID: "local"}
 }
 
 func TestSelectedFixRestartPreservesUnknownSourceTimestamp(t *testing.T) {
@@ -1047,7 +1047,7 @@ func TestSelectedTerminalRecoveryKeepsExistingVerifiedReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	reply := github.Item{Key: "review:published", Body: "Complete.\n\n" + (Job{ID: accepted.JobID}).Marker(),
-		Author: github.User{Login: "linkdataminion"}, UpdatedAt: at}
+		Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: at}
 	gh := &fakeGitHub{reviewReplies: []github.Item{reply}, currentItem: func(seed github.Item) (github.Item, error) {
 		if seed.Key != reply.Key {
 			return github.Item{}, errors.New("source is no longer available")
@@ -1078,7 +1078,7 @@ func TestSelectedTerminalRestartWithUnknownSourceTimeFindsExistingReply(t *testi
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
 	reply := github.Item{Key: "review:published", NodeID: "reply-node", Body: "Complete.\n\n" + (Job{ID: accepted.JobID}).Marker(),
-		Author: github.User{Login: "linkdataminion"}, UpdatedAt: at.Add(-time.Minute)}
+		Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: at.Add(-time.Minute)}
 	gh := &fakeGitHub{reviewReplies: []github.Item{reply}, permission: github.Permission{Permission: "write"},
 		currentItem: func(seed github.Item) (github.Item, error) {
 			if seed.Key == reply.Key {

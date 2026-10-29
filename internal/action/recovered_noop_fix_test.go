@@ -35,7 +35,7 @@ func TestPublishRecoveredFixRejectsUnchangedReviewedFile(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
 		!strings.Contains(err.Error(), "staged paths do not match reviewed changes") || writes.Load() != 0 {

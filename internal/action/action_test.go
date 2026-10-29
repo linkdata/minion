@@ -69,16 +69,24 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 	reviewMarker := "<!-- linkdataminion:" + strings.Repeat("b", 64) + " -->"
 	for _, tt := range []struct {
 		name, body, author, liveBody string
-		edited, want                 bool
+		authorID, liveID             int64
+		edited, want, provenance     bool
 	}{
-		{name: "copied audit marker in review", body: "Review result\n\n" + job.Marker() + "\n\n" + reviewMarker, author: "linkdataminion"},
-		{name: "own completion marker", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", want: true},
-		{name: "edited bot completion", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", edited: true},
-		{name: "stale completion body", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", liveBody: "Edited body without marker"},
-		{name: "other author", body: "Security audit complete\n\n" + job.Marker(), author: "writer"},
+		{name: "copied audit marker in review", body: "Review result\n\n" + job.Marker() + "\n\n" + reviewMarker, author: "linkdataminion", authorID: 8},
+		{name: "own completion marker", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, want: true, provenance: true},
+		{name: "same login different ID", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 9},
+		{name: "same ID changed login", body: "Security audit complete\n\n" + job.Marker(), author: "renamed-bot", authorID: 8, want: true, provenance: true},
+		{name: "provenance ID changed", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, liveID: 9, provenance: true},
+		{name: "edited bot completion", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, edited: true, provenance: true},
+		{name: "stale completion body", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, liveBody: "Edited body without marker", provenance: true},
+		{name: "other author", body: "Security audit complete\n\n" + job.Marker(), author: "writer", authorID: 7},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var provenanceCalls int
+			liveID := tt.authorID
+			if tt.liveID != 0 {
+				liveID = tt.liveID
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/repos/o/r/issues/7/comments":
@@ -95,7 +103,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 						_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
 							"pullRequest": map[string]any{"timelineItems": map[string]any{
 								"nodes": []map[string]any{{"id": "review-node-1", "fullDatabaseId": "1", "body": tt.body,
-									"author": map[string]string{"login": tt.author}, "state": "COMMENTED", "submittedAt": "2026-10-09T08:00:00Z"}},
+									"author": map[string]any{"login": tt.author, "id": tt.authorID}, "state": "COMMENTED", "submittedAt": "2026-10-09T08:00:00Z"}},
 								"pageInfo": map[string]any{"hasNextPage": false}}}}}})
 						return
 					}
@@ -109,7 +117,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 						editor = map[string]string{"login": "writer"}
 						editedAt = "2026-10-09T08:00:00Z"
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": liveBody, "author": map[string]string{"login": tt.author}, "editor": editor, "lastEditedAt": editedAt}}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": liveBody, "author": map[string]any{"login": tt.author, "id": liveID}, "editor": editor, "lastEditedAt": editedAt}}})
 				default:
 					t.Errorf("unexpected request: %s", r.URL)
 					http.NotFound(w, r)
@@ -120,12 +128,17 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 			orchestrator := Orchestrator{
 				GitHub:   client,
 				BotLogin: "linkdataminion",
+				BotID:    8,
 			}
 			got, err := orchestrator.alreadyAcknowledged(t.Context(), job)
 			if err != nil || got != tt.want {
 				t.Fatalf("alreadyAcknowledged() = %t, %v; want %t", got, err, tt.want)
 			}
-			if (provenanceCalls == 1) != (tt.author == "linkdataminion" && strings.HasSuffix(tt.body, job.Marker())) {
+			wantProvenance := 0
+			if tt.provenance {
+				wantProvenance = 1
+			}
+			if provenanceCalls != wantProvenance {
 				t.Fatalf("provenance checks = %d for %q", provenanceCalls, tt.name)
 			}
 		})
@@ -145,6 +158,7 @@ func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 		orchestrator := &Orchestrator{
 			GitHub:   client,
 			BotLogin: "linkdataminion",
+			BotID:    8,
 			Store:    openState(t, time.Now().UTC()),
 			Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 			Runner:   Runner{runModel: forbidModel(t)},
@@ -252,7 +266,7 @@ func (f *actionMonitorGitHub) CurrentItem(_ context.Context, item github.Item) (
 	}
 	return item, nil
 }
-func (f *actionMonitorGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error) {
+func (f *actionMonitorGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, int64, string, bool) (bool, error) {
 	return false, nil
 }
 func (f *actionMonitorGitHub) HasVerifiedBotPublication(context.Context, string, int, time.Time, github.User, string, string) (bool, error) {
