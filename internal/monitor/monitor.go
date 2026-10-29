@@ -213,8 +213,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		_, decided := store.Data.TerminalDecisions[accepted.JobID]
 		observed := store.Data.PublicationWrites[accepted.JobID].Status == state.PublicationWriteObserved
 		if retryAt := accepted.RetryAt; !observed && (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
-			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
-				return wake(retryAt, false), err
+			// Keep one full lookup budget for a later branch check before the action deadline.
+			remaining := time.Until(accepted.Deadline)
+			if push := store.Data.PublicationWrites[accepted.JobID+"-push"]; push.Status != state.PublicationWritePending ||
+				remaining <= 0 || remaining > 2*publicationReconcileBudget {
+				if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
+					return wake(retryAt, false), err
+				}
 			}
 			if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
 				return wake(retryAt, false), err
@@ -222,15 +227,31 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return wake(retryAt, true), nil
 		}
 		err := m.recoverAccepted(ctx, store)
-		pushObservedBeforeScan := store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWriteObserved
-		reconcileErr := m.reconcilePublicationWrites(ctx, store, "", skipChecked)
+		pushKey := activeJobID + "-push"
+		pushBeforeScan := store.Data.PublicationWrites[pushKey].Status
+		reconcileErr := m.reconcilePublicationWrites(ctx, store, pushKey, "")
+		pushJustObserved := pushBeforeScan != state.PublicationWriteObserved &&
+			store.Data.PublicationWrites[pushKey].Status == state.PublicationWriteObserved
+		remaining := time.Duration(0)
+		if store.Data.Accepted != nil {
+			remaining = time.Until(store.Data.Accepted.Deadline)
+		}
+		urgentPush := (pushJustObserved && errors.Is(err, ErrPostModelPublication)) ||
+			(store.Data.PublicationWrites[pushKey].Status == state.PublicationWritePending &&
+				remaining > 0 && remaining <= 2*publicationReconcileBudget)
+		if reconcileErr == nil && !urgentPush {
+			postSkip := skipChecked
+			if pushBeforeScan == state.PublicationWritePending {
+				postSkip = pushKey
+			}
+			reconcileErr = m.reconcilePublicationWrites(ctx, store, "", postSkip)
+		}
 		if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) && reconcileErr == nil {
 			return wake(store.Data.NextPollAt, true), nil
 		}
 		err = errors.Join(err, reconcileErr)
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
-			if errors.Is(err, ErrPostModelPublication) && !pushObservedBeforeScan &&
-				store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWriteObserved {
+			if errors.Is(err, ErrPostModelPublication) && pushJustObserved {
 				return wake(now().UTC(), false), err
 			}
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)

@@ -182,7 +182,13 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 			if jobID == skipJobID || write.Status != state.PublicationWritePending {
 				continue
 			}
-			checkAt := at.Add(publicationRecheckInterval)
+			interval := publicationRecheckInterval
+			if accepted := store.Data.Accepted; accepted != nil && write.Kind == "push" &&
+				jobID == accepted.JobID+"-push" && at.Before(accepted.Deadline) {
+				// Recheck before the action deadline without polling faster than once a second.
+				interval = min(interval, max(time.Second, accepted.Deadline.Sub(at)/2))
+			}
+			checkAt := at.Add(interval)
 			if write.Deadline.Before(checkAt) {
 				checkAt = write.Deadline
 			}

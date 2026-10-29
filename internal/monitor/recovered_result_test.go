@@ -311,25 +311,98 @@ func TestPostHandlerObservedFixPushGetsOneImmediateRecovery(t *testing.T) {
 				if err := store.WithLock(func() error {
 					store.Data.PendingFixes[accepted.JobID] = pending
 					store.Data.PublicationWrites[key] = push
+					store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+						Marker: "<!-- linkdataminion:old-job -->", Since: now,
+						StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+					}
+					store.Data.PublicationScanCursor = key
 					return store.Save()
 				}); err != nil {
 					return err
+				}
+				gh.beforeVerify = func(context.Context, bool) error {
+					time.Sleep(publicationReconcileBudget)
+					return nil
 				}
 				return ErrPostModelPublication
 			}
 			return nil
 		}}
 		m.Handler = handler
-		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrPostModelPublication) ||
+		next, err := m.RunOnce(t.Context(), store)
+		if !errors.Is(err, ErrPostModelPublication) || !next.Equal(now) || time.Since(now) != 0 ||
 			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.IsZero() ||
-			store.Data.PublicationWrites[key].Status != state.PublicationWriteObserved || calls != 1 {
-			t.Fatalf("post-handler observation did not wake recovery: err=%v accepted=%+v write=%+v calls=%d",
-				err, store.Data.Accepted, store.Data.PublicationWrites[key], calls)
+			store.Data.PublicationWrites[key].Status != state.PublicationWriteObserved || calls != 1 ||
+			len(gh.verifiedCalls) != 0 {
+			t.Fatalf("post-handler observation waited for backlog: next=%s elapsed=%s err=%v accepted=%+v write=%+v calls=%d old checks=%d",
+				next, time.Since(now), err, store.Data.Accepted, store.Data.PublicationWrites[key], calls, len(gh.verifiedCalls))
 		}
+		gh.beforeVerify = nil
 		if _, err := m.RunOnce(t.Context(), store); err != nil || calls != 2 || pushes != 1 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || gh.commentCalls != 0 ||
+			len(gh.verifiedCalls) == 0 {
+			t.Fatalf("observed push waited, repeated push, or lost reply: err=%v calls=%d pushes=%d accepted=%+v processed=%v comments=%d old checks=%d",
+				err, calls, pushes, store.Data.Accepted, store.Data.Processed[accepted.JobID], gh.commentCalls, len(gh.verifiedCalls))
+		}
+	})
+}
+
+func TestPendingFixPushRechecksBeforeOriginalDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(11 * time.Second)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			if time.Since(now) < 8*time.Second {
+				return github.Branch{}, &github.StatusError{StatusCode: 404}
+			}
+			return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+		}
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			if !time.Now().Before(deadline) {
+				t.Error("recovered fix reply started after original deadline")
+			}
+			return nil
+		}}
+		m.Handler = handler
+		for handler.publications == 0 {
+			next, err := m.RunOnce(t.Context(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handler.publications != 0 {
+				break
+			}
+			if !next.After(time.Now()) || !next.Before(deadline) || len(gh.verifiedCalls) != 0 {
+				t.Fatalf("pending push waited for deadline or unrelated backlog: next=%s elapsed=%s old checks=%d",
+					next, time.Since(now), len(gh.verifiedCalls))
+			}
+			time.Sleep(time.Until(next))
+		}
+		if branchChecks != 3 || handler.publications != 1 || !time.Now().Before(deadline) ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
 			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || gh.commentCalls != 0 {
-			t.Fatalf("observed push waited, repeated push, or lost reply: err=%v calls=%d pushes=%d accepted=%+v processed=%v comments=%d",
-				err, calls, pushes, store.Data.Accepted, store.Data.Processed[accepted.JobID], gh.commentCalls)
+			t.Fatalf("delayed branch visibility missed action deadline: checks=%d publications=%d elapsed=%s accepted=%+v write=%+v",
+				branchChecks, handler.publications, time.Since(now), store.Data.Accepted,
+				store.Data.PublicationWrites[accepted.JobID+"-push"])
 		}
 	})
 }
