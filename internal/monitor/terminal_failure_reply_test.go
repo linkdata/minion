@@ -63,7 +63,7 @@ func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 				test.change(gh, job)
 			}
 			m := selectedMonitor(t, now, gh, nil)
-			err := m.finishFailedJob(t.Context(), store, job, now, failure)
+			err := m.finishFailedJob(t.Context(), store, job, now)
 			if err != nil || (len(gh.comments) == 1) != test.wantReply || store.Data.Processed[job.ID].IsZero() ||
 				len(store.Data.JobFailures) != 0 {
 				t.Fatalf("failure reply ignored live authority: err=%v comments=%v state=%+v", err, gh.comments, store.Data)
@@ -98,7 +98,7 @@ func TestTerminalFailureReplyLostResponseReconcilesMarkerAfterRestart(t *testing
 					Author: github.User{Login: cfg.BotLogin, ID: 8}, UpdatedAt: now})
 			}}
 		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: time.Now}
-		if err := m.finishFailedJob(t.Context(), store, job, now, store.Data.JobFailures[job.ID]); err != nil ||
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
 			gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() ||
 			store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
 			t.Fatalf("lost response was not checkpointed: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
@@ -113,7 +113,7 @@ func TestTerminalFailureReplyLostResponseReconcilesMarkerAfterRestart(t *testing
 			store.Data.TerminalDecisions[job.ID] != decision {
 			t.Fatalf("restart did not observe original reply and outcome: err=%v state=%+v", err, store.Data)
 		}
-		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil ||
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
 			gh.commentCalls != 1 {
 			t.Fatalf("verified reply was posted again: err=%v calls=%d", err, gh.commentCalls)
 		}
@@ -136,7 +136,7 @@ func TestSelectedTerminalCleanupUsesDetachedContextAfterExecutorCancel(t *testin
 	m := selectedMonitor(t, now, gh, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if err := m.finishFailedJob(ctx, store, job, now, store.Data.JobFailures[job.ID]); err != nil ||
+	if err := m.finishFailedJob(ctx, store, job, now); err != nil ||
 		gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() ||
 		store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved {
 		t.Fatalf("selected terminal cleanup did not finish after executor cancellation: err=%v state=%+v", err, store.Data)
@@ -164,7 +164,7 @@ func TestFailureReplyCheckpointSaveFailurePreventsPOST(t *testing.T) {
 	}
 	gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
 	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
-	if err := m.finishFailedJob(t.Context(), store, job, now, store.Data.JobFailures[job.ID]); !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
+	if err := m.finishFailedJob(t.Context(), store, job, now); !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
 		!store.Data.Processed[job.ID].IsZero() || len(store.Data.PublicationWrites) != 0 {
 		t.Fatalf("failed checkpoint allowed POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
 	}
@@ -178,7 +178,7 @@ func TestFailureReplyCheckpointSaveFailurePreventsPOST(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = openStateAt(t, path, now)
-	if err := m.finishFailedJob(t.Context(), store, job, now, store.Data.JobFailures[job.ID]); err != nil ||
+	if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
 		gh.commentCalls != 1 || store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved {
 		t.Fatalf("restored state could not make its first POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
 	}
@@ -243,7 +243,7 @@ func TestIssuedFixPushSuppressesTerminalFailureReplyAndKeepsCheckpoint(t *testin
 			}
 			gh := &fakeGitHub{}
 			m := selectedMonitor(t, now, gh, nil)
-			err := m.finishFailedJob(t.Context(), store, job, now, failure)
+			err := m.finishFailedJob(t.Context(), store, job, now)
 			if !tc.valid {
 				if !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
 					store.Data.Accepted == nil || !store.Data.Processed[job.ID].IsZero() {

@@ -381,43 +381,29 @@ func TestSelectedExecuteGuardsTerminalControlAgainstLiveRepositoryIdentityMismat
 }
 
 func TestRunOnceCompletedScanWakesForTerminalDeadline(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		failure state.JobFailure
-		retry   time.Duration
-	}{
-		{name: "deadline", failure: state.JobFailure{Attempts: 1}, retry: 5 * time.Minute},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				now := time.Now().UTC()
-				store := openState(t, now.Add(-time.Minute))
-				failure := test.failure
-				if test.name == "deadline" {
-					failure.AcceptedAt = now.Add(-time.Minute)
-					failure.Deadline = now.Add(2 * time.Minute)
-				}
-				_, id := queueTerminalControl(store, now.Add(-time.Second), 8, failure, now.Add(test.retry))
-				store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
-				if err := store.Save(); err != nil {
-					t.Fatal(err)
-				}
-				cfg := testConfig(t)
-				cfg.PollIntervalSeconds = 30 * 60
-				gh := &fakeGitHub{}
-				handler := &capacityHandler{}
-				m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now },
-					SelectedExecutorID: "local"}
-				next, err := m.RunOnce(t.Context(), store)
-				want := now.Add(2 * time.Minute)
-				if err != nil || !next.Equal(want) || !store.Data.NextPollAt.Equal(now.Add(30*time.Minute)) ||
-					!store.Data.Processed[id].IsZero() || len(gh.comments) != 0 || len(gh.notificationCalls) != 1 || handler.waits != 1 {
-					t.Fatalf("completed scan missed terminal wake: next=%s want=%s err=%v state=%+v calls=%v waits=%d",
-						next, want, err, store.Data, gh.notificationCalls, handler.waits)
-				}
-			})
-		})
-	}
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now.Add(-time.Minute))
+		failure := state.JobFailure{Attempts: 1, AcceptedAt: now.Add(-time.Minute), Deadline: now.Add(2 * time.Minute)}
+		_, id := queueTerminalControl(store, now.Add(-time.Second), 8, failure, now.Add(5*time.Minute))
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.PollIntervalSeconds = 30 * 60
+		gh := &fakeGitHub{}
+		handler := &capacityHandler{}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now },
+			SelectedExecutorID: "local"}
+		next, err := m.RunOnce(t.Context(), store)
+		want := now.Add(2 * time.Minute)
+		if err != nil || !next.Equal(want) || !store.Data.NextPollAt.Equal(now.Add(30*time.Minute)) ||
+			!store.Data.Processed[id].IsZero() || len(gh.comments) != 0 || len(gh.notificationCalls) != 1 || handler.waits != 1 {
+			t.Fatalf("completed scan missed terminal wake: next=%s want=%s err=%v state=%+v calls=%v waits=%d",
+				next, want, err, store.Data, gh.notificationCalls, handler.waits)
+		}
+	})
 }
 
 func TestSelectedNewerSameThreadCommandKeepsUncertainReplyOneShot(t *testing.T) {

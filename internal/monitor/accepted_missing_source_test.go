@@ -13,16 +13,17 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
+func TestTerminalReplyLookupErrorSkipsAcceptedSourceCheck(t *testing.T) {
 	accepted := selectedAcceptance(t, time.Now().UTC())
 	accepted.SubjectType = "Issue"
 	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
 	stop := errors.New("reply lookup reached")
 	var remaining time.Duration
 	var hasDeadline bool
+	issueCalls := 0
 	gh := &fakeGitHub{
 		issueDetails: func(_ string, number int) (github.Issue, error) {
-			time.Sleep(8 * time.Second)
+			issueCalls++
 			return github.Issue{Number: number}, nil
 		},
 		beforeVerify: func(ctx context.Context, _ bool) error {
@@ -39,12 +40,12 @@ func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
 		t.Fatal(err)
 	}
 	synctest.Test(t, func(t *testing.T) {
-		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now(), state.JobFailure{}); err != nil ||
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now()); err != nil ||
 			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 {
 			t.Fatalf("failed reply lookup did not finish without POST: %v state=%+v", err, store.Data)
 		}
-		if !hasDeadline || remaining < 9*time.Second {
-			t.Fatalf("reply lookup inherited issue lookup's spent budget: remaining=%s", remaining)
+		if !hasDeadline || remaining < 9*time.Second || issueCalls != 0 {
+			t.Fatalf("failed reply lookup continued accepted source check: remaining=%s issue calls=%d", remaining, issueCalls)
 		}
 	})
 }
@@ -70,9 +71,7 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 		permission: github.Permission{Permission: "write"},
 		issueDetails: func(_ string, number int) (github.Issue, error) {
 			issueCalls++
-			if issueCalls == 2 {
-				time.Sleep(25 * time.Second)
-			}
+			time.Sleep(25 * time.Second)
 			return github.Issue{Number: number}, nil
 		},
 		currentItem: func(github.Item) (github.Item, error) {
@@ -84,11 +83,11 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 	store := openState(t, now)
 	store.Data.Accepted = &accepted
 	synctest.Test(t, func(t *testing.T) {
-		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), now, state.JobFailure{}); err != nil {
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), now); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil || repositoryCalls != 2 || issueCalls != 2 {
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil || repositoryCalls != 2 || issueCalls != 1 {
 		t.Fatalf("successful source checks did not finish the fixed reply: comments=%d repo=%d issue=%d state=%+v", len(gh.comments), repositoryCalls, issueCalls, store.Data)
 	}
 }

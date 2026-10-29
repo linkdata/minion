@@ -350,17 +350,11 @@ func TestSelectedActionKeepsTerminalSiblingReplyOneShotWhileBlocked(t *testing.T
 		}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		var gh *fakeGitHub
-		gh = &fakeGitHub{
+		gh := &fakeGitHub{
 			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
 			items:         []github.Item{selected, sibling},
 			permission:    github.Permission{Permission: "write"},
 			commentErr:    errors.New("temporary reply failure"),
-			beforeComment: func() {
-				if gh.commentCalls == 2 {
-					gh.commentErr = nil
-				}
-			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
@@ -432,7 +426,7 @@ func TestFailureReplyCheckpointSurvivesLaterStateSaveFailure(t *testing.T) {
 					}
 				}}
 			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
-			if err := m.finishFailedJob(t.Context(), store, job, now, store.Data.JobFailures[job.ID]); err == nil ||
+			if err := m.finishFailedJob(t.Context(), store, job, now); err == nil ||
 				gh.commentCalls != 1 || len(gh.comments) != test.comments || !store.Data.Processed[job.ID].IsZero() {
 				t.Fatalf("later save failure changed one POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
 			}
@@ -451,7 +445,7 @@ func TestFailureReplyCheckpointSurvivesLaterStateSaveFailure(t *testing.T) {
 				store.Data.PublicationWrites[job.ID].Status != test.wantStatus {
 				t.Fatalf("checkpoint could not reconcile after restart: err=%v state=%+v", err, store.Data)
 			}
-			if err := m.finishFailedJob(t.Context(), store, job, now, store.Data.JobFailures[job.ID]); err != nil ||
+			if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
 				gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() {
 				t.Fatalf("restored state repeated POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
 			}
@@ -1293,7 +1287,7 @@ func TestTerminalReplyRemainsOneShotAfterRestart(t *testing.T) {
 		gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"},
 			commentErr: errors.New("response lost")}
 		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: time.Now}
-		if err := m.finishFailedJob(t.Context(), store, job, now, store.Data.JobFailures[job.ID]); err != nil {
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 			t.Fatal(err)
 		}
 		write := store.Data.PublicationWrites[job.ID]
@@ -1309,7 +1303,7 @@ func TestTerminalReplyRemainsOneShotAfterRestart(t *testing.T) {
 		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil ||
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
 			gh.commentCalls != 1 || store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
 			t.Fatalf("restart repeated uncertain POST: err=%v calls=%d write=%+v", err, gh.commentCalls, store.Data.PublicationWrites[job.ID])
 		}
@@ -1339,13 +1333,7 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 			notifications: []github.Notification{notice},
 			items:         []github.Item{terminal, review},
 			permission:    github.Permission{Permission: "write"},
-		}
-		base.beforeComment = func() {
-			if base.commentCalls == 1 {
-				base.commentErr = errors.New("temporary comment failure")
-			} else {
-				base.commentErr = nil
-			}
+			commentErr:    errors.New("temporary comment failure"),
 		}
 		gh := &synchronizedCommentsGitHub{fakeGitHub: base}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}

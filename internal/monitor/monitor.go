@@ -655,7 +655,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				jobFailure.Attempts = maxJobAttempts
 			}
 			if jobFailure.Attempts >= maxJobAttempts {
-				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
+				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started))
 				if ctx.Err() != nil {
 					return stop()
 				}
@@ -667,7 +667,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if err := saveAcceptanceState(store); err != nil {
 					return stop(err)
 				}
-				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
+				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started))
 				continue
 			}
 			if store.Data.Accepted != nil {
@@ -1402,7 +1402,7 @@ func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Stor
 				return err
 			}
 		}
-		return m.finishFailedJob(ctx, store, job, at, failure)
+		return m.finishFailedJob(ctx, store, job, at)
 	}
 }
 
@@ -2562,10 +2562,7 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			continue
 		}
 		job := Job{Repository: repo, SubjectType: subjectType, Number: number, Source: current, Command: parsed, ID: id}
-		if failure.ModelCallStarted || !failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline) {
-			failure.Attempts = maxJobAttempts
-		}
-		if err := m.finishFailedJobWithNotification(ctx, store, job, m.now().UTC(), &entry); err != nil {
+		if err := m.finishFailedJobWithNotification(ctx, store, job, m.now().UTC(), true); err != nil {
 			m.logf("terminal control in %s: %v", itemLocation(current), err)
 			wake(m.now().UTC().Add(time.Minute))
 		}
@@ -2740,8 +2737,8 @@ func (m *Monitor) finalizeSelectedSuccess(ctx context.Context, store *state.Stor
 	return ctx.Err()
 }
 
-func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, _ state.JobFailure) error {
-	return m.finishFailedJobWithNotification(ctx, store, job, at, nil)
+func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time) error {
+	return m.finishFailedJobWithNotification(ctx, store, job, at, false)
 }
 
 // The checkpoint makes a lost POST response read-only to recover.
@@ -2791,7 +2788,7 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	postCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	_, err := m.GitHub.CreateIssueComment(postCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+job.Marker())
 	cancel()
 	if err != nil {
@@ -2804,9 +2801,9 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 }
 
 func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *state.Store, job Job, at time.Time,
-	notification *notificationScan) error {
+	queued bool) error {
 	replyCtx := ctx
-	if notification == nil {
+	if !queued {
 		replyCtx = context.WithoutCancel(ctx)
 	}
 	var accepted *state.AcceptedAction
@@ -2854,19 +2851,6 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 	if !replied && replyCtx.Err() != nil {
 		m.logf("skip failure reply to %s: %v", itemLocation(job.Source), replyCtx.Err())
 		replied = true
-	}
-	if accepted != nil && !replied {
-		issueCtx, cancelIssue := context.WithTimeout(replyCtx, 10*time.Second)
-		present, err := m.acceptedIssuePresent(issueCtx, *accepted)
-		cancelIssue()
-		if err != nil {
-			m.logf("skip failure reply to %s: verify source thread: %v", itemLocation(job.Source), err)
-			replied = true
-		}
-		if err == nil && !present {
-			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-			return store.WithLock(func() error { return m.discardAccepted(store) })
-		}
 	}
 	var err error
 	if issuedWrite {
@@ -2919,6 +2903,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		}
 	}
 	if !replied {
+		// Source validation may take 150 seconds, so recheck repository identity before posting.
 		repoCtx, cancelRepo := context.WithTimeout(replyCtx, 10*time.Second)
 		repo, err := m.GitHub.Repository(repoCtx, job.Repository.Name)
 		if err == nil {
@@ -2933,7 +2918,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 			replied = true
 		}
 	}
-	if !replied && notification != nil {
+	if !replied && queued {
 		if err := ctx.Err(); err != nil {
 			m.logf("skip failure reply to %s: %v", itemLocation(job.Source), err)
 			replied = true
