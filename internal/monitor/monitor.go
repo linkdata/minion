@@ -73,6 +73,7 @@ const (
 	maxJobAttempts          = 3
 	maxFailureReplyAttempts = 3
 	siblingReplyBudget      = 3 * time.Minute
+	fixPublicationReserve   = 3 * publicationReconcileBudget
 	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
 )
 
@@ -229,7 +230,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			remaining := time.Until(accepted.Deadline)
 			push := store.Data.PublicationWrites[accepted.JobID+"-push"]
 			if push.Status == state.PublicationWritePending && remaining > 0 {
-				controlDeadline := accepted.Deadline.Add(-2 * publicationReconcileBudget)
+				controlDeadline := accepted.Deadline.Add(-fixPublicationReserve)
 				startBefore := controlDeadline.Add(-siblingReplyBudget)
 				var terminalWake time.Time
 				if time.Now().Before(startBefore) {
@@ -270,7 +271,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		urgentPush := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) ||
 			(store.Data.PublicationWrites[pushKey].Status == state.PublicationWritePending &&
-				remaining > 0 && remaining <= 2*publicationReconcileBudget)
+				remaining > 0 && remaining <= fixPublicationReserve)
 		if reconcileErr == nil && !urgentPush {
 			postSkip := skipChecked
 			if pushBeforeScan == state.PublicationWritePending {
@@ -1767,7 +1768,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	if !time.Now().Before(job.Deadline) {
 		return finish(context.DeadlineExceeded)
 	}
-	controlDeadline := job.Deadline.Add(-2 * publicationReconcileBudget)
+	controlDeadline := job.Deadline.Add(-fixPublicationReserve)
 	terminalChecks := make(map[string]time.Time)
 	// Leave a full failure-reply budget before the fix's final control reserve.
 	if job.Command.Action != command.Fix || time.Until(controlDeadline) > siblingReplyBudget {
@@ -1785,8 +1786,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
 	controlCtx := actionCtx
+	var cancelControls context.CancelFunc
 	if job.Command.Action == command.Fix {
-		var cancelControls context.CancelFunc
 		controlCtx, cancelControls = context.WithDeadline(actionCtx, controlDeadline)
 		defer cancelControls()
 	}
@@ -1846,7 +1847,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	done := make(chan error, 1)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
-		defer func() { done <- result }()
+		defer func() {
+			done <- result
+			if cancelControls != nil {
+				cancelControls()
+			}
+		}()
 		result = run(actionCtx, job)
 		completionMu.Lock()
 		completedAt := time.Now().UTC()
@@ -1877,6 +1883,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			default:
 			}
 		}
+	}
+	controlCanceledByWorker := func(err error) bool {
+		readDone()
+		return completed && job.Command.Action == command.Fix && errors.Is(err, context.Canceled) &&
+			!errors.Is(err, ErrAcceptanceState) && errors.Is(controlCtx.Err(), context.Canceled) &&
+			ctx.Err() == nil && actionCtx.Err() == nil
 	}
 	completedWithDecision := func() bool {
 		if !completed {
@@ -1922,6 +1934,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	initialPublicationCheck := true
 	for {
 		readDone()
+		if completed && job.Command.Action == command.Fix {
+			return finish(result)
+		}
 		if completedWithDecision() {
 			return finish(result)
 		}
@@ -1932,9 +1947,15 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				initialPublicationCheck = false
 			}
 			readDone()
-			// Keep two lookup budgets for the selected action before scanning older writes.
-			if !completed && time.Until(job.Deadline) > 2*publicationReconcileBudget {
+			if completed && job.Command.Action == command.Fix {
+				return finish(result)
+			}
+			// Keep the publication reserve for the selected action before scanning older writes.
+			if !completed && time.Until(job.Deadline) > fixPublicationReserve {
 				if err := m.reconcilePublicationWrites(controlCtx, store, "", skipJobID); err != nil && !deferredControl(err) {
+					if controlCanceledByWorker(err) {
+						return finish(result)
+					}
 					return abort(err)
 				}
 			}
@@ -1944,9 +1965,16 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			}
 		}
 		completedAtStart := completed
+		readDone()
+		if completed && job.Command.Action == command.Fix {
+			return finish(result)
+		}
 		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		if !reserveFixDeadline {
 			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+				if controlCanceledByWorker(err) {
+					return finish(result)
+				}
 				return abort(err)
 			}
 		}
@@ -2012,7 +2040,14 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if !checkAt.IsZero() && (next.IsZero() || checkAt.Before(next)) {
 				next = checkAt
 			}
+			readDone()
+			if completed && job.Command.Action == command.Fix {
+				return finish(result)
+			}
 			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+				if controlCanceledByWorker(err) {
+					return finish(result)
+				}
 				return abort(err)
 			}
 		}

@@ -25,11 +25,18 @@ type recoveredResultHandler struct {
 
 type deadlineInvitationGitHub struct {
 	*fakeGitHub
-	checks int
+	checks  int
+	entered chan struct{}
 }
 
 func (g *deadlineInvitationGitHub) ListRepositoryInvitations(ctx context.Context) ([]github.Invitation, error) {
 	g.checks++
+	if g.entered != nil {
+		select {
+		case g.entered <- struct{}{}:
+		default:
+		}
+	}
 	<-ctx.Done()
 	return nil, ctx.Err()
 }
@@ -629,7 +636,7 @@ func TestSelectedFixReservesDeadlineFromRunningInvitation(t *testing.T) {
 		now := time.Now().UTC()
 		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
 		m.Now = time.Now
-		deadline := now.Add(21 * time.Second)
+		deadline := now.Add(31 * time.Second)
 		store.Data.Accepted.Deadline = deadline
 		failure := store.Data.JobFailures[accepted.JobID]
 		failure.Deadline = deadline
@@ -874,6 +881,67 @@ func TestRecoveredFixPushResultPreemptsOlderWriteNearDeadline(t *testing.T) {
 				store.Data.Processed[accepted.JobID], store.Data.TerminalDecisions[accepted.JobID], gh.commentCalls)
 		}
 	})
+}
+
+func TestCompletedFixDoesNotDelayPushRecoveryForInvitation(t *testing.T) {
+	for _, phase := range []string{"immediate result", "check in flight"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(25 * time.Second)
+				if phase == "check in flight" {
+					deadline = now.Add(35 * time.Second)
+				}
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = time.Time{}
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				store.Data.NextInviteCheckAt = now
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+				branchChecks := 0
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					branchChecks++
+					if branchChecks == 1 {
+						return github.Branch{}, &github.StatusError{StatusCode: 404}
+					}
+					time.Sleep(9 * time.Second)
+					return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+				}
+				wrapped := &deadlineInvitationGitHub{fakeGitHub: gh}
+				if phase == "check in flight" {
+					wrapped.entered = make(chan struct{}, 1)
+				}
+				m.GitHub = wrapped
+				publishCalls := 0
+				m.Handler = &recoveredResultHandler{publish: func(Job) error {
+					publishCalls++
+					if publishCalls == 1 {
+						if wrapped.entered != nil {
+							<-wrapped.entered
+						}
+						return ErrPostModelPublication
+					}
+					time.Sleep(12 * time.Second)
+					return nil
+				}}
+				_, err := m.RunOnce(t.Context(), store)
+				if err != nil || time.Since(now) != 21*time.Second || branchChecks != 2 || publishCalls != 2 ||
+					store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+					store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" ||
+					(phase == "check in flight" && wrapped.checks != 1) {
+					t.Fatalf("invitation delayed completed fix recovery: phase=%s err=%v elapsed=%s checks=%d publications=%d invitations=%d accepted=%+v processed=%v decision=%+v",
+						phase, err, time.Since(now), branchChecks, publishCalls, wrapped.checks, store.Data.Accepted,
+						store.Data.Processed[accepted.JobID], store.Data.TerminalDecisions[accepted.JobID])
+				}
+			})
+		})
+	}
 }
 
 func TestMonitorPreservesControlFailureFromStoredResultPublisher(t *testing.T) {
