@@ -135,8 +135,9 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 		if found {
 			changed, err := storePublicationWriteOutcome(store, jobID, write, state.PublicationWriteObserved, m.now().UTC())
 			if err != nil {
-				if activeResultReady && jobID == activeJobID && write.AttemptID == activeAttemptID &&
-					(write.Kind == "comment" || write.Kind == "review") {
+				if activeResultReady && write.AttemptID == activeAttemptID &&
+					(jobID == activePushID && write.Kind == "push" ||
+						jobID == activeJobID && (write.Kind == "comment" || write.Kind == "review")) {
 					return fmt.Errorf("%w: record observed publication %s: %w", ErrPostModelPublication, jobID, err)
 				}
 				return fmt.Errorf("%w: record observed publication %s: %w", ErrAcceptanceState, jobID, err)

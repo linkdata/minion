@@ -248,3 +248,40 @@ func TestSelectedInvitationStateFailureRemainsFatal(t *testing.T) {
 		}
 	})
 }
+
+func TestSelectedSavedResultDoesNotHideInvitationStateFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		m, store, job, gh, now := selectedAbortFixture(t)
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		ready := make(chan struct{})
+		release := make(chan struct{})
+		gh.beforeList = func() { <-ready }
+		m.afterInvitationCheck = func() {
+			close(release)
+			synctest.Wait() // Let the saved-result worker finish after the context check.
+			store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		}
+		run := func(context.Context, Job) error {
+			if err := store.WithLock(func() error {
+				if err := store.WriteAcceptedResult([]byte(`{"result":"saved"}`)); err != nil {
+					return err
+				}
+				store.Data.Accepted.ResultReady = true
+				return store.Save()
+			}); err != nil {
+				return err
+			}
+			close(ready)
+			<-release
+			return ErrPostModelPublication
+		}
+		err := m.runSelectedWithControls(t.Context(), store, job, "", nil, run,
+			func(err error) error { return m.completeSelected(t.Context(), store, job, now, err) })
+		if !errors.Is(err, ErrPostModelPublication) || !errors.Is(err, ErrAcceptanceState) {
+			t.Fatalf("saved result hid an independent invitation state failure: %v", err)
+		}
+	})
+}

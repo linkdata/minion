@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -211,6 +212,100 @@ func TestReconcileFixPushRejectsChangedCommitCheckpoint(t *testing.T) {
 	m := &Monitor{GitHub: gh}
 	if err := m.ReconcilePublicationWrites(t.Context(), store); !errors.Is(err, ErrAcceptanceState) || lookups != 0 {
 		t.Fatalf("changed checkpoint reached remote observation: lookups=%d error=%v", lookups, err)
+	}
+}
+
+func TestReconcileObservedFixPushSaveFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, attemptID         string
+		resultReady, foreignJob bool
+	}{
+		{name: "active saved result", resultReady: true},
+		{name: "result not ready"},
+		{name: "foreign attempt", resultReady: true, attemptID: "older-attempt"},
+		{name: "foreign job", resultReady: true, foreignJob: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			path := filepath.Join(t.TempDir(), "state.json")
+			store := openStateAt(t, path, now)
+			accepted := selectedAcceptance(t, now)
+			accepted.Action, accepted.CommandName = "fix", "fix"
+			accepted.JobID = jobID(accepted.SourceKey, "fix")
+			accepted.Assigned, accepted.ResultReady = true, tc.resultReady
+			store.Data.Accepted = &accepted
+			jobID := accepted.JobID
+			if tc.foreignJob {
+				jobID = strings.Repeat("f", 64)
+			}
+			attemptID := accepted.AttemptID
+			if tc.attemptID != "" {
+				attemptID = tc.attemptID
+			}
+			branch := "minion/fix-7-" + jobID[:12]
+			sha := strings.Repeat("b", 40)
+			write := state.PublicationWrite{
+				AttemptID: attemptID, Kind: "push", BotLogin: "bot", BotID: 8,
+				Repository: "bot/repo", Number: 7, Marker: "<!-- linkdataminion:" + jobID + " -->", Since: now,
+				Branch: branch, SHA: sha, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+			}
+			key := jobID + "-push"
+			store.Data.PendingFixes[jobID] = state.PendingFix{SHA: sha}
+			store.Data.PublicationWrites[key] = write
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			lookups := 0
+			gh := &fakeGitHub{branch: func(_ context.Context, repo, name string) (github.Branch, error) {
+				lookups++
+				if repo != "bot/repo" || name != branch {
+					t.Errorf("looked up wrong branch: %s %s", repo, name)
+				}
+				return github.Branch{Name: branch, Commit: github.BranchCommit{SHA: sha}}, nil
+			}}
+			m := &Monitor{GitHub: gh}
+			checkpoint := path + ".checkpoint"
+			if err := os.Rename(path, checkpoint); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := m.reconcilePublicationWrites(t.Context(), store, jobID, "")
+			if tc.resultReady && !tc.foreignJob && tc.attemptID == "" {
+				if !errors.Is(err, ErrPostModelPublication) || errors.Is(err, ErrAcceptanceState) {
+					t.Fatalf("active push save failure was not retryable: %v", err)
+				}
+			} else if !errors.Is(err, ErrAcceptanceState) || errors.Is(err, ErrPostModelPublication) {
+				t.Fatalf("inactive push save failure changed classification: %v", err)
+			}
+			if lookups != 1 {
+				t.Fatalf("exact push was not checked once: lookups=%d", lookups)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(checkpoint, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, now)
+			if got := store.Data.PublicationWrites[key]; got != write || store.Data.PendingFixes[jobID].SHA != sha {
+				t.Fatalf("failed observation changed durable push checkpoint: write=%+v pending=%+v", got, store.Data.PendingFixes[jobID])
+			}
+			if err := m.reconcilePublicationWrites(t.Context(), store, jobID, ""); err != nil {
+				t.Fatalf("exact push was not observed after reopening: %v", err)
+			}
+			if got := store.Data.PublicationWrites[key]; got.Status != state.PublicationWriteObserved || got.SHA != sha ||
+				got.Branch != branch || got.ResolvedAt.IsZero() || lookups != 2 {
+				t.Fatalf("retry did not persist exact push observation: write=%+v lookups=%d", got, lookups)
+			}
+		})
 	}
 }
 

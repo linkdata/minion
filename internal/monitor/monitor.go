@@ -121,6 +121,7 @@ type Monitor struct {
 	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
 	SelectedExecutorID     string          // Nonempty only while a selected local worker owns actions.
 	afterSelectedRunReturn func()          // Test seam after the worker's terminal decision.
+	afterInvitationCheck   func()          // Test seam after the invitation context check.
 }
 
 // NewAttemptID returns a random ID shared by acceptance and action records.
@@ -232,7 +233,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return activePublicationWriteWake(write, at, accepted.Deadline)
 			}
 			if !next.IsZero() && next.Equal(accepted.RetryAt) && next.Before(accepted.Deadline) &&
-				savedReplyPriority(accepted, store.Data.PublicationWrites) {
+				savedReplyPriority(accepted, store.Data.PublicationWrites) &&
+				!savedReplyHasControlWindow(accepted, store.Data.PublicationWrites, at) {
 				return next
 			}
 		}
@@ -279,7 +281,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if retryAt.Before(accepted.Deadline) &&
 				(savedReplyPriority(accepted, store.Data.PublicationWrites) ||
 					accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved) {
-				// Keep a saved reply ahead of unrelated checks until its retry.
+				if savedReplyHasControlWindow(accepted, store.Data.PublicationWrites, now().UTC()) {
+					if err := m.serviceSavedRetryControls(ctx, store, retryAt); err != nil {
+						return wake(retryAt, false), err
+					}
+				}
+				// Keep the saved reply ahead of unrelated publication scans until its retry.
 				return retryAt, nil
 			}
 			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
@@ -331,7 +338,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		err = errors.Join(err, reconcileErr)
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store, err)
-			return wake(retryAt, false), errors.Join(err, saveErr)
+			var controlErr error
+			if saveErr == nil && savedReplyHasControlWindow(store.Data.Accepted, store.Data.PublicationWrites, now().UTC()) {
+				controlErr = m.serviceSavedRetryControls(ctx, store, retryAt)
+			}
+			return wake(retryAt, false), errors.Join(err, saveErr, controlErr)
 		}
 		return wake(store.Data.NextPollAt, err == nil), err
 	}
@@ -817,6 +828,9 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if m.afterInvitationCheck != nil {
+		m.afterInvitationCheck()
+	}
 	return store.WithLock(func() error {
 		if len(deferred) != 0 {
 			if store.Data.RepositoryCursors == nil {
@@ -1244,6 +1258,32 @@ func savedReplyPriority(accepted *state.AcceptedAction, writes map[string]state.
 			(push.AttemptID != accepted.AttemptID || push.Status != state.PublicationWriteUncertain)
 	}
 	return true
+}
+
+func savedReplyHasControlWindow(accepted *state.AcceptedAction, writes map[string]state.PublicationWrite, at time.Time) bool {
+	if accepted == nil || !accepted.ResultReady ||
+		!at.Add(siblingReplyBudget+fixPublicationReserve+publicationReconcileBudget).Before(accepted.Deadline) {
+		return false
+	}
+	task, push := writes[accepted.JobID], writes[accepted.JobID+"-push"]
+	return (task.AttemptID != accepted.AttemptID || task.Status == "") &&
+		(push.AttemptID != accepted.AttemptID || push.Status == "")
+}
+
+func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.Store, retryAt time.Time) error {
+	controlCtx, cancel := context.WithDeadline(ctx, retryAt)
+	defer cancel()
+	if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if controlCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return nil // The saved reply is due; retry it on the next pass.
+		}
+		return err
+	}
+	m.serviceTerminalControlsBefore(controlCtx, store, retryAt)
+	return ctx.Err()
 }
 
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {
@@ -1980,11 +2020,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		if !completed || errors.Is(err, ErrAcceptanceState) || ctx.Err() != nil || actionCtx.Err() != nil {
 			return false
 		}
-		if selectedResultReady() {
-			return true
-		}
-		return job.Command.Action == command.Fix && errors.Is(err, context.Canceled) &&
-			errors.Is(controlCtx.Err(), context.Canceled)
+		return errors.Is(err, context.Canceled) && errors.Is(controlCtx.Err(), context.Canceled) &&
+			(selectedResultReady() || job.Command.Action == command.Fix)
 	}
 	completedWithDecision := func() bool {
 		if !completed {

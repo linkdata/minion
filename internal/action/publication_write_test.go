@@ -83,6 +83,86 @@ func TestFixPushCheckpointKeepsExactTargetAndOriginalGraceAcrossRestart(t *testi
 	}
 }
 
+func TestObservedFixPushSaveFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		resultReady       bool
+		foreignAssignment bool
+	}{
+		{name: "active saved result", resultReady: true},
+		{name: "result not ready"},
+		{name: "foreign assignment", resultReady: true, foreignAssignment: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := testJob(command.Fix)
+			job.Identity.JobID = strings.Repeat("a", 64)
+			store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+			e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+			sha := strings.Repeat("b", 40)
+			branch := "minion/fix-7-aaaaaaaaaaaa"
+			if err := e.beginFixPush(t.Context(), request, "bot/repo", branch, sha, nil); err != nil {
+				t.Fatal(err)
+			}
+			key := fixPushWriteKey(request.ID)
+			write := store.Data.PublicationWrites[key]
+			if !tc.resultReady {
+				store.Data.Accepted.ResultReady = false
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observed := request
+			if tc.foreignAssignment {
+				observed.Repository.ID++
+			}
+			checkpoint := path + ".checkpoint"
+			if err := os.Rename(path, checkpoint); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := e.observeFixPush(observed)
+			if tc.resultReady && !tc.foreignAssignment {
+				if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrAcceptanceState) {
+					t.Fatalf("active push observation save failure was not retryable: %v", err)
+				}
+			} else if !errors.Is(err, monitor.ErrAcceptanceState) || errors.Is(err, monitor.ErrPostModelPublication) {
+				t.Fatalf("inactive push observation save failure changed classification: %v", err)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(checkpoint, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = state.Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			e.Store = store
+			if got := store.Data.PublicationWrites[key]; got != write || store.Data.PendingFixes[request.ID].SHA != sha {
+				t.Fatalf("failed observation changed durable push checkpoint: write=%+v pending=%+v", got, store.Data.PendingFixes[request.ID])
+			}
+			if tc.resultReady && !tc.foreignAssignment {
+				if err := e.observeFixPush(request); err != nil {
+					t.Fatalf("active push observation did not retry: %v", err)
+				}
+				if got := store.Data.PublicationWrites[key]; got.Status != state.PublicationWriteObserved || got.SHA != sha || got.Branch != branch || got.ResolvedAt.IsZero() {
+					t.Fatalf("retried push observation changed exact checkpoint: %+v", got)
+				}
+			}
+		})
+	}
+}
+
 func TestFixPushRequiresCommittedResult(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)

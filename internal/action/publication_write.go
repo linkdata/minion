@@ -160,6 +160,10 @@ func (e *Orchestrator) observeFixPush(job monitor.Job) error {
 		write.ResolvedAt = time.Now().UTC()
 		e.Store.Data.PublicationWrites[key] = write
 		if err := e.Store.Save(); err != nil {
+			if accepted := e.Store.Data.Accepted; accepted != nil && accepted.ResultReady &&
+				monitor.AssignmentMatchesAccepted(job, *accepted) {
+				return fmt.Errorf("%w: save observed fix push: %w", monitor.ErrPostModelPublication, err)
+			}
 			return fmt.Errorf("%w: save observed fix push: %w", monitor.ErrAcceptanceState, err)
 		}
 		return nil
