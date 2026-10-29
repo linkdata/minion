@@ -972,7 +972,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			}
 			var checkpoint state.Data
 			if err := json.Unmarshal(data, &checkpoint); err != nil || !reflect.DeepEqual(checkpoint.PendingFixes[job.ID], wantPending) || !reflect.DeepEqual(store.Data.PendingFixes[job.ID], wantPending) {
-				t.Fatalf("original outcome was not durable before push or retained stale cap: checkpoint=%+v current=%+v want=%+v error=%v", checkpoint.PendingFixes[job.ID], store.Data.PendingFixes[job.ID], wantPending, err)
+				t.Fatalf("original outcome or cap was not saved before push: checkpoint=%+v current=%+v want=%+v error=%v", checkpoint.PendingFixes[job.ID], store.Data.PendingFixes[job.ID], wantPending, err)
 			}
 			push := checkpoint.PublicationWrites[fixPushWriteKey(job.ID)]
 			if push.Kind != "push" || push.Status != state.PublicationWritePending || push.Repository != "linkdataminion/r" ||
@@ -994,7 +994,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 					t.Fatalf("capped branch reply lost durable warning: %q", commentBody)
 				}
 			} else if strings.Contains(commentBody, "Critic round limit reached") {
-				t.Fatalf("ordinary fix inherited a stale cap warning: %q", commentBody)
+				t.Fatalf("ordinary fix received an unexpected cap warning: %q", commentBody)
 			}
 			if rulesetChecks != 4 {
 				t.Fatalf("push rulesets checked %d times, want base and fork before model execution and before push", rulesetChecks)
