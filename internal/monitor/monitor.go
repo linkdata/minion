@@ -1502,26 +1502,6 @@ func (m *Monitor) RevalidatePublication(ctx context.Context, store *state.Store,
 	})
 }
 
-// RevalidateInProcessPublication checks live authority for an action without a selected reservation.
-func (m *Monitor) RevalidateInProcessPublication(ctx context.Context, job Job) error {
-	if m == nil || m.GitHub == nil {
-		return fmt.Errorf("%w: publication validator is unavailable", ErrAcceptanceState)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
-		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
-	}
-	if err := m.revalidateJobSource(ctx, job); err != nil {
-		return err
-	}
-	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
-		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
-	}
-	return nil
-}
-
 // RevalidateFixedRefusal checks live authority for the bounded fixed reply.
 // This reply has its own budget, so the original action deadline is not checked.
 func (m *Monitor) RevalidateFixedRefusal(ctx context.Context, store *state.Store, job Job) error {
