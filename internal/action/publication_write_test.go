@@ -82,6 +82,75 @@ func TestFixPushCheckpointKeepsExactTargetAndOriginalGraceAcrossRestart(t *testi
 	}
 }
 
+func TestFixPushRequiresCommittedResult(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	store.Data.Accepted.ResultReady = false
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	err := e.beginFixPushAt(t.Context(), request, "bot/repo", "minion/fix-7-aaaaaaaaaaaa", strings.Repeat("b", 40), nil,
+		func() time.Time { return request.AcceptedAt.Add(time.Second) })
+	if !errors.Is(err, monitor.ErrAcceptanceState) || len(store.Data.PublicationWrites) != 0 || len(store.Data.PendingFixes) != 0 {
+		t.Fatalf("uncommitted result reserved a push: err=%v writes=%v fixes=%v", err, store.Data.PublicationWrites, store.Data.PendingFixes)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if len(reopened.Data.PublicationWrites) != 0 || len(reopened.Data.PendingFixes) != 0 {
+		t.Fatalf("uncommitted result left a durable push: writes=%v fixes=%v", reopened.Data.PublicationWrites, reopened.Data.PendingFixes)
+	}
+}
+
+func TestFixPushDeadlineAfterCheckpointSaveRollsBackBothRecords(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	checks := 0
+	err := e.beginFixPushAt(t.Context(), request, "bot/repo", "minion/fix-7-aaaaaaaaaaaa", strings.Repeat("b", 40), nil,
+		func() time.Time {
+			checks++
+			if checks == 1 {
+				return request.AcceptedAt.Add(time.Second)
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var saved state.Data
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWritePending ||
+				saved.PendingFixes[request.ID].SHA != strings.Repeat("b", 40) {
+				t.Fatalf("push checkpoint was not saved before deadline check: writes=%v fixes=%v", saved.PublicationWrites, saved.PendingFixes)
+			}
+			return request.Deadline.Add(time.Nanosecond)
+		})
+	if !errors.Is(err, context.DeadlineExceeded) || checks != 2 || len(store.Data.PublicationWrites) != 0 || len(store.Data.PendingFixes) != 0 {
+		t.Fatalf("expired unissued push retained a checkpoint: err=%v checks=%d writes=%v fixes=%v", err, checks, store.Data.PublicationWrites, store.Data.PendingFixes)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if len(reopened.Data.PublicationWrites) != 0 || len(reopened.Data.PendingFixes) != 0 {
+		t.Fatalf("expired unissued push survived restart: writes=%v fixes=%v", reopened.Data.PublicationWrites, reopened.Data.PendingFixes)
+	}
+}
+
 func TestFixPushReconciliationRequiresExactRemoteSHA(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)

@@ -188,6 +188,10 @@ func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 		{name: "bad bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "owner/bot" }},
 		{name: "bad bot ID", jobID: "job-1", change: func(w *PublicationWrite) { w.BotID = -1 }},
 		{name: "bad target", jobID: "job-1", change: func(w *PublicationWrite) { w.Repository = "../repo" }},
+		{name: "comment branch", jobID: "job-1", change: func(w *PublicationWrite) { w.Branch = "unexpected" }},
+		{name: "comment SHA", jobID: "job-1", change: func(w *PublicationWrite) { w.SHA = strings.Repeat("b", 40) }},
+		{name: "review branch", jobID: "job-1", change: func(w *PublicationWrite) { w.Kind = "review"; w.Branch = "unexpected" }},
+		{name: "review SHA", jobID: "job-1", change: func(w *PublicationWrite) { w.Kind = "review"; w.SHA = strings.Repeat("b", 40) }},
 		{name: "wrong marker", jobID: "job-1", change: func(w *PublicationWrite) { w.Marker = "<!-- linkdataminion:other -->" }},
 		{name: "renewed backwards", jobID: "job-1", change: func(w *PublicationWrite) { w.Deadline = at }},
 		{name: "invalid status", jobID: "job-1", change: func(w *PublicationWrite) { w.Status = "complete" }},
@@ -230,6 +234,7 @@ func TestOpenValidatesFixPushPublicationWrite(t *testing.T) {
 	}{
 		{name: "valid", valid: true},
 		{name: "missing attempt", change: func(w *PublicationWrite) { w.AttemptID = "" }},
+		{name: "missing bot ID", change: func(w *PublicationWrite) { w.BotID = 0 }},
 		{name: "wrong fork", change: func(w *PublicationWrite) { w.Repository = "other/repo" }},
 		{name: "wrong branch", change: func(w *PublicationWrite) { w.Branch = "minion/fix-7-other" }},
 		{name: "missing SHA", change: func(w *PublicationWrite) { w.SHA = "" }},
