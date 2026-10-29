@@ -158,18 +158,13 @@ func InertLogText(s string) string {
 // It persists each completed command before advancing that repository's cursor.
 // Failed threads remain queued for retries without blocking other repositories.
 // Parent cancellation preserves earlier failures and unprocessed retry state/cursors.
-// Legacy executions reporting parent cancellation refund their attempt unless a model call began, publication began, or the execution outcome is unknown.
 // A selected worker assignment without a stored result is terminal even when execution returns cancellation.
 func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, error) {
-	selectedMode := m.SelectedExecutorID != ""
 	if err := ctx.Err(); err != nil {
-		if selectedMode {
-			if next := store.Data.NextPollAt; !next.IsZero() {
-				return earlierWake(next, m.terminalControlWake(store)), err
-			}
-			return m.terminalControlWake(store), err
+		if next := store.Data.NextPollAt; !next.IsZero() {
+			return earlierWake(next, m.terminalControlWake(store)), err
 		}
-		return store.Data.NextPollAt, err
+		return m.terminalControlWake(store), err
 	}
 	if store.Data.Accepted == nil {
 		// A completed attempt may leave its sidecar after a crash or failed unlink.
@@ -197,9 +192,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	now := m.now
 	wake := func(next time.Time, service bool) time.Time {
-		if !selectedMode {
-			return withPublicationWriteWake(earlierWake(next, store.Data.NextInviteCheckAt), store, now().UTC())
-		}
 		var terminal time.Time
 		if service && ctx.Err() == nil {
 			terminal = m.serviceTerminalControls(ctx, store)
@@ -207,10 +199,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			terminal = m.terminalControlWake(store)
 		}
 		if next.IsZero() {
-			if terminal.IsZero() {
-				return withPublicationWriteWake(next, store, now().UTC())
+			next = store.Data.NextInviteCheckAt
+			if !terminal.IsZero() && (next.IsZero() || terminal.Before(next)) {
+				next = terminal
 			}
-			return withPublicationWriteWake(earlierWake(terminal, store.Data.NextInviteCheckAt), store, now().UTC())
+			return withPublicationWriteWake(next, store, now().UTC())
 		}
 		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, now().UTC())
 	}
@@ -239,14 +232,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return wake(store.Data.NextPollAt, err == nil), err
 	}
-	var capacityErr error
-	if selectedMode {
-		capacityErr = m.waitCapacityWithInvitations(ctx, store)
-	} else if capacityErr = m.checkDueInvitations(ctx, store, now().UTC()); capacityErr == nil {
-		capacityErr = m.waitCapacity(ctx)
+	if m.SelectedExecutorID == "" {
+		if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
+			return wake(store.Data.NextPollAt, false), err
+		}
+		return wake(store.Data.NextPollAt, true), nil
 	}
-	if capacityErr != nil {
-		return wake(store.Data.NextPollAt, false), capacityErr
+	if err := m.waitCapacityWithInvitations(ctx, store); err != nil {
+		return wake(store.Data.NextPollAt, false), err
 	}
 	started := now().UTC()
 	if started.Before(store.Data.NextPollAt) {
@@ -291,11 +284,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 	}
 	stop := func(errs ...error) (time.Time, error) {
-		var terminal time.Time
-		if selectedMode {
-			clearResolvedTerminalFailures()
-			terminal = m.terminalControlWake(store)
-		}
+		clearResolvedTerminalFailures()
+		terminal := m.terminalControlWake(store)
 		err := errors.Join(slices.Concat(failures, errs)...)
 		if canceled := ctx.Err(); canceled != nil && !errors.Is(err, canceled) {
 			err = errors.Join(err, canceled)
@@ -541,7 +531,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				continue
 			}
-			selected := selectedMode
 			jobFailure := store.Data.JobFailures[job.ID]
 			jobFailure.NotificationKey = entry.key
 			if jobFailure.ModelCallStarted {
@@ -557,173 +546,86 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if !jobFailure.Deadline.IsZero() && !time.Now().Before(jobFailure.Deadline) {
 				jobFailure.Attempts = maxJobAttempts
 				store.Data.JobFailures[job.ID] = jobFailure
-				if err := saveJobResult(store, selected); err != nil {
+				if err := saveAcceptanceState(store); err != nil {
 					return stop(err)
 				}
 				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
 				continue
 			}
-			if selected {
-				if store.Data.Accepted != nil {
-					return stop(fmt.Errorf("%w: another selected action remains accepted", ErrAcceptanceState))
-				}
-				job.AttemptID, err = NewAttemptID()
-				if err != nil {
+			if store.Data.Accepted != nil {
+				return stop(fmt.Errorf("%w: another selected action remains accepted", ErrAcceptanceState))
+			}
+			job.AttemptID, err = NewAttemptID()
+			if err != nil {
+				return stop(err)
+			}
+			if err := m.originalTiming(&jobFailure); err != nil {
+				return stop(err)
+			}
+			job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
+			accepted := &state.AcceptedAction{
+				JobID: job.ID, AttemptID: job.AttemptID, ExecutorID: m.SelectedExecutorID,
+				Repository: repo.Name, RepositoryID: repo.ID, OwnerID: repo.OwnerID,
+				SubjectType: job.SubjectType, SubjectNumber: number,
+				SourceKey: item.Key, SourceNodeID: item.NodeID, SourceURL: item.HTMLURL, SourceUpdatedAt: item.UpdatedAt,
+				Requester: item.Author.Login, RequesterID: item.Author.ID,
+				CommandName: cmd.Name, Action: string(cmd.Action), AcceptedAt: job.AcceptedAt, Deadline: job.Deadline,
+			}
+			if err := accepted.Validate(); err != nil {
+				return stop(fmt.Errorf("accept %s: %w", itemLocation(item), err))
+			}
+			// Save an earlier reply failure's backoff before Execute can service this thread.
+			if entryFailed() {
+				if err := deferEntry(); err != nil {
 					return stop(err)
 				}
-				if err := m.originalTiming(&jobFailure); err != nil {
-					return stop(err)
+			}
+			jobFailure.Attempts++
+			store.Data.JobFailures[job.ID] = jobFailure
+			store.Data.Accepted = accepted
+			for _, unaccepted := range scans[scanIndex:] {
+				if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
+					unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
+					pending.UpdatedAt = unaccepted.notification.UpdatedAt
+					pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
+					store.Data.PendingNotifications[unaccepted.key] = pending
 				}
-				job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
-				accepted := &state.AcceptedAction{
-					JobID: job.ID, AttemptID: job.AttemptID, ExecutorID: m.SelectedExecutorID,
-					Repository: repo.Name, RepositoryID: repo.ID, OwnerID: repo.OwnerID,
-					SubjectType: job.SubjectType, SubjectNumber: number,
-					SourceKey: item.Key, SourceNodeID: item.NodeID, SourceURL: item.HTMLURL, SourceUpdatedAt: item.UpdatedAt,
-					Requester: item.Author.Login, RequesterID: item.Author.ID,
-					CommandName: cmd.Name, Action: string(cmd.Action), AcceptedAt: job.AcceptedAt, Deadline: job.Deadline,
-				}
-				if err := accepted.Validate(); err != nil {
-					return stop(fmt.Errorf("accept %s: %w", itemLocation(item), err))
-				}
-				// Save an earlier reply failure's backoff before Execute can service this thread.
-				if entryFailed() {
-					if err := deferEntry(); err != nil {
-						return stop(err)
-					}
-				}
-				jobFailure.Attempts++
-				store.Data.JobFailures[job.ID] = jobFailure
-				store.Data.Accepted = accepted
-				for _, unaccepted := range scans[scanIndex:] {
-					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
-						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
-						pending.UpdatedAt = unaccepted.notification.UpdatedAt
-						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
-						store.Data.PendingNotifications[unaccepted.key] = pending
-					}
-					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
-				}
-				if err := saveAcceptanceState(store); err != nil {
-					return stop(err)
-				}
+				rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
+			}
+			if err := saveAcceptanceState(store); err != nil {
+				return stop(err)
 			}
 			err = m.GitHub.ReactEyes(ctx, item.NodeID)
 			if ctx.Err() != nil {
 				return stopAt("react to "+itemLocation(item), err)
 			}
 			if err != nil {
-				if selected {
-					if !time.Now().Before(job.Deadline) {
-						if err := m.terminalAccepted(ctx, store, job, jobFailure); err != nil {
-							return stop(err)
-						}
-						continue
+				if !time.Now().Before(job.Deadline) {
+					if err := m.terminalAccepted(ctx, store, job, jobFailure); err != nil {
+						return stop(err)
 					}
-					return stop(fmt.Errorf("react to %s: %w", itemLocation(item), err))
+					continue
 				}
-				failures = append(failures, fmt.Errorf("react to %s: %w", itemLocation(item), err))
-				continue
+				return stop(fmt.Errorf("react to %s: %w", itemLocation(item), err))
 			}
-			if selected && !time.Now().Before(job.Deadline) {
+			if !time.Now().Before(job.Deadline) {
 				if err := m.terminalAccepted(ctx, store, job, jobFailure); err != nil {
 					return stop(err)
 				}
 				continue
 			}
-			if !selected {
-				if err := m.originalTiming(&jobFailure); err != nil {
+			executeErr := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items)
+			clearResolvedTerminalFailures()
+			if err := executeErr; err != nil {
+				if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
+					return stop() // The refused assignment retired this worker.
+				}
+				if errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || ctx.Err() != nil {
 					return stop(err)
 				}
-				job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
-				if !time.Now().Before(job.Deadline) {
-					jobFailure.Attempts = maxJobAttempts
-					store.Data.JobFailures[job.ID] = jobFailure
-					if err := store.Save(); err != nil {
-						return stop(err)
-					}
-					if err := m.finishFailedJob(ctx, store, job, started, jobFailure); err != nil {
-						failures = append(failures, err)
-					}
-					continue
-				}
-				// Count an interrupted legacy execution before starting it.
-				jobFailure.Attempts++
-				store.Data.JobFailures[job.ID] = jobFailure
-				if err := store.Save(); err != nil {
-					return stop(err)
-				}
+				failures = append(failures, err)
 			}
-			if selected {
-				executeErr := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items)
-				clearResolvedTerminalFailures()
-				if err := executeErr; err != nil {
-					if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
-						return stop() // The refused assignment retired this worker.
-					}
-					if errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || ctx.Err() != nil {
-						return stop(err)
-					}
-					failures = append(failures, err)
-				}
-			} else {
-				m.logf("run %s from @%s in %s #%d", cmd.Action, item.Author.Login, repo.Name, number)
-				err = m.Handler.Execute(ctx, job)
-				jobFailure.ModelCallStarted = store.Data.JobFailures[job.ID].ModelCallStarted
-				if err != nil {
-					failureErr := fmt.Errorf("%s from %s: %w", cmd.Action, itemLocation(item), err)
-					publicationFailure := errors.Is(err, ErrPostModelPublication)
-					outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
-					interrupted := !jobFailure.ModelCallStarted && !outcomeUnknown && ctx.Err() != nil && errors.Is(err, context.Canceled) && !publicationFailure
-					switch {
-					case interrupted:
-						jobFailure.Attempts--
-					case jobFailure.ModelCallStarted, outcomeUnknown, errors.Is(err, ErrTerminalJob):
-						jobFailure.Attempts = maxJobAttempts
-					case !publicationFailure && (errors.Is(err, workroot.ErrUnsafe) || infrastructureFailure(err)):
-						jobFailure.Attempts--
-					}
-					if jobFailure == (state.JobFailure{NotificationKey: entry.key}) {
-						delete(store.Data.JobFailures, job.ID)
-					} else {
-						store.Data.JobFailures[job.ID] = jobFailure
-					}
-					if saveErr := store.Save(); saveErr != nil {
-						return stop(failureErr, saveErr)
-					}
-					if interrupted {
-						m.logf("%s from %s interrupted: %v", cmd.Action, itemLocation(item), err)
-						return stop(failureErr)
-					}
-					m.logf("%s from %s failed (attempt %d/%d): %v", cmd.Action, itemLocation(item), jobFailure.Attempts, maxJobAttempts, err)
-					if jobFailure.Attempts >= maxJobAttempts {
-						recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started, jobFailure))
-					}
-					if ctx.Err() != nil {
-						return stop(failureErr)
-					}
-					if jobFailure.Attempts < maxJobAttempts {
-						failures = append(failures, failureErr)
-					}
-				} else {
-					store.Data.Processed[job.ID] = started
-					delete(store.Data.JobFailures, job.ID)
-					delete(store.Data.PendingFixes, job.ID)
-					if err := store.Save(); err != nil {
-						return stop(err)
-					}
-					if ctx.Err() != nil {
-						return stop()
-					}
-				}
-			}
-			var capacityErr error
-			if selected {
-				capacityErr = m.waitCapacityWithInvitations(ctx, store)
-			} else {
-				capacityErr = m.waitCapacity(ctx)
-			}
-			if err := capacityErr; err != nil {
+			if err := m.waitCapacityWithInvitations(ctx, store); err != nil {
 				for _, later := range scans[scanIndex+1:] {
 					rememberNotification(store, later.key, later.notification, later.since)
 				}
@@ -745,13 +647,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return stop(err)
 			}
 		} else {
-			if _, pending := store.Data.PendingNotifications[entry.key]; selectedMode && pending {
+			if _, pending := store.Data.PendingNotifications[entry.key]; pending {
 				if err := m.retireMissingTerminalFailures(store, entry.key, items, m.controlCommands(repo), nil, started); err != nil {
 					return stop(err)
 				}
 			}
 			if pending, exists := store.Data.PendingNotifications[entry.key]; exists &&
-				(!selectedMode || !hasTerminalReplay(store, entry.key, "")) {
+				!hasTerminalReplay(store, entry.key, "") {
 				delete(store.Data.PendingNotifications, entry.key)
 				if err := store.Save(); err != nil {
 					store.Data.PendingNotifications[entry.key] = pending
@@ -1598,26 +1500,6 @@ func (m *Monitor) RevalidatePublication(ctx context.Context, store *state.Store,
 		}
 		return nil
 	})
-}
-
-// RevalidateInProcessPublication checks live authority for an action without a selected reservation.
-func (m *Monitor) RevalidateInProcessPublication(ctx context.Context, job Job) error {
-	if m == nil || m.GitHub == nil {
-		return fmt.Errorf("%w: publication validator is unavailable", ErrAcceptanceState)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
-		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
-	}
-	if err := m.revalidateJobSource(ctx, job); err != nil {
-		return err
-	}
-	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
-		return errors.Join(ErrTerminalJob, context.DeadlineExceeded)
-	}
-	return nil
 }
 
 // RevalidateFixedRefusal checks live authority for the bounded fixed reply.

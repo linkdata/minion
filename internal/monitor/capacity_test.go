@@ -28,6 +28,12 @@ type capacityHandler struct {
 	err    error
 }
 
+type noCapacityHandler struct{}
+
+func (*noCapacityHandler) Execute(context.Context, Job) error {
+	panic("selected action ran without a readiness check")
+}
+
 type heldCapacityHandler struct {
 	entered chan struct{}
 	release chan struct{}
@@ -84,7 +90,7 @@ func TestRunOnceWaitsBeforeActionDiscoveryOrStateMutation(t *testing.T) {
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, beforeList: func() { t.Fatal("invitation check ran before due time") }}
 	workerExited := errors.New("selected worker exited")
 	handler := &capacityHandler{failAt: 1, err: workerExited}
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, workerExited) {
 		t.Fatalf("worker exit = %v", err)
 	}
@@ -153,7 +159,7 @@ func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 			}
 			unavailable := errors.New("capacity unavailable")
 			handler := &capacityHandler{failAt: test.failAt, err: unavailable}
-			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+			m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return clock }, SelectedExecutorID: "local"}
 			_, err := m.RunOnce(t.Context(), store)
 			if test.failAt == 0 && err != nil || test.failAt != 0 && !errors.Is(err, unavailable) {
 				t.Fatalf("RunOnce error = %v", err)
@@ -239,7 +245,7 @@ func TestRunOnceCapacityLossPreservesPendingRetryBytes(t *testing.T) {
 	}
 	unavailable := errors.New("capacity unavailable")
 	handler := &capacityHandler{failAt: 2, err: unavailable}
-	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, unavailable) {
 		t.Fatalf("capacity loss = %v", err)
 	}
@@ -320,7 +326,7 @@ func TestRunOnceInterleavedRepositoriesReplayOnlyUnacceptedActions(t *testing.T)
 	clock := now
 	unavailable := errors.New("capacity unavailable")
 	handler := &capacityHandler{failAt: 3, err: unavailable}
-	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
+	m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return clock }, SelectedExecutorID: "local"}
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, unavailable) {
 		t.Fatalf("capacity loss = %v", err)
 	}
@@ -588,7 +594,7 @@ func TestRunOnceWakesForInvitationsBeforePollOrAcceptedRetry(t *testing.T) {
 		cfg := testConfig(t)
 		cfg.PollIntervalSeconds = 30 * 60
 		store := openState(t, now.Add(-time.Minute))
-		m := &Monitor{Config: cfg, GitHub: &fakeGitHub{}, Handler: &capacityHandler{}, Now: func() time.Time { return now }}
+		m := &Monitor{Config: cfg, GitHub: &fakeGitHub{}, Handler: &capacityHandler{}, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
 		next, err := m.RunOnce(t.Context(), store)
 		if err != nil || !next.Equal(now.Add(15*time.Minute)) || !store.Data.NextPollAt.Equal(now.Add(30*time.Minute)) {
 			t.Fatalf("long poll missed invitation wake: next=%s poll=%s err=%v", next, store.Data.NextPollAt, err)
@@ -627,9 +633,7 @@ func TestRunOnceSelectedModeRequiresReadinessCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}}
-	m := selectedMonitor(t, now, gh, &fakeHandler{onExecute: func() {
-		t.Fatal("selected action ran without a readiness check")
-	}})
+	m := selectedMonitor(t, now, gh, &noCapacityHandler{})
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrAcceptanceState) ||
 		len(gh.notificationCalls) != 0 || len(store.Data.Processed) != 0 || !store.Data.NextPollAt.IsZero() {
 		t.Fatalf("selected mode discovered work without readiness: calls=%v state=%+v err=%v",
@@ -710,7 +714,7 @@ func TestSelectedWorkerDefersInvitedRepositoryUntilRestart(t *testing.T) {
 	gh := &fakeGitHub{invitations: []github.Invitation{{
 		ID: 1, Repository: github.Repository{FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write",
 	}}}
-	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, SelectedCommands: map[string]bool{"review": true}}
+	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 	deferred, err := m.acceptWhitelistedInvitations(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -775,7 +779,7 @@ func TestSelectedWorkerInvitationKeepsCursorUntilRestart(t *testing.T) {
 	store := openStateAt(t, statePath, initial)
 	handler := &capacityHandler{}
 	m := &Monitor{Config: cfg, ConfigPath: configPath, GitHub: gh, Handler: handler,
-		SelectedCommands: map[string]bool{"review": true}, Now: func() time.Time { return now }}
+		SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}, Now: func() time.Time { return now }}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}
@@ -795,7 +799,7 @@ func TestSelectedWorkerInvitationKeepsCursorUntilRestart(t *testing.T) {
 	gh.invitations = nil
 	gh.notificationCalls = nil
 	m = &Monitor{Config: reloaded, ConfigPath: configPath, GitHub: gh, Handler: handler,
-		SelectedCommands: map[string]bool{"review": true}, Now: func() time.Time { return now.Add(time.Minute) }}
+		SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}, Now: func() time.Time { return now.Add(time.Minute) }}
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}

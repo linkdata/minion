@@ -245,6 +245,12 @@ func (f *actionMonitorGitHub) ThreadItems(context.Context, string, string, int, 
 	return items, nil
 }
 func (f *actionMonitorGitHub) CurrentItem(_ context.Context, item github.Item) (github.Item, error) {
+	for _, current := range f.items {
+		if current.Key == item.Key && current.NodeID == item.NodeID {
+			current.Author.ID = 7
+			return current, nil
+		}
+	}
 	return item, nil
 }
 func (f *actionMonitorGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, string, string, bool) (bool, error) {
@@ -259,6 +265,44 @@ func (f *actionMonitorGitHub) Permission(_ context.Context, _, login string) (gi
 func (f *actionMonitorGitHub) ReactEyes(context.Context, string) error { return nil }
 func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, string) (github.Comment, error) {
 	return github.Comment{}, nil
+}
+
+func bindSelectedRunner(m *monitor.Monitor, store *state.Store, owner *Orchestrator) {
+	m.SelectedExecutorID = LocalExecutorID
+	m.SelectedCommands = make(map[string]bool, len(owner.Commands))
+	for name := range owner.Commands {
+		m.SelectedCommands[name] = true
+	}
+	owner.assignmentRequired = true
+	owner.ValidateAssignment = func(ctx context.Context, job monitor.Job) error {
+		return m.RevalidateAssignment(ctx, store, job)
+	}
+	owner.ValidatePublication = func(ctx context.Context, job monitor.Job, requireAssigned bool) error {
+		return m.RevalidatePublication(ctx, store, job, requireAssigned)
+	}
+	owner.ValidateFixedRefusal = func(ctx context.Context, job monitor.Job) error {
+		return m.RevalidateFixedRefusal(ctx, store, job)
+	}
+	owner.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		assignment, ok := checkpoints.(assignmentCheckpoint)
+		if !ok || !assignment.AssignmentRequired() {
+			return Result{}, fmt.Errorf("selected runner has no assignment checkpoint")
+		}
+		if err := assignment.BeforeAssignment(job); err != nil {
+			return Result{}, err
+		}
+		runner := owner.Runner
+		runner.WorkRoot = owner.WorkRoot
+		result, err := runner.Execute(ctx, job, checkpoints)
+		if err == nil {
+			receiver, ok := checkpoints.(interface{ ReceiveCompletedResult(Result) error })
+			if !ok {
+				return result, fmt.Errorf("selected runner has no completed result checkpoint")
+			}
+			err = receiver.ReceiveCompletedResult(result)
+		}
+		return result, err
+	})
 }
 
 func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
@@ -355,6 +399,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	m := monitor.Monitor{Logger: log.New(&journal, "", 0), Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: monitorGitHub, Handler: orchestrator, Now: func() time.Time { return now.Add(time.Minute) }}
+	bindSelectedRunner(&m, store, orchestrator)
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)
 	}

@@ -155,17 +155,8 @@ func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testin
 		m := &Monitor{Config: config.Config{BotLogin: "bot", Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}, GitHub: gh}
 		for pass, id := range ids {
 			start := time.Now()
-			if pass == 0 {
-				if _, err := m.RunOnce(t.Context(), store); err != nil {
-					t.Fatal(err)
-				}
-				if len(gh.notificationCalls) != 1 {
-					t.Fatalf("bounded reconciliation did not reach notification polling: %d calls", len(gh.notificationCalls))
-				}
-			} else {
-				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
-					t.Fatal(err)
-				}
+			if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+				t.Fatal(err)
 			}
 			if elapsed := time.Since(start); elapsed != publicationReconcileBudget {
 				t.Fatalf("pass %d occupied monitor for %s, want %s", pass, elapsed, publicationReconcileBudget)
@@ -186,7 +177,7 @@ func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testin
 	})
 }
 
-func TestRunOnceNormalPollWakesForIssuedPublication(t *testing.T) {
+func TestRunOnceWithoutWorkerWakesForIssuedPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		store := openState(t, now)
@@ -203,7 +194,7 @@ func TestRunOnceNormalPollWakesForIssuedPublication(t *testing.T) {
 		m := &Monitor{Config: config.Config{BotLogin: "bot", PollIntervalSeconds: 600}, GitHub: gh}
 		next, err := m.RunOnce(t.Context(), store)
 		if err != nil || !next.Equal(now.Add(publicationRecheckInterval)) || len(gh.verifiedCalls) != 1 {
-			t.Fatalf("normal poll skipped publication wake: next=%s err=%v checks=%d", next, err, len(gh.verifiedCalls))
+			t.Fatalf("workerless run skipped publication wake: next=%s err=%v checks=%d", next, err, len(gh.verifiedCalls))
 		}
 	})
 }

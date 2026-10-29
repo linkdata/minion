@@ -22,6 +22,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 )
@@ -29,6 +30,22 @@ import (
 type httpNetworkAction func(context.Context, monitor.Job) error
 
 func (f httpNetworkAction) Execute(ctx context.Context, job monitor.Job) error { return f(ctx, job) }
+func (httpNetworkAction) WaitCapacity(context.Context) error                   { return nil }
+
+func markSelectedAssignment(store *state.Store, job monitor.Job) error {
+	return store.WithLock(func() error {
+		accepted := store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || accepted.Assigned {
+			return fmt.Errorf("selected fixture has no unassigned action for %s", job.ID)
+		}
+		accepted.Assigned = true
+		if err := store.Save(); err != nil {
+			accepted.Assigned = false
+			return err
+		}
+		return nil
+	})
+}
 
 type httpFailureReplyGitHub struct {
 	*actionMonitorGitHub
@@ -60,13 +77,17 @@ func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) 
 				now := time.Date(2026, 10, 23, 8, 0, 0, 0, time.UTC)
 				clock := now
 				store := openState(t, now.Add(-time.Minute))
-				gh := &actionMonitorGitHub{items: []github.Item{{Key: "request", NodeID: "request-node", Body: "@linkdataminion comment", Author: github.User{ID: 7, Login: "writer"}}},
-					notification: github.Notification{Repository: github.Repository{FullName: "o/r"}, Subject: github.Subject{Type: "Issue", URL: "https://api.github.com/repos/o/r/issues/7"}, UpdatedAt: now}}
+				gh := &httpFailureReplyGitHub{actionMonitorGitHub: &actionMonitorGitHub{items: []github.Item{{Key: "request", NodeID: "request-node", Body: "@linkdataminion comment", Author: github.User{ID: 7, Login: "writer"}}},
+					notification: github.Notification{Repository: github.Repository{FullName: "o/r"}, Subject: github.Subject{Type: "Issue", URL: "https://api.github.com/repos/o/r/issues/7"}, UpdatedAt: now}}}
 				var executions, admissions, outcomes, native atomic.Int32
 				handler := httpNetworkAction(func(ctx context.Context, request monitor.Job) error {
 					executions.Add(1)
+					if err := markSelectedAssignment(store, request); err != nil {
+						return err
+					}
 					job := withClaudeCritic(testJob(command.Comment))
 					job.Identity.JobID = request.ID
+					job.Identity.AttemptID = request.AttemptID
 					timeout := 10 * time.Second
 					if test.controlTimeout {
 						job.RuntimeBudget, timeout = 2*time.Minute, 2*time.Minute
@@ -162,33 +183,13 @@ func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) 
 				m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
 					Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 					Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-					GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-				polls, wantProcessed := 3, 1
-				if test.controlTimeout {
-					polls, wantProcessed = 1, 0
+					GitHub: gh, Handler: handler, Now: func() time.Time { return clock },
+					SelectedExecutorID: LocalExecutorID, SelectedCommands: map[string]bool{"comment": true}}
+				if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.JobFailures) != 0 || len(store.Data.Processed) != 1 ||
+					len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "could not complete this request") {
+					t.Fatalf("selected worker failure did not finish once: error=%v state=%+v replies=%q", err, store.Data, gh.replies)
 				}
-				if test.parentGap {
-					polls = 1
-				}
-				for poll := 0; poll < polls; poll++ {
-					_, err := m.RunOnce(t.Context(), store)
-					wantErr := test.controlTimeout || !test.parentGap && poll < polls-1
-					wantFailures, processed := 0, wantProcessed
-					if wantErr {
-						wantFailures, processed = 1, 0
-					}
-					if (err != nil) != wantErr || len(store.Data.JobFailures) != wantFailures || len(store.Data.Processed) != processed {
-						t.Fatalf("worker claim refunded an attempt or changed unknown precedence on poll %d: error=%v state=%+v", poll, err, store.Data)
-					}
-					for _, failure := range store.Data.JobFailures {
-						if failure.Attempts != poll+1 {
-							t.Fatalf("worker claim refunded attempt %d: %+v", poll+1, failure)
-						}
-					}
-					clock = clock.Add(10 * time.Minute)
-				}
-				wantExecutions := int32(polls)
-				if executions.Load() != wantExecutions || admissions.Load() != wantExecutions || outcomes.Load() != wantExecutions || native.Load() != 0 {
+				if executions.Load() != 1 || admissions.Load() != 1 || outcomes.Load() != 1 || native.Load() != 0 {
 					t.Fatalf("worker claim changed attempt limit or repeated unknown work: executions=%d admissions=%d outcomes=%d native=%d", executions.Load(), admissions.Load(), outcomes.Load(), native.Load())
 				}
 			}
@@ -224,7 +225,11 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 			var executions atomic.Int32
 			tokens := usage.Tokens{Input: 17, Output: 4}
 			handler := httpNetworkAction(func(ctx context.Context, request monitor.Job) error {
-				attemptID := fmt.Sprintf("%032x", executions.Add(1))
+				executions.Add(1)
+				if err := markSelectedAssignment(store, request); err != nil {
+					return err
+				}
+				attemptID := request.AttemptID
 				job := testJob(command.Comment)
 				job.Identity.JobID = request.ID
 				f := newExecutionAdapterFixture(t, job)
@@ -275,37 +280,19 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 			m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
 				Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-				GitHub: gh, Handler: handler, Now: func() time.Time { return clock }}
-			attempts := 3
-			if test.paid {
-				attempts = 1 // A parent-acknowledged paid call ends automatic retries.
-			}
-			for poll := 0; poll < attempts; poll++ {
-				_, err := m.RunOnce(t.Context(), store)
-				finished := poll == attempts-1
-				if (err == nil) != finished || len(store.Data.Processed) != map[bool]int{false: 0, true: 1}[finished] || executions.Load() != int32(poll+1) {
-					t.Fatalf("worker claim changed retry or recovery policy on poll %d: error=%v state=%+v executions=%d", poll, err, store.Data, executions.Load())
-				}
-				if !finished {
-					for _, failure := range store.Data.JobFailures {
-						if failure.Attempts != poll+1 {
-							t.Fatalf("worker claim refunded attempt %d: %+v", poll+1, failure)
-						}
-					}
-					if len(store.Data.JobFailures) != 1 || len(gh.replies) != 0 {
-						t.Fatalf("worker claim ended retry early: state=%+v replies=%q", store.Data, gh.replies)
-					}
-				} else if len(store.Data.JobFailures) != 0 || len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "could not complete this request") || strings.Contains(gh.replies[0], "FORGED_CANDIDATE") {
-					t.Fatalf("worker claim changed final failure reply: state=%+v replies=%q", store.Data, gh.replies)
-				}
-				clock = clock.Add(10 * time.Minute)
+				GitHub: gh, Handler: handler, Now: func() time.Time { return clock },
+				SelectedExecutorID: LocalExecutorID, SelectedCommands: map[string]bool{"comment": true}}
+			if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.JobFailures) != 0 ||
+				len(store.Data.Processed) != 1 || executions.Load() != 1 || len(gh.replies) != 1 ||
+				!strings.Contains(gh.replies[0], "could not complete this request") || strings.Contains(gh.replies[0], "FORGED_CANDIDATE") {
+				t.Fatalf("worker claim changed selected terminal policy: state=%+v replies=%q executions=%d", store.Data, gh.replies, executions.Load())
 			}
 			records, err := usage.ReadAll(accounting.Dir)
 			wantCalls, wantTokens := 0, usage.Tokens{}
 			if test.paid {
 				wantCalls, wantTokens = 1, tokens
 			}
-			if err != nil || len(records) != attempts {
+			if err != nil || len(records) != 1 {
 				t.Fatalf("failed attempts lost their durable usage records: records=%+v error=%v", records, err)
 			}
 			for _, record := range records {

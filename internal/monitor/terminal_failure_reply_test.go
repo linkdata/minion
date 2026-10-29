@@ -10,7 +10,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestInProcessFailureReplyRechecksLiveAuthority(t *testing.T) {
+func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 	lookupErr := errors.New("permission lookup unavailable")
 	for _, test := range []struct {
 		name      string
@@ -36,7 +36,7 @@ func TestInProcessFailureReplyRechecksLiveAuthority(t *testing.T) {
 			accepted := selectedAcceptance(t, now)
 			job := jobFromAccepted(accepted)
 			job.Source = selectedItem(now)
-			job.AttemptID = "" // In-process actions have no selected reservation.
+			job.AttemptID = "" // Terminal controls may outlive the selected reservation.
 			job.AcceptedAt, job.Deadline = now.Add(-2*time.Minute), now.Add(-time.Minute)
 			failure := state.JobFailure{Attempts: maxJobAttempts, AcceptedAt: job.AcceptedAt, Deadline: job.Deadline}
 			store := openState(t, now)
