@@ -366,7 +366,7 @@ func TestMonitorLoopRechecksPendingPushAtSubsecondWake(t *testing.T) {
 				}
 				sha := strings.Repeat("c", 40)
 				writes := map[string]state.PublicationWrite{jobID + "-push": {
-					AttemptID: accepted.AttemptID, Kind: "push", BotLogin: "bot", Repository: "bot/repo", Number: 7,
+					AttemptID: accepted.AttemptID, Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
 					Marker: "<!-- linkdataminion:" + jobID + " -->", Branch: "minion/fix-7-" + jobID[:12], SHA: sha,
 					Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 				}}

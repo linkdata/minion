@@ -442,6 +442,59 @@ func TestPendingFixPushRechecksBeforeOriginalDeadline(t *testing.T) {
 	})
 }
 
+func TestPendingFixPushServicesDueSiblingBeforeReserve(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(7 * time.Minute)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		currentItem := gh.currentItem
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == accepted.SourceKey {
+				return currentItem(item)
+			}
+			return item, nil
+		}
+		gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+			time.Sleep(30 * time.Second)
+			return []github.Item{item}, nil
+		}
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			return github.Branch{}, &github.StatusError{StatusCode: 404}
+		}
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !terminalReplyRecorded(gh, store, terminalID) || branchChecks != 1 ||
+			store.Data.Accepted == nil || store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
+			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending ||
+			time.Since(now) != 30*time.Second || !next.Equal(now.Add(time.Minute)) {
+			t.Fatalf("pending push did not service sibling or recompute wake: err=%v replies=%v checks=%d accepted=%+v next=%s elapsed=%s",
+				err, gh.comments, branchChecks, store.Data.Accepted, next, time.Since(now))
+		}
+		for _, includeReviews := range gh.verifiedCalls {
+			if !includeReviews {
+				t.Fatal("pending push scanned older publication write")
+			}
+		}
+	})
+}
+
 func TestPendingFixPushDefersDueControlsNearDeadline(t *testing.T) {
 	for _, control := range []string{"invitation", "terminal reply"} {
 		t.Run(control, func(t *testing.T) {
@@ -635,6 +688,62 @@ func TestSelectedFixDefersUncancelableSiblingTerminalReply(t *testing.T) {
 		m.serviceTerminalControls(t.Context(), store)
 		if terminalChecks == 0 || store.Data.Processed[terminalID].IsZero() {
 			t.Fatalf("deferred sibling reply was not serviced: checks=%d processed=%v", terminalChecks, store.Data.Processed[terminalID])
+		}
+	})
+}
+
+func TestSelectedFixServicesDueSiblingWhileWorkerRuns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(7 * time.Minute)
+		store.Data.Accepted.Deadline = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		currentItem := gh.currentItem
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == accepted.SourceKey {
+				return currentItem(item)
+			}
+			return item, nil
+		}
+		gh.threadItems = terminalThreads(map[int]github.Item{8: item})
+		release := make(chan struct{})
+		finished := make(chan error, 1)
+		go func() {
+			finished <- m.runSelectedWithControls(t.Context(), store, jobFromAccepted(*store.Data.Accepted), "", nil,
+				func(ctx context.Context, _ Job) error {
+					select {
+					case <-release:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}, func(err error) error { return err })
+		}()
+		synctest.Wait()
+		if !terminalReplyRecorded(gh, store, terminalID) || store.Data.Accepted == nil ||
+			!store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("held fix did not service sibling: comments=%v processed=%v accepted=%+v",
+				gh.comments, store.Data.Processed, store.Data.Accepted)
+		}
+		select {
+		case err := <-finished:
+			t.Fatalf("selected fix completed before worker release: %v", err)
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		if err := <-finished; err != nil || store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" {
+			t.Fatalf("selected fix did not complete after sibling reply: err=%v decision=%+v",
+				err, store.Data.TerminalDecisions[accepted.JobID])
 		}
 	})
 }
