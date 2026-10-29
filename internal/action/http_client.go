@@ -58,7 +58,6 @@ type httpClientCheckpoints struct {
 	control   context.Context
 	action    context.Context
 	binding   httpBinding
-	started   time.Time
 	sequence  uint64
 	failure   error
 }
@@ -174,7 +173,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		timer := time.AfterFunc(remaining, cancelControl)
 		context.AfterFunc(controlCtx, func() { timer.Stop() })
 	}
-	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job), started: started}
+	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job)}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
@@ -247,9 +246,6 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		watchDone <- err
 	}()
 	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
-	if err := checkpoints.status(actionCtx, "prepare", 1); err != nil {
-		runner.logf("HTTP prepare observation: %v", err)
-	}
 	var runErr error
 	// Preparation consumes the accepted runtime.
 	job.RuntimeBudget = time.Until(expires)
@@ -258,7 +254,6 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
-	stopStarted := time.Now()
 	startStop()
 	clearCredentials()
 	for _, diagnostic := range result.Diagnostics {
@@ -266,14 +261,6 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			cleanupFailed = true
 			break
 		}
-	}
-	if runErr == nil && actionCtx.Err() == nil {
-		// Leave at least half the fixed stop grace for the required Result.
-		statusCtx, cancelStatus := context.WithDeadline(actionCtx, stopStarted.Add(assignment.StopGrace/2))
-		if err := checkpoints.status(statusCtx, "upload", 2); err != nil {
-			runner.logf("HTTP upload observation: %v", err)
-		}
-		cancelStatus()
 	}
 	cause := context.Cause(actionCtx)
 	if runErr == nil && httpWatchUncertainty(cause) {
@@ -294,8 +281,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		protocolFailed = errors.Is(watchErr, monitor.ErrExecutionOutcomeUnknown) || errors.Is(watchErr, monitor.ErrRequestTransport) || errors.As(watchErr, &network)
 	}
 	if status == nil && outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
-		// Parent receipt is known. A watch-only protocol failure during upload
-		// cannot revoke it; errors already captured in runErr still propagate.
+		// Parent receipt is known. A watch-only protocol failure cannot revoke it;
+		// errors already captured in runErr still propagate.
 		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
 		watchErr = nil
 	}
@@ -439,16 +426,10 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 func (c *httpClientCheckpoints) acknowledge(parent context.Context, kind string, data []byte, sequence uint64) error {
 	ctx, cancel := context.WithTimeout(parent, httpControlTimeout)
 	defer cancel()
-	if kind == "status" {
-		stop := context.AfterFunc(c.control, cancel)
-		defer stop()
-	}
 	if err := ctx.Err(); err != nil {
 		return httpClientUnknown(kind, err)
 	}
-	if kind != "status" {
-		c.sequence = sequence
-	}
+	c.sequence = sequence
 	var ack httpAcknowledgement
 	if err := c.transport.post(ctx, kind, data, httpControlBytes, &ack, c.binding, sequence); err != nil {
 		return err
@@ -517,15 +498,6 @@ func (c *httpClientCheckpoints) Review(value ReviewCheckpoint) error {
 	}
 	c.failure = err
 	return err
-}
-
-func (c *httpClientCheckpoints) status(parent context.Context, phase string, observation uint64) error {
-	status := Status{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Sequence: observation, ProgressAge: time.Since(c.started), WorkerState: "busy", Phase: phase}
-	data, err := httpEncode(httpObservation{Status: status}, httpControlBytes)
-	if err != nil {
-		return httpClientUnknown("status", err)
-	}
-	return c.acknowledge(parent, "status", data, observation)
 }
 
 func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
