@@ -175,6 +175,35 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 	return store, path, accepted, gh, selectedMonitor(t, at, gh, nil)
 }
 
+func storedTaskWriteFixtureAt(t *testing.T, now time.Time, remaining time.Duration, kind, status string) (
+	*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor, string,
+) {
+	t.Helper()
+	store, path, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+	m.Now = time.Now
+	accepted.Deadline = now.Add(remaining)
+	store.Data.Accepted.Deadline = accepted.Deadline
+	store.Data.Accepted.RetryAt = accepted.Deadline
+	failure := store.Data.JobFailures[accepted.JobID]
+	failure.Deadline = accepted.Deadline
+	store.Data.JobFailures[accepted.JobID] = failure
+	marker := "<!-- linkdataminion:" + accepted.JobID + " -->"
+	write := state.PublicationWrite{
+		AttemptID: accepted.AttemptID, Kind: kind, BotLogin: "linkdataminion", BotID: 8,
+		Repository: accepted.Repository, Number: accepted.SubjectNumber,
+		Marker: marker, Since: accepted.SourceUpdatedAt, StartedAt: now,
+		Deadline: now.Add(time.Minute), Status: status,
+	}
+	if status == state.PublicationWriteObserved {
+		write.ResolvedAt = now
+	}
+	store.Data.PublicationWrites[accepted.JobID] = write
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	return store, path, accepted, gh, m, marker
+}
+
 func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
 	now := time.Now().UTC()
 	store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
@@ -201,6 +230,201 @@ func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
 		store.Data.Processed[accepted.JobID].IsZero() || store.Data.Accepted != nil {
 		t.Fatalf("observed task waited until accepted deadline: publications=%d write=%+v processed=%v accepted=%+v",
 			handler.publications, store.Data.PublicationWrites[accepted.JobID], store.Data.Processed[accepted.JobID], store.Data.Accepted)
+	}
+}
+
+func TestPendingTaskReplyObservedBeforeOriginalDeadline(t *testing.T) {
+	for _, kind := range []string{"comment", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, 500*time.Millisecond, kind, state.PublicationWritePending)
+				deadline := accepted.Deadline
+				gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+				handler := &recoveredResultHandler{}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if err != nil || !next.Equal(now.Add(250*time.Millisecond)) || len(gh.verifiedCalls) != 1 ||
+					handler.publications != 0 || handler.executions != 0 {
+					t.Fatalf("pending %s reply did not get a bounded check: next=%s checks=%d handler=%+v err=%v",
+						kind, next, len(gh.verifiedCalls), handler, err)
+				}
+				time.Sleep(time.Until(next))
+				published := github.Item{Body: "published\n\n" + marker,
+					Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: time.Now()}
+				if kind == "review" {
+					gh.reviewReplies = []github.Item{published}
+				} else {
+					gh.items = []github.Item{published}
+				}
+				if _, err := m.RunOnce(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				if !time.Now().Before(deadline) || len(gh.verifiedCalls) != 2 || handler.executions != 0 ||
+					handler.publications != 1 || gh.commentCalls != 0 || store.Data.Accepted != nil ||
+					store.Data.Processed[accepted.JobID].IsZero() ||
+					store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWriteObserved {
+					t.Fatalf("pending %s reply did not finish once before deadline: elapsed=%s checks=%d handler=%+v comments=%d accepted=%+v processed=%v write=%+v",
+						kind, time.Since(now), len(gh.verifiedCalls), handler, gh.commentCalls, store.Data.Accepted,
+						store.Data.Processed[accepted.JobID], store.Data.PublicationWrites[accepted.JobID])
+				}
+			})
+		})
+	}
+}
+
+func TestObservedTaskReplyRetriesBeforeOriginalDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m, _ := storedTaskWriteFixtureAt(t, now, 2*time.Second, "review", state.PublicationWriteObserved)
+		deadline := accepted.Deadline
+		store.Data.Accepted.RetryAt = time.Time{}
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+			Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
+		publishErr := errors.New("transient reply failure")
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			if !time.Now().Before(deadline) {
+				t.Error("retry started after original deadline")
+			}
+			if store.Data.Accepted != nil && store.Data.Accepted.RetryAt.IsZero() {
+				return errors.Join(ErrPostModelPublication, publishErr)
+			}
+			return nil
+		}}
+		m.Handler = handler
+		firstNext, err := m.RunOnce(t.Context(), store)
+		wantRetry := now.Add(time.Second)
+		if !errors.Is(err, ErrPostModelPublication) || !errors.Is(err, publishErr) || !firstNext.Equal(wantRetry) ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(wantRetry) ||
+			handler.publications != 1 || handler.executions != 0 || len(gh.verifiedCalls) != 0 {
+			t.Fatalf("observed reply did not schedule bounded retry: next=%s accepted=%+v handler=%+v err=%v",
+				firstNext, store.Data.Accepted, handler, err)
+		}
+		if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(wantRetry) ||
+			handler.publications != 1 || len(gh.verifiedCalls) != 0 {
+			t.Fatalf("observed reply bypassed retry or scanned backlog: next=%s handler=%+v old checks=%d err=%v",
+				next, handler, len(gh.verifiedCalls), err)
+		}
+		time.Sleep(time.Until(wantRetry))
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if handler.publications != 2 || handler.executions != 0 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || !time.Now().Before(deadline) {
+			t.Fatalf("observed reply did not complete once before deadline: elapsed=%s handler=%+v comments=%d accepted=%+v processed=%v",
+				time.Since(now), handler, gh.commentCalls, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+		}
+	})
+}
+
+func TestSavedTaskReplySkipsOlderScanWithElevenSecondsLeft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m, _ := storedTaskWriteFixtureAt(t, now, 11*time.Second, "review", state.PublicationWriteObserved)
+		store.Data.Accepted.RetryAt = time.Time{}
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+			Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
+		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if !errors.Is(err, ErrPostModelPublication) || time.Since(now) != 0 ||
+			!next.Equal(now.Add(5500*time.Millisecond)) || len(gh.verifiedCalls) != 0 ||
+			handler.publications != 1 || handler.executions != 0 || store.Data.Accepted == nil {
+			t.Fatalf("saved reply waited for older scan: elapsed=%s next=%s old checks=%d handler=%+v accepted=%+v err=%v",
+				time.Since(now), next, len(gh.verifiedCalls), handler, store.Data.Accepted, err)
+		}
+	})
+}
+
+func TestObservedTaskReplySaveFailureRetriesBeforeOriginalDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, path, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, 500*time.Millisecond, "review", state.PublicationWritePending)
+		deadline := accepted.Deadline
+		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		gh.reviewReplies = []github.Item{{Body: "published\n\n" + marker,
+			Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
+		handler := &recoveredResultHandler{}
+		m.Handler = handler
+		backup := path + ".saved"
+		if err := os.Rename(path, backup); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "block"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		next, err := m.RunOnce(t.Context(), store)
+		if !errors.Is(err, ErrPostModelPublication) || errors.Is(err, ErrAcceptanceState) ||
+			!next.Equal(now.Add(250*time.Millisecond)) || handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("observed reply save failure did not retry: next=%s handler=%+v err=%v", next, handler, err)
+		}
+		if err := os.Remove(filepath.Join(path, "block")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(backup, path); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) || handler.publications != 1 || handler.executions != 0 ||
+			gh.commentCalls != 0 || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("observed reply did not finish after save retry: elapsed=%s handler=%+v comments=%d accepted=%+v processed=%v",
+				time.Since(now), handler, gh.commentCalls, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+		}
+	})
+}
+
+func TestUnrelatedPublicationSaveFailureRemainsFatal(t *testing.T) {
+	now := time.Now().UTC()
+	store, path, _, gh, m := storedRecoveryFixtureAt(t, now)
+	marker := "<!-- linkdataminion:old-job -->"
+	store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+		AttemptID: "old-attempt", Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+		Repository: "owner/repo", Number: 9, Marker: marker, Since: now,
+		StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+	gh.items = []github.Item{{Body: "published\n\n" + marker,
+		Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "block"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReconcilePublicationWrites(t.Context(), store); !errors.Is(err, ErrAcceptanceState) ||
+		errors.Is(err, ErrPostModelPublication) {
+		t.Fatalf("unrelated publication save failure lost fatal classification: %v", err)
 	}
 }
 
@@ -395,13 +619,14 @@ func TestStartupObservedFixPushRespectsLaterPublicationBackoff(t *testing.T) {
 		replyErr := errors.New("reply temporarily unavailable")
 		handler := &recoveredResultHandler{publish: func(Job) error { return replyErr }}
 		m.Handler = handler
+		wantRetry := now.Add(accepted.Deadline.Sub(now) / 2)
 		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || handler.publications != 1 ||
-			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(accepted.Deadline) {
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(wantRetry) {
 			t.Fatalf("observed push did not schedule failed reply: err=%v handler=%+v accepted=%+v",
 				err, handler, store.Data.Accepted)
 		}
 		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
-			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(accepted.Deadline) || gh.commentCalls != 0 {
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(wantRetry) || gh.commentCalls != 0 {
 			t.Fatalf("observed push bypassed later publication backoff: err=%v handler=%+v accepted=%+v comments=%d",
 				err, handler, store.Data.Accepted, gh.commentCalls)
 		}
@@ -477,9 +702,10 @@ func TestObservedFixPushImmediateRecoveryFailureUsesBackoff(t *testing.T) {
 		}
 		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
 		m.Handler = handler
+		wantRetry := now.Add(accepted.Deadline.Sub(now) / 2)
 		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrPostModelPublication) ||
 			handler.publications != 2 || branchChecks != 2 || store.Data.Accepted == nil ||
-			!store.Data.Accepted.RetryAt.Equal(accepted.Deadline) || gh.commentCalls != 0 {
+			!store.Data.Accepted.RetryAt.Equal(wantRetry) || gh.commentCalls != 0 {
 			t.Fatalf("same-pass retry did not stop after one publication failure: err=%v publications=%d checks=%d accepted=%+v comments=%d",
 				err, handler.publications, branchChecks, store.Data.Accepted, gh.commentCalls)
 		}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -467,6 +468,103 @@ func TestObservedTaskPublicationUpdatesEarlierUncertainResolution(t *testing.T) 
 	observed := store.Data.PublicationWrites[request.ID]
 	if observed.Status != state.PublicationWriteObserved || observed.ResolvedAt.Before(started) || observed.ResolvedAt.After(time.Now().UTC()) {
 		t.Fatalf("observed write retained stale resolution: %+v", observed)
+	}
+}
+
+func TestObservedTaskPublicationSaveFailureClassification(t *testing.T) {
+	for _, test := range []struct {
+		name, kind  string
+		action      command.Action
+		resultReady bool
+	}{
+		{name: "saved comment", kind: "comment", action: command.Comment, resultReady: true},
+		{name: "saved review", kind: "review", action: command.Review, resultReady: true},
+		{name: "fixed reply", kind: "comment", action: command.Comment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			store, err := state.Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			request := usageJob()
+			request.Command = command.Command{Name: test.kind, Action: test.action}
+			if test.action == command.Review {
+				request.SubjectType = "PullRequest"
+			}
+			reserveActionRequest(t, store, &request, true)
+			store.Data.Accepted.ResultReady = test.resultReady
+			store.Data.Accepted.RetryAt = request.Deadline
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			e := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
+			if err := e.beginTaskPublication(t.Context(), request, test.kind); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err = e.observeTaskPublication(request)
+			if test.resultReady && (!errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrAcceptanceState)) ||
+				!test.resultReady && (!errors.Is(err, monitor.ErrAcceptanceState) || errors.Is(err, monitor.ErrPostModelPublication)) {
+				t.Fatalf("save failure after observed %s has wrong classification: %v", test.name, err)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.observeTaskPublication(request); err != nil {
+				t.Fatalf("observed %s did not persist on retry: %v", test.kind, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved state.Data
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if got := saved.PublicationWrites[request.ID].Status; got != state.PublicationWriteObserved {
+				t.Fatalf("retried %s observation was not durable: %s", test.kind, got)
+			}
+			if got := saved.Accepted.RetryAt; test.resultReady && !got.IsZero() ||
+				!test.resultReady && !got.Equal(request.Deadline) {
+				t.Fatalf("observed %s changed accepted retry incorrectly: %s", test.name, got)
+			}
+		})
+	}
+}
+
+func TestUnissuedTaskPublicationSaveFailureRemainsFatal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	reserveActionRequest(t, store, &request, true)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
+	if err := e.beginTaskPublication(t.Context(), request, "comment"); !errors.Is(err, monitor.ErrAcceptanceState) ||
+		errors.Is(err, monitor.ErrPostModelPublication) {
+		t.Fatalf("pre-publication save failure changed classification: %v", err)
 	}
 }
 

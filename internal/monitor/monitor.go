@@ -182,30 +182,52 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	activeJobID := ""
 	activeWriteChecked := false
+	activeTaskReady := false
 	if store.Data.Accepted != nil {
-		activeJobID = store.Data.Accepted.JobID
+		accepted := store.Data.Accepted
+		activeJobID = accepted.JobID
 		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending ||
 			store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWritePending
+		task := store.Data.PublicationWrites[activeJobID]
+		activeTaskReady = accepted.ResultReady && task.AttemptID == accepted.AttemptID &&
+			(task.Kind == "comment" || task.Kind == "review") &&
+			(task.Status == state.PublicationWritePending || task.Status == state.PublicationWriteObserved)
 	}
 	if err := m.reconcilePublicationWrites(ctx, store, activeJobID, ""); err != nil {
+		if accepted := store.Data.Accepted; accepted != nil && errors.Is(err, ErrPostModelPublication) &&
+			time.Now().Before(accepted.Deadline) {
+			// The remote reply was seen; retry its failed local observation before expiry.
+			accepted.RetryAt = publicationRetryAt(time.Now().UTC(), accepted.Deadline)
+			return accepted.RetryAt, err
+		}
 		return store.Data.NextPollAt, err
 	}
 	skipChecked := ""
 	if activeWriteChecked {
 		skipChecked = activeJobID
 	}
+	pendingActiveWrite := func(accepted *state.AcceptedAction) (state.PublicationWrite, bool) {
+		push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		if push.Status == state.PublicationWritePending && push.AttemptID == accepted.AttemptID {
+			return push, true
+		}
+		task := store.Data.PublicationWrites[accepted.JobID]
+		if accepted.ResultReady && task.Status == state.PublicationWritePending && task.AttemptID == accepted.AttemptID {
+			return task, true
+		}
+		return state.PublicationWrite{}, false
+	}
 	now := m.now
 	wake := func(next time.Time, service bool) time.Time {
 		at := now().UTC()
 		if accepted := store.Data.Accepted; accepted != nil && at.Before(accepted.Deadline) {
-			push := store.Data.PublicationWrites[accepted.JobID+"-push"]
-			if push.Status == state.PublicationWritePending {
-				// Do not let overdue unrelated writes delay the active push check.
-				pushWake := publicationWriteCheckAt(push, at, accepted.Deadline)
-				if !pushWake.After(at) {
-					pushWake = earlierWake(at.Add(publicationLastChanceInterval), accepted.Deadline)
+			if write, pending := pendingActiveWrite(accepted); pending {
+				// Keep the active remote write ahead of unrelated reconciliation.
+				writeWake := publicationWriteCheckAt(write, at, accepted.Deadline)
+				if !writeWake.After(at) {
+					writeWake = earlierWake(at.Add(publicationLastChanceInterval), accepted.Deadline)
 				}
-				return pushWake
+				return writeWake
 			}
 		}
 		var terminal time.Time
@@ -226,11 +248,19 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
 		_, decided := store.Data.TerminalDecisions[accepted.JobID]
-		observed := store.Data.PublicationWrites[accepted.JobID].Status == state.PublicationWriteObserved
-		if retryAt := accepted.RetryAt; !observed && (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
+		if retryAt := accepted.RetryAt; (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
 			remaining := time.Until(accepted.Deadline)
-			push := store.Data.PublicationWrites[accepted.JobID+"-push"]
-			if push.Status == state.PublicationWritePending && remaining > 0 {
+			task := store.Data.PublicationWrites[accepted.JobID]
+			if accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved &&
+				retryAt.Before(accepted.Deadline) && time.Until(retryAt) <= publicationReconcileBudget {
+				// A backlog scan can outlast this saved reply's retry window.
+				return retryAt, nil
+			}
+			if write, pending := pendingActiveWrite(accepted); pending && remaining > 0 {
+				writeWake := publicationWriteCheckAt(write, now().UTC(), accepted.Deadline)
+				if write.Kind != "push" {
+					return earlierWake(retryAt, writeWake), ctx.Err()
+				}
 				controlDeadline := accepted.Deadline.Add(-fixPublicationReserve)
 				startBefore := controlDeadline.Add(-siblingReplyBudget)
 				var terminalWake time.Time
@@ -239,10 +269,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					terminalWake = m.serviceTerminalControlsBefore(controlCtx, store, startBefore)
 					cancel()
 				}
-				// A pending push takes priority over unrelated publication checks.
-				push = store.Data.PublicationWrites[accepted.JobID+"-push"]
-				pushWake := publicationWriteCheckAt(push, now().UTC(), accepted.Deadline)
-				next := earlierWake(earlierWake(retryAt, pushWake), terminalWake)
+				// The active write takes priority over unrelated publication checks.
+				write, _ = pendingActiveWrite(accepted)
+				writeWake = publicationWriteCheckAt(write, now().UTC(), accepted.Deadline)
+				next := earlierWake(earlierWake(retryAt, writeWake), terminalWake)
 				return next, ctx.Err()
 			}
 			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
@@ -267,14 +297,19 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			err = m.recoverAccepted(ctx, store)
 		}
 		reserveFix := false
+		activeTaskWrite := false
 		if accepted := store.Data.Accepted; accepted != nil {
 			remaining := time.Until(accepted.Deadline)
 			// An unrelated scan can consume a full budget before the fix reserve starts.
 			reserveFix = accepted.Action == string(command.Fix) && remaining > 0 &&
 				remaining <= fixPublicationReserve+publicationReconcileBudget
+			task := store.Data.PublicationWrites[accepted.JobID]
+			activeTaskWrite = accepted.ResultReady && task.AttemptID == accepted.AttemptID &&
+				(task.Status == state.PublicationWritePending || task.Status == state.PublicationWriteObserved)
 		}
-		urgentFix := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) || reserveFix
-		if reconcileErr == nil && !urgentFix {
+		urgentPublication := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) || reserveFix ||
+			activeTaskWrite || activeTaskReady && store.Data.Accepted == nil
+		if reconcileErr == nil && !urgentPublication {
 			postSkip := skipChecked
 			if pushBeforeScan == state.PublicationWritePending {
 				postSkip = pushKey
@@ -286,7 +321,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		err = errors.Join(err, reconcileErr)
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
-			retryAt, saveErr := m.scheduleAcceptedRetry(store)
+			retryAt, saveErr := m.scheduleAcceptedRetry(store, err)
 			return wake(retryAt, false), errors.Join(err, saveErr)
 		}
 		return wake(store.Data.NextPollAt, err == nil), err
@@ -350,7 +385,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			err = errors.Join(err, canceled)
 		}
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
-			retryAt, saveErr := m.scheduleAcceptedRetry(store)
+			retryAt, saveErr := m.scheduleAcceptedRetry(store, err)
 			return withPublicationWriteWake(earlierWake(earlierWake(retryAt, store.Data.NextInviteCheckAt), terminal), store, now().UTC()), errors.Join(err, saveErr)
 		}
 		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, now().UTC()), err
@@ -1161,10 +1196,13 @@ func (m *Monitor) pollInterval() time.Duration {
 	return interval
 }
 
-func (m *Monitor) scheduleAcceptedRetry(store *state.Store) (time.Time, error) {
+func (m *Monitor) scheduleAcceptedRetry(store *state.Store, reason error) (time.Time, error) {
 	accepted := store.Data.Accepted
 	now := time.Now().UTC()
 	retryAt := now.Add(m.pollInterval())
+	if accepted.ResultReady && errors.Is(reason, ErrPostModelPublication) && !errors.Is(reason, ErrAcceptanceState) {
+		retryAt = publicationRetryAt(now, accepted.Deadline)
+	}
 	if now.Before(accepted.Deadline) && accepted.Deadline.Before(retryAt) {
 		retryAt = accepted.Deadline
 	}
@@ -1174,6 +1212,14 @@ func (m *Monitor) scheduleAcceptedRetry(store *state.Store) (time.Time, error) {
 	}
 	m.logf("accepted %s #%d recovery deferred until %s; new action discovery remains paused", accepted.Repository, accepted.SubjectNumber, retryAt.Format(time.RFC3339))
 	return retryAt, nil
+}
+
+func publicationRetryAt(now, deadline time.Time) time.Time {
+	remaining := deadline.Sub(now)
+	if remaining <= publicationLastChanceInterval {
+		return deadline
+	}
+	return now.Add(min(publicationRecheckInterval, max(publicationLastChanceInterval, remaining/2)))
 }
 
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {
@@ -1941,6 +1987,29 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		}
 		if completedWithDecision() {
 			return finish(result)
+		}
+		var savedTaskReply bool
+		_ = store.WithLock(func() error {
+			accepted := store.Data.Accepted
+			write := store.Data.PublicationWrites[job.ID]
+			savedTaskReply = accepted != nil && accepted.JobID == job.ID && accepted.AttemptID == job.AttemptID &&
+				accepted.ResultReady && write.AttemptID == job.AttemptID &&
+				(write.Kind == "comment" || write.Kind == "review") &&
+				(write.Status == state.PublicationWritePending || write.Status == state.PublicationWriteObserved)
+			return nil
+		})
+		if savedTaskReply {
+			// Give the saved reply the remaining deadline instead of scanning unrelated work.
+			if completed {
+				return finish(result)
+			}
+			select {
+			case result = <-done:
+				completed = true
+				return finish(result)
+			case <-actionCtx.Done():
+				return abort(actionCtx.Err())
+			}
 		}
 		if !m.now().UTC().Before(nextPublicationCheck) {
 			skipJobID := job.ID + "-push"

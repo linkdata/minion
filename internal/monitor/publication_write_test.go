@@ -241,6 +241,137 @@ func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
 	})
 }
 
+func TestReconcileActiveTaskWriteUsesHalfRemainingLookup(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, attemptID string
+		want                  time.Duration
+	}{
+		{name: "comment", kind: "comment", want: 2 * time.Second},
+		{name: "review", kind: "review", want: 2 * time.Second},
+		{name: "stale attempt", kind: "review", attemptID: "older-attempt", want: 10 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+				m.Now = time.Now
+				store.Data.Accepted.Deadline = now.Add(4 * time.Second)
+				attemptID := accepted.AttemptID
+				if tc.attemptID != "" {
+					attemptID = tc.attemptID
+				}
+				write := state.PublicationWrite{
+					AttemptID: attemptID, Kind: tc.kind, BotLogin: "linkdataminion", BotID: 8,
+					Repository: accepted.Repository, Number: accepted.SubjectNumber,
+					Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+					StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+				store.Data.PublicationWrites[accepted.JobID] = write
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				gh.beforeVerify = func(ctx context.Context, _ bool) error {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				start := time.Now()
+				if err := m.reconcilePublicationWrites(t.Context(), store, accepted.JobID, ""); err != nil {
+					t.Fatal(err)
+				}
+				if elapsed := time.Since(start); elapsed != tc.want || len(gh.verifiedCalls) != 1 ||
+					store.Data.PublicationWrites[accepted.JobID] != write {
+					t.Fatalf("lookup held active task for %s, want %s; checks=%d write=%+v",
+						elapsed, tc.want, len(gh.verifiedCalls), store.Data.PublicationWrites[accepted.JobID])
+				}
+			})
+		})
+	}
+}
+
+func TestActiveTaskWriteWakeUsesOriginalDeadline(t *testing.T) {
+	for _, kind := range []string{"comment", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, _, _ := storedRecoveryFixtureAt(t, now)
+				deadline := now.Add(500 * time.Millisecond)
+				store.Data.Accepted.Deadline = deadline
+				write := state.PublicationWrite{
+					AttemptID: accepted.AttemptID, Kind: kind, BotLogin: "linkdataminion", BotID: 8,
+					Repository: accepted.Repository, Number: accepted.SubjectNumber,
+					Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+					StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+				store.Data.PublicationWrites[accepted.JobID] = write
+				if got := publicationWriteWake(store, now); !got.Equal(now.Add(250 * time.Millisecond)) {
+					t.Fatalf("active %s wake = %s, want half remaining", kind, got)
+				}
+				if got := publicationWriteWake(store, deadline.Add(-50*time.Millisecond)); !got.Equal(deadline) {
+					t.Fatalf("last %s wake = %s, want original deadline %s", kind, got, deadline)
+				}
+				if got := publicationWriteWake(store, deadline); !got.Equal(deadline.Add(publicationRecheckInterval)) {
+					t.Fatalf("expired action %s wake = %s, want ordinary interval", kind, got)
+				}
+				write.AttemptID = "older-attempt"
+				store.Data.PublicationWrites[accepted.JobID] = write
+				if got := publicationWriteWake(store, now); !got.Equal(now.Add(publicationRecheckInterval)) {
+					t.Fatalf("stale %s attempt got active wake %s", kind, got)
+				}
+			})
+		})
+	}
+}
+
+func TestObservedActiveTaskWriteClearsRetryOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, attemptID string
+		clears                bool
+	}{
+		{name: "comment", kind: "comment", clears: true},
+		{name: "review", kind: "review", clears: true},
+		{name: "stale attempt", kind: "review", attemptID: "older-attempt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			store, path, accepted, _, _ := storedRecoveryFixtureAt(t, now)
+			retryAt := now.Add(30 * time.Second)
+			store.Data.Accepted.RetryAt = retryAt
+			attemptID := accepted.AttemptID
+			if tc.attemptID != "" {
+				attemptID = tc.attemptID
+			}
+			write := state.PublicationWrite{
+				AttemptID: attemptID, Kind: tc.kind, BotLogin: "linkdataminion", BotID: 8,
+				Repository: accepted.Repository, Number: accepted.SubjectNumber,
+				Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+				StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+			}
+			store.Data.PublicationWrites[accepted.JobID] = write
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := storePublicationWriteOutcome(store, accepted.JobID, write, state.PublicationWriteObserved, now); err != nil || !changed {
+				t.Fatalf("observe %s: changed=%t err=%v", tc.name, changed, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, now)
+			gotRetry := store.Data.Accepted.RetryAt
+			if got := store.Data.PublicationWrites[accepted.JobID]; got.Status != state.PublicationWriteObserved ||
+				tc.clears && !gotRetry.IsZero() || !tc.clears && !gotRetry.Equal(retryAt) {
+				t.Fatalf("observed %s did not retain correct retry: write=%+v retry=%s", tc.name, got, gotRetry)
+			}
+			store.Data.Accepted.RetryAt = retryAt
+			if changed, err := storePublicationWriteOutcome(store, accepted.JobID, write, state.PublicationWriteObserved, now); err != nil || changed ||
+				!store.Data.Accepted.RetryAt.Equal(retryAt) {
+				t.Fatalf("observing %s twice changed retry again: changed=%t err=%v retry=%s",
+					tc.name, changed, err, store.Data.Accepted.RetryAt)
+			}
+		})
+	}
+}
+
 func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
@@ -308,11 +439,16 @@ func TestRunOnceWithoutWorkerWakesForIssuedPublication(t *testing.T) {
 	})
 }
 
-func TestRunOnceAcceptedRetryChecksOlderIssuedPublication(t *testing.T) {
+func TestRunOncePendingTaskReplyPreemptsOlderWritesAndInvitations(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
-		store.Data.Accepted.RetryAt = now.Add(5 * time.Minute)
+		deadline := now.Add(41 * time.Second)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
 		store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
 			AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "bot", BotID: 8, Repository: accepted.Repository, Number: accepted.SubjectNumber,
 			Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
@@ -323,15 +459,18 @@ func TestRunOnceAcceptedRetryChecksOlderIssuedPublication(t *testing.T) {
 			Marker: "<!-- linkdataminion:old-job -->", Since: now, StartedAt: now,
 			Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
+		store.Data.NextInviteCheckAt = now
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
+		invitationChecks := 0
+		gh.beforeList = func() { invitationChecks++ }
 		next, err := m.RunOnce(t.Context(), store)
-		if err != nil || !next.Equal(now.Add(publicationRecheckInterval)) || len(gh.verifiedCalls) != 2 ||
+		if err != nil || !next.Equal(now.Add(20500*time.Millisecond)) || len(gh.verifiedCalls) != 1 || invitationChecks != 0 ||
 			store.Data.Accepted == nil || store.Data.Accepted.JobID != accepted.JobID ||
 			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
-			t.Fatalf("accepted retry starved older write: next=%s err=%v checks=%d accepted=%+v write=%+v",
-				next, err, len(gh.verifiedCalls), store.Data.Accepted, store.Data.PublicationWrites["old-job"])
+			t.Fatalf("pending reply did not preempt unrelated checks: next=%s err=%v checks=%d invitations=%d accepted=%+v write=%+v",
+				next, err, len(gh.verifiedCalls), invitationChecks, store.Data.Accepted, store.Data.PublicationWrites["old-job"])
 		}
 	})
 }
@@ -489,7 +628,7 @@ func TestRunOnceReconcilesWriteAfterTaskCleanup(t *testing.T) {
 	}
 }
 
-func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
+func TestSelectedSavedReplyDefersOlderWriteUntilPublisherFinishes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
@@ -544,10 +683,16 @@ func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
 		if !completedEarly {
 			runErr = <-finished
 		}
-		if initialChecks != 1 || periodicChecks < 3 || completedEarly || runErr != nil ||
+		if initialChecks != 0 || periodicChecks != 0 || completedEarly || runErr != nil ||
 			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
-			t.Fatalf("active write was redundantly checked or older write was not rechecked: initial=%d periodic=%d completed_early=%t err=%v write=%+v",
+			t.Fatalf("saved reply waited for older write checks: initial=%d periodic=%d completed_early=%t err=%v write=%+v",
 				initialChecks, periodicChecks, completedEarly, runErr, store.Data.PublicationWrites["old-job"])
+		}
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if len(gh.verifiedCalls) != 2 {
+			t.Fatalf("older writes did not resume after the publisher finished: checks=%d", len(gh.verifiedCalls))
 		}
 	})
 }
@@ -662,7 +807,7 @@ func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 			return nil
 		})
 		if lookups.Load() != 0 || current.Status != state.PublicationWritePending ||
-			commentChecks.Load() < 3 || taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
+			commentChecks.Load() != 1 || taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
 			t.Fatalf("active push or other writes were mishandled: push lookups=%d comment checks=%d push=%+v task=%+v old=%+v",
 				lookups.Load(), commentChecks.Load(), current, taskWrite, olderWrite)
 		}
