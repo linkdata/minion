@@ -375,28 +375,76 @@ func TestSavedReplyWithoutIssuedWriteRetriesBeforeOriginalDeadline(t *testing.T)
 		gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
 		invitationChecks := 0
 		gh.beforeList = func() { invitationChecks++ }
+		publishCalls := 0
 		handler := &recoveredResultHandler{publish: func(Job) error {
-			return store.WithLock(func() error {
-				store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
-					AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion", BotID: 8,
-					Repository: accepted.Repository, Number: accepted.SubjectNumber,
-					Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
-					StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
-				}
-				if err := store.Save(); err != nil {
-					return err
-				}
+			publishCalls++
+			if publishCalls == 1 {
 				return ErrPostModelPublication
-			})
+			}
+			return nil
 		}}
 		m.Handler = handler
 		next, err := m.RunOnce(t.Context(), store)
 		if !errors.Is(err, ErrPostModelPublication) || time.Since(now) != 0 ||
 			!next.Equal(now.Add(time.Second)) || len(gh.verifiedCalls) != 0 || invitationChecks != 0 ||
 			handler.publications != 1 || handler.executions != 0 || store.Data.Accepted == nil ||
-			store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending {
+			!store.Data.Accepted.RetryAt.Equal(next) || store.Data.PublicationWrites[accepted.JobID].Status != "" {
 			t.Fatalf("saved reply waited for unrelated checks before its first write: elapsed=%s next=%s old checks=%d invitations=%d handler=%+v accepted=%+v err=%v",
 				time.Since(now), next, len(gh.verifiedCalls), invitationChecks, handler, store.Data.Accepted, err)
+		}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) || handler.publications != 2 || handler.executions != 0 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(gh.verifiedCalls) != 0 {
+			t.Fatalf("saved reply retry did not complete before deadline: elapsed=%s old checks=%d handler=%+v accepted=%+v processed=%v",
+				time.Since(now), len(gh.verifiedCalls), handler, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+		}
+	})
+}
+
+func TestLiveResultReturnCancelsOlderPublicationLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		m.Now = time.Now
+		store.Data.Accepted.ResultReady = false // The receipt becomes ready while Execute runs.
+		store.Data.Accepted.Deadline = now.Add(2 * time.Second)
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = store.Data.Accepted.Deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+			Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		entered := make(chan struct{}, 1)
+		gh.beforeVerify = func(ctx context.Context, _ bool) error {
+			entered <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		job := jobFromAccepted(*store.Data.Accepted)
+		err := m.runSelectedWithControls(t.Context(), store, job, "", nil,
+			func(context.Context, Job) error {
+				<-entered
+				return store.WithLock(func() error {
+					store.Data.Accepted.ResultReady = true
+					if err := store.Save(); err != nil {
+						return err
+					}
+					return ErrPostModelPublication
+				})
+			}, func(err error) error { return err })
+		if !errors.Is(err, ErrPostModelPublication) || errors.Is(err, ErrAcceptanceState) ||
+			time.Since(now) != 0 || len(gh.verifiedCalls) != 1 || store.Data.Accepted == nil {
+			t.Fatalf("completed live result waited for older lookup: elapsed=%s checks=%d accepted=%+v err=%v",
+				time.Since(now), len(gh.verifiedCalls), store.Data.Accepted, err)
 		}
 	})
 }
@@ -1728,7 +1776,7 @@ func TestStoredResultRecoveryDefersInvitationUntilPublicationFinishes(t *testing
 					store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
 					t.Fatalf("held %s did not finish: err=%v handler=%+v state=%+v", phase, err, handler, store.Data)
 				}
-				if err := monitor.checkDueInvitations(t.Context(), store, time.Now()); err != nil {
+				if _, err := monitor.RunOnce(t.Context(), store); err != nil {
 					t.Fatal(err)
 				}
 				select {
@@ -1810,7 +1858,9 @@ func TestStoredResultRecoveryDefersTerminalReplyUntilPublicationFinishes(t *test
 			t.Fatalf("terminal reply or publication failed: err=%v handler=%+v state=%+v comments=%v", err, handler, store.Data, gh.comments)
 		}
 		if len(gh.comments) == 0 {
-			monitor.serviceTerminalControls(t.Context(), store)
+			if _, err := monitor.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if len(gh.comments) != 1 {
 			t.Fatalf("deferred terminal reply was not posted after publication: comments=%v", gh.comments)

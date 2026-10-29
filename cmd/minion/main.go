@@ -281,7 +281,9 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 				activeReply := accepted.ResultReady && reply.AttemptID == accepted.AttemptID &&
 					(reply.Status == state.PublicationWritePending ||
 						reply.Status == state.PublicationWriteObserved && !accepted.RetryAt.IsZero() && !next.After(accepted.RetryAt))
-				if !activePush && !activeReply {
+				activeSavedRetry := accepted.ResultReady && next.Equal(accepted.RetryAt) &&
+					(accepted.Action != "fix" || push.Status != state.PublicationWritePending)
+				if !activePush && !activeReply && !activeSavedRetry {
 					wait = time.Second
 				}
 			}

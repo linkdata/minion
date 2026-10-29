@@ -479,7 +479,7 @@ func TestObservedTaskPublicationSaveFailureClassification(t *testing.T) {
 	}{
 		{name: "saved comment", kind: "comment", action: command.Comment, resultReady: true},
 		{name: "saved review", kind: "review", action: command.Review, resultReady: true},
-		{name: "fixed reply", kind: "comment", action: command.Comment},
+		{name: "result not saved", kind: "comment", action: command.Comment},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")

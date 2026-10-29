@@ -127,6 +127,10 @@ func (g *terminalRecoveryGitHub) Repository(context.Context, string) (github.Rep
 	return github.Repository{ID: 1, Owner: github.User{ID: 2}, DefaultBranch: "main"}, nil
 }
 
+func (*terminalRecoveryGitHub) IssueDetails(_ context.Context, _ string, number int) (github.Issue, error) {
+	return github.Issue{Number: number}, nil
+}
+
 func (g *terminalRecoveryGitHub) Permission(context.Context, string, string) (github.Permission, error) {
 	return github.Permission{Permission: "write", User: g.item.Author}, nil
 }
@@ -533,57 +537,73 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 	}
 }
 
-func TestMonitorLoopRetriesObservedTaskReplyAtSubsecondWake(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		now := time.Now().UTC()
-		deadline := now.Add(500 * time.Millisecond)
-		retryAt := now.Add(250 * time.Millisecond)
-		jobID := strings.Repeat("a", 64)
-		attemptID := strings.Repeat("b", 32)
-		accepted := state.AcceptedAction{
-			JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
-			Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
-			SubjectType: "Issue", SubjectNumber: 7,
-			SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
-			Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
-			AcceptedAt: now, Deadline: deadline, RetryAt: retryAt, Assigned: true, ResultReady: true,
+func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
+	for _, issuedWrite := range []bool{false, true} {
+		name := "before first write"
+		if issuedWrite {
+			name = "after observed write"
 		}
-		store := serviceStore(t, state.Data{
-			Accepted: &accepted, JobFailures: map[string]state.JobFailure{
-				jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
-			},
-			Processed:         map[string]time.Time{},
-			TerminalDecisions: map[string]state.TerminalDecision{},
-			PublicationWrites: map[string]state.PublicationWrite{jobID: {
-				AttemptID: attemptID, Kind: "comment", BotLogin: "bot", BotID: 8,
-				Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:" + jobID + " -->",
-				Since: now, StartedAt: now, Deadline: now.Add(time.Minute),
-				Status: state.PublicationWriteObserved, ResolvedAt: now,
-			}},
-			NextPollAt: now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				deadline := now.Add(500 * time.Millisecond)
+				retryAt := now.Add(250 * time.Millisecond)
+				jobID := strings.Repeat("a", 64)
+				attemptID := strings.Repeat("b", 32)
+				accepted := state.AcceptedAction{
+					JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
+					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+					SubjectType: "Issue", SubjectNumber: 7,
+					SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
+					Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+					AcceptedAt: now, Deadline: deadline, RetryAt: retryAt, Assigned: true, ResultReady: true,
+				}
+				writes := map[string]state.PublicationWrite{}
+				if issuedWrite {
+					writes[jobID] = state.PublicationWrite{
+						AttemptID: attemptID, Kind: "comment", BotLogin: "bot", BotID: 8,
+						Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:" + jobID + " -->",
+						Since: now, StartedAt: now, Deadline: now.Add(time.Minute),
+						Status: state.PublicationWriteObserved, ResolvedAt: now,
+					}
+				}
+				store := serviceStore(t, state.Data{
+					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
+						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+					},
+					Processed:         map[string]time.Time{},
+					TerminalDecisions: map[string]state.TerminalDecision{},
+					PublicationWrites: writes,
+					NextPollAt:        now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
+				})
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.WriteAcceptedResult([]byte(`{"saved":true}`)); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				handler := &pendingPushLoopHandler{cancel: cancel}
+				watcher := &monitor.Monitor{
+					Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
+						"comment": {Action: "comment"},
+					}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}}},
+					GitHub: &terminalRecoveryGitHub{item: github.Item{
+						Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL,
+						Body: "@bot comment", Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID},
+					}},
+					Handler: handler, Now: time.Now,
+				}
+				var logs bytes.Buffer
+				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
+				if elapsed := time.Since(now); code != 0 || handler.publications != 1 || elapsed != retryAt.Sub(now) {
+					t.Fatalf("loop missed saved task retry: code=%d publications=%d elapsed=%s want=%s logs=%q",
+						code, handler.publications, elapsed, retryAt.Sub(now), logs.String())
+				}
+			})
 		})
-		if err := store.Save(); err != nil {
-			t.Fatal(err)
-		}
-		if err := store.WriteAcceptedResult([]byte(`{"saved":true}`)); err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		handler := &pendingPushLoopHandler{cancel: cancel}
-		watcher := &monitor.Monitor{
-			Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
-				"comment": {Action: "comment"},
-			}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}}},
-			Handler: handler, Now: time.Now,
-		}
-		var logs bytes.Buffer
-		code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
-		if elapsed := time.Since(now); code != 0 || handler.publications != 1 || elapsed != retryAt.Sub(now) {
-			t.Fatalf("loop missed observed task retry: code=%d publications=%d elapsed=%s want=%s logs=%q",
-				code, handler.publications, elapsed, retryAt.Sub(now), logs.String())
-		}
-	})
+	}
 }
 
 func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {

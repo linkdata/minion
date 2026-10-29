@@ -183,9 +183,11 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	activeJobID := ""
 	activeWriteChecked := false
 	activeTaskReady := false
+	activeSavedReply := false
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
 		activeJobID = accepted.JobID
+		activeSavedReply = savedReplyPriority(accepted, store.Data.PublicationWrites)
 		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending ||
 			store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWritePending
 		task := store.Data.PublicationWrites[activeJobID]
@@ -229,6 +231,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				return writeWake
 			}
+			if !next.IsZero() && next.Equal(accepted.RetryAt) && next.Before(accepted.Deadline) &&
+				savedReplyPriority(accepted, store.Data.PublicationWrites) {
+				return next
+			}
 		}
 		var terminal time.Time
 		if service && ctx.Err() == nil {
@@ -251,9 +257,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if retryAt := accepted.RetryAt; (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
 			remaining := time.Until(accepted.Deadline)
 			task := store.Data.PublicationWrites[accepted.JobID]
-			if accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved &&
-				retryAt.Before(accepted.Deadline) {
-				// Keep an observed saved reply ahead of unrelated checks until its retry.
+			if retryAt.Before(accepted.Deadline) &&
+				(savedReplyPriority(accepted, store.Data.PublicationWrites) ||
+					accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved) {
+				// Keep a saved reply ahead of unrelated checks until its retry.
 				return retryAt, nil
 			}
 			if write, pending := pendingActiveWrite(accepted); pending && remaining > 0 {
@@ -307,8 +314,10 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			activeTaskWrite = accepted.ResultReady && task.AttemptID == accepted.AttemptID &&
 				(task.Status == state.PublicationWritePending || task.Status == state.PublicationWriteObserved)
 		}
+		priorityRetry := errors.Is(err, ErrPostModelPublication) && !errors.Is(err, ErrAcceptanceState) &&
+			savedReplyPriority(store.Data.Accepted, store.Data.PublicationWrites)
 		urgentPublication := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) || reserveFix ||
-			activeTaskWrite || activeTaskReady && store.Data.Accepted == nil
+			activeTaskWrite || (activeTaskReady || activeSavedReply) && store.Data.Accepted == nil || priorityRetry
 		if reconcileErr == nil && !urgentPublication {
 			postSkip := skipChecked
 			if pushBeforeScan == state.PublicationWritePending {
@@ -1222,6 +1231,13 @@ func publicationRetryAt(now, deadline time.Time) time.Time {
 	return now.Add(min(publicationRecheckInterval, max(publicationLastChanceInterval, remaining/2)))
 }
 
+func savedReplyPriority(accepted *state.AcceptedAction, writes map[string]state.PublicationWrite) bool {
+	if accepted == nil || !accepted.ResultReady {
+		return false
+	}
+	return accepted.Action != string(command.Fix) || writes[accepted.JobID+"-push"].Status != state.PublicationWritePending
+}
+
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {
 	if err := failure.Validate(); err != nil {
 		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
@@ -1819,10 +1835,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	var savedResultAtStart bool
 	_ = store.WithLock(func() error {
 		accepted := store.Data.Accepted
-		push := store.Data.PublicationWrites[job.ID+"-push"]
 		savedResultAtStart = accepted != nil && accepted.JobID == job.ID &&
-			accepted.AttemptID == job.AttemptID && accepted.ResultReady &&
-			(job.Command.Action != command.Fix || push.Status != state.PublicationWritePending)
+			accepted.AttemptID == job.AttemptID && savedReplyPriority(accepted, store.Data.PublicationWrites)
 		return nil
 	})
 	controlDeadline := job.Deadline.Add(-fixPublicationReserve)
@@ -1846,8 +1860,10 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	var cancelControls context.CancelFunc
 	if job.Command.Action == command.Fix {
 		controlCtx, cancelControls = context.WithDeadline(actionCtx, controlDeadline)
-		defer cancelControls()
+	} else {
+		controlCtx, cancelControls = context.WithCancel(actionCtx)
 	}
+	defer cancelControls()
 	deferredControl := func(err error) bool {
 		return job.Command.Action == command.Fix && errors.Is(err, context.DeadlineExceeded) &&
 			!errors.Is(err, ErrAcceptanceState) && actionCtx.Err() == nil && !time.Now().Before(controlDeadline)
@@ -1901,12 +1917,22 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		completionMu.Unlock()
 		return stopErr
 	}
+	selectedResultReady := func() bool {
+		var ready bool
+		_ = store.WithLock(func() error {
+			accepted := store.Data.Accepted
+			ready = accepted != nil && accepted.JobID == job.ID && accepted.AttemptID == job.AttemptID && accepted.ResultReady
+			return nil
+		})
+		return ready
+	}
 	done := make(chan error, 1)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() {
+			cancelForSavedResult := selectedResultReady()
 			done <- result
-			if cancelControls != nil {
+			if cancelControls != nil && (job.Command.Action == command.Fix || cancelForSavedResult) {
 				cancelControls()
 			}
 		}()
@@ -1943,9 +1969,14 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	}
 	controlCanceledByWorker := func(err error) bool {
 		readDone()
-		return completed && job.Command.Action == command.Fix && errors.Is(err, context.Canceled) &&
-			!errors.Is(err, ErrAcceptanceState) && errors.Is(controlCtx.Err(), context.Canceled) &&
-			ctx.Err() == nil && actionCtx.Err() == nil
+		if !completed || errors.Is(err, ErrAcceptanceState) || ctx.Err() != nil || actionCtx.Err() != nil {
+			return false
+		}
+		if selectedResultReady() {
+			return true
+		}
+		return job.Command.Action == command.Fix && errors.Is(err, context.Canceled) &&
+			errors.Is(controlCtx.Err(), context.Canceled)
 	}
 	completedWithDecision := func() bool {
 		if !completed {
@@ -1991,23 +2022,25 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	initialPublicationCheck := true
 	for {
 		readDone()
-		if completed && job.Command.Action == command.Fix {
+		if completed && (job.Command.Action == command.Fix || selectedResultReady()) {
 			return finish(result)
 		}
 		if completedWithDecision() {
 			return finish(result)
 		}
-		var savedTaskReply bool
+		var savedTaskReply, activeSavedReply bool
 		_ = store.WithLock(func() error {
 			accepted := store.Data.Accepted
 			write := store.Data.PublicationWrites[job.ID]
+			activeSavedReply = accepted != nil && accepted.JobID == job.ID &&
+				accepted.AttemptID == job.AttemptID && savedReplyPriority(accepted, store.Data.PublicationWrites)
 			savedTaskReply = accepted != nil && accepted.JobID == job.ID && accepted.AttemptID == job.AttemptID &&
 				accepted.ResultReady && write.AttemptID == job.AttemptID &&
 				(write.Kind == "comment" || write.Kind == "review") &&
 				(write.Status == state.PublicationWritePending || write.Status == state.PublicationWriteObserved)
 			return nil
 		})
-		if savedResultAtStart || savedTaskReply {
+		if savedResultAtStart || activeSavedReply || savedTaskReply {
 			// Give the saved reply the remaining deadline instead of scanning unrelated work.
 			if completed {
 				return finish(result)

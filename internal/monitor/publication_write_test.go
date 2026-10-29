@@ -231,7 +231,7 @@ func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
 		m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
 		time.Sleep(2 * time.Minute)
 		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}
-		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
 		if got := store.Data.PublicationWrites["issued-job"]; got.Status != state.PublicationWriteObserved ||
