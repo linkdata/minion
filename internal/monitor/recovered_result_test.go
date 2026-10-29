@@ -181,7 +181,7 @@ func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
 	store.Data.Accepted.RetryAt = accepted.Deadline
 	marker := "<!-- linkdataminion:" + accepted.JobID + " -->"
 	store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
-		AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion",
+		AttemptID: accepted.AttemptID, Kind: "review", BotLogin: "linkdataminion", BotID: 8,
 		Repository: accepted.Repository, Number: accepted.SubjectNumber,
 		Marker: marker, Since: accepted.SourceUpdatedAt, StartedAt: now,
 		Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
@@ -190,7 +190,7 @@ func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	gh.reviewReplies = []github.Item{{Key: "review:1", Body: "published\n\n" + marker,
-		Author: github.User{Login: "linkdataminion"}, UpdatedAt: now}}
+		Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
 	gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
 	handler := &recoveredResultHandler{publish: func(Job) error { return nil }}
 	m.Handler = handler
@@ -429,7 +429,7 @@ func TestPostHandlerObservedFixPushGetsOneImmediateRecovery(t *testing.T) {
 					store.Data.PendingFixes[accepted.JobID] = pending
 					store.Data.PublicationWrites[key] = push
 					store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 						Marker: "<!-- linkdataminion:old-job -->", Since: now,
 						StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 					}
@@ -501,7 +501,7 @@ func TestPendingFixPushRechecksBeforeOriginalDeadline(t *testing.T) {
 		failure.Deadline = deadline
 		store.Data.JobFailures[accepted.JobID] = failure
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}
@@ -562,7 +562,7 @@ func TestPendingFixPushServicesDueSiblingBeforeReserve(t *testing.T) {
 		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
 			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
 		}
@@ -904,7 +904,7 @@ func TestPendingFixPushWakeIgnoresOverdueOtherWriteAfterRecovery(t *testing.T) {
 		failure.Deadline = deadline
 		store.Data.JobFailures[accepted.JobID] = failure
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
 		}
@@ -941,7 +941,7 @@ func TestRecoveredFixPushResultPreemptsOlderWriteNearDeadline(t *testing.T) {
 		failure.Deadline = deadline
 		store.Data.JobFailures[accepted.JobID] = failure
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
-			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 		}

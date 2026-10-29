@@ -48,7 +48,7 @@ type PublicationWrite struct {
 	AttemptID  string    `json:"attempt_id"`
 	Kind       string    `json:"kind"`
 	BotLogin   string    `json:"bot_login"`
-	BotID      int64     `json:"bot_id,omitempty"`
+	BotID      int64     `json:"bot_id"`
 	Repository string    `json:"repository"`
 	Number     int       `json:"number"`
 	Marker     string    `json:"marker"`
@@ -68,7 +68,7 @@ func ValidPublicationBotLogin(login string) bool {
 
 func validPublicationWrite(jobID string, write PublicationWrite) bool {
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(write.AttemptID) ||
-		!ValidPublicationBotLogin(write.BotLogin) || write.BotID < 0 ||
+		!ValidPublicationBotLogin(write.BotLogin) || write.BotID <= 0 ||
 		!workspace.ValidRepository(write.Repository) || write.Number <= 0 ||
 		write.StartedAt.IsZero() || !write.Deadline.After(write.StartedAt) {
 		return false
@@ -85,7 +85,7 @@ func validPublicationWrite(jobID string, write PublicationWrite) bool {
 		}
 		markerJobID = strings.TrimSuffix(jobID, "-push")
 		owner, _, _ := strings.Cut(write.Repository, "/")
-		if write.BotID <= 0 || len(markerJobID) < 12 || !workspace.ValidIdentitySegment(markerJobID) ||
+		if len(markerJobID) < 12 || !workspace.ValidIdentitySegment(markerJobID) ||
 			!strings.EqualFold(owner, strings.TrimSuffix(write.BotLogin, "[bot]")) ||
 			write.Branch != fmt.Sprintf("minion/fix-%d-%s", write.Number, markerJobID[:12]) ||
 			!workspace.ValidSHA(write.SHA) {

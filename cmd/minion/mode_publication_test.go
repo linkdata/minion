@@ -35,7 +35,7 @@ func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 	}
 	marker := "<!-- linkdataminion:issued-job -->"
 	store.Data.PublicationWrites = map[string]state.PublicationWrite{"issued-job": {
-		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "o/r", Number: 7,
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "o/r", Number: 7,
 		Marker: marker, Since: at, StartedAt: at, Deadline: at.Add(2 * time.Minute), Status: state.PublicationWritePending,
 	}}
 	if err := store.Save(); err != nil {
@@ -57,9 +57,9 @@ func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 		case "GET /user":
 			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
 		case "GET /repos/o/r/issues/7/comments":
-			_, _ = fmt.Fprintf(recorder, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"bot"},"updated_at":%q}]`, body, time.Now().UTC().Format(time.RFC3339))
+			_, _ = fmt.Fprintf(recorder, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"bot","id":8},"updated_at":%q}]`, body, time.Now().UTC().Format(time.RFC3339))
 		case "POST /graphql":
-			_, _ = fmt.Fprintf(recorder, `{"data":{"node":{"body":%q,"author":{"login":"bot"}}}}`, body)
+			_, _ = fmt.Fprintf(recorder, `{"data":{"node":{"body":%q,"author":{"login":"bot","id":8}}}}`, body)
 		default:
 			t.Errorf("unexpected GitHub request %s", key)
 			return nil, errors.New("unexpected GitHub request")
@@ -105,7 +105,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	jobID := "issued-job"
 	marker := "<!-- linkdataminion:issued-job -->"
 	store.Data.PublicationWrites[jobID] = state.PublicationWrite{
-		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "o/r", Number: 7,
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "o/r", Number: 7,
 		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 	}
 	if withAccepted {
@@ -128,9 +128,9 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			lookups.Add(1)
-			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"bot"},"updated_at":%q}]`, body, now.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(w, `[{"id":1,"node_id":"reply-node","body":%q,"user":{"login":"bot","id":8},"updated_at":%q}]`, body, now.Format(time.RFC3339))
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"bot"}}}}`, body)
+			_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"login":"bot","id":8}}}}`, body)
 		default:
 			http.Error(w, "unexpected request", http.StatusInternalServerError)
 		}
@@ -138,7 +138,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	t.Cleanup(server.Close)
 	client := github.New("fixture-token")
 	client.HTTPClient, client.BaseURL = server.Client(), server.URL
-	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: client}
+	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: client, BotID: 8}
 	if code := runOrchestrateMode(t.Context(), nil, watcher, store, true, log.New(io.Discard, "", 0), "", 0); code != 1 {
 		t.Fatalf("missing worker should fail after reconciliation: code=%d", code)
 	}

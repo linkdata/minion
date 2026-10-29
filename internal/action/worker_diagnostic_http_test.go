@@ -386,7 +386,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
 		Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock },
+		GitHub: gh, Handler: owner, BotID: 8, Logger: parentLogger, Now: func() time.Time { return clock },
 		SelectedExecutorID: LocalExecutorID, SelectedCommands: map[string]bool{"comment": true}}
 	owner.Store, owner.assignmentRequired = store, true
 	owner.ValidateAssignment = func(ctx context.Context, job monitor.Job) error {

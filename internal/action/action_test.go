@@ -68,15 +68,17 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Action: command.Review}}
 	reviewMarker := "<!-- linkdataminion:" + strings.Repeat("b", 64) + " -->"
 	for _, tt := range []struct {
-		name, body, author, liveBody string
-		authorID, liveID             int64
-		edited, want, provenance     bool
+		name, body, author, liveBody             string
+		authorID, liveID                         int64
+		edited, want, provenance, overrideLiveID bool
 	}{
 		{name: "copied audit marker in review", body: "Review result\n\n" + job.Marker() + "\n\n" + reviewMarker, author: "linkdataminion", authorID: 8},
 		{name: "own completion marker", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, want: true, provenance: true},
 		{name: "same login different ID", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 9},
+		{name: "same login missing listed ID", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion"},
 		{name: "same ID changed login", body: "Security audit complete\n\n" + job.Marker(), author: "renamed-bot", authorID: 8, want: true, provenance: true},
-		{name: "provenance ID changed", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, liveID: 9, provenance: true},
+		{name: "provenance ID changed", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, liveID: 9, overrideLiveID: true, provenance: true},
+		{name: "provenance ID missing", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, overrideLiveID: true, provenance: true},
 		{name: "edited bot completion", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, edited: true, provenance: true},
 		{name: "stale completion body", body: "Security audit complete\n\n" + job.Marker(), author: "linkdataminion", authorID: 8, liveBody: "Edited body without marker", provenance: true},
 		{name: "other author", body: "Security audit complete\n\n" + job.Marker(), author: "writer", authorID: 7},
@@ -84,7 +86,7 @@ func TestAlreadyAcknowledgedRequiresOwnTrailingMarker(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var provenanceCalls int
 			liveID := tt.authorID
-			if tt.liveID != 0 {
+			if tt.overrideLiveID {
 				liveID = tt.liveID
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -266,7 +268,10 @@ func (f *actionMonitorGitHub) CurrentItem(_ context.Context, item github.Item) (
 	}
 	return item, nil
 }
-func (f *actionMonitorGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, int64, string, bool) (bool, error) {
+func (f *actionMonitorGitHub) HasVerifiedBotReply(_ context.Context, _ string, _ int, _ time.Time, botID int64, _ string, _ bool) (bool, error) {
+	if botID <= 0 {
+		return false, fmt.Errorf("invalid bot account ID %d", botID)
+	}
 	return false, nil
 }
 func (f *actionMonitorGitHub) HasVerifiedBotPublication(context.Context, string, int, time.Time, github.User, string, string) (bool, error) {
@@ -453,7 +458,7 @@ func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
 	var journal bytes.Buffer
 	m := monitor.Monitor{Logger: log.New(&journal, "", 0), Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review", "security-audit"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-		GitHub: monitorGitHub, Handler: orchestrator, Now: func() time.Time { return now.Add(time.Minute) }}
+		GitHub: monitorGitHub, Handler: orchestrator, BotID: 8, Now: func() time.Time { return now.Add(time.Minute) }}
 	bindSelectedRunner(&m, store, orchestrator)
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatal(err)

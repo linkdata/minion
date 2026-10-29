@@ -637,7 +637,6 @@ func TestHasVerifiedBotPublicationUsesRecordedSurface(t *testing.T) {
 			{name: "renamed account", author: User{ID: 8, Login: "renamed-bot"}, bot: User{ID: 8, Login: "linkdataminion"}, want: true, wantProvenance: 1},
 			{name: "reclaimed login", author: User{ID: 9, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}},
 			{name: "provenance changed", author: User{ID: 8, Login: "linkdataminion"}, provenanceAuthor: User{ID: 9, Login: "linkdataminion"}, bot: User{ID: 8, Login: "linkdataminion"}, wantProvenance: 1},
-			{name: "legacy login", author: User{ID: 8, Login: "linkdataminion"}, bot: User{Login: "linkdataminion"}, want: true, wantProvenance: 1},
 		} {
 			t.Run(presentKind+"/"+tc.name, func(t *testing.T) {
 				var comments, reviews, provenance int
@@ -697,6 +696,19 @@ func TestHasVerifiedBotPublicationUsesRecordedSurface(t *testing.T) {
 					t.Fatalf("recorded surface lookup: found=%t err=%v comments=%d reviews=%d provenance=%d", found, err, comments, reviews, provenance)
 				}
 			})
+		}
+	}
+}
+
+func TestHasVerifiedBotPublicationRequiresBotID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unpinned bot triggered GitHub request: %s", r.URL)
+	}))
+	defer server.Close()
+	for _, kind := range []string{"comment", "review"} {
+		found, err := testClient(server).HasVerifiedBotPublication(t.Context(), "o/r", 7, time.Time{}, User{Login: "linkdataminion"}, "<!-- linkdataminion:job -->", kind)
+		if err == nil || found {
+			t.Fatalf("%s with missing bot ID: found=%t err=%v", kind, found, err)
 		}
 	}
 }

@@ -206,9 +206,6 @@ func (f *fakeGitHub) CurrentItem(_ context.Context, item github.Item) (github.It
 }
 
 func (f *fakeGitHub) HasVerifiedBotReply(ctx context.Context, _ string, _ int, since time.Time, botID int64, marker string, includeReviews bool) (bool, error) {
-	if botID <= 0 {
-		return false, fmt.Errorf("invalid bot account ID %d", botID)
-	}
 	return f.hasVerifiedBotReply(ctx, since, github.User{ID: botID}, marker, true, includeReviews)
 }
 
@@ -217,11 +214,8 @@ func (f *fakeGitHub) HasVerifiedBotPublication(ctx context.Context, _ string, _ 
 }
 
 func (f *fakeGitHub) hasVerifiedBotReply(ctx context.Context, since time.Time, bot github.User, marker string, scanComments, scanReviews bool) (bool, error) {
-	matchesBot := func(author github.User) bool {
-		if bot.ID > 0 {
-			return author.ID == bot.ID
-		}
-		return strings.EqualFold(author.Login, bot.Login)
+	if bot.ID <= 0 {
+		return false, fmt.Errorf("invalid bot account ID %d", bot.ID)
 	}
 	f.verifiedCalls = append(f.verifiedCalls, scanReviews)
 	f.verifiedSince = append(f.verifiedSince, since)
@@ -241,14 +235,14 @@ func (f *fakeGitHub) hasVerifiedBotReply(ctx context.Context, since time.Time, b
 		if !since.IsZero() && !item.UpdatedAt.IsZero() && item.UpdatedAt.Before(since.Add(-time.Second)) {
 			continue
 		}
-		if !matchesBot(item.Author) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+		if item.Author.ID != bot.ID || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
 			continue
 		}
 		current, err := f.CurrentItem(ctx, item)
 		if err != nil {
 			return false, err
 		}
-		if !current.Edited && matchesBot(current.Author) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker) {
+		if !current.Edited && current.Author.ID == bot.ID && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker) {
 			return true, nil
 		}
 	}
@@ -727,6 +721,7 @@ func TestFailureReplyMatchesPinnedBotID(t *testing.T) {
 		wantReply bool
 	}{
 		{name: "same login different ID", author: github.User{Login: "linkdataminion", ID: 9}, wantReply: true},
+		{name: "same login missing ID", author: github.User{Login: "linkdataminion"}, wantReply: true},
 		{name: "same ID changed login", author: github.User{Login: "renamed-bot", ID: 8}},
 	} {
 		t.Run(test.name, func(t *testing.T) {

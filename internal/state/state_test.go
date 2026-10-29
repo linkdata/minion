@@ -172,7 +172,7 @@ func TestOpenInitializesMissingPublicationWrites(t *testing.T) {
 
 func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	valid := PublicationWrite{AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+	valid := PublicationWrite{AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
 		Marker: "<!-- linkdataminion:job-1 -->", Since: at, StartedAt: at,
 		Deadline: at.Add(2 * time.Minute), Status: PublicationWritePending}
 	for _, test := range []struct {
@@ -186,6 +186,7 @@ func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 		{name: "missing bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "" }},
 		{name: "empty bot account", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "[bot]" }},
 		{name: "bad bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "owner/bot" }},
+		{name: "missing bot ID", jobID: "job-1", change: func(w *PublicationWrite) { w.BotID = 0 }},
 		{name: "bad bot ID", jobID: "job-1", change: func(w *PublicationWrite) { w.BotID = -1 }},
 		{name: "bad target", jobID: "job-1", change: func(w *PublicationWrite) { w.Repository = "../repo" }},
 		{name: "comment branch", jobID: "job-1", change: func(w *PublicationWrite) { w.Branch = "unexpected" }},

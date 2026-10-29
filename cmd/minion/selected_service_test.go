@@ -86,7 +86,10 @@ func serviceStore(t *testing.T, data state.Data) *state.Store {
 	return store
 }
 
-func (g *terminalRecoveryGitHub) HasVerifiedBotReply(context.Context, string, int, time.Time, int64, string, bool) (bool, error) {
+func (g *terminalRecoveryGitHub) HasVerifiedBotReply(_ context.Context, _ string, _ int, _ time.Time, botID int64, _ string, _ bool) (bool, error) {
+	if botID <= 0 {
+		return false, fmt.Errorf("invalid bot account ID %d", botID)
+	}
 	return false, nil
 }
 
@@ -252,7 +255,7 @@ func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T)
 	var logs bytes.Buffer
 	logger := log.New(&logs, "", 0)
 	owner := newOrchestrator(cfg, nil, store, logger, nil)
-	watcher := &monitor.Monitor{Config: cfg, GitHub: gh, Logger: logger}
+	watcher := &monitor.Monitor{Config: cfg, GitHub: gh, BotID: 8, Logger: logger}
 	if code := runOrchestrateMode(t.Context(), owner, watcher, store, false, logger, "", time.Second); code != 0 {
 		t.Fatalf("assigned action required a removed skill or worker: code=%d logs=%q", code, logs.String())
 	}
@@ -323,7 +326,7 @@ func TestOrchestrateModeAttachesAfterExpiredAcceptanceRecovery(t *testing.T) {
 			var logs bytes.Buffer
 			logger := log.New(&logs, "", 0)
 			owner := newOrchestrator(cfg, nil, store, logger, nil)
-			watcher := &monitor.Monitor{Config: cfg, GitHub: gh, Logger: logger}
+			watcher := &monitor.Monitor{Config: cfg, GitHub: gh, BotID: 8, Logger: logger}
 			code := runOrchestrateMode(t.Context(), owner, watcher, store, loop, logger,
 				filepath.Join(t.TempDir(), "missing-worker"), time.Second)
 			attempted := strings.Contains(logs.String(), "start selected worker: start local worker:")

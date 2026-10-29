@@ -248,9 +248,6 @@ func eligible(updated, since time.Time) bool {
 // reviews. The since bound applies to comments and filters reviews by
 // submission time.
 func (c *Client) HasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, botID int64, marker string, includeReviews bool) (bool, error) {
-	if botID <= 0 {
-		return false, fmt.Errorf("invalid bot account ID %d", botID)
-	}
 	return c.hasVerifiedBotReply(ctx, repo, number, since, User{ID: botID}, marker, true, includeReviews)
 }
 
@@ -263,6 +260,9 @@ func (c *Client) HasVerifiedBotPublication(ctx context.Context, repo string, num
 }
 
 func (c *Client) hasVerifiedBotReply(ctx context.Context, repo string, number int, since time.Time, bot User, marker string, scanComments, scanReviews bool) (bool, error) {
+	if bot.ID <= 0 {
+		return false, fmt.Errorf("invalid bot account ID %d", bot.ID)
+	}
 	path, err := repoPath(repo)
 	if err != nil {
 		return false, err
@@ -270,21 +270,15 @@ func (c *Client) hasVerifiedBotReply(ctx context.Context, repo string, number in
 	if number <= 0 {
 		return false, fmt.Errorf("invalid thread number %d", number)
 	}
-	matchesBot := func(author User) bool {
-		if bot.ID > 0 {
-			return author.ID == bot.ID
-		}
-		return strings.EqualFold(author.Login, bot.Login)
-	}
 	match := func(item Item) (bool, error) {
-		if !matchesBot(item.Author) || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
+		if item.Author.ID != bot.ID || !strings.HasSuffix(strings.TrimSpace(item.Body), "\n\n"+marker) {
 			return false, nil
 		}
 		current, err := c.CurrentItem(ctx, item)
 		if err != nil {
 			return false, fmt.Errorf("check bot reply provenance: %w", err)
 		}
-		return !current.Edited && matchesBot(current.Author) && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
+		return !current.Edited && current.Author.ID == bot.ID && strings.HasSuffix(strings.TrimSpace(current.Body), "\n\n"+marker), nil
 	}
 
 	if scanComments {
