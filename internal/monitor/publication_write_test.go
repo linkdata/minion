@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -549,6 +550,97 @@ func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
 				initialChecks, periodicChecks, completedEarly, runErr, store.Data.PublicationWrites["old-job"])
 		}
 	})
+}
+
+func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
+	for _, remoteVisible := range []bool{false, true} {
+		name := "push absent through grace"
+		if remoteVisible {
+			name = "push visible before handler returns"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				store.Data.Accepted.Deadline = now.Add(90 * time.Second)
+				store.Data.Accepted.RetryAt = time.Time{}
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = store.Data.Accepted.Deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				key := accepted.JobID + "-push"
+				push := store.Data.PublicationWrites[key]
+				push.Deadline = now.Add(10 * time.Second)
+				store.Data.PublicationWrites[key] = push
+				store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+					AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+					Marker: "<!-- linkdataminion:old-job -->", Since: now,
+					StartedAt: now, Deadline: now.Add(90 * time.Second), Status: state.PublicationWritePending,
+				}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				var lookups atomic.Int32
+				var commentChecks atomic.Int32
+				gh.beforeVerify = func(context.Context, bool) error { commentChecks.Add(1); return nil }
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					lookups.Add(1)
+					if !remoteVisible {
+						return github.Branch{}, &github.StatusError{StatusCode: 404}
+					}
+					return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+				}
+				started := make(chan struct{})
+				release := make(chan struct{})
+				finished := make(chan error, 1)
+				job := jobFromAccepted(*store.Data.Accepted)
+				go func() {
+					finished <- m.runSelectedWithControls(t.Context(), store, job, "", nil,
+						func(context.Context, Job) error { close(started); <-release; return nil },
+						func(err error) error { return err })
+				}()
+				select {
+				case <-started:
+				case err := <-finished:
+					t.Fatalf("selected handler ended before push started: %v", err)
+				}
+				synctest.Wait()
+				if commentChecks.Load() != 1 {
+					t.Fatalf("initial scan skipped older publication: checks=%d", commentChecks.Load())
+				}
+				if err := store.WithLock(func() error {
+					store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
+						AttemptID: accepted.AttemptID, Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+						Repository: accepted.Repository, Number: accepted.SubjectNumber,
+						Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+						StartedAt: now, Deadline: now.Add(90 * time.Second), Status: state.PublicationWritePending,
+					}
+					return store.Save()
+				}); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(publicationRecheckInterval + time.Second)
+				synctest.Wait()
+				var current state.PublicationWrite
+				var taskWrite, olderWrite state.PublicationWrite
+				_ = store.WithLock(func() error {
+					current = store.Data.PublicationWrites[key]
+					taskWrite = store.Data.PublicationWrites[accepted.JobID]
+					olderWrite = store.Data.PublicationWrites["old-job"]
+					return nil
+				})
+				if lookups.Load() != 0 || current.Status != state.PublicationWritePending ||
+					commentChecks.Load() < 3 || taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
+					t.Fatalf("active push or other writes were mishandled: push lookups=%d comment checks=%d push=%+v task=%+v old=%+v",
+						lookups.Load(), commentChecks.Load(), current, taskWrite, olderWrite)
+				}
+				close(release)
+				if err := <-finished; err != nil {
+					t.Fatal(err)
+				}
+			})
+		})
+	}
 }
 
 func TestRecoveredIssuedReviewSkipsLiveSourceRevalidation(t *testing.T) {

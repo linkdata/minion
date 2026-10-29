@@ -222,12 +222,17 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return wake(retryAt, true), nil
 		}
 		err := m.recoverAccepted(ctx, store)
+		pushObservedBeforeScan := store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWriteObserved
 		reconcileErr := m.reconcilePublicationWrites(ctx, store, "", skipChecked)
 		if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) && reconcileErr == nil {
 			return wake(store.Data.NextPollAt, true), nil
 		}
 		err = errors.Join(err, reconcileErr)
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
+			if errors.Is(err, ErrPostModelPublication) && !pushObservedBeforeScan &&
+				store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWriteObserved {
+				return wake(now().UTC(), false), err
+			}
 			retryAt, saveErr := m.scheduleAcceptedRetry(store)
 			return wake(retryAt, false), errors.Join(err, saveErr)
 		}
@@ -1852,7 +1857,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			return finish(result)
 		}
 		if !m.now().UTC().Before(nextPublicationCheck) {
-			skipJobID := ""
+			skipJobID := job.ID + "-push"
 			if initialPublicationCheck {
 				skipJobID = job.ID // The worker and RunOnce check this active write.
 				initialPublicationCheck = false
@@ -1860,7 +1865,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if err := m.reconcilePublicationWrites(actionCtx, store, "", skipJobID); err != nil {
 				return abort(err)
 			}
-			nextPublicationCheck = publicationWriteWake(store, m.now().UTC())
+			nextPublicationCheck = publicationWriteWakeExcept(store, m.now().UTC(), job.ID+"-push")
 			if nextPublicationCheck.IsZero() {
 				nextPublicationCheck = m.now().UTC().Add(publicationRecheckInterval)
 			}

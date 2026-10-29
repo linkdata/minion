@@ -289,6 +289,51 @@ func TestStartupObservedFixPushRespectsLaterPublicationBackoff(t *testing.T) {
 	})
 }
 
+func TestPostHandlerObservedFixPushGetsOneImmediateRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		key := accepted.JobID + "-push"
+		push := store.Data.PublicationWrites[key]
+		pending := store.Data.PendingFixes[accepted.JobID]
+		delete(store.Data.PublicationWrites, key)
+		delete(store.Data.PendingFixes, accepted.JobID)
+		store.Data.Accepted.RetryAt = time.Time{}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		pushes := 0
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			calls++
+			if calls == 1 {
+				pushes++
+				if err := store.WithLock(func() error {
+					store.Data.PendingFixes[accepted.JobID] = pending
+					store.Data.PublicationWrites[key] = push
+					return store.Save()
+				}); err != nil {
+					return err
+				}
+				return ErrPostModelPublication
+			}
+			return nil
+		}}
+		m.Handler = handler
+		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrPostModelPublication) ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.IsZero() ||
+			store.Data.PublicationWrites[key].Status != state.PublicationWriteObserved || calls != 1 {
+			t.Fatalf("post-handler observation did not wake recovery: err=%v accepted=%+v write=%+v calls=%d",
+				err, store.Data.Accepted, store.Data.PublicationWrites[key], calls)
+		}
+		if _, err := m.RunOnce(t.Context(), store); err != nil || calls != 2 || pushes != 1 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || gh.commentCalls != 0 {
+			t.Fatalf("observed push waited, repeated push, or lost reply: err=%v calls=%d pushes=%d accepted=%+v processed=%v comments=%d",
+				err, calls, pushes, store.Data.Accepted, store.Data.Processed[accepted.JobID], gh.commentCalls)
+		}
+	})
+}
+
 func TestMonitorPreservesControlFailureFromStoredResultPublisher(t *testing.T) {
 	store, _, _, _, monitor := storedRecoveryFixture(t)
 	controlErr := errors.New("control state unavailable")

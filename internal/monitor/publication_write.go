@@ -172,10 +172,14 @@ func storePublicationWriteOutcome(store *state.Store, jobID string, original sta
 }
 
 func publicationWriteWake(store *state.Store, at time.Time) time.Time {
+	return publicationWriteWakeExcept(store, at, "")
+}
+
+func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID string) time.Time {
 	var next time.Time
 	_ = store.WithLock(func() error {
-		for _, write := range store.Data.PublicationWrites {
-			if write.Status != state.PublicationWritePending {
+		for jobID, write := range store.Data.PublicationWrites {
+			if jobID == skipJobID || write.Status != state.PublicationWritePending {
 				continue
 			}
 			checkAt := at.Add(publicationRecheckInterval)
