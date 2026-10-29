@@ -375,7 +375,7 @@ func TestMonitorLoopRechecksPendingPushAtSubsecondWake(t *testing.T) {
 				}}
 				if tc.postHandler {
 					writes["old-job"] = state.PublicationWrite{
-						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 9,
 						Marker: "<!-- linkdataminion:old-job -->", Since: now,
 						StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
 					}
