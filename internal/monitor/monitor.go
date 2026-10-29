@@ -72,6 +72,8 @@ var ErrAcceptedRetry = errors.New("accepted action assignment validation deferre
 const (
 	maxJobAttempts          = 3
 	maxFailureReplyAttempts = 3
+	siblingReplyBudget      = 3 * time.Minute
+	fixPublicationReserve   = 3 * publicationReconcileBudget
 	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
 )
 
@@ -181,7 +183,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	activeWriteChecked := false
 	if store.Data.Accepted != nil {
 		activeJobID = store.Data.Accepted.JobID
-		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending
+		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending ||
+			store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWritePending
 	}
 	if err := m.reconcilePublicationWrites(ctx, store, activeJobID, ""); err != nil {
 		return store.Data.NextPollAt, err
@@ -192,6 +195,18 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	now := m.now
 	wake := func(next time.Time, service bool) time.Time {
+		at := now().UTC()
+		if accepted := store.Data.Accepted; accepted != nil && at.Before(accepted.Deadline) {
+			push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+			if push.Status == state.PublicationWritePending {
+				// Do not let overdue unrelated writes delay the active push check.
+				pushWake := publicationWriteCheckAt(push, at, accepted.Deadline)
+				if !pushWake.After(at) {
+					pushWake = earlierWake(at.Add(publicationLastChanceInterval), accepted.Deadline)
+				}
+				return pushWake
+			}
+		}
 		var terminal time.Time
 		if service && ctx.Err() == nil {
 			terminal = m.serviceTerminalControls(ctx, store)
@@ -203,15 +218,32 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if !terminal.IsZero() && (next.IsZero() || terminal.Before(next)) {
 				next = terminal
 			}
-			return withPublicationWriteWake(next, store, now().UTC())
+			return withPublicationWriteWake(next, store, at)
 		}
-		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, now().UTC())
+		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, at)
 	}
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
 		_, decided := store.Data.TerminalDecisions[accepted.JobID]
 		observed := store.Data.PublicationWrites[accepted.JobID].Status == state.PublicationWriteObserved
 		if retryAt := accepted.RetryAt; !observed && (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
+			remaining := time.Until(accepted.Deadline)
+			push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+			if push.Status == state.PublicationWritePending && remaining > 0 {
+				controlDeadline := accepted.Deadline.Add(-fixPublicationReserve)
+				startBefore := controlDeadline.Add(-siblingReplyBudget)
+				var terminalWake time.Time
+				if time.Now().Before(startBefore) {
+					controlCtx, cancel := context.WithDeadline(ctx, controlDeadline)
+					terminalWake = m.serviceTerminalControlsBefore(controlCtx, store, startBefore)
+					cancel()
+				}
+				// A pending push takes priority over unrelated publication checks.
+				push = store.Data.PublicationWrites[accepted.JobID+"-push"]
+				pushWake := publicationWriteCheckAt(push, now().UTC(), accepted.Deadline)
+				next := earlierWake(earlierWake(retryAt, pushWake), terminalWake)
+				return next, ctx.Err()
+			}
 			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
 				return wake(retryAt, false), err
 			}
@@ -221,7 +253,33 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return wake(retryAt, true), nil
 		}
 		err := m.recoverAccepted(ctx, store)
-		reconcileErr := m.reconcilePublicationWrites(ctx, store, "", skipChecked)
+		pushKey := activeJobID + "-push"
+		pushBeforeScan := store.Data.PublicationWrites[pushKey].Status
+		reconcileErr := m.reconcilePublicationWrites(ctx, store, pushKey, "")
+		pushJustObserved := pushBeforeScan != state.PublicationWriteObserved &&
+			store.Data.PublicationWrites[pushKey].Status == state.PublicationWriteObserved
+		retriedObservedPush := false
+		if reconcileErr == nil && pushJustObserved && errors.Is(err, ErrPostModelPublication) &&
+			!errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
+			// The exact push SHA is now visible; retry only the saved publication once.
+			retriedObservedPush = true
+			err = m.recoverAccepted(ctx, store)
+		}
+		reserveFix := false
+		if accepted := store.Data.Accepted; accepted != nil {
+			remaining := time.Until(accepted.Deadline)
+			// An unrelated scan can consume a full budget before the fix reserve starts.
+			reserveFix = accepted.Action == string(command.Fix) && remaining > 0 &&
+				remaining <= fixPublicationReserve+publicationReconcileBudget
+		}
+		urgentFix := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) || reserveFix
+		if reconcileErr == nil && !urgentFix {
+			postSkip := skipChecked
+			if pushBeforeScan == state.PublicationWritePending {
+				postSkip = pushKey
+			}
+			reconcileErr = m.reconcilePublicationWrites(ctx, store, "", postSkip)
+		}
 		if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) && reconcileErr == nil {
 			return wake(store.Data.NextPollAt, true), nil
 		}
@@ -974,6 +1032,11 @@ func (m *Monitor) terminalControlWake(store *state.Store) time.Time {
 
 // Service each due linked thread once on the monitor goroutine, then return its next wake.
 func (m *Monitor) serviceTerminalControls(ctx context.Context, store *state.Store) time.Time {
+	return m.serviceTerminalControlsBefore(ctx, store, time.Time{})
+}
+
+// A cutoff keeps later sibling replies from entering the fix's final publication window.
+func (m *Monitor) serviceTerminalControlsBefore(ctx context.Context, store *state.Store, startBefore time.Time) time.Time {
 	checks, activeJobID := terminalControlChecks(store, "")
 	if len(checks) == 0 || ctx.Err() != nil {
 		return m.terminalControlWake(store)
@@ -986,7 +1049,7 @@ func (m *Monitor) serviceTerminalControls(ctx context.Context, store *state.Stor
 	commandSets := make(map[string]map[string]command.Action)
 	serviced := make(map[string]time.Time)
 	for _, key := range keys {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !startBefore.IsZero() && !time.Now().Before(startBefore) {
 			break
 		}
 		check := checks[key]
@@ -1706,10 +1769,14 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	if !time.Now().Before(job.Deadline) {
 		return finish(context.DeadlineExceeded)
 	}
-	checks, _ := terminalControlChecks(store, job.ID)
-	terminalChecks := make(map[string]time.Time, len(checks))
-	for key, check := range checks {
-		terminalChecks[key] = check.checkAt
+	controlDeadline := job.Deadline.Add(-fixPublicationReserve)
+	terminalChecks := make(map[string]time.Time)
+	// Leave a full failure-reply budget before the fix's final control reserve.
+	if job.Command.Action != command.Fix || time.Until(controlDeadline) > siblingReplyBudget {
+		checks, _ := terminalControlChecks(store, job.ID)
+		for key, check := range checks {
+			terminalChecks[key] = check.checkAt
+		}
 	}
 	commandSets := make(map[string]map[string]command.Action)
 	if len(terminalChecks) != 0 {
@@ -1719,6 +1786,16 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	}
 	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
+	controlCtx := actionCtx
+	var cancelControls context.CancelFunc
+	if job.Command.Action == command.Fix {
+		controlCtx, cancelControls = context.WithDeadline(actionCtx, controlDeadline)
+		defer cancelControls()
+	}
+	deferredControl := func(err error) bool {
+		return job.Command.Action == command.Fix && errors.Is(err, context.DeadlineExceeded) &&
+			!errors.Is(err, ErrAcceptanceState) && actionCtx.Err() == nil && !time.Now().Before(controlDeadline)
+	}
 	var completionMu sync.Mutex
 	var terminalReturn bool
 	recordAssignedStop := func(stoppedAt time.Time, cause error) error {
@@ -1771,7 +1848,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	done := make(chan error, 1)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
-		defer func() { done <- result }()
+		defer func() {
+			done <- result
+			if cancelControls != nil {
+				cancelControls()
+			}
+		}()
 		result = run(actionCtx, job)
 		completionMu.Lock()
 		completedAt := time.Now().UTC()
@@ -1802,6 +1884,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			default:
 			}
 		}
+	}
+	controlCanceledByWorker := func(err error) bool {
+		readDone()
+		return completed && job.Command.Action == command.Fix && errors.Is(err, context.Canceled) &&
+			!errors.Is(err, ErrAcceptanceState) && errors.Is(controlCtx.Err(), context.Canceled) &&
+			ctx.Err() == nil && actionCtx.Err() == nil
 	}
 	completedWithDecision := func() bool {
 		if !completed {
@@ -1847,30 +1935,57 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	initialPublicationCheck := true
 	for {
 		readDone()
+		if completed && job.Command.Action == command.Fix {
+			return finish(result)
+		}
 		if completedWithDecision() {
 			return finish(result)
 		}
 		if !m.now().UTC().Before(nextPublicationCheck) {
-			skipJobID := ""
+			skipJobID := job.ID + "-push"
 			if initialPublicationCheck {
 				skipJobID = job.ID // The worker and RunOnce check this active write.
 				initialPublicationCheck = false
 			}
-			if err := m.reconcilePublicationWrites(actionCtx, store, "", skipJobID); err != nil {
-				return abort(err)
+			readDone()
+			if completed && job.Command.Action == command.Fix {
+				return finish(result)
 			}
-			nextPublicationCheck = publicationWriteWake(store, m.now().UTC())
+			// Keep the fix's publication reserve before scanning older writes.
+			if !completed && (job.Command.Action != command.Fix || time.Until(job.Deadline) > fixPublicationReserve) {
+				if err := m.reconcilePublicationWrites(controlCtx, store, "", skipJobID); err != nil && !deferredControl(err) {
+					if controlCanceledByWorker(err) {
+						return finish(result)
+					}
+					return abort(err)
+				}
+			}
+			nextPublicationCheck = publicationWriteWakeExcept(store, m.now().UTC(), job.ID+"-push")
 			if nextPublicationCheck.IsZero() {
 				nextPublicationCheck = m.now().UTC().Add(publicationRecheckInterval)
 			}
 		}
 		completedAtStart := completed
-		if err := m.checkDueInvitations(actionCtx, store, m.now().UTC()); err != nil {
-			return abort(err)
+		readDone()
+		if completed && job.Command.Action == command.Fix {
+			return finish(result)
 		}
+		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
+		if !reserveFixDeadline {
+			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+				if controlCanceledByWorker(err) {
+					return finish(result)
+				}
+				return abort(err)
+			}
+		}
+		reserveFixDeadline = job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		var next time.Time
 		var due []notificationScan
 		_ = store.WithLock(func() error {
+			if reserveFixDeadline {
+				return nil
+			}
 			next = store.Data.NextInviteCheckAt
 			if len(terminalChecks) == 0 {
 				return nil
@@ -1903,12 +2018,19 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			return nil
 		})
 		for _, entry := range due {
+			readDone()
+			if completed && job.Command.Action == command.Fix {
+				return finish(result)
+			}
+			if job.Command.Action == command.Fix && time.Until(controlDeadline) <= siblingReplyBudget {
+				break
+			}
 			var items []github.Item
 			if entry.key == cachedKey {
 				items = cachedItems
 				cachedKey = "" // Retries read the current thread again.
 			}
-			checkAt := m.processTerminalNotification(actionCtx, store, job.ID, entry, commandSets, items)
+			checkAt := m.processTerminalNotification(controlCtx, store, job.ID, entry, commandSets, items)
 			nextCheck[entry.key] = checkAt
 			_ = store.WithLock(func() error {
 				if !hasTerminalReplay(store, entry.key, job.ID) {
@@ -1919,10 +2041,18 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if !checkAt.IsZero() && (next.IsZero() || checkAt.Before(next)) {
 				next = checkAt
 			}
-			if err := m.checkDueInvitations(actionCtx, store, m.now().UTC()); err != nil {
+			readDone()
+			if completed && job.Command.Action == command.Fix {
+				return finish(result)
+			}
+			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+				if controlCanceledByWorker(err) {
+					return finish(result)
+				}
 				return abort(err)
 			}
 		}
+		reserveFixDeadline = job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		readDone()
 		if completedWithDecision() {
 			return finish(result)
@@ -1950,7 +2080,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			}
 			continue
 		}
-		if next.IsZero() || nextPublicationCheck.Before(next) {
+		if reserveFixDeadline {
+			next = job.Deadline
+		} else if next.IsZero() || nextPublicationCheck.Before(next) {
 			next = nextPublicationCheck
 		}
 		if next.IsZero() {
@@ -2419,6 +2551,10 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 
 func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Store, job Job, at time.Time,
 	failure state.JobFailure, replyRetry *notificationScan) error {
+	replyCtx := ctx
+	if replyRetry == nil {
+		replyCtx = context.WithoutCancel(ctx)
+	}
 	var accepted *state.AcceptedAction
 	_ = store.WithLock(func() error {
 		if current := store.Data.Accepted; current != nil && current.JobID == job.ID {
@@ -2437,20 +2573,31 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	var issuedWrite bool
 	if err := store.WithLock(func() error {
 		write, exists := store.Data.PublicationWrites[job.ID]
-		if !exists {
-			return nil
+		if exists {
+			if write.Repository != job.Repository.Name || write.Number != job.Number || write.Marker != marker ||
+				(job.AttemptID != "" && write.AttemptID != job.AttemptID) {
+				return fmt.Errorf("%w: issued publication differs from failed action", ErrAcceptanceState)
+			}
+			issuedWrite = true
 		}
-		if write.Repository != job.Repository.Name || write.Number != job.Number || write.Marker != marker ||
-			(job.AttemptID != "" && write.AttemptID != job.AttemptID) {
-			return fmt.Errorf("%w: issued publication differs from failed action", ErrAcceptanceState)
+		push, exists := store.Data.PublicationWrites[job.ID+"-push"]
+		if exists {
+			pending, hasPending := store.Data.PendingFixes[job.ID]
+			_, repoName, hasRepo := strings.Cut(job.Repository.Name, "/")
+			if job.Command.Action != command.Fix || job.AttemptID == "" || push.Kind != "push" ||
+				push.AttemptID != job.AttemptID || push.Number != job.Number || push.Marker != marker ||
+				!hasRepo || !strings.EqualFold(push.Repository, strings.TrimSuffix(push.BotLogin, "[bot]")+"/"+repoName) ||
+				!hasPending || pending.SHA == "" || pending.SHA != push.SHA {
+				return fmt.Errorf("%w: issued fix push differs from failed action", ErrAcceptanceState)
+			}
+			issuedWrite = true
 		}
-		issuedWrite = true
 		return nil
 	}); err != nil {
 		return err
 	}
 	if accepted != nil && !issuedWrite {
-		issueCtx, cancelIssue := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		issueCtx, cancelIssue := context.WithTimeout(replyCtx, 10*time.Second)
 		present, err := m.acceptedIssuePresent(issueCtx, *accepted)
 		cancelIssue()
 		if err != nil {
@@ -2464,9 +2611,9 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	replied := issuedWrite
 	var err error
 	if issuedWrite {
-		m.logf("skip failure reply to %s: an earlier task publication was issued; reconcile its remote effect separately", itemLocation(job.Source))
+		m.logf("skip failure reply to %s: an earlier publication was issued; reconcile its remote effect separately", itemLocation(job.Source))
 	} else {
-		lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		lookupCtx, cancelLookup := context.WithTimeout(replyCtx, 10*time.Second)
 		defer cancelLookup()
 		includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 		replied, err = m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.Config.BotLogin, marker, includeReviews)
@@ -2479,7 +2626,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		}
 	}
 	if !replied && accepted == nil {
-		verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
+		verifyCtx, cancel := context.WithTimeout(replyCtx, 150*time.Second)
 		verifyErr := m.revalidateJobSource(verifyCtx, job)
 		if verifyErr == nil {
 			verifyErr = verifyCtx.Err()
@@ -2495,7 +2642,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	if !replied {
 		if accepted != nil {
 			// Allow several slow GitHub reads without renewing the budget indefinitely.
-			verifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 150*time.Second)
+			verifyCtx, cancel := context.WithTimeout(replyCtx, 150*time.Second)
 			configured, current, valid, verifyErr := m.validateAcceptedSource(verifyCtx, *accepted, false)
 			if verifyErr == nil {
 				verifyErr = verifyCtx.Err()
@@ -2510,7 +2657,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			}
 			job.Repository, job.Source = configured, current
 		}
-		repoCtx, cancelRepo := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		repoCtx, cancelRepo := context.WithTimeout(replyCtx, 10*time.Second)
 		repo, err := m.GitHub.Repository(repoCtx, job.Repository.Name)
 		if err == nil {
 			err = repoCtx.Err()
@@ -2522,9 +2669,17 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
 			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
 		}
-		replyCtx, cancelReply := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if replyRetry != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 10*time.Second {
+				return fmt.Errorf("defer failure reply to %s: %w", itemLocation(job.Source), context.DeadlineExceeded)
+			}
+		}
+		postCtx, cancelReply := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelReply()
-		_, err = m.GitHub.CreateIssueComment(replyCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
+		_, err = m.GitHub.CreateIssueComment(postCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
 		if err != nil {
 			failure.ReplyAttempts++
 			if failure.ReplyAttempts < maxFailureReplyAttempts {

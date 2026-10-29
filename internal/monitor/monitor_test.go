@@ -68,6 +68,14 @@ type fakeGitHub struct {
 	beforeVerify       func(context.Context, bool) error
 	rawIDs             bool
 	liveRepo           *github.Repository
+	branch             func(context.Context, string, string) (github.Branch, error)
+}
+
+func (f *fakeGitHub) Branch(ctx context.Context, repo, branch string) (github.Branch, error) {
+	if f.branch != nil {
+		return f.branch(ctx, repo, branch)
+	}
+	return github.Branch{}, &github.StatusError{StatusCode: http.StatusNotFound}
 }
 
 func (f *fakeGitHub) ListRepositoryNotifications(_ context.Context, repo string, since time.Time) ([]github.Notification, time.Duration, error) {
@@ -809,6 +817,56 @@ func TestFailureReplyStopsAfterFailedAttempts(t *testing.T) {
 	}
 	if gh.commentCalls != maxFailureReplyAttempts || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
 		t.Fatalf("failed reply pinned job: replies=%d state=%+v", gh.commentCalls, store.Data)
+	}
+}
+
+func TestQueuedFailureReplyRespectsCallerDeadline(t *testing.T) {
+	for _, phase := range []string{"lookup", "post"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store := openState(t, now.Add(-time.Minute))
+				item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+					state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				failure := store.Data.JobFailures[id]
+				checks, _ := terminalControlChecks(store, "")
+				control := checks[failure.NotificationKey]
+				cfg := testConfig(t)
+				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+				defer cancel()
+				gh := &fakeGitHub{
+					items:      []github.Item{item},
+					permission: github.Permission{Permission: "write"},
+				}
+				if phase == "lookup" {
+					gh.beforeVerify = func(ctx context.Context, _ bool) error {
+						<-ctx.Done()
+						return ctx.Err()
+					}
+				}
+				m := &Monitor{Config: cfg, GitHub: gh, Now: time.Now}
+				job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 8, Source: item,
+					Command: command.Command{Name: "review", Action: command.Review}, ID: id}
+				err := m.finishFailedJobWithRetry(ctx, store, job, now, failure, &control.entry)
+				wantElapsed := time.Second
+				if phase == "post" {
+					wantElapsed = 0
+				}
+				if !errors.Is(err, context.DeadlineExceeded) || time.Since(now) != wantElapsed || gh.commentCalls != 0 ||
+					!store.Data.Processed[id].IsZero() || store.Data.JobFailures[id] != failure {
+					t.Fatalf("queued reply ignored caller deadline: err=%v elapsed=%s comments=%d processed=%v failure=%+v",
+						err, time.Since(now), gh.commentCalls, store.Data.Processed[id], store.Data.JobFailures[id])
+				}
+				gh.beforeVerify = nil
+				m.serviceTerminalControls(t.Context(), store)
+				if !terminalReplyRecorded(gh, store, id) {
+					t.Fatalf("deferred reply was not serviced: comments=%v processed=%v", gh.comments, store.Data.Processed[id])
+				}
+			})
+		})
 	}
 }
 

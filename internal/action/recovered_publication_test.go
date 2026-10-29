@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -598,7 +599,7 @@ func TestPublishRecoveredFixRevalidatesBeforePush(t *testing.T) {
 	}
 }
 
-func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) {
+func TestPublishRecoveredFixReconcilesLostPushResponseWithoutSecondPush(t *testing.T) {
 	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")})
 	root := t.TempDir()
 	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
@@ -614,7 +615,17 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 	}
 	forkRemote := filepath.Join(filepath.Dir(remote), "fork.git")
 	source := filepath.Join(filepath.Dir(remote), "source")
-	modelGit(t, source, "config", "--file", filepath.Join(filepath.Dir(remote), "gitconfig"), "url."+forkRemote+".insteadOf", "https://github.com/bot/r.git")
+	modelGit(t, source, "clone", "--bare", remote, forkRemote)
+	gitConfig := filepath.Join(filepath.Dir(remote), "gitconfig")
+	modelGit(t, source, "config", "--file", gitConfig, "url."+forkRemote+".insteadOf", "https://github.com/bot/r.git")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushCount := filepath.Join(t.TempDir(), "push-count")
+	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nset -eu\ncase \" $* \" in *\" push --no-verify \"*) printf x >> %s; %s -c %s \"$@\"; exit 1 ;; esac\nexec %s -c %s \"$@\"\n",
+		shellQuote(pushCount), shellQuote(realGit), shellQuote("include.path="+gitConfig), shellQuote(realGit), shellQuote("include.path="+gitConfig)))
+
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)
 	job.Identity.Repository = "o/r"
@@ -622,11 +633,22 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 	result := completedRecoveryResult(job)
 	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("reviewed change\n")}}
 	store, path, request := savedRecoveryFixture(t, job, result)
+	branch := "minion/fix-7-aaaaaaaaaaaa"
 	var comment string
+	var forkCased atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
 			_, _ = fmt.Fprint(w, `[]`)
+		case forkCased.Load() && r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"BOT/R","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/bot/r/branches/"+branch || r.URL.Path == "/repos/BOT/R/branches/"+branch):
+			sha, err := exec.Command(realGit, "--git-dir="+forkRemote, "rev-parse", "refs/heads/"+branch).Output()
+			if err != nil {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, strings.TrimSpace(string(sha)))
 		case serveFixFlowFixture(t, w, r):
 		case captureComment(t, w, r, &comment):
 		default:
@@ -637,12 +659,14 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || comment != "" {
-		t.Fatalf("failed fork push did not retain complete result: comment=%q error=%v", comment, err)
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) || comment != "" {
+		t.Fatalf("lost push response was treated as completed: comment=%q error=%v", comment, err)
 	}
+	issued := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
 	recorded := store.Data.PendingFixes[request.ID].SHA
-	if len(recorded) != 40 {
-		t.Fatalf("missing commit checkpoint after failed push: %+v", store.Data.PendingFixes[request.ID])
+	if issued.Status != state.PublicationWritePending || issued.Repository != "bot/r" || issued.Branch != branch || issued.SHA != recorded ||
+		issued.AttemptID != request.AttemptID || !workspace.ValidSHA(recorded) {
+		t.Fatalf("lost push response lacks exact durable checkpoint: push=%+v pending=%+v", issued, store.Data.PendingFixes[request.ID])
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -653,49 +677,81 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	orchestrator.Store = store
-	modelGit(t, source, "clone", "--bare", remote, forkRemote)
-	wrong := store.Data.PendingFixes[request.ID]
-	wrong.Cap = &state.CriticCap{MaxRounds: 1, HasBlockers: true}
-	store.Data.PendingFixes[request.ID] = wrong
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) {
-		t.Fatalf("inconsistent saved review decision was accepted: %v", err)
-	}
-	if output, err := testsupport.ModelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"); err == nil {
-		t.Fatalf("inconsistent review decision reached remote: %s", output)
-	}
-	wrong.Cap = nil
-	wrong.SHA = strings.Repeat("b", 40)
-	store.Data.PendingFixes[request.ID] = wrong
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "rebuilt fix commit") {
-		t.Fatalf("recovered fix accepted a different commit: %v", err)
-	}
-	if output, err := testsupport.ModelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"); err == nil {
-		t.Fatalf("different recovered commit reached remote: %s", output)
-	}
-	wrong.SHA = recorded
-	store.Data.PendingFixes[request.ID] = wrong
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
+	forkCased.Store(true)         // GitHub may return different casing for the same fork ID after restart.
+	t.Setenv("PATH", t.TempDir()) // Recovery must not run Git or issue another push.
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
-		t.Fatalf("retry recorded commit after fork push outage: %v", err)
+		t.Fatalf("accepted remote push was not reconciled after restart: %v", err)
 	}
-	tip := strings.TrimSpace(modelGit(t, source, "--git-dir="+forkRemote, "rev-parse", "refs/heads/minion/fix-7-aaaaaaaaaaaa"))
-	dates := strings.TrimSpace(modelGit(t, source, "--git-dir="+forkRemote, "show", "-s", "--format=%at|%ct", tip))
-	wantDates := fmt.Sprintf("%d|%d", request.AcceptedAt.Unix(), request.AcceptedAt.Unix())
-	if tip != recorded || store.Data.PendingFixes[request.ID].SHA != recorded || dates != wantDates ||
-		!strings.Contains(comment, recorded) || !strings.HasSuffix(comment, request.Marker()) {
-		t.Fatalf("retry changed recorded commit: tip=%s recorded=%s dates=%s comment=%q", tip, recorded, dates, comment)
+	count, err := os.ReadFile(pushCount)
+	if err != nil || string(count) != "x" || !strings.Contains(comment, recorded) || !strings.Contains(comment, "BOT/R") ||
+		store.Data.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWriteObserved {
+		t.Fatalf("recovery pushed twice or lost branch reply: pushes=%q comment=%q write=%+v error=%v", count, comment,
+			store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
 	}
 }
 
-func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *testing.T) {
+func TestPublishRecoveredFixRejectsPushCheckpointForAnotherFork(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	job.Identity.Repository = "o/r"
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}
+	store, path, request := savedRecoveryFixture(t, job, result)
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	sha := strings.Repeat("b", 40)
+	if err := e.beginFixPush(t.Context(), request, "bot/other", branch, sha, nil); err != nil {
+		t.Fatal(err)
+	}
+	write := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
+	write.Status, write.ResolvedAt = state.PublicationWriteObserved, time.Now().UTC()
+	store.Data.PublicationWrites[fixPushWriteKey(request.ID)] = write
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var writes, branchLookups atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writes.Add(1)
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case serveSafeForkChecks(w, r, "bot/r", false):
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
+			_, _ = fmt.Fprint(w, publicRepositoryJSON)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
+			_, _ = fmt.Fprint(w, `{"node_id":"issue-node"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/bot/r":
+			_, _ = fmt.Fprint(w, `{"id":4,"full_name":"bot/r","fork":true,"parent":{"id":1,"full_name":"o/r"},"source":{"id":1,"full_name":"o/r"},"visibility":"public"}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/branches/"):
+			branchLookups.Add(1)
+			http.NotFound(w, r)
+		default:
+			t.Errorf("unexpected cross-fork recovery request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("PATH", t.TempDir()) // A mismatched checkpoint must stop before Git publication.
+	e.Store, e.GitHub, e.WorkRoot = store, testGitHub(server, "token"), t.TempDir()
+	e.Runner = Runner{runModel: forbidModel(t)}
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) ||
+		writes.Load() != 0 || branchLookups.Load() != 0 || store.Data.PublicationWrites[fixPushWriteKey(request.ID)] != write {
+		t.Fatalf("cross-fork push checkpoint reached publication: writes=%d lookups=%d write=%+v error=%v",
+			writes.Load(), branchLookups.Load(), store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
+	}
+}
+
+func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchWithoutGitRetry(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)
 	job.Identity.Repository = "o/r"
@@ -744,10 +800,10 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *te
 		}
 	}))
 	defer server.Close()
-	t.Setenv("PATH", t.TempDir()) // A missing branch needs Git before rebuilding from the saved result.
+	t.Setenv("PATH", t.TempDir()) // A recorded SHA must never invoke Git for another push.
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
 		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git readiness before recovered fix") ||
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "no matching remote branch") ||
 		replies.Load() != 0 || branchLookups.Load() != 1 || store.Data.PendingFixes[request.ID].SHA != sha {
 		t.Fatalf("missing branch lookup lost checkpoint: replies=%d checkpoint=%+v error=%v", replies.Load(), store.Data.PendingFixes[request.ID], err)
 	}

@@ -779,10 +779,6 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			store.Data.PendingFixes[job.ID] = state.PendingFix{SHA: strings.Repeat("f", 40), Cap: &state.CriticCap{MaxRounds: 3, HasBlockers: true}} // Simulate a recorded commit whose fork push failed.
-			if err := store.Save(); err != nil {
-				t.Fatal(err)
-			}
 			var commentBody string
 			var rulesetChecks int
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -922,6 +918,9 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 				if _, exists := store.Data.PendingFixes[job.ID]; exists {
 					t.Fatalf("failed save left an in-memory fix checkpoint: %+v", store.Data.PendingFixes[job.ID])
 				}
+				if _, exists := store.Data.PublicationWrites[fixPushWriteKey(job.ID)]; exists {
+					t.Fatalf("failed save left an in-memory push checkpoint: %+v", store.Data.PublicationWrites[fixPushWriteKey(job.ID)])
+				}
 				store.Data.Cursor = time.Time{}
 				if err := store.Save(); err != nil {
 					t.Fatal(err)
@@ -936,6 +935,9 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 				}
 				if _, exists := durable.PendingFixes[job.ID]; exists {
 					t.Fatalf("later save persisted a phantom fix checkpoint: %+v", durable.PendingFixes[job.ID])
+				}
+				if _, exists := durable.PublicationWrites[fixPushWriteKey(job.ID)]; exists {
+					t.Fatalf("later save persisted a phantom push checkpoint: %+v", durable.PublicationWrites[fixPushWriteKey(job.ID)])
 				}
 				if _, err := os.Stat(beforePushState); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("push ran after checkpoint save failure: %v", err)
@@ -970,7 +972,14 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			}
 			var checkpoint state.Data
 			if err := json.Unmarshal(data, &checkpoint); err != nil || !reflect.DeepEqual(checkpoint.PendingFixes[job.ID], wantPending) || !reflect.DeepEqual(store.Data.PendingFixes[job.ID], wantPending) {
-				t.Fatalf("original outcome was not durable before push or retained stale cap: checkpoint=%+v current=%+v want=%+v error=%v", checkpoint.PendingFixes[job.ID], store.Data.PendingFixes[job.ID], wantPending, err)
+				t.Fatalf("original outcome or cap was not saved before push: checkpoint=%+v current=%+v want=%+v error=%v", checkpoint.PendingFixes[job.ID], store.Data.PendingFixes[job.ID], wantPending, err)
+			}
+			push := checkpoint.PublicationWrites[fixPushWriteKey(job.ID)]
+			if push.Kind != "push" || push.Status != state.PublicationWritePending || push.Repository != "linkdataminion/r" ||
+				push.Branch != branch || push.SHA != sha || push.AttemptID != job.AttemptID ||
+				push.Deadline.Sub(push.StartedAt) != time.Duration(config.DefaultPublicationGraceSeconds)*time.Second ||
+				store.Data.PublicationWrites[fixPushWriteKey(job.ID)].Status != state.PublicationWriteObserved {
+				t.Fatalf("push checkpoint was not durable before Git or observed after it: before=%+v after=%+v", push, store.Data.PublicationWrites[fixPushWriteKey(job.ID)])
 			}
 			if len(sha) != 40 || !strings.Contains(commentBody, branch) || !strings.Contains(commentBody, sha) ||
 				!strings.Contains(commentBody, "https://github.com/o/r/compare/main...linkdataminion:minion%2Ffix-7-aaaaaaaaaaaa?expand=1") ||
@@ -985,7 +994,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 					t.Fatalf("capped branch reply lost durable warning: %q", commentBody)
 				}
 			} else if strings.Contains(commentBody, "Critic round limit reached") {
-				t.Fatalf("ordinary fix inherited a stale cap warning: %q", commentBody)
+				t.Fatalf("ordinary fix received an unexpected cap warning: %q", commentBody)
 			}
 			if rulesetChecks != 4 {
 				t.Fatalf("push rulesets checked %d times, want base and fork before model execution and before push", rulesetChecks)

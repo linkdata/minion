@@ -188,6 +188,10 @@ func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 		{name: "bad bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "owner/bot" }},
 		{name: "bad bot ID", jobID: "job-1", change: func(w *PublicationWrite) { w.BotID = -1 }},
 		{name: "bad target", jobID: "job-1", change: func(w *PublicationWrite) { w.Repository = "../repo" }},
+		{name: "comment branch", jobID: "job-1", change: func(w *PublicationWrite) { w.Branch = "unexpected" }},
+		{name: "comment SHA", jobID: "job-1", change: func(w *PublicationWrite) { w.SHA = strings.Repeat("b", 40) }},
+		{name: "review branch", jobID: "job-1", change: func(w *PublicationWrite) { w.Kind = "review"; w.Branch = "unexpected" }},
+		{name: "review SHA", jobID: "job-1", change: func(w *PublicationWrite) { w.Kind = "review"; w.SHA = strings.Repeat("b", 40) }},
 		{name: "wrong marker", jobID: "job-1", change: func(w *PublicationWrite) { w.Marker = "<!-- linkdataminion:other -->" }},
 		{name: "renewed backwards", jobID: "job-1", change: func(w *PublicationWrite) { w.Deadline = at }},
 		{name: "invalid status", jobID: "job-1", change: func(w *PublicationWrite) { w.Status = "complete" }},
@@ -209,6 +213,56 @@ func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 			}
 			if store, err := Open(path, at); store != nil || err == nil || !strings.Contains(err.Error(), "invalid publication write") {
 				t.Fatalf("Open() = %v, %v; want invalid publication write", store, err)
+			}
+		})
+	}
+}
+
+func TestOpenValidatesFixPushPublicationWrite(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	jobID := strings.Repeat("a", 64)
+	valid := PublicationWrite{
+		AttemptID: "attempt-1", Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
+		Marker: "<!-- linkdataminion:" + jobID + " -->", Since: at,
+		Branch: "minion/fix-7-aaaaaaaaaaaa", SHA: strings.Repeat("b", 40),
+		StartedAt: at, Deadline: at.Add(time.Minute), Status: PublicationWritePending,
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*PublicationWrite)
+		valid  bool
+	}{
+		{name: "valid", valid: true},
+		{name: "missing attempt", change: func(w *PublicationWrite) { w.AttemptID = "" }},
+		{name: "missing bot ID", change: func(w *PublicationWrite) { w.BotID = 0 }},
+		{name: "wrong fork", change: func(w *PublicationWrite) { w.Repository = "other/repo" }},
+		{name: "wrong branch", change: func(w *PublicationWrite) { w.Branch = "minion/fix-7-other" }},
+		{name: "missing SHA", change: func(w *PublicationWrite) { w.SHA = "" }},
+		{name: "wrong marker", change: func(w *PublicationWrite) { w.Marker = "<!-- linkdataminion:other -->" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			write := valid
+			if tc.change != nil {
+				tc.change(&write)
+			}
+			data, err := json.Marshal(Data{Cursor: at, PublicationWrites: map[string]PublicationWrite{jobID + "-push": write}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := Open(path, at)
+			if tc.valid {
+				if err != nil || store.Data.PublicationWrites[jobID+"-push"] != valid {
+					t.Fatalf("valid push checkpoint did not reopen: store=%v error=%v", store, err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else if store != nil || err == nil || !strings.Contains(err.Error(), "invalid publication write") {
+				t.Fatalf("invalid push checkpoint reopened: store=%v error=%v", store, err)
 			}
 		})
 	}

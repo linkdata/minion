@@ -2,7 +2,10 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -103,6 +106,112 @@ func TestReconcilePublicationWriteExpiresWithoutRepost(t *testing.T) {
 			t.Fatalf("expired write was retried or not recorded: write=%+v checks=%d comments=%d", got, len(gh.verifiedCalls), gh.commentCalls)
 		}
 	})
+}
+
+func TestReconcileFixPushRequiresExactSHAUntilOriginalGraceExpires(t *testing.T) {
+	for _, tc := range []struct {
+		name, remoteSHA string
+	}{
+		{name: "matching", remoteSHA: strings.Repeat("b", 40)},
+		{name: "mismatched", remoteSHA: strings.Repeat("c", 40)},
+		{name: "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				path := filepath.Join(t.TempDir(), "state.json")
+				store := openStateAt(t, path, now)
+				jobID := strings.Repeat("a", 64)
+				branch := "minion/fix-7-aaaaaaaaaaaa"
+				sha := strings.Repeat("b", 40)
+				write := state.PublicationWrite{
+					AttemptID: "attempt-1", Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
+					Marker: "<!-- linkdataminion:" + jobID + " -->", Since: now,
+					Branch: branch, SHA: sha, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+				key := jobID + "-push"
+				store.Data.PendingFixes[jobID] = state.PendingFix{SHA: sha}
+				store.Data.PublicationWrites[key] = write
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				lookups := 0
+				gh := &fakeGitHub{branch: func(_ context.Context, repo, name string) (github.Branch, error) {
+					lookups++
+					if repo != "bot/repo" || name != branch {
+						t.Errorf("looked up wrong branch: %s %s", repo, name)
+					}
+					if tc.remoteSHA == "" {
+						return github.Branch{}, &github.StatusError{StatusCode: 404}
+					}
+					return github.Branch{Name: branch, Commit: github.BranchCommit{SHA: tc.remoteSHA}}, nil
+				}}
+				m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store = openStateAt(t, path, now)
+				got := store.Data.PublicationWrites[key]
+				if tc.remoteSHA == sha {
+					if got.Status != state.PublicationWriteObserved || got.ResolvedAt.IsZero() ||
+						!got.Deadline.Equal(write.Deadline) || lookups != 1 || len(gh.verifiedCalls) != 0 {
+						t.Fatalf("exact remote SHA was not observed after restart: write=%+v lookups=%d", got, lookups)
+					}
+					return
+				}
+				if got.Status != state.PublicationWritePending || !got.Deadline.Equal(write.Deadline) || lookups != 1 {
+					t.Fatalf("unmatched branch changed grace before restart: write=%+v lookups=%d", got, lookups)
+				}
+				time.Sleep(time.Minute)
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				got = store.Data.PublicationWrites[key]
+				if got.Status != state.PublicationWriteUncertain || got.ResolvedAt.IsZero() ||
+					got.Branch != branch || got.SHA != sha || !got.Deadline.Equal(write.Deadline) ||
+					lookups != 2 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 {
+					t.Fatalf("unmatched branch did not become inspectable after grace: write=%+v lookups=%d", got, lookups)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store = openStateAt(t, path, now)
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil ||
+					store.Data.PublicationWrites[key] != got || lookups != 2 {
+					t.Fatalf("uncertain push was retried after restart: write=%+v lookups=%d error=%v",
+						store.Data.PublicationWrites[key], lookups, err)
+				}
+			})
+		})
+	}
+}
+
+func TestReconcileFixPushRejectsChangedCommitCheckpoint(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	jobID := strings.Repeat("a", 64)
+	store.Data.PendingFixes[jobID] = state.PendingFix{SHA: strings.Repeat("c", 40)}
+	store.Data.PublicationWrites[jobID+"-push"] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
+		Marker: "<!-- linkdataminion:" + jobID + " -->", Since: now,
+		Branch: "minion/fix-7-aaaaaaaaaaaa", SHA: strings.Repeat("b", 40),
+		StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	lookups := 0
+	gh := &fakeGitHub{branch: func(context.Context, string, string) (github.Branch, error) {
+		lookups++
+		return github.Branch{}, nil
+	}}
+	m := &Monitor{GitHub: gh}
+	if err := m.ReconcilePublicationWrites(t.Context(), store); !errors.Is(err, ErrAcceptanceState) || lookups != 0 {
+		t.Fatalf("changed checkpoint reached remote observation: lookups=%d error=%v", lookups, err)
+	}
 }
 
 func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
@@ -439,6 +548,127 @@ func TestSelectedActionChecksOlderWriteWhileWorkerRuns(t *testing.T) {
 			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
 			t.Fatalf("active write was redundantly checked or older write was not rechecked: initial=%d periodic=%d completed_early=%t err=%v write=%+v",
 				initialChecks, periodicChecks, completedEarly, runErr, store.Data.PublicationWrites["old-job"])
+		}
+	})
+}
+
+func TestSelectedReviewNearDeadlineReconcilesOverdueWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		accepted.Deadline = now.Add(5 * time.Second)
+		store.Data.Accepted.Deadline = accepted.Deadline
+		marker := "<!-- linkdataminion:old-job -->"
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8,
+			Repository: "owner/repo", Number: 9, Marker: marker, Since: now.Add(-time.Minute),
+			StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.items = []github.Item{{Body: "published\n\n" + marker, Author: github.User{Login: "bot", ID: 8}, UpdatedAt: now}}
+		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		ready := make(chan struct{})
+		var released, clockReads atomic.Int32
+		release := func() {
+			if released.CompareAndSwap(0, 1) {
+				close(ready)
+			}
+		}
+		gh.beforeVerify = func(context.Context, bool) error { release(); return nil }
+		m.Now = func() time.Time {
+			if clockReads.Add(1) == 100 {
+				release() // Stop the worker if a regression skips the overdue write and spins.
+			}
+			return time.Now()
+		}
+		err := m.runSelectedWithControls(t.Context(), store, jobFromAccepted(accepted), "", nil,
+			func(context.Context, Job) error { <-ready; return nil }, func(err error) error { return err })
+		if err != nil || store.Data.PublicationWrites["old-job"].Status != state.PublicationWriteObserved ||
+			len(gh.verifiedCalls) != 1 {
+			t.Fatalf("selected review skipped overdue write: err=%v write=%+v checks=%d clock reads=%d",
+				err, store.Data.PublicationWrites["old-job"], len(gh.verifiedCalls), clockReads.Load())
+		}
+	})
+}
+
+func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		store.Data.Accepted.Deadline = now.Add(90 * time.Second)
+		store.Data.Accepted.RetryAt = time.Time{}
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = store.Data.Accepted.Deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		key := accepted.JobID + "-push"
+		push := store.Data.PublicationWrites[key]
+		push.Deadline = now.Add(10 * time.Second)
+		store.Data.PublicationWrites[key] = push
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(90 * time.Second), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		var lookups atomic.Int32
+		var commentChecks atomic.Int32
+		gh.beforeVerify = func(context.Context, bool) error { commentChecks.Add(1); return nil }
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			lookups.Add(1)
+			return github.Branch{}, &github.StatusError{StatusCode: 404}
+		}
+		started := make(chan struct{})
+		release := make(chan struct{})
+		finished := make(chan error, 1)
+		job := jobFromAccepted(*store.Data.Accepted)
+		go func() {
+			finished <- m.runSelectedWithControls(t.Context(), store, job, "", nil,
+				func(context.Context, Job) error { close(started); <-release; return nil },
+				func(err error) error { return err })
+		}()
+		select {
+		case <-started:
+		case err := <-finished:
+			t.Fatalf("selected handler ended before push started: %v", err)
+		}
+		synctest.Wait()
+		if commentChecks.Load() != 1 {
+			t.Fatalf("initial scan skipped older publication: checks=%d", commentChecks.Load())
+		}
+		if err := store.WithLock(func() error {
+			store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
+				AttemptID: accepted.AttemptID, Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+				Repository: accepted.Repository, Number: accepted.SubjectNumber,
+				Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+				StartedAt: now, Deadline: now.Add(90 * time.Second), Status: state.PublicationWritePending,
+			}
+			return store.Save()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(publicationRecheckInterval + time.Second)
+		synctest.Wait()
+		var current state.PublicationWrite
+		var taskWrite, olderWrite state.PublicationWrite
+		_ = store.WithLock(func() error {
+			current = store.Data.PublicationWrites[key]
+			taskWrite = store.Data.PublicationWrites[accepted.JobID]
+			olderWrite = store.Data.PublicationWrites["old-job"]
+			return nil
+		})
+		if lookups.Load() != 0 || current.Status != state.PublicationWritePending ||
+			commentChecks.Load() < 3 || taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
+			t.Fatalf("active push or other writes were mishandled: push lookups=%d comment checks=%d push=%+v task=%+v old=%+v",
+				lookups.Load(), commentChecks.Load(), current, taskWrite, olderWrite)
+		}
+		close(release)
+		if err := <-finished; err != nil {
+			t.Fatal(err)
 		}
 	})
 }

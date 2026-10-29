@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -35,7 +34,6 @@ type preparedAction struct {
 	branch      string
 	existing    *github.PullRequest
 	reply       string
-	recoverFix  state.PendingFix
 }
 
 // needsExecution distinguishes supplied work from fixed replies.
@@ -598,12 +596,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 		return nil, fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
 	if expected.SHA != "" {
-		if err := e.Store.WithLock(func() error {
-			delete(e.Store.Data.PendingFixes, request.ID)
-			return e.Store.Save()
-		}); err != nil {
-			return nil, fmt.Errorf("clear failed fork push checkpoint: %w", err)
-		}
+		return nil, fmt.Errorf("%w: recorded fix push has no matching remote branch", monitor.ErrPostModelPublication)
 	}
 	content, err := e.currentFixIssue(ctx, p)
 	if errors.Is(err, errFixIssueChanged) {
@@ -659,9 +652,6 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	if !originalFixDestination(repo, fork).matches(currentRepo, currentFork) {
 		return fmt.Errorf("%w: repository or fork changed during fix; refusing to push", monitor.ErrTerminalJob)
 	}
-	if p.recoverFix.SHA != "" && !reflect.DeepEqual(p.recoverFix.Cap, published.cap) {
-		return fmt.Errorf("%w: saved fix review decision differs from completed result", monitor.ErrAcceptanceState)
-	}
 	if err := p.checkout.Import(ctx, p.job.Source.Head, result.Changes); err != nil {
 		if ctx.Err() != nil {
 			return err
@@ -678,22 +668,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		if err := e.publicationAllowed(ctx, request, true); err != nil {
 			return err
 		}
-		if p.recoverFix.SHA != "" && sha != p.recoverFix.SHA {
-			return fmt.Errorf("%w: rebuilt fix commit %s differs from recorded %s", monitor.ErrAcceptanceState, sha, p.recoverFix.SHA)
-		}
-		return e.Store.WithLock(func() error {
-			prior, hadPrior := e.Store.Data.PendingFixes[request.ID]
-			e.Store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: sha, Cap: published.cap}
-			if err := e.Store.Save(); err != nil {
-				if hadPrior {
-					e.Store.Data.PendingFixes[request.ID] = prior
-				} else {
-					delete(e.Store.Data.PendingFixes, request.ID)
-				}
-				return err
-			}
-			return nil
-		})
+		return e.beginFixPush(ctx, request, fork.FullName, p.branch, sha, published.cap)
 	}); err != nil {
 		if errors.Is(err, errFixIssueChanged) {
 			if gateErr := e.publicationAllowed(ctx, request, true); gateErr != nil {
@@ -704,6 +679,9 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		if errors.Is(err, gitwork.ErrNoChanges) {
 			return fmt.Errorf("%w: reviewed changes produced no commit: %w", monitor.ErrTerminalJob, err)
 		}
+		return err
+	}
+	if err := e.observeFixPush(request); err != nil {
 		return err
 	}
 	return e.publishFixReply(ctx, p)

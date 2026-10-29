@@ -114,6 +114,9 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	ctx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
+	if err := e.reconcileFixPush(ctx, job); err != nil {
+		return err
+	}
 	if handled, err := e.resumeTaskPublication(ctx, job); handled || err != nil {
 		return err
 	}

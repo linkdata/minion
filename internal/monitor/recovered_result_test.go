@@ -3,8 +3,10 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -19,6 +21,24 @@ type recoveredResultHandler struct {
 	publications int
 	execute      func(Job) error
 	publish      func(Job) error
+}
+
+type deadlineInvitationGitHub struct {
+	*fakeGitHub
+	checks  int
+	entered chan struct{}
+}
+
+func (g *deadlineInvitationGitHub) ListRepositoryInvitations(ctx context.Context) ([]github.Invitation, error) {
+	g.checks++
+	if g.entered != nil {
+		select {
+		case g.entered <- struct{}{}:
+		default:
+		}
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 type terminalUsageRecoveryHandler struct {
@@ -181,6 +201,845 @@ func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
 		store.Data.Processed[accepted.JobID].IsZero() || store.Data.Accepted != nil {
 		t.Fatalf("observed task waited until accepted deadline: publications=%d write=%+v processed=%v accepted=%+v",
 			handler.publications, store.Data.PublicationWrites[accepted.JobID], store.Data.Processed[accepted.JobID], store.Data.Accepted)
+	}
+}
+
+func storedIssuedFixPushFixtureAt(t *testing.T, now time.Time) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
+	t.Helper()
+	store, path, _, gh, m := storedRecoveryFixtureAt(t, now)
+	accepted := *store.Data.Accepted
+	delete(store.Data.JobFailures, accepted.JobID)
+	accepted.JobID = jobID(accepted.SourceKey, "fix")
+	accepted.SubjectType, accepted.CommandName, accepted.Action = "Issue", "fix", "fix"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	accepted.Deadline = now.Add(15 * time.Second)
+	accepted.RetryAt = accepted.Deadline
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	sha := strings.Repeat("b", 40)
+	branch := fmt.Sprintf("minion/fix-%d-%s", accepted.SubjectNumber, accepted.JobID[:12])
+	store.Data.PendingFixes[accepted.JobID] = state.PendingFix{SHA: sha}
+	store.Data.PublicationWrites[accepted.JobID+"-push"] = state.PublicationWrite{
+		AttemptID: accepted.AttemptID, Kind: "push", BotLogin: "linkdataminion", BotID: 8,
+		Repository: "linkdataminion/example-repo", Number: accepted.SubjectNumber,
+		Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+		Branch: branch, SHA: sha, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	fixItem := selectedItem(now)
+	fixItem.Body = "@linkdataminion fix"
+	fixItem.HTMLURL = accepted.SourceURL
+	gh.currentItem = func(github.Item) (github.Item, error) { return fixItem, nil }
+	gh.branch = func(_ context.Context, repo, name string) (github.Branch, error) {
+		if repo != "linkdataminion/example-repo" || name != branch {
+			t.Errorf("checked wrong fix branch: %s %s", repo, name)
+		}
+		return github.Branch{Name: branch, Commit: github.BranchCommit{SHA: sha}}, nil
+	}
+	return store, path, accepted, gh, m
+}
+
+func TestObservedIssuedFixPushBypassesAcceptedRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, time.Now().UTC())
+		branchChecks := 0
+		lookup := gh.branch
+		gh.branch = func(ctx context.Context, repo, name string) (github.Branch, error) {
+			branchChecks++
+			return lookup(ctx, repo, name)
+		}
+		handler := &recoveredResultHandler{publish: func(job Job) error {
+			if !time.Now().Before(job.Deadline) {
+				t.Errorf("recovered fix publication started after its original deadline")
+			}
+			return nil
+		}}
+		m.Handler = handler
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if branchChecks != 1 || handler.publications != 1 || handler.executions != 0 ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
+			store.Data.Processed[accepted.JobID].IsZero() || store.Data.Accepted != nil || gh.commentCalls != 0 {
+			t.Fatalf("confirmed fix push waited until accepted deadline: checks=%d handler=%+v write=%+v processed=%v accepted=%+v comments=%d",
+				branchChecks, handler, store.Data.PublicationWrites[accepted.JobID+"-push"],
+				store.Data.Processed[accepted.JobID], store.Data.Accepted, gh.commentCalls)
+		}
+	})
+}
+
+func TestSlowActivePushCheckLeavesTimeForSavedFixReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(500 * time.Millisecond)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		branchChecks := 0
+		lookup := gh.branch
+		gh.branch = func(ctx context.Context, repo, branch string) (github.Branch, error) {
+			branchChecks++
+			if branchChecks == 1 {
+				<-ctx.Done()
+				return github.Branch{}, ctx.Err()
+			}
+			return lookup(ctx, repo, branch)
+		}
+		handler := &recoveredResultHandler{publish: func(job Job) error {
+			if !time.Now().Before(job.Deadline) {
+				t.Error("saved fix reply started after its original deadline")
+			}
+			return nil
+		}}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.After(time.Now()) || !next.Before(deadline) ||
+			branchChecks != 1 || handler.publications != 0 || store.Data.Accepted == nil {
+			t.Fatalf("slow push check used the reply window: next=%s elapsed=%s checks=%d publications=%d accepted=%+v err=%v",
+				next, time.Since(now), branchChecks, handler.publications, store.Data.Accepted, err)
+		}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil || branchChecks != 2 || handler.publications != 1 ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("exact push did not resume saved reply: elapsed=%s checks=%d publications=%d write=%+v accepted=%+v err=%v",
+				time.Since(now), branchChecks, handler.publications, store.Data.PublicationWrites[accepted.JobID+"-push"],
+				store.Data.Accepted, err)
+		}
+	})
+}
+
+func TestSavedFixKeepsReserveBeforeOlderWriteScan(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		remaining      time.Duration
+		oldWriteChecks int
+		observedPush   bool
+	}{
+		{name: "pending inside scan budget", remaining: fixPublicationReserve + time.Second, oldWriteChecks: 1},
+		{name: "observed inside scan budget", remaining: fixPublicationReserve + time.Second, oldWriteChecks: 1, observedPush: true},
+		{name: "pending before scan budget", remaining: fixPublicationReserve + publicationReconcileBudget + time.Second, oldWriteChecks: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(test.remaining)
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = time.Time{}
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+					AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8,
+					Repository: "owner/repo", Number: 9, Marker: "<!-- linkdataminion:old-job -->", Since: now,
+					StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+				if test.observedPush {
+					push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+					push.Status, push.ResolvedAt = state.PublicationWriteObserved, now
+					store.Data.PublicationWrites[accepted.JobID+"-push"] = push
+				}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					return github.Branch{}, &github.StatusError{StatusCode: 404}
+				}
+				gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
+				handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if !errors.Is(err, ErrPostModelPublication) || len(gh.verifiedCalls) != test.oldWriteChecks ||
+					handler.publications != 1 || !next.Before(deadline) ||
+					deadline.Sub(time.Now()) < fixPublicationReserve || store.Data.Accepted == nil {
+					t.Fatalf("saved fix lost its publication reserve: elapsed=%s remaining=%s next=%s deadline=%s old checks=%d publications=%d accepted=%+v err=%v",
+						time.Since(now), deadline.Sub(time.Now()), next, deadline, len(gh.verifiedCalls), handler.publications, store.Data.Accepted, err)
+				}
+			})
+		})
+	}
+}
+
+func TestStartupObservedFixPushRespectsLaterPublicationBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, path, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Data.Accepted.RetryAt; !got.IsZero() ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved {
+			t.Fatalf("startup observation did not release accepted retry: retry=%s write=%+v",
+				got, store.Data.PublicationWrites[accepted.JobID+"-push"])
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store = openStateAt(t, path, now)
+		if store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.IsZero() {
+			t.Fatalf("startup observation was not durable: accepted=%+v", store.Data.Accepted)
+		}
+		replyErr := errors.New("reply temporarily unavailable")
+		handler := &recoveredResultHandler{publish: func(Job) error { return replyErr }}
+		m.Handler = handler
+		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || handler.publications != 1 ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(accepted.Deadline) {
+			t.Fatalf("observed push did not schedule failed reply: err=%v handler=%+v accepted=%+v",
+				err, handler, store.Data.Accepted)
+		}
+		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(accepted.Deadline) || gh.commentCalls != 0 {
+			t.Fatalf("observed push bypassed later publication backoff: err=%v handler=%+v accepted=%+v comments=%d",
+				err, handler, store.Data.Accepted, gh.commentCalls)
+		}
+	})
+}
+
+func TestPostHandlerObservedFixPushGetsOneImmediateRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		key := accepted.JobID + "-push"
+		push := store.Data.PublicationWrites[key]
+		pending := store.Data.PendingFixes[accepted.JobID]
+		delete(store.Data.PublicationWrites, key)
+		delete(store.Data.PendingFixes, accepted.JobID)
+		store.Data.Accepted.RetryAt = time.Time{}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			calls++
+			if calls == 1 {
+				if err := store.WithLock(func() error {
+					store.Data.PendingFixes[accepted.JobID] = pending
+					store.Data.PublicationWrites[key] = push
+					store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+						Marker: "<!-- linkdataminion:old-job -->", Since: now,
+						StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+					}
+					store.Data.PublicationScanCursor = key
+					return store.Save()
+				}); err != nil {
+					return err
+				}
+				gh.beforeVerify = func(context.Context, bool) error {
+					time.Sleep(publicationReconcileBudget)
+					return nil
+				}
+				return ErrPostModelPublication
+			}
+			return nil
+		}}
+		m.Handler = handler
+		_, err := m.RunOnce(t.Context(), store)
+		if err != nil || time.Since(now) != 0 || calls != 2 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || gh.commentCalls != 0 ||
+			store.Data.PublicationWrites[key].Status != state.PublicationWriteObserved || len(gh.verifiedCalls) != 0 {
+			t.Fatalf("observed push waited or lost same-pass reply: err=%v elapsed=%s calls=%d accepted=%+v processed=%v comments=%d old checks=%d",
+				err, time.Since(now), calls, store.Data.Accepted, store.Data.Processed[accepted.JobID], gh.commentCalls, len(gh.verifiedCalls))
+		}
+	})
+}
+
+func TestObservedFixPushImmediateRecoveryFailureUsesBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		store.Data.Accepted.RetryAt = time.Time{}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			if branchChecks == 1 {
+				return github.Branch{}, &github.StatusError{StatusCode: 404}
+			}
+			return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+		}
+		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+		m.Handler = handler
+		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrPostModelPublication) ||
+			handler.publications != 2 || branchChecks != 2 || store.Data.Accepted == nil ||
+			!store.Data.Accepted.RetryAt.Equal(accepted.Deadline) || gh.commentCalls != 0 {
+			t.Fatalf("same-pass retry did not stop after one publication failure: err=%v publications=%d checks=%d accepted=%+v comments=%d",
+				err, handler.publications, branchChecks, store.Data.Accepted, gh.commentCalls)
+		}
+		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 2 {
+			t.Fatalf("recovered publication bypassed backoff: err=%v publications=%d", err, handler.publications)
+		}
+	})
+}
+
+func TestPendingFixPushRechecksBeforeOriginalDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(11 * time.Second)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			if time.Since(now) < 8*time.Second {
+				return github.Branch{}, &github.StatusError{StatusCode: 404}
+			}
+			return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+		}
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			if !time.Now().Before(deadline) {
+				t.Error("recovered fix reply started after original deadline")
+			}
+			return nil
+		}}
+		m.Handler = handler
+		for handler.publications == 0 {
+			next, err := m.RunOnce(t.Context(), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handler.publications != 0 {
+				break
+			}
+			if !next.After(time.Now()) || !next.Before(deadline) || len(gh.verifiedCalls) != 0 {
+				t.Fatalf("pending push waited for deadline or unrelated backlog: next=%s elapsed=%s old checks=%d",
+					next, time.Since(now), len(gh.verifiedCalls))
+			}
+			time.Sleep(time.Until(next))
+		}
+		if branchChecks != 3 || handler.publications != 1 || !time.Now().Before(deadline) ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || gh.commentCalls != 0 {
+			t.Fatalf("delayed branch visibility missed action deadline: checks=%d publications=%d elapsed=%s accepted=%+v write=%+v",
+				branchChecks, handler.publications, time.Since(now), store.Data.Accepted,
+				store.Data.PublicationWrites[accepted.JobID+"-push"])
+		}
+	})
+}
+
+func TestPendingFixPushServicesDueSiblingBeforeReserve(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(7 * time.Minute)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(2 * time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		currentItem := gh.currentItem
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == accepted.SourceKey {
+				return currentItem(item)
+			}
+			return item, nil
+		}
+		gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+			time.Sleep(30 * time.Second)
+			return []github.Item{item}, nil
+		}
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			return github.Branch{}, &github.StatusError{StatusCode: 404}
+		}
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !terminalReplyRecorded(gh, store, terminalID) || branchChecks != 1 ||
+			store.Data.Accepted == nil || store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
+			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending ||
+			time.Since(now) != 30*time.Second || !next.Equal(now.Add(time.Minute)) {
+			t.Fatalf("pending push did not service sibling or recompute wake: err=%v replies=%v checks=%d accepted=%+v next=%s elapsed=%s",
+				err, gh.comments, branchChecks, store.Data.Accepted, next, time.Since(now))
+		}
+		for _, includeReviews := range gh.verifiedCalls {
+			if !includeReviews {
+				t.Fatal("pending push scanned older publication write")
+			}
+		}
+	})
+}
+
+func TestPendingFixPushDefersDueControlsNearDeadline(t *testing.T) {
+	for _, control := range []string{"invitation", "terminal reply"} {
+		t.Run(control, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(15 * time.Second)
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = deadline
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				var publishedAt time.Time
+				checks := 0
+				terminalID := ""
+				if control == "invitation" {
+					store.Data.NextInviteCheckAt = now
+					gh.beforeList = func() {
+						checks++
+						if publishedAt.IsZero() {
+							time.Sleep(30 * time.Second)
+						}
+					}
+				} else {
+					item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+						state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+					terminalID = id
+					activeCurrent := gh.currentItem
+					gh.currentItem = func(current github.Item) (github.Item, error) {
+						if current.Key == accepted.SourceKey {
+							return activeCurrent(current)
+						}
+						return current, nil
+					}
+					gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+						checks++
+						if publishedAt.IsZero() {
+							time.Sleep(30 * time.Second)
+						}
+						return []github.Item{item}, nil
+					}
+				}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+				branchChecks := 0
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					branchChecks++
+					if branchChecks == 1 {
+						return github.Branch{}, &github.StatusError{StatusCode: 404}
+					}
+					return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+				}
+				handler := &recoveredResultHandler{publish: func(Job) error { publishedAt = time.Now(); return nil }}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if err != nil || checks != 0 || handler.publications != 0 || store.Data.Accepted == nil ||
+					time.Since(now) != 0 || !next.After(now) || !next.Before(deadline) {
+					t.Fatalf("pending push waited for %s: next=%s err=%v checks=%d publications=%d accepted=%+v elapsed=%s",
+						control, next, err, checks, handler.publications, store.Data.Accepted, time.Since(now))
+				}
+				time.Sleep(time.Second)
+				if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
+					!publishedAt.Before(deadline) || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+					t.Fatalf("due %s consumed recovered reply deadline: err=%v checks=%d publications=%d reply=%s deadline=%s accepted=%+v processed=%v",
+						control, err, checks, handler.publications, publishedAt, deadline, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+				}
+				if control == "invitation" {
+					if _, err := m.RunOnce(t.Context(), store); err != nil {
+						t.Fatal(err)
+					}
+				} else if store.Data.Processed[terminalID].IsZero() {
+					t.Fatal("terminal reply was not serviced after selected publication")
+				}
+				if checks == 0 {
+					t.Fatalf("deferred %s was never checked", control)
+				}
+			})
+		})
+	}
+}
+
+func TestPendingFixPushDefersInvitationWhileWaiting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(21 * time.Second)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		wrapped := &deadlineInvitationGitHub{fakeGitHub: gh}
+		m.GitHub = wrapped
+		push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			if branchChecks == 1 {
+				return github.Branch{}, &github.StatusError{StatusCode: 404}
+			}
+			return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+		}
+		var publishedAt time.Time
+		handler := &recoveredResultHandler{publish: func(Job) error { publishedAt = time.Now(); return nil }}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || time.Since(now) != 0 || wrapped.checks != 0 || branchChecks != 1 ||
+			store.Data.Accepted == nil || !next.After(time.Now()) || !next.Before(deadline) {
+			t.Fatalf("pending push checked invitation before reserve: next=%s err=%v elapsed=%s invitations=%d branches=%d accepted=%+v",
+				next, err, time.Since(now), wrapped.checks, branchChecks, store.Data.Accepted)
+		}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
+			!publishedAt.Before(deadline) || wrapped.checks != 0 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("reserved push window lost reply: err=%v elapsed=%s invitations=%d publications=%d reply=%s deadline=%s accepted=%+v",
+				err, time.Since(now), wrapped.checks, handler.publications, publishedAt, deadline, store.Data.Accepted)
+		}
+	})
+}
+
+func TestSelectedFixReservesDeadlineFromRunningInvitation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(31 * time.Second)
+		store.Data.Accepted.Deadline = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		wrapped := &deadlineInvitationGitHub{fakeGitHub: gh}
+		m.GitHub = wrapped
+		err := m.runSelectedWithControls(t.Context(), store, jobFromAccepted(*store.Data.Accepted), "", nil,
+			func(context.Context, Job) error { time.Sleep(2 * time.Second); return ErrPostModelPublication },
+			func(err error) error { return err })
+		if !errors.Is(err, ErrPostModelPublication) || errors.Is(err, context.DeadlineExceeded) ||
+			time.Since(now) != 2*time.Second || wrapped.checks != 1 {
+			t.Fatalf("in-flight fix lost control reserve: err=%v elapsed=%s invitations=%d",
+				err, time.Since(now), wrapped.checks)
+		}
+	})
+}
+
+func TestSelectedFixDefersUncancelableSiblingTerminalReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(90 * time.Second)
+		store.Data.Accepted.Deadline = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		store.Data.NextInviteCheckAt = now.Add(time.Hour)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		var completedAt time.Time
+		terminalChecks := 0
+		gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+			terminalChecks++
+			if completedAt.IsZero() {
+				time.Sleep(2 * time.Minute) // This terminal reply lookup ignores cancellation.
+			}
+			return []github.Item{item}, nil
+		}
+		err := m.runSelectedWithControls(t.Context(), store, jobFromAccepted(*store.Data.Accepted), "", nil,
+			func(context.Context, Job) error { time.Sleep(time.Second); completedAt = time.Now(); return nil },
+			func(err error) error { return err })
+		if err != nil || time.Since(now) != time.Second || terminalChecks != 0 ||
+			store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" || !completedAt.Before(deadline) {
+			t.Fatalf("sibling terminal reply delayed selected fix: err=%v elapsed=%s terminal checks=%d completed=%s decision=%+v",
+				err, time.Since(now), terminalChecks, completedAt, store.Data.TerminalDecisions[accepted.JobID])
+		}
+		m.serviceTerminalControls(t.Context(), store)
+		if terminalChecks == 0 || store.Data.Processed[terminalID].IsZero() {
+			t.Fatalf("deferred sibling reply was not serviced: checks=%d processed=%v", terminalChecks, store.Data.Processed[terminalID])
+		}
+	})
+}
+
+func TestSelectedFixServicesDueSiblingWhileWorkerRuns(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(7 * time.Minute)
+		store.Data.Accepted.Deadline = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		currentItem := gh.currentItem
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == accepted.SourceKey {
+				return currentItem(item)
+			}
+			return item, nil
+		}
+		gh.threadItems = terminalThreads(map[int]github.Item{8: item})
+		release := make(chan struct{})
+		finished := make(chan error, 1)
+		go func() {
+			finished <- m.runSelectedWithControls(t.Context(), store, jobFromAccepted(*store.Data.Accepted), "", nil,
+				func(ctx context.Context, _ Job) error {
+					select {
+					case <-release:
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				}, func(err error) error { return err })
+		}()
+		synctest.Wait()
+		if !terminalReplyRecorded(gh, store, terminalID) || store.Data.Accepted == nil ||
+			!store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("held fix did not service sibling: comments=%v processed=%v accepted=%+v",
+				gh.comments, store.Data.Processed, store.Data.Accepted)
+		}
+		select {
+		case err := <-finished:
+			t.Fatalf("selected fix completed before worker release: %v", err)
+		default:
+		}
+		close(release)
+		synctest.Wait()
+		if err := <-finished; err != nil || store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" {
+			t.Fatalf("selected fix did not complete after sibling reply: err=%v decision=%+v",
+				err, store.Data.TerminalDecisions[accepted.JobID])
+		}
+	})
+}
+
+func TestPendingFixPushGetsSubsecondWakeBeforeDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		remaining time.Duration
+	}{
+		{"half second", 500 * time.Millisecond},
+		{"just over one second", 1100 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(tc.remaining)
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = deadline
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				checks := 0
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					checks++
+					return github.Branch{}, &github.StatusError{StatusCode: 404}
+				}
+				next, err := m.RunOnce(t.Context(), store)
+				if err != nil || checks != 1 || !next.Equal(now.Add(tc.remaining/2)) ||
+					!next.Equal(publicationWriteWake(store, now)) || store.Data.Accepted == nil {
+					t.Fatalf("pending push wake: next=%s want=%s deadline=%s err=%v checks=%d accepted=%+v",
+						next, now.Add(tc.remaining/2), deadline, err, checks, store.Data.Accepted)
+				}
+			})
+		})
+	}
+}
+
+func TestPendingFixPushWakeIgnoresOverdueOtherWriteAfterRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(500 * time.Millisecond)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = time.Time{}
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			return github.Branch{}, &github.StatusError{StatusCode: 404}
+		}
+		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		want := now.Add(250 * time.Millisecond)
+		if !errors.Is(err, ErrPostModelPublication) || !next.Equal(want) ||
+			branchChecks != 2 || handler.publications != 1 || len(gh.verifiedCalls) != 0 ||
+			store.Data.Accepted == nil || store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending {
+			t.Fatalf("overdue other write displaced pending push wake: next=%s want=%s err=%v branch checks=%d publications=%d old checks=%d accepted=%+v",
+				next, want, err, branchChecks, handler.publications, len(gh.verifiedCalls), store.Data.Accepted)
+		}
+	})
+}
+
+func TestRecoveredFixPushResultPreemptsOlderWriteNearDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(500 * time.Millisecond)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = time.Time{}
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			if branchChecks == 1 {
+				return github.Branch{}, &github.StatusError{StatusCode: 404}
+			}
+			return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+		}
+		gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
+		var replyAt time.Time
+		calls := 0
+		handler := &recoveredResultHandler{publish: func(Job) error {
+			calls++
+			if calls == 1 {
+				return ErrPostModelPublication
+			}
+			replyAt = time.Now()
+			return nil
+		}}
+		m.Handler = handler
+		_, err := m.RunOnce(t.Context(), store)
+		if err != nil || branchChecks != 2 || len(gh.verifiedCalls) != 0 ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
+			handler.publications != 2 || !replyAt.Before(deadline) ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+			store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" || gh.commentCalls != 0 {
+			t.Fatalf("observed push did not publish one-shot reply before deadline: err=%v checks=%d old checks=%d publications=%d reply=%s deadline=%s accepted=%+v processed=%v decision=%+v comments=%d",
+				err, branchChecks, len(gh.verifiedCalls), handler.publications, replyAt, deadline, store.Data.Accepted,
+				store.Data.Processed[accepted.JobID], store.Data.TerminalDecisions[accepted.JobID], gh.commentCalls)
+		}
+	})
+}
+
+func TestCompletedFixDoesNotDelayPushRecoveryForInvitation(t *testing.T) {
+	for _, phase := range []string{"immediate result", "check in flight"} {
+		t.Run(phase, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(25 * time.Second)
+				if phase == "check in flight" {
+					deadline = now.Add(35 * time.Second)
+				}
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = time.Time{}
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				store.Data.NextInviteCheckAt = now
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+				branchChecks := 0
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					branchChecks++
+					if branchChecks == 1 {
+						return github.Branch{}, &github.StatusError{StatusCode: 404}
+					}
+					time.Sleep(9 * time.Second)
+					return github.Branch{Name: push.Branch, Commit: github.BranchCommit{SHA: push.SHA}}, nil
+				}
+				wrapped := &deadlineInvitationGitHub{fakeGitHub: gh}
+				if phase == "check in flight" {
+					wrapped.entered = make(chan struct{}, 1)
+				}
+				m.GitHub = wrapped
+				publishCalls := 0
+				m.Handler = &recoveredResultHandler{publish: func(Job) error {
+					publishCalls++
+					if publishCalls == 1 {
+						if wrapped.entered != nil {
+							<-wrapped.entered
+						}
+						return ErrPostModelPublication
+					}
+					time.Sleep(12 * time.Second)
+					return nil
+				}}
+				_, err := m.RunOnce(t.Context(), store)
+				if err != nil || time.Since(now) != 21*time.Second || branchChecks != 2 || publishCalls != 2 ||
+					store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+					store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" ||
+					(phase == "check in flight" && wrapped.checks != 1) {
+					t.Fatalf("invitation delayed completed fix recovery: phase=%s err=%v elapsed=%s checks=%d publications=%d invitations=%d accepted=%+v processed=%v decision=%+v",
+						phase, err, time.Since(now), branchChecks, publishCalls, wrapped.checks, store.Data.Accepted,
+						store.Data.Processed[accepted.JobID], store.Data.TerminalDecisions[accepted.JobID])
+				}
+			})
+		})
 	}
 }
 

@@ -31,6 +31,50 @@ type terminalRecoveryGitHub struct {
 	reply string
 }
 
+type pendingPushLoopGitHub struct {
+	monitor.GitHub
+	cancel      context.CancelFunc
+	cancelAfter int
+	checks      int
+}
+
+func (g *pendingPushLoopGitHub) Branch(context.Context, string, string) (github.Branch, error) {
+	g.checks++
+	if g.checks < g.cancelAfter {
+		return github.Branch{}, &github.StatusError{StatusCode: http.StatusNotFound}
+	}
+	g.cancel()
+	return github.Branch{}, context.Canceled
+}
+
+func (*pendingPushLoopGitHub) Repository(context.Context, string) (github.Repository, error) {
+	return github.Repository{ID: 1, Owner: github.User{ID: 2}, DefaultBranch: "main"}, nil
+}
+
+func (*pendingPushLoopGitHub) IssueDetails(context.Context, string, int) (github.Issue, error) {
+	return github.Issue{Number: 7}, nil
+}
+
+func (*pendingPushLoopGitHub) CurrentItem(context.Context, github.Item) (github.Item, error) {
+	return github.Item{Key: "comment:1", NodeID: "node:1", Body: "@bot fix",
+		Author: github.User{Login: "writer", ID: 7}}, nil
+}
+
+func (*pendingPushLoopGitHub) Permission(context.Context, string, string) (github.Permission, error) {
+	return github.Permission{Permission: "write", User: github.User{Login: "writer", ID: 7}}, nil
+}
+
+type pendingPushLoopHandler struct{ publications int }
+
+func (*pendingPushLoopHandler) Execute(context.Context, monitor.Job) error {
+	return errors.New("unexpected selected execution")
+}
+
+func (h *pendingPushLoopHandler) PublishRecovered(context.Context, monitor.Job) error {
+	h.publications++
+	return monitor.ErrPostModelPublication
+}
+
 func serviceStore(t *testing.T, data state.Data) *state.Store {
 	t.Helper()
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now())
@@ -289,6 +333,92 @@ func TestOrchestrateModeAttachesAfterExpiredAcceptanceRecovery(t *testing.T) {
 			if gh.reply == "" || store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || len(store.Data.JobFailures) != 0 {
 				t.Fatalf("deadline recovery did not finish before worker attach: reply=%q state=%+v", gh.reply, store.Data)
 			}
+		})
+	}
+}
+
+func TestMonitorLoopRechecksPendingPushAtSubsecondWake(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		remaining   time.Duration
+		postHandler bool
+	}{
+		{"half second", 500 * time.Millisecond, false},
+		{"just over one second", 1100 * time.Millisecond, false},
+		{"post-handler with overdue other write", 500 * time.Millisecond, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				deadline := now.Add(tc.remaining)
+				jobID := strings.Repeat("a", 64)
+				retryAt := deadline
+				if tc.postHandler {
+					retryAt = time.Time{}
+				}
+				accepted := state.AcceptedAction{
+					JobID: jobID, AttemptID: strings.Repeat("b", 32), ExecutorID: action.LocalExecutorID,
+					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+					SubjectType: "Issue", SubjectNumber: 7,
+					SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
+					Requester: "writer", RequesterID: 7, CommandName: "fix", Action: "fix",
+					AcceptedAt: now, Deadline: deadline, RetryAt: retryAt, Assigned: true, ResultReady: tc.postHandler,
+				}
+				sha := strings.Repeat("c", 40)
+				writes := map[string]state.PublicationWrite{jobID + "-push": {
+					AttemptID: accepted.AttemptID, Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
+					Marker: "<!-- linkdataminion:" + jobID + " -->", Branch: "minion/fix-7-" + jobID[:12], SHA: sha,
+					Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}}
+				if tc.postHandler {
+					writes["old-job"] = state.PublicationWrite{
+						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 9,
+						Marker: "<!-- linkdataminion:old-job -->", Since: now,
+						StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
+					}
+				}
+				store := serviceStore(t, state.Data{
+					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
+						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+					},
+					Processed:         map[string]time.Time{},
+					TerminalDecisions: map[string]state.TerminalDecision{},
+					PendingFixes:      map[string]state.PendingFix{jobID: {SHA: sha}},
+					PublicationWrites: writes,
+					NextPollAt:        now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
+				})
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if tc.postHandler {
+					if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-push"}`)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				cancelAfter := 2
+				wantPublications := 0
+				if tc.postHandler {
+					cancelAfter = 3
+					wantPublications = 1
+				}
+				gh := &pendingPushLoopGitHub{cancel: cancel, cancelAfter: cancelAfter}
+				handler := &pendingPushLoopHandler{}
+				watcher := &monitor.Monitor{
+					Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
+						"fix": {Action: "fix"},
+					}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"fix"}}}},
+					GitHub: gh, Handler: handler, Now: time.Now,
+				}
+				var logs bytes.Buffer
+				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
+				if elapsed := time.Since(now); code != 0 || gh.checks != cancelAfter || elapsed != tc.remaining/2 ||
+					store.Data.Accepted == nil || handler.publications != wantPublications {
+					t.Fatalf("loop missed pending push wake: code=%d checks=%d elapsed=%s want=%s publications=%d logs=%q",
+						code, gh.checks, elapsed, tc.remaining/2, handler.publications, logs.String())
+				}
+			})
 		})
 	}
 }

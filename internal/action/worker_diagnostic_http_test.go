@@ -167,7 +167,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	}
 	fakeOnPath(t, "git", fmt.Sprintf("#!/bin/sh\nexec %s -c %s \"$@\"\n", shellQuote(git), shellQuote("include.path="+gitConfig)))
 	checkout := cloneFixture(t, t.TempDir())
-	const branch = "minion/fix-reviewed"
+	const branch = "minion/fix-7-aaaaaaaaaaaa"
 	if err := checkout.NewBranch(t.Context(), branch); err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +222,10 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	var journal bytes.Buffer
 	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
 	reserveActionRequest(t, owner.Store, &request, true)
+	owner.Store.Data.Accepted.ResultReady = true
+	if err := owner.Store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 	fork := github.Repository{ID: 4, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, Visibility: "public"}
 	prepared := &preparedAction{job: job, request: request, checkout: checkout, repository: repo, fork: fork, branch: branch, issueNodeID: "issue-node"}
@@ -229,7 +233,7 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 		t.Fatal(err)
 	}
 	sha := owner.Store.Data.PendingFixes[request.ID].SHA
-	want := fmt.Sprintf("Fix branch `%s` is ready in `bot/r` at `%s`. @writer, [open the pull request yourself](https://github.com/o/r/compare/main...bot:minion%%2Ffix-reviewed?expand=1) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.\n\n%s", branch, sha, request.Marker())
+	want := fmt.Sprintf("Fix branch `%s` is ready in `bot/r` at `%s`. @writer, [open the pull request yourself](https://github.com/o/r/compare/main...bot:minion%%2Ffix-7-aaaaaaaaaaaa?expand=1) after reviewing the diff. Repository review rules, when enabled, can then evaluate your authorship.\n\n%s", branch, sha, request.Marker())
 	if len(sha) != 40 || writes != 1 || posted != want || strings.Contains(posted, outcome.Result.Answer) ||
 		strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "FORGED") || strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "FORGED") || strings.ContainsRune(journal.String(), '\x1b') {
 		t.Fatalf("changed fix exposed worker text or lost branch reply: writes=%d posted=%q journal=%q", writes, posted, journal.String())

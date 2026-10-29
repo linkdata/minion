@@ -22,9 +22,289 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func permitSelectedPublication(context.Context, monitor.Job, bool) error { return nil }
+
+func TestFixPushCheckpointKeepsExactTargetAndOriginalGraceAcrossRestart(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8, PublicationGrace: 42 * time.Second}
+	at := request.AcceptedAt.Add(time.Second)
+	sha := strings.Repeat("b", 40)
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	if err := e.beginFixPushAt(t.Context(), request, "bot/repo", branch, sha, nil, func() time.Time { return at }); err != nil {
+		t.Fatal(err)
+	}
+	write := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
+	if write.AttemptID != request.AttemptID || write.Repository != "bot/repo" || write.Branch != branch || write.SHA != sha ||
+		write.Status != state.PublicationWritePending || !write.StartedAt.Equal(at) || !write.Deadline.Equal(at.Add(42*time.Second)) ||
+		store.Data.PendingFixes[request.ID].SHA != sha || !store.Data.Accepted.Deadline.Equal(request.Deadline) {
+		t.Fatalf("issued push changed identity, SHA, or original deadline: write=%+v pending=%+v accepted=%+v", write,
+			store.Data.PendingFixes[request.ID], store.Data.Accepted)
+	}
+	if err := e.beginFixPush(t.Context(), request, "bot/repo", branch, sha, nil); !errors.Is(err, monitor.ErrPostModelPublication) {
+		t.Fatalf("issued push was reserved twice: %v", err)
+	}
+	withoutAttempt := request
+	withoutAttempt.AttemptID = ""
+	if err := e.beginFixPush(t.Context(), withoutAttempt, "bot/repo", branch, sha, nil); !errors.Is(err, monitor.ErrAcceptanceState) {
+		t.Fatalf("missing attempt ID was generated or accepted: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	e.Store = store
+	if got := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]; got != write {
+		t.Fatalf("pending push checkpoint changed after restart: got=%+v want=%+v", got, write)
+	}
+	if err := e.observeFixPush(request); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.Store = store
+	if got := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]; got.Status != state.PublicationWriteObserved ||
+		got.ResolvedAt.IsZero() || got.Branch != branch || got.SHA != sha || !got.Deadline.Equal(write.Deadline) {
+		t.Fatalf("observed push checkpoint changed after restart: %+v", got)
+	}
+}
+
+func TestFixPushRequiresCommittedResult(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	store.Data.Accepted.ResultReady = false
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	err := e.beginFixPushAt(t.Context(), request, "bot/repo", "minion/fix-7-aaaaaaaaaaaa", strings.Repeat("b", 40), nil,
+		func() time.Time { return request.AcceptedAt.Add(time.Second) })
+	if !errors.Is(err, monitor.ErrAcceptanceState) || len(store.Data.PublicationWrites) != 0 || len(store.Data.PendingFixes) != 0 {
+		t.Fatalf("uncommitted result reserved a push: err=%v writes=%v fixes=%v", err, store.Data.PublicationWrites, store.Data.PendingFixes)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if len(reopened.Data.PublicationWrites) != 0 || len(reopened.Data.PendingFixes) != 0 {
+		t.Fatalf("uncommitted result left a durable push: writes=%v fixes=%v", reopened.Data.PublicationWrites, reopened.Data.PendingFixes)
+	}
+}
+
+func TestFixPushDeadlineAfterCheckpointSaveRollsBackBothRecords(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	checks := 0
+	err := e.beginFixPushAt(t.Context(), request, "bot/repo", "minion/fix-7-aaaaaaaaaaaa", strings.Repeat("b", 40), nil,
+		func() time.Time {
+			checks++
+			if checks == 1 {
+				return request.AcceptedAt.Add(time.Second)
+			}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			var saved state.Data
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWritePending ||
+				saved.PendingFixes[request.ID].SHA != strings.Repeat("b", 40) {
+				t.Fatalf("push checkpoint was not saved before deadline check: writes=%v fixes=%v", saved.PublicationWrites, saved.PendingFixes)
+			}
+			return request.Deadline.Add(time.Nanosecond)
+		})
+	if !errors.Is(err, context.DeadlineExceeded) || checks != 2 || len(store.Data.PublicationWrites) != 0 || len(store.Data.PendingFixes) != 0 {
+		t.Fatalf("expired unissued push retained a checkpoint: err=%v checks=%d writes=%v fixes=%v", err, checks, store.Data.PublicationWrites, store.Data.PendingFixes)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if len(reopened.Data.PublicationWrites) != 0 || len(reopened.Data.PendingFixes) != 0 {
+		t.Fatalf("expired unissued push survived restart: writes=%v fixes=%v", reopened.Data.PublicationWrites, reopened.Data.PendingFixes)
+	}
+}
+
+func TestFixPushReconciliationRequiresExactRemoteBranchAndSHA(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	sha := strings.Repeat("b", 40)
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	if err := e.beginFixPush(t.Context(), request, "bot/repo", branch, sha, nil); err != nil {
+		t.Fatal(err)
+	}
+	var mode string
+	lookups := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/repos/bot/repo/branches/"+branch {
+			t.Errorf("unexpected reconciliation request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		lookups++
+		switch mode {
+		case "missing":
+			http.NotFound(w, r)
+		case "wrong SHA":
+			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, strings.Repeat("c", 40))
+		case "wrong branch":
+			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch+"-other", sha)
+		default:
+			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, sha)
+		}
+	}))
+	t.Cleanup(server.Close)
+	e.GitHub = testGitHub(server, "token")
+	for _, mismatch := range []string{"missing", "wrong SHA", "wrong branch"} {
+		mode = mismatch
+		if err := e.reconcileFixPush(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) {
+			t.Fatalf("%s remote branch authorized publication: %v", mismatch, err)
+		}
+		if got := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]; got.Status != state.PublicationWritePending ||
+			store.Data.PendingFixes[request.ID].SHA != sha {
+			t.Fatalf("%s remote branch changed checkpoint: %+v", mismatch, got)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	e.Store = store
+	mode = "match"
+	if err := e.reconcileFixPush(t.Context(), request); err != nil || lookups != 4 ||
+		store.Data.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWriteObserved {
+		t.Fatalf("matching remote SHA was not observed after restart: lookups=%d write=%+v error=%v", lookups,
+			store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
+	}
+}
+
+func TestUncertainFixPushCannotResumeAfterBranchAppears(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+	sha := strings.Repeat("b", 40)
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+	if err := e.beginFixPush(t.Context(), request, "bot/repo", branch, sha, nil); err != nil {
+		t.Fatal(err)
+	}
+	write := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
+	write.Status, write.ResolvedAt = state.PublicationWriteUncertain, time.Now().UTC()
+	store.Data.PublicationWrites[fixPushWriteKey(request.ID)] = write
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	e.Store = store
+	var lookups atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lookups.Add(1)
+		_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, sha)
+	}))
+	t.Cleanup(server.Close)
+	e.GitHub = testGitHub(server, "token")
+	if err := e.reconcileFixPush(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+		lookups.Load() != 0 || store.Data.PublicationWrites[fixPushWriteKey(request.ID)] != write {
+		t.Fatalf("uncertain push was reused after branch appeared: lookups=%d write=%+v error=%v",
+			lookups.Load(), store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
+	}
+}
+
+func TestExpiredSelectedFixObservesPushWithoutExtendingActionDeadline(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Identity.JobID = strings.Repeat("a", 64)
+	result := completedRecoveryResult(job)
+	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}
+	store, _, request := savedRecoveryFixture(t, job, result)
+	now := time.Now().UTC()
+	request.AcceptedAt, request.Deadline = now.Add(-3*time.Minute), now.Add(-time.Minute)
+	store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = request.AcceptedAt, request.Deadline
+	data, err := store.ReadAcceptedResult(AcceptedResultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := DecodeAcceptedResultRecord(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Accepted = *store.Data.Accepted
+	data, err = httpEncode(record, int(AcceptedResultMaxBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("b", 40)
+	branch := "minion/fix-7-aaaaaaaaaaaa"
+	e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8, PublicationGrace: 3 * time.Minute}
+	if err := e.beginFixPushAt(t.Context(), request, "bot/repo", branch, sha, nil,
+		func() time.Time { return now.Add(-2 * time.Minute) }); err != nil {
+		t.Fatal(err)
+	}
+	var reads, writes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/repos/bot/repo/branches/"+branch {
+			reads.Add(1)
+			_, _ = fmt.Fprintf(w, `{"name":%q,"commit":{"sha":%q}}`, branch, sha)
+			return
+		}
+		writes.Add(1)
+		t.Errorf("expired fix reached GitHub publication: %s %s", r.Method, r.URL.Path)
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	e.GitHub = testGitHub(server, "token")
+	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
+		!errors.Is(err, context.DeadlineExceeded) || reads.Load() != 1 || writes.Load() != 0 ||
+		store.Data.PublicationWrites[fixPushWriteKey(request.ID)].Status != state.PublicationWriteObserved ||
+		!store.Data.Accepted.Deadline.Equal(request.Deadline) {
+		t.Fatalf("expired fix was republished or remote push was lost: reads=%d writes=%d accepted=%+v push=%+v error=%v",
+			reads.Load(), writes.Load(), store.Data.Accepted, store.Data.PublicationWrites[fixPushWriteKey(request.ID)], err)
+	}
+}
 
 func TestExpiredIssuedCommentNeverRepostsOrRerunsModel(t *testing.T) {
 	job := testJob(command.Comment)
