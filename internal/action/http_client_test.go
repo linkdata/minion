@@ -55,24 +55,19 @@ func TestRunHTTPRejectsBaseRunnerCredentialsBeforePull(t *testing.T) {
 	}
 }
 
-func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
+func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 	for _, test := range []struct {
 		name            string
 		invalidCounters bool
 		holdWatch       bool
-		lostStatus      string
-		malformedStatus bool
 		afterFailure    bool
 		watchPipe       bool
-		measureAge      bool
 	}{
-		{name: "complete", measureAge: true},
+		{name: "complete"},
 		{name: "invalid signed counters", invalidCounters: true},
 		{name: "intentional held watch stop", holdWatch: true},
 		{name: "intentional held watch pipe close", holdWatch: true, watchPipe: true},
-		{name: "lost prepare observation ACK", lostStatus: "prepare"},
-		{name: "malformed upload observation ACK", lostStatus: "upload", malformedStatus: true},
-		{name: "paid checkpoint refusal skips upload", afterFailure: true},
+		{name: "paid checkpoint refusal retains outcome", afterFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -86,7 +81,6 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			var watchAdmitted atomic.Bool
 			sealed := make(chan struct{})
 			events := make(chan string, 8)
-			statusAges := make(chan time.Duration, 2)
 			after := make(chan CallUsage, 1)
 			outcome := make(chan httpOutcome, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -123,37 +117,6 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					case <-r.Context().Done():
 					}
 					return
-				case "status":
-					var value httpObservation
-					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value.Status.Validate(job) != nil || value.Status.WorkerState != "busy" {
-						t.Errorf("invalid observation: %+v error=%v", value, err)
-					}
-					if test.measureAge {
-						statusAges <- value.Status.ProgressAge
-					}
-					want := uint64(1)
-					if value.Status.Phase == "upload" {
-						want = 2
-					}
-					if value.Status.Sequence != want {
-						t.Errorf("status sequence reused transport sequence: %+v", value)
-					}
-					requestSequence = value.Status.Sequence
-					events <- "status/" + value.Status.Phase
-					if value.Status.Phase == test.lostStatus {
-						if test.malformedStatus {
-							w.Header().Set("Content-Type", "application/json")
-							_, _ = fmt.Fprint(w, "{")
-						} else {
-							connection, _, err := w.(http.Hijacker).Hijack()
-							if err != nil {
-								t.Error(err)
-							} else {
-								_ = connection.Close()
-							}
-						}
-						return
-					}
 				case "before", "after":
 					var value httpCall
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
@@ -178,7 +141,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					http.NotFound(w, r)
 					return
 				}
-				if kind != "status" && requestSequence != sequence.Add(1) {
+				if requestSequence != sequence.Add(1) {
 					t.Errorf("transport sequence skipped or repeated: %d", requestSequence)
 				}
 				ack := httpAcknowledgement{httpBinding: binding, Sequence: requestSequence, Kind: kind}
@@ -208,9 +171,6 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 					t.Errorf("worker renewed the accepted budget: %v %t", deadline, ok)
 					return aicli.Result{}, errors.New("renewed native runtime")
 				}
-				if test.measureAge {
-					time.Sleep(20 * time.Millisecond)
-				}
 				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageComplete: true}, nil
 			}}
 			err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner)
@@ -221,24 +181,12 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			wantEvents := []string{"next", "status/prepare", "before", "after", "status/upload", "outcome"}
-			if test.invalidCounters || test.afterFailure {
-				wantEvents = []string{"next", "status/prepare", "before", "after", "outcome"}
-			}
+			wantEvents := []string{"next", "before", "after", "outcome"}
 			if test.watchPipe && pipeReads.Load() != 1 {
 				t.Fatalf("held watch did not return the injected teardown pipe error: %d", pipeReads.Load())
 			}
-			if test.measureAge {
-				if len(statusAges) != 2 {
-					t.Fatalf("missing age observations: %d", len(statusAges))
-				}
-				prepareAge, uploadAge := <-statusAges, <-statusAges
-				if uploadAge < 20*time.Millisecond || uploadAge <= prepareAge {
-					t.Fatalf("upload age did not include model time: prepare=%s upload=%s", prepareAge, uploadAge)
-				}
-			}
 			if len(events) != len(wantEvents) || len(after) != 1 || len(outcome) != 1 || next.Load() != 1 || native.Load() != 1 {
-				t.Fatalf("missing transaction observations: events=%d after=%d outcome=%d pulls=%d native=%d", len(events), len(after), len(outcome), next.Load(), native.Load())
+				t.Fatalf("missing transaction events: events=%d after=%d outcome=%d pulls=%d native=%d", len(events), len(after), len(outcome), next.Load(), native.Load())
 			}
 			var gotEvents []string
 			for range wantEvents {
@@ -262,7 +210,7 @@ func TestRunHTTPReportsActualObservationsAndRawPaidReceipts(t *testing.T) {
 	}
 }
 
-func TestRunHTTPShortStopGraceReservesFinalOutcome(t *testing.T) {
+func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)
 		binding := httpJobBinding(job)
@@ -278,15 +226,8 @@ func TestRunHTTPShortStopGraceReservesFinalOutcome(t *testing.T) {
 				w.(http.Flusher).Flush()
 				<-r.Context().Done()
 			case "/status":
-				var status httpObservation
-				if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
-					t.Error(err)
-				}
-				if statuses.Add(1) > 1 {
-					<-r.Context().Done()
-					return
-				}
-				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Status.Sequence})
+				statuses.Add(1)
+				<-r.Context().Done()
 			case "/before", "/after":
 				var call httpCall
 				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
@@ -313,8 +254,8 @@ func TestRunHTTPShortStopGraceReservesFinalOutcome(t *testing.T) {
 		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
 			t.Fatal(err)
 		}
-		if statuses.Load() != 2 || len(outcomes) != 1 {
-			t.Fatalf("optional status displaced final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
+		if statuses.Load() != 0 || len(outcomes) != 1 {
+			t.Fatalf("blocked status endpoint delayed final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
 		}
 		outcome := <-outcomes
 		if outcome.Failure != nil || outcome.Result.Answer != "Complete" || len(outcome.Result.Calls) != 1 {
@@ -523,12 +464,6 @@ func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
 							_ = json.NewEncoder(w).Encode(httpCancellation{httpBinding: httpJobBinding(job), Reason: "completed"})
 						case <-r.Context().Done():
 						}
-					case "/status":
-						var observation httpObservation
-						if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
-							t.Error(err)
-						}
-						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status", Sequence: observation.Status.Sequence})
 					case "/before", "/after":
 						var call httpCall
 						if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
@@ -831,110 +766,6 @@ func (c *testDeadlineContext) expire() {
 	c.once.Do(func() { close(c.done) })
 }
 
-func TestRunHTTPStalledStatusCannotConsumeOutcomeGrace(t *testing.T) {
-	for _, phase := range []string{"prepare", "upload"} {
-		t.Run(phase, func(t *testing.T) {
-			run := func(t *testing.T) {
-				job := testJob(command.Comment)
-				job.RuntimeBudget = 2 * time.Second
-				parentContext := t.Context()
-				var deadline *testDeadlineContext
-				if phase == "upload" {
-					job.RuntimeBudget = time.Minute
-					deadline = &testDeadlineContext{Context: t.Context(), done: make(chan struct{})}
-					parentContext = deadline
-					defer deadline.expire()
-				}
-				paid := make(chan CallUsage, 1)
-				newServer := httptest.NewServer
-				if phase == "prepare" {
-					newServer = func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }
-				}
-				f := newHTTPServerTestWithServer(t, parentContext, job, runnerExecutionCheckpoints{
-					after: func(value CallCheckpoint) error { paid <- value.Call; return nil },
-				}, nil, newServer)
-				entered, release := make(chan struct{}), make(chan struct{})
-				defer close(release)
-				stopped := make(chan error, 1)
-				var observations, native atomic.Int32
-				client := *f.server.Client()
-				client.Timeout = 0 // The action context must end the stalled observation.
-				transport := client.Transport
-				client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-					if r.URL.Path == "/status" {
-						sequence := observations.Add(1)
-						if phase == "prepare" && sequence == 1 || phase == "upload" && sequence == 2 {
-							close(entered)
-							select {
-							case <-r.Context().Done():
-								stopped <- context.Cause(r.Context())
-								return nil, r.Context().Err()
-							case <-release:
-								return nil, errors.New("fixture released a stuck Status request")
-							}
-						}
-					}
-					return transport.RoundTrip(r)
-				})
-				tokens := usage.Tokens{Input: 17, CachedInput: 3, Output: 5}
-				runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-					native.Add(1)
-					return aicli.Result{Answer: "Completed before upload stalled", Tokens: tokens, UsageComplete: true}, nil
-				}}
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				done := make(chan error, 1)
-				go func() { done <- RunHTTP(ctx, &client, f.server.URL, job.Identity.ExecutorID, runner) }()
-				select {
-				case <-entered:
-				case <-time.After(30 * time.Second):
-					t.Fatal("optional observation did not enter its stalled request")
-				}
-				if deadline != nil {
-					deadline.expire()
-				}
-				select {
-				case cause := <-stopped:
-					if !errors.Is(cause, context.DeadlineExceeded) {
-						t.Fatalf("observation did not inherit the accepted action expiry: %v", cause)
-					}
-				case <-time.After(5 * time.Second):
-					t.Fatal("optional Status did not stop promptly after action expiry")
-				}
-				var err error
-				select {
-				case err = <-done:
-				case <-time.After(30 * time.Second):
-					t.Fatal("optional Status consumed required outcome grace after action expiry")
-				}
-				got := f.result(t)
-				wantCalls := 0
-				if phase == "upload" {
-					wantCalls = 1
-				}
-				var reported *workerFailureError
-				// The worker can expire before the parent because pull transit consumes
-				// part of its budget. Its deadline report stays private worker evidence.
-				if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.Terminal || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || native.Load() != int32(wantCalls) || len(got.result.Calls) != wantCalls || len(paid) != wantCalls {
-					t.Fatalf("stalled observation lost known outcome or paid facts: worker=%v parent=%v result=%+v native=%d paid=%d", err, got.err, got.result, native.Load(), len(paid))
-				}
-				if wantCalls == 1 {
-					if receipt := <-paid; receipt != got.result.Calls[0] || receipt.Tokens != tokens || !receipt.Complete || got.result.Answer != "Completed before upload stalled" {
-						t.Fatalf("stalled upload discarded acknowledged paid facts: receipt=%+v result=%+v", receipt, got.result)
-					}
-				} else if got.result.Answer != "" {
-					t.Fatalf("stalled preparation fabricated an answer: %+v", got.result)
-				}
-			}
-			if phase == "prepare" {
-				synctest.Test(t, run)
-			} else {
-				run(t)
-			}
-		})
-	}
-}
-
 func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 	for _, test := range []struct {
 		name                string
@@ -943,7 +774,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		malformedACK        bool
 		externalCause       bool
 		duringOutcome       bool
-		duringUpload        bool
+		afterPaid           bool
 		callerBeforeOutcome bool
 		expiredAfterWatch   bool
 		nativeFailure       bool
@@ -952,14 +783,16 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 		{name: "truncated watch after ACK", truncated: true},
 		{name: "malformed watch during outcome", duringOutcome: true},
 		{name: "watch failure stops Runner", early: true},
+		{name: "watch failure after model output and paid ACK", afterPaid: true},
+		{name: "watch then caller cause after paid ACK", afterPaid: true, callerBeforeOutcome: true},
+		{name: "native failure after paid ACK", afterPaid: true, nativeFailure: true},
 		{name: "malformed final ACK stays unknown", malformedACK: true},
 		{name: "external caller cause after ACK", externalCause: true},
-		{name: "malformed watch during upload Status", duringUpload: true},
-		{name: "upload watch and malformed final ACK", duringUpload: true, malformedACK: true},
-		{name: "watch first then caller cause before outcome", duringUpload: true, callerBeforeOutcome: true},
-		{name: "watch first then caller cause after ACK", duringUpload: true, externalCause: true},
-		{name: "parent expiry after upload watch", duringUpload: true, expiredAfterWatch: true},
-		{name: "native failure during upload watch", duringUpload: true, nativeFailure: true},
+		{name: "watch failure before delivery and malformed final ACK", duringOutcome: true, malformedACK: true},
+		{name: "watch first then caller cause before outcome delivery", duringOutcome: true, callerBeforeOutcome: true},
+		{name: "watch first then caller cause after ACK", duringOutcome: true, externalCause: true},
+		{name: "parent expiry before outcome delivery", duringOutcome: true, expiredAfterWatch: true},
+		{name: "native failure before outcome delivery", duringOutcome: true, nativeFailure: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Comment)
@@ -975,61 +808,66 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			store := f.startUsage()
 			parent := newHTTPServerTest(t, parentContext, f.job, f.sink, nil)
 			started := make(chan struct{})
+			modelFinished, afterACKReady := make(chan struct{}), make(chan struct{})
 			outcomeEntered, watchClosed := make(chan struct{}), make(chan struct{})
 			outcomeACKClosed := make(chan struct{}, 1)
-			uploadEntered := make(chan struct{})
-			closeUpload := sync.OnceFunc(func() { close(uploadEntered) })
-			defer closeUpload()
 			ctx, cancel := context.WithCancelCause(t.Context())
 			externalCause := errors.Join(syscall.ENOSPC, monitor.ErrExecutionOutcomeUnknown)
-			var native, outcomes, faultReads, observations atomic.Int32
+			var native, outcomes, faultReads atomic.Int32
 			client := *parent.server.Client()
 			client.Timeout = 0
 			underlying := client.Transport
 			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-				if test.duringUpload && r.URL.Path == "/status" && observations.Add(1) == 2 {
-					closeUpload()
-					<-r.Context().Done() // The watch must cancel the optional request before its cause is sampled.
-					if test.callerBeforeOutcome {
-						cancel(externalCause)
-					}
-					if test.expiredAfterWatch {
-						deadline.expire() // Accepted expiry follows the watch's child cancellation.
-						<-parent.tx.budget.Done()
-					}
-					return nil, r.Context().Err()
-				}
 				if r.URL.Path == "/outcome" {
 					outcomes.Add(1)
 					if test.duringOutcome {
 						close(outcomeEntered)
 						select {
-						case <-watchClosed: // Decode and close the malformed watch before actual outcome delivery.
+						case <-watchClosed: // Decode and close the failed watch before actual outcome delivery.
 						case <-r.Context().Done():
 							return nil, r.Context().Err()
+						}
+						if test.callerBeforeOutcome {
+							cancel(externalCause)
+						}
+						if test.expiredAfterWatch {
+							deadline.expire()
+							<-parent.tx.budget.Done()
 						}
 					}
 				}
 				response, err := underlying.RoundTrip(r)
+				if err == nil && test.afterPaid && r.URL.Path == "/after" {
+					<-modelFinished
+					close(afterACKReady)
+					select {
+					case <-watchClosed:
+					case <-t.Context().Done():
+						return nil, t.Context().Err()
+					}
+					if test.callerBeforeOutcome {
+						cancel(externalCause)
+					}
+				}
 				if err == nil && r.URL.Path == "/cancel" {
 					trigger := r.Context().Done() // RunHTTP stops the watch after its outcome exchange.
 					if test.early {
 						trigger = started
+					} else if test.afterPaid {
+						trigger = afterACKReady
 					} else if test.duringOutcome {
 						trigger = outcomeEntered
-					} else if test.duringUpload {
-						trigger = uploadEntered
 					}
 					var reader io.Reader = strings.NewReader("{")
 					if test.truncated {
 						reader = iotest.ErrReader(io.ErrUnexpectedEOF)
 					} else if test.nativeFailure {
 						reader = iotest.ErrReader(externalCause)
-					} else if test.externalCause && !test.duringUpload {
+					} else if test.externalCause && !test.duringOutcome {
 						reader = iotest.ErrReader(context.Canceled)
 					}
 					var closed chan struct{}
-					if test.duringOutcome {
+					if test.afterPaid || test.duringOutcome {
 						closed = watchClosed
 					}
 					response.Body = httpClientGatedWatchBody{ReadCloser: response.Body, reader: reader, trigger: trigger, reads: &faultReads, closed: closed}
@@ -1054,6 +892,7 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					<-ctx.Done()
 					return aicli.Result{Tokens: tokens}, ctx.Err()
 				}
+				close(modelFinished)
 				return aicli.Result{Answer: "Known candidate", Tokens: tokens, UsageComplete: true}, nil
 			}}
 			done := make(chan error, 1)
@@ -1069,18 +908,6 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				}
 			})
 			go func() { done <- RunHTTP(ctx, &client, parent.server.URL, f.job.Identity.ExecutorID, runner) }()
-			if test.expiredAfterWatch {
-				select {
-				case <-uploadEntered:
-				case <-time.After(30 * time.Second):
-					t.Fatal("worker did not reach upload Status before accepted expiry")
-				}
-				select {
-				case <-parent.tx.budget.Done():
-				case <-time.After(10 * time.Second):
-					t.Fatal("watch failure did not trigger accepted expiry")
-				}
-			}
 			var workerErr error
 			// Keep fixture startup outside the watch-drain deadline.
 			waitForGate := func(gate <-chan struct{}, phase string) {
@@ -1098,10 +925,12 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 					t.Fatalf("worker did not reach %s", phase)
 				}
 			}
-			if test.early || test.duringOutcome {
+			if test.early || test.duringOutcome || test.afterPaid {
 				gate := started
 				if test.duringOutcome {
 					gate = outcomeEntered
+				} else if test.afterPaid {
+					gate = afterACKReady
 				}
 				waitForGate(gate, "gated watch phase")
 			}
@@ -1122,14 +951,20 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			}
 			got := parent.result(t)
 			callerFailure := test.externalCause || test.callerBeforeOutcome
-			workerUnknown := test.early || test.malformedACK || callerFailure || test.nativeFailure
+			workerUnknown := test.early || test.afterPaid || test.malformedACK || callerFailure || test.nativeFailure
 			workerFailed := workerUnknown
-			parentFailed := test.early || test.callerBeforeOutcome || test.nativeFailure || test.expiredAfterWatch
-			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 || test.duringUpload && observations.Load() != 2 {
+			parentFailed := test.early || test.afterPaid || test.expiredAfterWatch
+			if errors.Is(workerErr, monitor.ErrExecutionOutcomeUnknown) != workerUnknown || (workerErr != nil) != workerFailed || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || (got.err != nil) != parentFailed || native.Load() != 1 || outcomes.Load() != 1 || faultReads.Load() == 0 || len(got.result.Calls) != 1 {
 				t.Fatalf("watch drain changed known receipt or erased earlier failure: worker=%v parent=%v result=%+v native=%d outcomes=%d reads=%d", workerErr, got.err, got.result, native.Load(), outcomes.Load(), faultReads.Load())
 			}
 			if callerFailure && (!errors.Is(workerErr, externalCause) || context.Cause(ctx) != externalCause) {
 				t.Fatalf("known receipt erased original caller cause: worker=%v caller=%v", workerErr, context.Cause(ctx))
+			}
+			if test.afterPaid && (test.callerBeforeOutcome || test.nativeFailure) {
+				var reported *workerFailureError
+				if !errors.As(got.err, &reported) || !reported.failure.NoSpace || !reported.failure.OutcomeUnknown {
+					t.Fatalf("pre-outcome failure did not reach parent: %v", got.err)
+				}
 			}
 			if errors.Is(workerErr, syscall.ENOSPC) != (callerFailure || test.nativeFailure) || errors.Is(got.err, syscall.ENOSPC) || test.nativeFailure && !errors.Is(workerErr, externalCause) {
 				t.Fatalf("worker native failure escaped into parent policy: worker=%v parent=%v", workerErr, got.err)
@@ -1141,8 +976,8 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 			if call.Tokens != tokens || call.Complete == test.early || !slices.Equal(f.sink.calls, got.result.Calls) || f.sink.pending != nil {
 				t.Fatalf("watch fault lost acknowledged paid facts: call=%+v saved=%+v pending=%+v", call, f.sink.calls, f.sink.pending)
 			}
-			if test.early {
-				if !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || f.sink.finish(got.result, got.err) == nil {
+			if test.early || test.afterPaid {
+				if test.early && !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || f.sink.finish(got.result, got.err) == nil {
 					t.Fatalf("watch error that stopped Runner became success: worker=%v parent=%v result=%+v", workerErr, got.err, got.result)
 				}
 			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || (f.sink.finish(got.result, got.err) != nil) != parentFailed {
@@ -1356,12 +1191,6 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					}
 					httpClientTestJSON(t, w, httpCancellation{httpBinding: binding, Reason: name, StopRemaining: httpControlTimeout})
 					return
-				case "status":
-					var value httpObservation
-					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
-						t.Error(err)
-					}
-					sequence = value.Status.Sequence
 				case "before", "after":
 					var value httpCall
 					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
@@ -1389,7 +1218,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					t.Errorf("unexpected request: %s", r.URL.Path)
 				}
 				requests.Add(1)
-				if kind != "status" && sequence != mutationSequence.Add(1) {
+				if sequence != mutationSequence.Add(1) {
 					t.Errorf("request sequence changed after cancellation: %d", sequence)
 				}
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: sequence, Kind: kind})
@@ -1423,7 +1252,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 			if name == "local action deadline" {
 				wantCause = context.DeadlineExceeded
 			}
-			if !errors.Is(err, wantCause) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || native.Load() != 1 || requests.Load() != 4 || len(after) != 1 || len(outcome) != 1 {
+			if !errors.Is(err, wantCause) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || native.Load() != 1 || requests.Load() != 3 || len(after) != 1 || len(outcome) != 1 {
 				t.Fatalf("watch cancellation lost paid callbacks or changed policy: error=%v native=%d requests=%d after=%d outcome=%d", err, native.Load(), requests.Load(), len(after), len(outcome))
 			}
 			paid, returned := <-after, <-outcome
@@ -1566,12 +1395,6 @@ func TestRunHTTPStopGraceBoundsSerialAfterAndOutcome(t *testing.T) {
 						} else {
 							<-r.Context().Done()
 						}
-					case "/status":
-						var observation httpObservation
-						if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
-							t.Error(err)
-						}
-						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: observation.Status.Sequence})
 					case "/before", "/after":
 						var call httpCall
 						if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {

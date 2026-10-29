@@ -5,14 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,13 +24,12 @@ import (
 func TestExecuteOrdersAccountingReviewAndPublicationCheckpoints(t *testing.T) {
 	for _, overHTTP := range []bool{false, true} {
 		for _, capped := range []bool{false, true} {
-			t.Run(fmt.Sprintf("HTTP=%t/capped=%t", overHTTP, capped), func(t *testing.T) { testExecuteOrdersCheckpoints(t, overHTTP, capped, false) })
+			t.Run(fmt.Sprintf("HTTP=%t/capped=%t", overHTTP, capped), func(t *testing.T) { testExecuteOrdersCheckpoints(t, overHTTP, capped) })
 		}
 	}
-	t.Run("HTTP optional observations lost", func(t *testing.T) { testExecuteOrdersCheckpoints(t, true, false, true) })
 }
 
-func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservations bool) {
+func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	maxRounds, stopReason := 3, "approved"
 	if capped {
 		maxRounds, stopReason = 2, "round_cap"
@@ -191,22 +188,6 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		worker := e.Runner
 		worker.WorkRoot = t.TempDir()
 		client := transport.Client()
-		if loseObservations {
-			underlying := client.Transport
-			var observations atomic.Int32
-			client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-				if r.URL.Path == "/status" && observations.Add(1) == 1 {
-					_ = r.Body.Close()
-					return nil, io.ErrUnexpectedEOF // Prepare never reaches parent; upload sequence 2 must remain valid.
-				}
-				response, err := underlying.RoundTrip(r)
-				if r.URL.Path == "/status" && err == nil {
-					_ = response.Body.Close()
-					response.Body = io.NopCloser(strings.NewReader("{")) // Parent retained upload; its ACK was malformed.
-				}
-				return response, err
-			})
-		}
 		workerDone = make(chan error, 1)
 		go func() { workerDone <- RunHTTP(workerCtx, client, transport.URL, "local", &worker) }()
 		e.Executor = executorFunc(func(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
@@ -228,9 +209,8 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		case <-time.After(5 * time.Second):
 			t.Fatal("HTTP worker did not receive outcome acknowledgement")
 		}
-		status, ok := remote.Status()
-		if !ok || status.Sequence != 2 || status.Phase != "upload" || status.Identity.JobID != request.ID || status.SourceRef != sourceHead {
-			t.Fatalf("HTTP observations lost binding or own sequence: %+v present=%t", status, ok)
+		if status, ok := remote.Status(); ok {
+			t.Fatalf("HTTP worker unexpectedly sent status: %+v", status)
 		}
 	}
 	if calls != len(expected) {
