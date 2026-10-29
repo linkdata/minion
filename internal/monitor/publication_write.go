@@ -27,8 +27,13 @@ func (m *Monitor) ReconcilePublicationWrites(ctx context.Context, store *state.S
 func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.Store, onlyJobID, skipJobID string) error {
 	pending := make(map[string]state.PublicationWrite)
 	var cursor string
+	var activePushID string
+	var activeDeadline time.Time
 	if err := store.WithLock(func() error {
 		cursor = store.Data.PublicationScanCursor
+		if accepted := store.Data.Accepted; accepted != nil {
+			activePushID, activeDeadline = accepted.JobID+"-push", accepted.Deadline
+		}
 		for jobID, write := range store.Data.PublicationWrites {
 			if write.Status == state.PublicationWritePending && jobID != skipJobID && jobID != skipJobID+"-push" &&
 				(onlyJobID == "" || jobID == onlyJobID || jobID == onlyJobID+"-push") {
@@ -78,6 +83,12 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 		lookupTimeout := 10 * time.Second
 		if !expired {
 			lookupTimeout = min(lookupTimeout, write.Deadline.Sub(now))
+		}
+		if jobID == activePushID && write.Kind == "push" {
+			if remaining := activeDeadline.Sub(now); remaining > 0 {
+				// Leave time for another check and the saved fix reply.
+				lookupTimeout = min(lookupTimeout, remaining/2)
+			}
 		}
 		lookupCtx, cancel := context.WithTimeout(passCtx, lookupTimeout)
 		var found bool

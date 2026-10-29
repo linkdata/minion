@@ -272,6 +272,54 @@ func TestObservedIssuedFixPushBypassesAcceptedRetry(t *testing.T) {
 	})
 }
 
+func TestSlowActivePushCheckLeavesTimeForSavedFixReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		deadline := now.Add(500 * time.Millisecond)
+		store.Data.Accepted.Deadline = deadline
+		store.Data.Accepted.RetryAt = deadline
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		branchChecks := 0
+		lookup := gh.branch
+		gh.branch = func(ctx context.Context, repo, branch string) (github.Branch, error) {
+			branchChecks++
+			if branchChecks == 1 {
+				<-ctx.Done()
+				return github.Branch{}, ctx.Err()
+			}
+			return lookup(ctx, repo, branch)
+		}
+		handler := &recoveredResultHandler{publish: func(job Job) error {
+			if !time.Now().Before(job.Deadline) {
+				t.Error("saved fix reply started after its original deadline")
+			}
+			return nil
+		}}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.After(time.Now()) || !next.Before(deadline) ||
+			branchChecks != 1 || handler.publications != 0 || store.Data.Accepted == nil {
+			t.Fatalf("slow push check used the reply window: next=%s elapsed=%s checks=%d publications=%d accepted=%+v err=%v",
+				next, time.Since(now), branchChecks, handler.publications, store.Data.Accepted, err)
+		}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil || branchChecks != 2 || handler.publications != 1 ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("exact push did not resume saved reply: elapsed=%s checks=%d publications=%d write=%+v accepted=%+v err=%v",
+				time.Since(now), branchChecks, handler.publications, store.Data.PublicationWrites[accepted.JobID+"-push"],
+				store.Data.Accepted, err)
+		}
+	})
+}
+
 func TestStartupObservedFixPushRespectsLaterPublicationBackoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
