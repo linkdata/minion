@@ -1291,14 +1291,25 @@ func savedReplyHasControlWindow(accepted *state.AcceptedAction, writes map[strin
 func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.Store, retryAt time.Time) error {
 	controlCtx, cancel := context.WithDeadline(ctx, retryAt)
 	defer cancel()
-	if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil {
+	at := m.now().UTC()
+	invitationDeadline := retryAt
+	checks, _ := terminalControlChecks(store, "")
+	for _, check := range checks {
+		if !check.checkAt.After(at) {
+			now := time.Now()
+			invitationDeadline = now.Add(retryAt.Sub(now) / 2)
+			break
+		}
+	}
+	invitationCtx, cancelInvitation := context.WithDeadline(controlCtx, invitationDeadline)
+	defer cancelInvitation()
+	if err := m.checkDueInvitations(invitationCtx, store, at); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if controlCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			return nil // The saved reply is due; retry it on the next pass.
+		if invitationCtx.Err() == nil || !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return err
 		}
-		return err
 	}
 	m.serviceTerminalControlsBefore(controlCtx, store, retryAt)
 	return ctx.Err()

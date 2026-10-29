@@ -452,6 +452,45 @@ func TestSavedReplyBackoffBoundsInvitationByRetry(t *testing.T) {
 	})
 }
 
+func TestSavedReplyBackoffServicesTerminalAfterSlowInvitation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		m.Now = time.Now
+		store.Data.Accepted.Deadline = now.Add(time.Hour)
+		retryAt := now.Add(30 * time.Second)
+		store.Data.Accepted.RetryAt = retryAt
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = store.Data.Accepted.Deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		gh.threadItems = terminalThreads(map[int]github.Item{8: item})
+		currentItem := gh.currentItem
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == accepted.SourceKey {
+				return currentItem(item)
+			}
+			return item, nil
+		}
+		waiting := &deadlineInvitationGitHub{fakeGitHub: gh}
+		m.GitHub = waiting
+		handler := &recoveredResultHandler{}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || waiting.checks != 1 || !terminalReplyRecorded(gh, store, terminalID) ||
+			!time.Now().Before(retryAt) || !next.Equal(retryAt) ||
+			handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("slow invitation starved terminal reply or saved retry: next=%s elapsed=%s checks=%d replies=%v handler=%+v err=%v",
+				next, time.Since(now), waiting.checks, gh.comments, handler, err)
+		}
+	})
+}
+
 func TestSavedReplyWithoutIssuedWriteRetriesBeforeOriginalDeadline(t *testing.T) {
 	for _, remaining := range []time.Duration{2 * time.Second, 101 * time.Millisecond, 50 * time.Millisecond} {
 		t.Run(remaining.String(), func(t *testing.T) {
