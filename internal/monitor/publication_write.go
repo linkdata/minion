@@ -90,8 +90,12 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 		if (jobID == activePushID && write.Kind == "push") ||
 			(jobID == activeJobID && write.AttemptID == activeAttemptID && (write.Kind == "comment" || write.Kind == "review")) {
 			if remaining := activeDeadline.Sub(now); remaining > 0 {
-				// Leave time for another check before the accepted deadline.
-				lookupTimeout = min(lookupTimeout, remaining/2)
+				reserve := remaining / 2
+				if write.Kind == "comment" || write.Kind == "review" {
+					// Give the active reply one longer check while leaving time to finish locally.
+					reserve = min(reserve, publicationLastChanceInterval)
+				}
+				lookupTimeout = min(lookupTimeout, remaining-reserve)
 			}
 		}
 		lookupCtx, cancel := context.WithTimeout(passCtx, lookupTimeout)

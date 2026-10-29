@@ -408,13 +408,13 @@ func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
 	})
 }
 
-func TestReconcileActiveTaskWriteUsesHalfRemainingLookup(t *testing.T) {
+func TestReconcileActiveTaskWriteReservesCompletionTime(t *testing.T) {
 	for _, tc := range []struct {
 		name, kind, attemptID string
 		want                  time.Duration
 	}{
-		{name: "comment", kind: "comment", want: 2 * time.Second},
-		{name: "review", kind: "review", want: 2 * time.Second},
+		{name: "comment", kind: "comment", want: 3900 * time.Millisecond},
+		{name: "review", kind: "review", want: 3900 * time.Millisecond},
 		{name: "stale attempt", kind: "review", attemptID: "older-attempt", want: 10 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -452,6 +452,65 @@ func TestReconcileActiveTaskWriteUsesHalfRemainingLookup(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestActiveTaskReplyLookupCanObserveSlowPublicationBeforeDeadline(t *testing.T) {
+	for _, kind := range []string{"comment", "review"} {
+		for _, tc := range []struct {
+			name      string
+			remaining time.Duration
+			wantWait  time.Duration
+			observed  bool
+		}{
+			{name: "enough time", remaining: 500 * time.Millisecond, wantWait: 300 * time.Millisecond, observed: true},
+			{name: "near deadline", remaining: 50 * time.Millisecond, wantWait: 25 * time.Millisecond},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					now := time.Now().UTC()
+					store, _, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, tc.remaining, kind, state.PublicationWritePending)
+					gh.beforeVerify = func(ctx context.Context, _ bool) error {
+						select {
+						case <-time.After(300 * time.Millisecond):
+							return nil
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+					gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+					published := github.Item{Body: "published\n\n" + marker,
+						Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}
+					if kind == "review" {
+						gh.reviewReplies = []github.Item{published}
+					} else {
+						gh.items = []github.Item{published}
+					}
+					handler := &recoveredResultHandler{}
+					m.Handler = handler
+					next, err := m.RunOnce(t.Context(), store)
+					if err != nil || time.Since(now) != tc.wantWait || len(gh.verifiedCalls) != 1 ||
+						gh.commentCalls != 0 || handler.executions != 0 {
+						t.Fatalf("reply lookup: elapsed=%s next=%s checks=%d comments=%d handler=%+v err=%v",
+							time.Since(now), next, len(gh.verifiedCalls), gh.commentCalls, handler, err)
+					}
+					write := store.Data.PublicationWrites[accepted.JobID]
+					if tc.observed {
+						if !time.Now().Before(accepted.Deadline) || handler.publications != 1 ||
+							write.Status != state.PublicationWriteObserved || store.Data.Accepted != nil ||
+							store.Data.Processed[accepted.JobID].IsZero() {
+							t.Fatalf("slow reply was not completed before deadline: write=%+v handler=%+v accepted=%+v",
+								write, handler, store.Data.Accepted)
+						}
+					} else if handler.publications != 0 || write.Status != state.PublicationWritePending ||
+						store.Data.Accepted == nil || !store.Data.Accepted.Deadline.Equal(accepted.Deadline) ||
+						!next.After(time.Now()) || !next.Before(accepted.Deadline) {
+						t.Fatalf("near-deadline lookup did not cancel within action window: next=%s write=%+v handler=%+v accepted=%+v",
+							next, write, handler, store.Data.Accepted)
+					}
+				})
+			})
+		}
 	}
 }
 
