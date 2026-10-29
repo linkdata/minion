@@ -353,7 +353,7 @@ func TestSavedTaskReplySkipsOlderScanWithElevenSecondsLeft(t *testing.T) {
 }
 
 func TestSavedReplyWithoutIssuedWriteRetriesBeforeOriginalDeadline(t *testing.T) {
-	for _, remaining := range []time.Duration{2 * time.Second, 50 * time.Millisecond} {
+	for _, remaining := range []time.Duration{2 * time.Second, 101 * time.Millisecond, 50 * time.Millisecond} {
 		t.Run(remaining.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				now := time.Now().UTC()
@@ -482,7 +482,7 @@ func TestObservedTaskRetryPreemptsUnrelatedChecksWithThirtyOneSecondsLeft(t *tes
 }
 
 func TestObservedTaskReplySaveFailureRetriesBeforeOriginalDeadline(t *testing.T) {
-	for _, remaining := range []time.Duration{500 * time.Millisecond, 50 * time.Millisecond} {
+	for _, remaining := range []time.Duration{500 * time.Millisecond, 101 * time.Millisecond, 50 * time.Millisecond} {
 		t.Run(remaining.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				now := time.Now().UTC()
@@ -953,6 +953,70 @@ func TestPendingFixPushRechecksBeforeOriginalDeadline(t *testing.T) {
 				store.Data.PublicationWrites[accepted.JobID+"-push"])
 		}
 	})
+}
+
+func TestUncertainSavedWriteServicesDueControls(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fix  bool
+	}{
+		{name: "task reply"},
+		{name: "fix push", fix: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				var store *state.Store
+				var accepted state.AcceptedAction
+				var gh *fakeGitHub
+				var m *Monitor
+				writeKey := ""
+				if tc.fix {
+					store, _, accepted, gh, m = storedIssuedFixPushFixtureAt(t, now)
+					writeKey = accepted.JobID + "-push"
+				} else {
+					store, _, accepted, gh, m, _ = storedTaskWriteFixtureAt(t, now, 7*time.Minute, "review", state.PublicationWritePending)
+					writeKey = accepted.JobID
+				}
+				m.Now = time.Now
+				store.Data.Accepted.Deadline = now.Add(7 * time.Minute)
+				store.Data.Accepted.RetryAt = now.Add(time.Minute)
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = store.Data.Accepted.Deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				write := store.Data.PublicationWrites[writeKey]
+				write.Status = state.PublicationWriteUncertain
+				write.StartedAt = now.Add(-time.Second)
+				write.Deadline = now.Add(-time.Millisecond)
+				write.ResolvedAt = now
+				store.Data.PublicationWrites[writeKey] = write
+				item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+					state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+				store.Data.NextInviteCheckAt = now
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				currentItem := gh.currentItem
+				gh.currentItem = func(item github.Item) (github.Item, error) {
+					if item.Key == accepted.SourceKey {
+						return currentItem(item)
+					}
+					return item, nil
+				}
+				gh.threadItems = terminalThreads(map[int]github.Item{8: item})
+				invitationChecks := 0
+				gh.beforeList = func() { invitationChecks++ }
+				handler := &recoveredResultHandler{}
+				m.Handler = handler
+				if _, err := m.RunOnce(t.Context(), store); err != nil || !terminalReplyRecorded(gh, store, terminalID) ||
+					invitationChecks == 0 || handler.publications != 0 || handler.executions != 0 ||
+					store.Data.Accepted == nil || store.Data.PublicationWrites[writeKey].Status != state.PublicationWriteUncertain {
+					t.Fatalf("uncertain %s starved due controls: err=%v replies=%v invitations=%d handler=%+v accepted=%+v write=%+v",
+						tc.name, err, gh.comments, invitationChecks, handler, store.Data.Accepted, store.Data.PublicationWrites[writeKey])
+				}
+			})
+		})
+	}
 }
 
 func TestPendingFixPushServicesDueSiblingBeforeReserve(t *testing.T) {

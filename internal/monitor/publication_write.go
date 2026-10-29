@@ -214,9 +214,11 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 						jobID == accepted.JobID && write.AttemptID == accepted.AttemptID) {
 				actionDeadline = accepted.Deadline
 			}
-			checkAt := publicationWriteCheckAt(write, at, actionDeadline)
+			var checkAt time.Time
 			if !actionDeadline.IsZero() {
 				checkAt = activePublicationWriteWake(write, at, actionDeadline)
+			} else {
+				checkAt = publicationWriteCheckAt(write, at, actionDeadline)
 			}
 			if next.IsZero() || checkAt.Before(next) {
 				next = checkAt
@@ -246,7 +248,7 @@ func activePublicationWriteWake(write state.PublicationWrite, at, actionDeadline
 	}
 	// Keep active checks inside the action window after write grace or near expiry.
 	if remaining := actionDeadline.Sub(at); remaining > publicationLastChanceInterval {
-		return at.Add(publicationLastChanceInterval)
+		return at.Add(min(publicationLastChanceInterval, remaining/2))
 	}
 	return publicationRetryAt(at, actionDeadline)
 }

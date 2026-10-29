@@ -1228,17 +1228,22 @@ func publicationRetryAt(now, deadline time.Time) time.Time {
 	if remaining <= time.Millisecond {
 		return deadline
 	}
-	if remaining <= publicationLastChanceInterval {
-		return now.Add(remaining / 2)
-	}
-	return now.Add(min(publicationRecheckInterval, max(publicationLastChanceInterval, remaining/2)))
+	return now.Add(min(publicationRecheckInterval, remaining/2))
 }
 
 func savedReplyPriority(accepted *state.AcceptedAction, writes map[string]state.PublicationWrite) bool {
 	if accepted == nil || !accepted.ResultReady {
 		return false
 	}
-	return accepted.Action != string(command.Fix) || writes[accepted.JobID+"-push"].Status != state.PublicationWritePending
+	if task := writes[accepted.JobID]; task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteUncertain {
+		return false
+	}
+	if accepted.Action == string(command.Fix) {
+		push := writes[accepted.JobID+"-push"]
+		return push.Status != state.PublicationWritePending &&
+			(push.AttemptID != accepted.AttemptID || push.Status != state.PublicationWriteUncertain)
+	}
+	return true
 }
 
 func (m *Monitor) originalTiming(failure *state.JobFailure) error {

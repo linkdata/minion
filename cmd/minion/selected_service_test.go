@@ -40,14 +40,16 @@ type pendingPushLoopGitHub struct {
 
 type pendingTaskLoopGitHub struct {
 	monitor.GitHub
-	cancel context.CancelFunc
-	marker string
-	checks int
+	cancel      context.CancelFunc
+	marker      string
+	checks      int
+	otherChecks int
 }
 
 func (g *pendingTaskLoopGitHub) HasVerifiedBotPublication(_ context.Context, _ string, _ int, _ time.Time,
 	_ github.User, marker, _ string) (bool, error) {
 	if marker != g.marker {
+		g.otherChecks++
 		return false, nil
 	}
 	g.checks++
@@ -529,9 +531,9 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 				}
 				var logs bytes.Buffer
 				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
-				if elapsed := time.Since(now); code != 0 || gh.checks != 2 || elapsed != tc.wantWake {
-					t.Fatalf("loop missed pending task reply wake: code=%d checks=%d elapsed=%s want=%s logs=%q",
-						code, gh.checks, elapsed, tc.wantWake, logs.String())
+				if elapsed := time.Since(now); code != 0 || gh.checks != 2 || gh.otherChecks != 0 || elapsed != tc.wantWake {
+					t.Fatalf("loop missed pending task reply wake: code=%d checks=%d other checks=%d elapsed=%s want=%s logs=%q",
+						code, gh.checks, gh.otherChecks, elapsed, tc.wantWake, logs.String())
 				}
 			})
 		})

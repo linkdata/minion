@@ -328,6 +328,7 @@ func TestActiveTaskWriteGraceTimeoutStillWakesBeforeActionDeadline(t *testing.T)
 		actionDeadline, writeGrace, wantWake time.Duration
 	}{
 		{name: "ordinary window", actionDeadline: 500 * time.Millisecond, writeGrace: 150 * time.Millisecond, wantWake: 250 * time.Millisecond},
+		{name: "just over last hundred milliseconds", actionDeadline: 181 * time.Millisecond, writeGrace: 80 * time.Millisecond, wantWake: 130*time.Millisecond + 500*time.Microsecond},
 		{name: "last hundred milliseconds", actionDeadline: 180 * time.Millisecond, writeGrace: 80 * time.Millisecond, wantWake: 130 * time.Millisecond},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
