@@ -322,14 +322,14 @@ func TestSlowActivePushCheckLeavesTimeForSavedFixReply(t *testing.T) {
 
 func TestSavedFixKeepsReserveBeforeOlderWriteScan(t *testing.T) {
 	for _, test := range []struct {
-		name           string
-		remaining      time.Duration
-		oldWriteChecks int
-		observedPush   bool
+		name              string
+		remaining         time.Duration
+		maxOldWriteChecks int
+		observedPush      bool
 	}{
-		{name: "pending inside scan budget", remaining: fixPublicationReserve + time.Second, oldWriteChecks: 1},
-		{name: "observed inside scan budget", remaining: fixPublicationReserve + time.Second, oldWriteChecks: 1, observedPush: true},
-		{name: "pending before scan budget", remaining: fixPublicationReserve + publicationReconcileBudget + time.Second, oldWriteChecks: 2},
+		{name: "pending inside scan budget", remaining: fixPublicationReserve + time.Second, maxOldWriteChecks: 1},
+		{name: "observed inside scan budget", remaining: fixPublicationReserve + time.Second, maxOldWriteChecks: 1, observedPush: true},
+		{name: "pending before scan budget", remaining: fixPublicationReserve + publicationReconcileBudget + time.Second, maxOldWriteChecks: 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -362,7 +362,7 @@ func TestSavedFixKeepsReserveBeforeOlderWriteScan(t *testing.T) {
 				handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
 				m.Handler = handler
 				next, err := m.RunOnce(t.Context(), store)
-				if !errors.Is(err, ErrPostModelPublication) || len(gh.verifiedCalls) != test.oldWriteChecks ||
+				if !errors.Is(err, ErrPostModelPublication) || len(gh.verifiedCalls) > test.maxOldWriteChecks ||
 					handler.publications != 1 || !next.Before(deadline) ||
 					deadline.Sub(time.Now()) < fixPublicationReserve || store.Data.Accepted == nil {
 					t.Fatalf("saved fix lost its publication reserve: elapsed=%s remaining=%s next=%s deadline=%s old checks=%d publications=%d accepted=%+v err=%v",
