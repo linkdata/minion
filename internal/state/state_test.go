@@ -26,7 +26,7 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 		t.Fatalf("second writer got %v, want ErrLocked", err)
 	}
 	store.Data.Processed["job"] = initial
-	failure := JobFailure{Attempts: 2, ReplyAttempts: 1, ModelCallStarted: true, AcceptedAt: initial, Deadline: initial.Add(time.Hour)}
+	failure := JobFailure{Attempts: 2, ModelCallStarted: true, AcceptedAt: initial, Deadline: initial.Add(time.Hour)}
 	store.Data.JobFailures["failed"] = failure
 	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
 	store.Data.RepositoryCursors["owner/repo"] = initial.Add(time.Minute)

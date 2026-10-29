@@ -70,11 +70,10 @@ var ErrAcceptedDiscarded = errors.New("accepted action discarded")
 var ErrAcceptedRetry = errors.New("accepted action assignment validation deferred")
 
 const (
-	maxJobAttempts          = 3
-	maxFailureReplyAttempts = 3
-	siblingReplyBudget      = 3 * time.Minute
-	fixPublicationReserve   = 3 * publicationReconcileBudget
-	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
+	maxJobAttempts        = 3
+	siblingReplyBudget    = 3 * time.Minute
+	fixPublicationReserve = 3 * publicationReconcileBudget
+	failureReply          = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
 )
 
 // ActionHandler runs the trusted orchestration and publication workflow.
@@ -1054,9 +1053,6 @@ func terminalControlChecks(store *state.Store, exceptID string) (map[string]term
 			checkAt := failure.Deadline
 			if failure.Attempts >= maxJobAttempts || failure.ModelCallStarted {
 				checkAt = time.Time{}
-			}
-			if failure.ReplyAttempts > 0 && pending.RetryAt.After(checkAt) {
-				checkAt = pending.RetryAt
 			}
 			if previous, exists := checks[failure.NotificationKey]; exists && !checkAt.Before(previous.checkAt) {
 				continue
@@ -2449,12 +2445,6 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 	var next time.Time
 	var invalid []string
 	uncertain := false
-	passStarted := m.now().UTC()
-	var replyRetryAt time.Time
-	_ = store.WithLock(func() error {
-		replyRetryAt = store.Data.PendingNotifications[entry.key].RetryAt
-		return nil
-	})
 	wake := func(at time.Time) {
 		if next.IsZero() || at.Before(next) {
 			next = at
@@ -2524,10 +2514,6 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			}
 			continue
 		}
-		if failure.ReplyAttempts > 0 && passStarted.Before(replyRetryAt) {
-			wake(replyRetryAt)
-			continue
-		}
 		current, err := m.GitHub.CurrentItem(ctx, item)
 		if err != nil {
 			uncertain = true
@@ -2579,20 +2565,8 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 		if failure.ModelCallStarted || !failure.Deadline.IsZero() && !time.Now().Before(failure.Deadline) {
 			failure.Attempts = maxJobAttempts
 		}
-		failure.NotificationKey = entry.key
-		if err := m.finishFailedJobWithRetry(ctx, store, job, m.now().UTC(), failure, &entry); err != nil {
+		if err := m.finishFailedJobWithNotification(ctx, store, job, m.now().UTC(), &entry); err != nil {
 			m.logf("terminal control in %s: %v", itemLocation(current), err)
-			var retryAt time.Time
-			_ = store.WithLock(func() error {
-				if store.Data.JobFailures[id].ReplyAttempts > failure.ReplyAttempts {
-					retryAt = store.Data.PendingNotifications[entry.key].RetryAt
-				}
-				return nil
-			})
-			if !retryAt.IsZero() {
-				wake(retryAt)
-				continue
-			}
 			wake(m.now().UTC().Add(time.Minute))
 		}
 	}
@@ -2766,14 +2740,73 @@ func (m *Monitor) finalizeSelectedSuccess(ctx context.Context, store *state.Stor
 	return ctx.Err()
 }
 
-func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, failure state.JobFailure) error {
-	return m.finishFailedJobWithRetry(ctx, store, job, at, failure, nil)
+func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job Job, at time.Time, _ state.JobFailure) error {
+	return m.finishFailedJobWithNotification(ctx, store, job, at, nil)
 }
 
-func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Store, job Job, at time.Time,
-	failure state.JobFailure, replyRetry *notificationScan) error {
+// The checkpoint makes a lost POST response read-only to recover.
+func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job Job) error {
+	started := m.now().UTC()
+	grace := m.Config.PublicationGraceSeconds
+	if grace <= 0 {
+		grace = config.DefaultPublicationGraceSeconds
+	}
+	attemptID := job.AttemptID
+	if attemptID == "" {
+		attemptID = job.ID
+	}
+	write := state.PublicationWrite{
+		AttemptID: attemptID, Kind: "comment", BotLogin: m.Config.BotLogin, BotID: m.BotID,
+		Repository: job.Repository.Name, Number: job.Number, Marker: job.Marker(), Since: job.Source.UpdatedAt,
+		StartedAt: started, Deadline: started.Add(time.Duration(grace) * time.Second), Status: state.PublicationWritePending,
+	}
+	if err := store.WithLock(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !store.Data.Processed[job.ID].IsZero() {
+			return fmt.Errorf("%w: failed job was already completed", ErrAcceptanceState)
+		}
+		if job.AttemptID != "" {
+			accepted := store.Data.Accepted
+			if accepted == nil || accepted.JobID != job.ID || accepted.AttemptID != job.AttemptID {
+				return fmt.Errorf("%w: accepted action changed before failure reply", ErrAcceptanceState)
+			}
+		}
+		if _, exists := store.Data.PublicationWrites[job.ID]; exists {
+			return fmt.Errorf("%w: failure reply was already issued", ErrAcceptanceState)
+		}
+		if store.Data.PublicationWrites == nil {
+			store.Data.PublicationWrites = make(map[string]state.PublicationWrite)
+		}
+		store.Data.PublicationWrites[job.ID] = write
+		if err := store.Save(); err != nil {
+			delete(store.Data.PublicationWrites, job.ID)
+			return fmt.Errorf("%w: save failure reply checkpoint: %w", ErrAcceptanceState, err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	postCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	_, err := m.GitHub.CreateIssueComment(postCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+job.Marker())
+	cancel()
+	if err != nil {
+		return err // The remote effect is uncertain; only the shared reconciler may inspect it.
+	}
+	if _, err := storePublicationWriteOutcome(store, job.ID, write, state.PublicationWriteObserved, m.now().UTC()); err != nil {
+		return fmt.Errorf("%w: save observed failure reply: %w", ErrAcceptanceState, err)
+	}
+	return nil
+}
+
+func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *state.Store, job Job, at time.Time,
+	notification *notificationScan) error {
 	replyCtx := ctx
-	if replyRetry == nil {
+	if notification == nil {
 		replyCtx = context.WithoutCancel(ctx)
 	}
 	var accepted *state.AcceptedAction
@@ -2817,33 +2850,38 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	}); err != nil {
 		return err
 	}
-	if accepted != nil && !issuedWrite {
+	replied := issuedWrite
+	if !replied && replyCtx.Err() != nil {
+		m.logf("skip failure reply to %s: %v", itemLocation(job.Source), replyCtx.Err())
+		replied = true
+	}
+	if accepted != nil && !replied {
 		issueCtx, cancelIssue := context.WithTimeout(replyCtx, 10*time.Second)
 		present, err := m.acceptedIssuePresent(issueCtx, *accepted)
 		cancelIssue()
 		if err != nil {
-			return err
+			m.logf("skip failure reply to %s: verify source thread: %v", itemLocation(job.Source), err)
+			replied = true
 		}
-		if !present {
+		if err == nil && !present {
 			m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
 			return store.WithLock(func() error { return m.discardAccepted(store) })
 		}
 	}
-	replied := issuedWrite
 	var err error
 	if issuedWrite {
 		m.logf("skip failure reply to %s: an earlier publication was issued; reconcile its remote effect separately", itemLocation(job.Source))
-	} else {
+	} else if !replied {
 		lookupCtx, cancelLookup := context.WithTimeout(replyCtx, 10*time.Second)
-		defer cancelLookup()
 		includeReviews := job.SubjectType == "PullRequest" && job.Command.Action == command.Review
 		replied, err = m.GitHub.HasVerifiedBotReply(lookupCtx, job.Repository.Name, job.Number, job.Source.UpdatedAt, m.BotID, marker, includeReviews)
+		if err == nil {
+			err = lookupCtx.Err()
+		}
+		cancelLookup()
 		if err != nil {
-			if accepted != nil && githubResourceMovedOrGone(err) {
-				m.logf("discard accepted %s: source thread moved or was deleted", itemLocation(job.Source))
-				return store.WithLock(func() error { return m.discardAccepted(store) })
-			}
-			return fmt.Errorf("check existing bot replies to %s: %w", itemLocation(job.Source), err)
+			m.logf("skip failure reply to %s: check existing bot replies: %v", itemLocation(job.Source), err)
+			replied = true
 		}
 	}
 	if !replied && accepted == nil {
@@ -2857,12 +2895,12 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			m.logf("skip failure reply to %s: source or requester is no longer valid", itemLocation(job.Source))
 			replied = true // Finish the failed job without a fresh reply.
 		} else if verifyErr != nil {
-			return fmt.Errorf("revalidate %s before failure reply: %w", itemLocation(job.Source), verifyErr)
+			m.logf("skip failure reply to %s: revalidate source: %v", itemLocation(job.Source), verifyErr)
+			replied = true
 		}
 	}
 	if !replied {
 		if accepted != nil {
-			// Allow several slow GitHub reads without renewing the budget indefinitely.
 			verifyCtx, cancel := context.WithTimeout(replyCtx, 150*time.Second)
 			configured, current, valid, verifyErr := m.validateAcceptedSource(verifyCtx, *accepted, false)
 			if verifyErr == nil {
@@ -2870,14 +2908,17 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 			}
 			cancel()
 			if verifyErr != nil {
-				return fmt.Errorf("revalidate %s before failure reply: %w", itemLocation(job.Source), verifyErr)
-			}
-			if !valid {
+				m.logf("skip failure reply to %s: revalidate source: %v", itemLocation(job.Source), verifyErr)
+				replied = true
+			} else if !valid {
 				m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
 				return store.WithLock(func() error { return m.discardAccepted(store) })
+			} else {
+				job.Repository, job.Source = configured, current
 			}
-			job.Repository, job.Source = configured, current
 		}
+	}
+	if !replied {
 		repoCtx, cancelRepo := context.WithTimeout(replyCtx, 10*time.Second)
 		repo, err := m.GitHub.Repository(repoCtx, job.Repository.Name)
 		if err == nil {
@@ -2885,62 +2926,28 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 		}
 		cancelRepo()
 		if err != nil {
-			return fmt.Errorf("verify %s before failure reply: %w", job.Repository.Name, err)
+			m.logf("skip failure reply to %s: verify repository: %v", itemLocation(job.Source), err)
+			replied = true
+		} else if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
+			m.logf("skip failure reply to %s: repository identity changed", itemLocation(job.Source))
+			replied = true
 		}
-		if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
-			return fmt.Errorf("%s identity changed before failure reply", job.Repository.Name)
+	}
+	if !replied && notification != nil {
+		if err := ctx.Err(); err != nil {
+			m.logf("skip failure reply to %s: %v", itemLocation(job.Source), err)
+			replied = true
+		} else if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 10*time.Second {
+			m.logf("skip failure reply to %s: caller deadline leaves no POST budget", itemLocation(job.Source))
+			replied = true
 		}
-		if replyRetry != nil {
-			if err := ctx.Err(); err != nil {
+	}
+	if !replied {
+		if err := m.postFailureReply(replyCtx, store, job); err != nil {
+			if errors.Is(err, ErrAcceptanceState) {
 				return err
 			}
-			if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 10*time.Second {
-				return fmt.Errorf("defer failure reply to %s: %w", itemLocation(job.Source), context.DeadlineExceeded)
-			}
-		}
-		postCtx, cancelReply := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cancelReply()
-		_, err = m.GitHub.CreateIssueComment(postCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+marker)
-		if err != nil {
-			failure.ReplyAttempts++
-			if failure.ReplyAttempts < maxFailureReplyAttempts {
-				var pending state.PendingNotification
-				if saveErr := store.WithLock(func() error {
-					previousFailure, hadFailure := store.Data.JobFailures[job.ID]
-					var previousPending state.PendingNotification
-					var hadPending bool
-					if replyRetry != nil {
-						previousPending, hadPending = store.Data.PendingNotifications[replyRetry.key]
-					}
-					store.Data.JobFailures[job.ID] = failure
-					if replyRetry != nil {
-						pending = deferNotificationState(store, replyRetry.key, replyRetry.notification, replyRetry.since, m.now().UTC())
-					}
-					if saveErr := saveJobResult(store, accepted != nil); saveErr != nil {
-						if hadFailure {
-							store.Data.JobFailures[job.ID] = previousFailure
-						} else {
-							delete(store.Data.JobFailures, job.ID)
-						}
-						if replyRetry != nil {
-							if hadPending {
-								store.Data.PendingNotifications[replyRetry.key] = previousPending
-							} else {
-								delete(store.Data.PendingNotifications, replyRetry.key)
-							}
-						}
-						return saveErr
-					}
-					return nil
-				}); saveErr != nil {
-					return errors.Join(err, saveErr)
-				}
-				if replyRetry != nil {
-					m.logf("retry %s %s after %s (failure %d)", pending.Repository, pending.SubjectURL, pending.RetryAt.Format(time.RFC3339), pending.Failures)
-				}
-				return fmt.Errorf("post failure reply to %s: %w", itemLocation(job.Source), err)
-			}
-			m.logf("could not post failure reply to %s after %d attempts: %v", itemLocation(job.Source), failure.ReplyAttempts, err)
+			m.logf("failure reply to %s has an uncertain or skipped POST: %v", itemLocation(job.Source), err)
 		}
 	}
 	err = store.WithLock(func() error {

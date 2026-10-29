@@ -33,10 +33,15 @@ func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
 		},
 	}
 	m := selectedMonitor(t, accepted.AcceptedAt, gh, nil)
-	store := &state.Store{Data: state.Data{Accepted: &accepted}}
+	store := openState(t, accepted.AcceptedAt)
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	synctest.Test(t, func(t *testing.T) {
-		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now(), state.JobFailure{}); !errors.Is(err, stop) {
-			t.Fatalf("reply lookup did not follow issue lookup: %v", err)
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now(), state.JobFailure{}); err != nil ||
+			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 {
+			t.Fatalf("failed reply lookup did not finish without POST: %v state=%+v", err, store.Data)
 		}
 		if !hasDeadline || remaining < 9*time.Second {
 			t.Fatalf("reply lookup inherited issue lookup's spent budget: remaining=%s", remaining)
@@ -179,7 +184,7 @@ func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
 			} else if gh.threadCalls != 1 || len(gh.verifiedCalls) != 0 {
 				t.Fatalf("unexpected recovery lookups: replies=%v thread=%d", gh.verifiedCalls, gh.threadCalls)
 			}
-			if test.status == http.StatusGone {
+			if test.status == http.StatusGone || test.assigned {
 				if err != nil || store.Data.Accepted != nil || len(store.Data.Processed) != 1 ||
 					len(store.Data.JobFailures) != 0 || len(gh.comments) != 0 || len(gh.reactions) != 0 {
 					t.Fatalf("deleted issue kept global reservation or received a reply: err=%v state=%+v", err, store.Data)
@@ -201,7 +206,7 @@ func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
 				t.Fatal(err)
 			}
 			reopened := openStateAt(t, path, at.Add(-time.Minute))
-			if test.status == http.StatusGone {
+			if test.status == http.StatusGone || test.assigned {
 				if reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 {
 					t.Fatalf("deleted issue reservation survived restart: %+v", reopened.Data)
 				}

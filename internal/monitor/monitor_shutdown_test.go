@@ -160,7 +160,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 			id := jobID(item.Key, cmd.Name)
 			store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts}
 			key, pending := seedShutdownPending(store, first, tail, initial)
-			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) || test.err != nil && !errors.Is(err, test.err) {
+			if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
 				t.Fatalf("canceled failure reply lost cancellation: %v", err)
 			}
 			if gh.repositoryCalls != 2+test.replies || len(handler.jobs) != 0 || len(store.Data.PendingNotifications) != 1 || store.Data.PendingNotifications[key] != pending ||
@@ -168,7 +168,7 @@ func TestRunOnceStopsCanceledFailureReplyWithoutDeferring(t *testing.T) {
 				t.Fatalf("canceled failure reply continued discovery or changed backoff/cursors: calls=%d state=%+v", gh.repositoryCalls, store.Data)
 			}
 			_, processed := store.Data.Processed[id]
-			if processed != (test.replies == 1) || len(gh.comments) != test.replies || store.Data.JobFailures[id].ReplyAttempts != 0 {
+			if !processed || len(gh.comments) != test.replies {
 				t.Fatalf("failure reply completion or budget changed: processed=%t comments=%d failure=%+v", processed, len(gh.comments), store.Data.JobFailures[id])
 			}
 		})

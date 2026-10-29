@@ -539,7 +539,7 @@ func TestSelectedAssignedFailureIsTerminal(t *testing.T) {
 	}
 }
 
-func TestSelectedFailedReplyStopsBeforeAnotherAcceptance(t *testing.T) {
+func TestSelectedUncertainReplyDoesNotBlockOrRepeatAnotherAcceptance(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	first := selectedItem(at)
 	second := selectedItem(at)
@@ -563,23 +563,20 @@ func TestSelectedFailedReplyStopsBeforeAnotherAcceptance(t *testing.T) {
 		}
 		return errors.New("worker failed")
 	}))
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) {
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatalf("reply error = %v", err)
 	}
-	if executions != 1 || len(gh.reactions) != 1 || store.Data.Accepted == nil ||
-		store.Data.Accepted.JobID != jobID(first.Key, "review") || store.Data.JobFailures[store.Data.Accepted.JobID].Attempts != maxJobAttempts {
-		t.Fatalf("failed reply let another acceptance through: executions=%d reactions=%v state=%+v", executions, gh.reactions, store.Data)
+	firstID, secondID := jobID(first.Key, "review"), jobID(second.Key, "review")
+	if executions != 2 || len(gh.reactions) != 2 || store.Data.Accepted != nil ||
+		store.Data.Processed[firstID].IsZero() || store.Data.Processed[secondID].IsZero() || gh.commentCalls != 2 ||
+		store.Data.PublicationWrites[firstID].Status != state.PublicationWritePending ||
+		store.Data.PublicationWrites[secondID].Status != state.PublicationWritePending {
+		t.Fatalf("uncertain reply blocked or repeated another acceptance: executions=%d reactions=%v state=%+v", executions, gh.reactions, store.Data)
 	}
 	gh.commentErr = nil
-	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 1 || len(gh.comments) != 0 {
-		t.Fatalf("failure reply retried before due: err=%v executions=%d comments=%+v", err, executions, gh.comments)
-	}
-	store.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 1 || len(gh.comments) != 1 || store.Data.Accepted != nil {
-		t.Fatalf("recovery did not finish held reply: err=%v executions=%d comments=%+v state=%+v", err, executions, gh.comments, store.Data)
+	if _, err := m.RunOnce(t.Context(), store); err != nil || gh.commentCalls != 2 ||
+		store.Data.TerminalDecisions[firstID].Outcome != "failed" || store.Data.TerminalDecisions[secondID].Outcome != "failed" {
+		t.Fatalf("later pass repeated or changed terminal outcomes: err=%v posts=%d state=%+v", err, gh.commentCalls, store.Data)
 	}
 }
 
@@ -779,7 +776,7 @@ func TestSelectedIssueRecoveryChecksOriginalThread(t *testing.T) {
 					t.Fatal(err)
 				}
 				store = openStateAt(t, path, at.Add(-time.Minute))
-				if status == http.StatusNotFound {
+				if status == http.StatusNotFound && !terminal {
 					var got *github.StatusError
 					if !errors.As(err, &got) || got.StatusCode != status || store.Data.Accepted == nil ||
 						store.Data.Accepted.AttemptID != accepted.AttemptID || store.Data.Accepted.Terminal != terminal ||
@@ -793,6 +790,12 @@ func TestSelectedIssueRecoveryChecksOriginalThread(t *testing.T) {
 				_, processed := store.Data.Processed[accepted.JobID]
 				if err != nil || store.Data.Accepted != nil || !processed || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
 					t.Fatalf("issue recovery result: err=%v state=%+v", err, store.Data)
+				}
+				if status == http.StatusNotFound {
+					if dispatches != 0 || len(gh.comments) != 0 {
+						t.Fatalf("terminal 404 posted a reply: dispatches=%d comments=%v", dispatches, gh.comments)
+					}
+					return
 				}
 				if status == http.StatusMovedPermanently {
 					if dispatches != 0 || len(gh.comments) != 0 {
@@ -981,7 +984,7 @@ func TestSelectedTerminalRecoveryRechecksSourceAndAuthority(t *testing.T) {
 	}
 }
 
-func TestSelectedTerminalRecoveryRetainsTransientLookupAndSchedulesRetry(t *testing.T) {
+func TestSelectedTerminalRecoveryFinishesAfterTransientLookup(t *testing.T) {
 	at := time.Now().UTC()
 	accepted := selectedAcceptance(t, at)
 	accepted.Assigned = true
@@ -989,50 +992,29 @@ func TestSelectedTerminalRecoveryRetainsTransientLookupAndSchedulesRetry(t *test
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
-	store.Data.NextPollAt = at.Add(-time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
 	lookupErr := errors.New("source lookup unavailable")
-	gh := &fakeGitHub{items: []github.Item{selectedItem(at)}, permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) {
-		return github.Item{}, lookupErr
-	}}
-	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("terminal action redispatched"); return nil }))
-	before := time.Now().UTC()
-	next, err := m.RunOnce(t.Context(), store)
-	if !errors.Is(err, lookupErr) || next.Before(before.Add(time.Minute-time.Second)) ||
-		store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(next) ||
-		!store.Data.Accepted.Deadline.Equal(accepted.Deadline) || len(gh.comments) != 0 {
-		t.Fatalf("transient terminal lookup spun or cleared reservation: next=%s err=%v state=%+v", next, err, store.Data)
+	gh := &fakeGitHub{items: []github.Item{selectedItem(at)}, permission: github.Permission{Permission: "write"},
+		currentItem: func(github.Item) (github.Item, error) { return github.Item{}, lookupErr }}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("terminal action redispatched")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+		store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 || len(store.Data.PublicationWrites) != 0 {
+		t.Fatalf("transient terminal lookup did not finish without POST: err=%v state=%+v", err, store.Data)
 	}
 	lookups := gh.currentChecks
-	if next, err := m.RunOnce(t.Context(), store); err != nil || !next.Equal(store.Data.Accepted.RetryAt) || gh.currentChecks != lookups {
-		t.Fatalf("one-pass poll retried before due time: next=%s err=%v lookups=%d", next, err, gh.currentChecks)
-	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
-	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.RetryAt.Equal(store.Data.Accepted.RetryAt) {
-		t.Fatalf("retry schedule was not durable: %+v", reopened.Data)
-	}
-	if next, err := m.RunOnce(t.Context(), reopened); err != nil || !next.Equal(reopened.Data.Accepted.RetryAt) || gh.currentChecks != lookups {
-		t.Fatalf("restart retried before due time: next=%s err=%v lookups=%d", next, err, gh.currentChecks)
-	}
-	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
-	if err := reopened.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.RunOnce(t.Context(), reopened); !errors.Is(err, lookupErr) || gh.currentChecks != lookups+1 {
-		t.Fatalf("due retry skipped transient lookup: err=%v lookups=%d", err, gh.currentChecks)
-	}
 	gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(at), nil }
-	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
-	if err := reopened.Save(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(gh.comments) != 1 || reopened.Data.Accepted != nil {
-		t.Fatalf("terminal lookup retry did not finish: err=%v state=%+v", err, reopened.Data)
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.currentChecks != lookups ||
+		reopened.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 {
+		t.Fatalf("restart rediscovered skipped reply: err=%v state=%+v", err, reopened.Data)
 	}
 }
 
@@ -1166,7 +1148,7 @@ func TestSelectedReservedThirdAttemptResumesAfterRestart(t *testing.T) {
 	}
 }
 
-func TestSelectedThirdAttemptExpiryPersistsTerminalMarkerBeforeReply(t *testing.T) {
+func TestSelectedThirdAttemptExpiryKeepsOutcomeAfterUncertainReply(t *testing.T) {
 	at := time.Now().UTC().Add(-9 * time.Minute)
 	accepted := selectedAcceptance(t, at)
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -1185,24 +1167,23 @@ func TestSelectedThirdAttemptExpiryPersistsTerminalMarkerBeforeReply(t *testing.
 		t.Fatal("expired reservation dispatched work")
 		return nil
 	}))
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || store.Data.Accepted == nil ||
-		!store.Data.Accepted.Terminal || store.Data.JobFailures[accepted.JobID].Attempts != maxJobAttempts {
-		t.Fatalf("terminal marker was not saved before reply: err=%v state=%+v", err, store.Data)
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+		store.Data.Processed[accepted.JobID].IsZero() ||
+		store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending ||
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" {
+		t.Fatalf("terminal outcome or uncertain reply was lost: err=%v state=%+v", err, store.Data)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
-	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal {
-		t.Fatalf("terminal marker was lost after restart: %+v", reopened.Data)
-	}
-	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
-	if err := reopened.Save(); err != nil {
-		t.Fatal(err)
+	if reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() ||
+		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" {
+		t.Fatalf("terminal outcome was lost after restart: %+v", reopened.Data)
 	}
 	gh.commentErr = nil
-	if _, err := m.RunOnce(t.Context(), reopened); err != nil || len(gh.comments) != 1 || reopened.Data.Accepted != nil {
-		t.Fatalf("terminal retry redispatched or missed reply: err=%v state=%+v", err, reopened.Data)
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 1 || len(gh.comments) != 0 {
+		t.Fatalf("restart repeated uncertain reply: err=%v state=%+v", err, reopened.Data)
 	}
 }
 
@@ -1226,21 +1207,19 @@ func TestSelectedThirdAttemptTerminalFailureDoesNotRedispatchAfterRestart(t *tes
 		executions++
 		return errors.Join(ErrTerminalJob, errors.New("preassignment failure"))
 	}))
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || executions != 1 ||
-		store.Data.Accepted == nil || !store.Data.Accepted.Terminal || store.Data.Accepted.Assigned ||
-		store.Data.JobFailures[accepted.JobID].Attempts != maxJobAttempts || len(gh.comments) != 0 {
-		t.Fatalf("terminal preassignment failure lost its marker: err=%v executions=%d state=%+v", err, executions, store.Data)
+	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 1 ||
+		store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" ||
+		store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending || len(gh.comments) != 0 {
+		t.Fatalf("terminal preassignment failure lost its outcome: err=%v executions=%d state=%+v", err, executions, store.Data)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
-	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal {
-		t.Fatalf("terminal marker was not durable: %+v", reopened.Data)
-	}
-	reopened.Data.Accepted.RetryAt = time.Now().UTC().Add(-time.Second)
-	if err := reopened.Save(); err != nil {
-		t.Fatal(err)
+	if reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() ||
+		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" {
+		t.Fatalf("terminal outcome was not durable: %+v", reopened.Data)
 	}
 	gh.commentErr = nil
 	m.Handler = selectedHandler(func(Job) error {
@@ -1248,8 +1227,8 @@ func TestSelectedThirdAttemptTerminalFailureDoesNotRedispatchAfterRestart(t *tes
 		return nil
 	})
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil || executions != 1 ||
-		len(gh.comments) != 1 || reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 {
-		t.Fatalf("terminal recovery repeated work or missed reply: err=%v executions=%d state=%+v", err, executions, reopened.Data)
+		gh.commentCalls != 1 || len(gh.comments) != 0 || reopened.Data.Accepted != nil {
+		t.Fatalf("terminal recovery repeated work or reply: err=%v executions=%d state=%+v", err, executions, reopened.Data)
 	}
 }
 

@@ -380,14 +380,13 @@ func TestSelectedExecuteGuardsTerminalControlAgainstLiveRepositoryIdentityMismat
 	}
 }
 
-func TestRunOnceCompletedScanWakesForTerminalDeadlineOrReplyRetry(t *testing.T) {
+func TestRunOnceCompletedScanWakesForTerminalDeadline(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		failure state.JobFailure
 		retry   time.Duration
 	}{
 		{name: "deadline", failure: state.JobFailure{Attempts: 1}, retry: 5 * time.Minute},
-		{name: "reply retry", failure: state.JobFailure{Attempts: maxJobAttempts, ReplyAttempts: 1}, retry: 2 * time.Minute},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -421,7 +420,7 @@ func TestRunOnceCompletedScanWakesForTerminalDeadlineOrReplyRetry(t *testing.T) 
 	}
 }
 
-func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
+func TestSelectedNewerSameThreadCommandKeepsUncertainReplyOneShot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		older := selectedItem(now.Add(-2 * time.Second))
@@ -435,13 +434,13 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		statePath := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, statePath, now.Add(-time.Minute))
 		store.Data.JobFailures[olderID] = state.JobFailure{
-			Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key,
+			Attempts: maxJobAttempts, NotificationKey: key,
 		}
 		store.Data.PendingNotifications[key] = state.PendingNotification{
 			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
 			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
 			Since: now.Add(-time.Minute), UpdatedAt: older.UpdatedAt,
-			RetryAt: now.Add(5 * time.Minute), Failures: 1,
+			RetryAt: time.Time{}, Failures: 0,
 		}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
@@ -474,29 +473,25 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		synctest.Wait()
 		pending := store.Data.PendingNotifications[key]
 		failure := store.Data.JobFailures[olderID]
-		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() ||
-			failure.ReplyAttempts != 2 || pending.Failures != 2 || !pending.RetryAt.After(time.Now()) ||
+		if gh.commentCalls != 1 || store.Data.Processed[olderID].IsZero() ||
+			failure.Attempts != 0 || pending.Failures != 0 ||
 			!pending.UpdatedAt.Equal(notice.UpdatedAt) {
-			t.Errorf("newer command lost older reply backoff: calls=%d processed=%v failure=%+v pending=%+v",
+			t.Errorf("newer command lost older one-shot reply: calls=%d processed=%v failure=%+v pending=%+v",
 				gh.commentCalls, store.Data.Processed[olderID], failure, pending)
 		}
-		if untilRetry := pending.RetryAt.Sub(time.Now()) / 2; untilRetry > 0 {
-			time.Sleep(untilRetry)
-		}
+		time.Sleep(time.Minute)
 		synctest.Wait()
-		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() {
-			t.Errorf("older reply repeated before its retry time: calls=%d processed=%v retry=%s now=%s",
+		if gh.commentCalls != 1 || store.Data.Processed[olderID].IsZero() {
+			t.Errorf("older reply repeated: calls=%d processed=%v retry=%s now=%s",
 				gh.commentCalls, store.Data.Processed[olderID], pending.RetryAt, time.Now())
 		}
 		close(held.release)
 		synctest.Wait()
-		if err := <-result; !errors.Is(err, commentErr) {
+		if err := <-result; err != nil {
 			t.Errorf("RunOnce after older reply failure: %v", err)
 		}
-		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() ||
-			store.Data.Processed[newerID].IsZero() || store.Data.JobFailures[olderID].ReplyAttempts != 2 ||
-			store.Data.PendingNotifications[key].Failures != pending.Failures ||
-			!store.Data.PendingNotifications[key].RetryAt.Equal(pending.RetryAt) {
+		if gh.commentCalls != 1 || store.Data.Processed[olderID].IsZero() ||
+			store.Data.Processed[newerID].IsZero() || store.Data.PublicationWrites[olderID].Status != state.PublicationWritePending {
 			t.Errorf("release retried or deferred older reply again: calls=%d processed=%v failures=%+v pending=%+v",
 				gh.commentCalls, store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications)
 		}
@@ -508,10 +503,8 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		if err := json.Unmarshal(stateBytes, &saved); err != nil {
 			t.Fatal(err)
 		}
-		if saved.JobFailures[olderID].ReplyAttempts != 2 || !saved.Processed[olderID].IsZero() ||
-			saved.PendingNotifications[key].Failures != pending.Failures ||
-			!saved.PendingNotifications[key].RetryAt.Equal(pending.RetryAt) {
-			t.Errorf("older reply retry was not durable: saved failure=%+v processed=%v pending=%+v",
+		if saved.PublicationWrites[olderID].Status != state.PublicationWritePending || saved.Processed[olderID].IsZero() {
+			t.Errorf("older one-shot reply was not durable: saved failure=%+v processed=%v pending=%+v",
 				saved.JobFailures[olderID], saved.Processed[olderID], saved.PendingNotifications[key])
 		}
 	})
