@@ -48,13 +48,7 @@ func TestOrchestratorAllowsQuotedRequestNotesButRejectsNewPrivateText(t *testing
 				Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 			}
 			e.Executor = executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
-				assignment, ok := checkpoints.(assignmentCheckpoint)
-				if !ok {
-					t.Fatal("selected worker has no assignment checkpoint")
-				}
-				if err := assignment.BeforeAssignment(job); err != nil {
-					t.Fatal(err)
-				}
+				admitFixtureAssignment(t, checkpoints, job)
 				if job.Notes != quoted {
 					t.Fatalf("requester notes did not reach prepared action: %q", job.Notes)
 				}

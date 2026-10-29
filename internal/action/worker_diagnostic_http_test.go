@@ -687,13 +687,7 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 		Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
-		assignment, ok := checkpoints.(assignmentCheckpoint)
-		if !ok {
-			return Result{}, fmt.Errorf("selected worker has no assignment checkpoint")
-		}
-		if err := assignment.BeforeAssignment(job); err != nil {
-			return Result{}, err
-		}
+		admitFixtureAssignment(t, checkpoints, job)
 		transport := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		transport.pull(t)
 		result := privateReviewResult(job)
