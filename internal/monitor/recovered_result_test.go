@@ -320,6 +320,59 @@ func TestSlowActivePushCheckLeavesTimeForSavedFixReply(t *testing.T) {
 	})
 }
 
+func TestSavedFixKeepsReserveBeforeOlderWriteScan(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		remaining      time.Duration
+		oldWriteChecks int
+		observedPush   bool
+	}{
+		{name: "pending inside scan budget", remaining: fixPublicationReserve + time.Second, oldWriteChecks: 1},
+		{name: "observed inside scan budget", remaining: fixPublicationReserve + time.Second, oldWriteChecks: 1, observedPush: true},
+		{name: "pending before scan budget", remaining: fixPublicationReserve + publicationReconcileBudget + time.Second, oldWriteChecks: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(test.remaining)
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = time.Time{}
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+					AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8,
+					Repository: "owner/repo", Number: 9, Marker: "<!-- linkdataminion:old-job -->", Since: now,
+					StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+				if test.observedPush {
+					push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+					push.Status, push.ResolvedAt = state.PublicationWriteObserved, now
+					store.Data.PublicationWrites[accepted.JobID+"-push"] = push
+				}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					return github.Branch{}, &github.StatusError{StatusCode: 404}
+				}
+				gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
+				handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if !errors.Is(err, ErrPostModelPublication) || len(gh.verifiedCalls) != test.oldWriteChecks ||
+					handler.publications != 1 || !next.Before(deadline) ||
+					deadline.Sub(time.Now()) < fixPublicationReserve || store.Data.Accepted == nil {
+					t.Fatalf("saved fix lost its publication reserve: elapsed=%s remaining=%s next=%s deadline=%s old checks=%d publications=%d accepted=%+v err=%v",
+						time.Since(now), deadline.Sub(time.Now()), next, deadline, len(gh.verifiedCalls), handler.publications, store.Data.Accepted, err)
+				}
+			})
+		})
+	}
+}
+
 func TestStartupObservedFixPushRespectsLaterPublicationBackoff(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

@@ -265,14 +265,15 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			retriedObservedPush = true
 			err = m.recoverAccepted(ctx, store)
 		}
-		remaining := time.Duration(0)
-		if store.Data.Accepted != nil {
-			remaining = time.Until(store.Data.Accepted.Deadline)
+		reserveFix := false
+		if accepted := store.Data.Accepted; accepted != nil {
+			remaining := time.Until(accepted.Deadline)
+			// An unrelated scan can consume a full budget before the fix reserve starts.
+			reserveFix = accepted.Action == string(command.Fix) && remaining > 0 &&
+				remaining <= fixPublicationReserve+publicationReconcileBudget
 		}
-		urgentPush := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) ||
-			(store.Data.PublicationWrites[pushKey].Status == state.PublicationWritePending &&
-				remaining > 0 && remaining <= fixPublicationReserve)
-		if reconcileErr == nil && !urgentPush {
+		urgentFix := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) || reserveFix
+		if reconcileErr == nil && !urgentFix {
 			postSkip := skipChecked
 			if pushBeforeScan == state.PublicationWritePending {
 				postSkip = pushKey
