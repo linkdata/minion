@@ -196,11 +196,15 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			(task.Status == state.PublicationWritePending || task.Status == state.PublicationWriteObserved)
 	}
 	if err := m.reconcilePublicationWrites(ctx, store, activeJobID, ""); err != nil {
-		if accepted := store.Data.Accepted; accepted != nil && errors.Is(err, ErrPostModelPublication) &&
-			time.Now().Before(accepted.Deadline) {
-			// The remote reply was seen; retry its failed local observation before expiry.
-			accepted.RetryAt = publicationRetryAt(time.Now().UTC(), accepted.Deadline)
-			return accepted.RetryAt, err
+		if accepted := store.Data.Accepted; accepted != nil && errors.Is(err, ErrPostModelPublication) {
+			now := time.Now().UTC()
+			if now.Before(accepted.Deadline) {
+				// The remote reply was seen; retry its failed local observation before expiry.
+				accepted.RetryAt = publicationRetryAt(now, accepted.Deadline)
+				return accepted.RetryAt, err
+			}
+			// An expired acceptance still needs prompt terminal cleanup after storage recovers.
+			return now.Add(time.Second), err
 		}
 		return store.Data.NextPollAt, err
 	}

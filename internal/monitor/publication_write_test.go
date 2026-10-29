@@ -325,15 +325,17 @@ func TestActiveTaskWriteWakeUsesOriginalDeadline(t *testing.T) {
 func TestObservedActiveTaskWriteClearsRetryOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name, kind, attemptID string
-		clears                bool
+		clears, notReady      bool
 	}{
 		{name: "comment", kind: "comment", clears: true},
 		{name: "review", kind: "review", clears: true},
 		{name: "stale attempt", kind: "review", attemptID: "older-attempt"},
+		{name: "result not ready", kind: "review", notReady: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now().UTC()
 			store, path, accepted, _, _ := storedRecoveryFixtureAt(t, now)
+			store.Data.Accepted.ResultReady = !tc.notReady
 			retryAt := now.Add(30 * time.Second)
 			store.Data.Accepted.RetryAt = retryAt
 			attemptID := accepted.AttemptID
@@ -466,7 +468,7 @@ func TestRunOncePendingTaskReplyPreemptsOlderWritesAndInvitations(t *testing.T) 
 		invitationChecks := 0
 		gh.beforeList = func() { invitationChecks++ }
 		next, err := m.RunOnce(t.Context(), store)
-		if err != nil || !next.Equal(now.Add(20500*time.Millisecond)) || len(gh.verifiedCalls) != 1 || invitationChecks != 0 ||
+		if err != nil || !next.Equal(now.Add(20500*time.Millisecond)) || len(gh.verifiedCalls) != 1 || !gh.verifiedCalls[0] || invitationChecks != 0 ||
 			store.Data.Accepted == nil || store.Data.Accepted.JobID != accepted.JobID ||
 			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending {
 			t.Fatalf("pending reply did not preempt unrelated checks: next=%s err=%v checks=%d invitations=%d accepted=%+v write=%+v",

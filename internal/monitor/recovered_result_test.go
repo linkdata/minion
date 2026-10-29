@@ -523,6 +523,52 @@ func TestObservedTaskReplySaveFailureRetriesBeforeOriginalDeadline(t *testing.T)
 	})
 }
 
+func TestObservedTaskReplySaveFailureAfterDeadlineWakesForCleanup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, path, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, 200*time.Millisecond, "review", state.PublicationWritePending)
+		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		gh.reviewReplies = []github.Item{{Body: "published\n\n" + marker,
+			Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
+		handler := &recoveredResultHandler{}
+		m.Handler = handler
+		time.Sleep(time.Until(accepted.Deadline) + time.Millisecond)
+		backup := path + ".saved"
+		if err := os.Rename(path, backup); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "block"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		attemptedAt := time.Now().UTC()
+		next, err := m.RunOnce(t.Context(), store)
+		if !errors.Is(err, ErrPostModelPublication) || errors.Is(err, ErrAcceptanceState) ||
+			!next.Equal(attemptedAt.Add(time.Second)) || handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("expired observation save failure stalled cleanup: next=%s err=%v handler=%+v", next, err, handler)
+		}
+		if err := os.Remove(filepath.Join(path, "block")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(backup, path); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || handler.executions != 0 {
+			t.Fatalf("expired acceptance did not complete after storage recovered: accepted=%+v processed=%v handler=%+v",
+				store.Data.Accepted, store.Data.Processed[accepted.JobID], handler)
+		}
+	})
+}
+
 func TestUnrelatedPublicationSaveFailureRemainsFatal(t *testing.T) {
 	now := time.Now().UTC()
 	store, path, _, gh, m := storedRecoveryFixtureAt(t, now)
@@ -1776,6 +1822,9 @@ func TestStoredResultRecoveryDefersInvitationUntilPublicationFinishes(t *testing
 					store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
 					t.Fatalf("held %s did not finish: err=%v handler=%+v state=%+v", phase, err, handler, store.Data)
 				}
+				gh.items = []github.Item{{Body: "published\n\n<!-- linkdataminion:old-job -->",
+					Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
+				gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
 				if _, err := monitor.RunOnce(t.Context(), store); err != nil {
 					t.Fatal(err)
 				}
@@ -1783,6 +1832,9 @@ func TestStoredResultRecoveryDefersInvitationUntilPublicationFinishes(t *testing
 				case <-checked:
 				default:
 					t.Fatal("deferred invitation was not checked after publication")
+				}
+				if got := store.Data.PublicationWrites["old-job"].Status; got != state.PublicationWriteObserved {
+					t.Fatalf("deferred older write was not reconciled after publication: %s", got)
 				}
 			})
 		})
