@@ -883,7 +883,7 @@ func TestQueuedFailureReplyRespectsCallerDeadline(t *testing.T) {
 						return ctx.Err()
 					}
 				}
-				m := &Monitor{Config: cfg, GitHub: gh, Now: time.Now}
+				m := &Monitor{Config: cfg, GitHub: gh, BotID: 8, Now: time.Now}
 				job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 8, Source: item,
 					Command: command.Command{Name: "review", Action: command.Review}, ID: id}
 				err := m.finishFailedJobWithRetry(ctx, store, job, now, failure, &control.entry)
