@@ -2006,13 +2006,29 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		})
 		return pending
 	}
+	selectedSavedReply := func() bool {
+		var ready bool
+		_ = store.WithLock(func() error {
+			accepted := store.Data.Accepted
+			if accepted == nil || accepted.JobID != job.ID || accepted.AttemptID != job.AttemptID {
+				return nil
+			}
+			write := store.Data.PublicationWrites[job.ID]
+			ready = savedReplyPriority(accepted, store.Data.PublicationWrites) ||
+				accepted.ResultReady && write.AttemptID == job.AttemptID &&
+					(write.Kind == "comment" || write.Kind == "review") &&
+					(write.Status == state.PublicationWritePending || write.Status == state.PublicationWriteObserved)
+			return nil
+		})
+		return ready
+	}
 	done := make(chan error, 1)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() {
 			cancelForSavedResult := selectedResultReady()
 			done <- result
-			if cancelControls != nil && (job.Command.Action == command.Fix || cancelForSavedResult) {
+			if job.Command.Action == command.Fix || cancelForSavedResult {
 				cancelControls()
 			}
 		}()
@@ -2097,6 +2113,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	nextCheck := make(map[string]time.Time)
 	nextPublicationCheck := m.now().UTC()
 	initialPublicationCheck := true
+selectedLoop:
 	for {
 		readDone()
 		if completed && (job.Command.Action == command.Fix || selectedResultReady()) {
@@ -2105,19 +2122,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		if completedWithDecision() {
 			return finish(result)
 		}
-		var savedTaskReply, activeSavedReply bool
-		_ = store.WithLock(func() error {
-			accepted := store.Data.Accepted
-			write := store.Data.PublicationWrites[job.ID]
-			activeSavedReply = accepted != nil && accepted.JobID == job.ID &&
-				accepted.AttemptID == job.AttemptID && savedReplyPriority(accepted, store.Data.PublicationWrites)
-			savedTaskReply = accepted != nil && accepted.JobID == job.ID && accepted.AttemptID == job.AttemptID &&
-				accepted.ResultReady && write.AttemptID == job.AttemptID &&
-				(write.Kind == "comment" || write.Kind == "review") &&
-				(write.Status == state.PublicationWritePending || write.Status == state.PublicationWriteObserved)
-			return nil
-		})
-		if savedResultAtStart || activeSavedReply || savedTaskReply {
+		if savedResultAtStart || selectedSavedReply() {
 			// Give the saved reply the remaining deadline instead of scanning unrelated work.
 			if completed {
 				return finish(result)
@@ -2144,6 +2149,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				if completed && job.Command.Action == command.Fix {
 					return finish(result)
 				}
+				if selectedSavedReply() {
+					continue selectedLoop
+				}
 				// Keep the fix's publication reserve before scanning older writes.
 				if !completed && (job.Command.Action != command.Fix || time.Until(job.Deadline) > fixPublicationReserve) {
 					if err := m.reconcilePublicationWrites(controlCtx, store, "", skipJobID); err != nil && !deferredControl(err) {
@@ -2163,6 +2171,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		readDone()
 		if completed && job.Command.Action == command.Fix {
 			return finish(result)
+		}
+		if selectedSavedReply() {
+			continue selectedLoop
 		}
 		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		if !reserveFixDeadline && !selectedPendingPush() {
@@ -2219,6 +2230,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if completed && job.Command.Action == command.Fix {
 				return finish(result)
 			}
+			if selectedSavedReply() {
+				continue selectedLoop
+			}
 			if job.Command.Action == command.Fix && time.Until(controlDeadline) <= siblingReplyBudget {
 				break
 			}
@@ -2242,6 +2256,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if completed && job.Command.Action == command.Fix {
 				return finish(result)
 			}
+			if selectedSavedReply() {
+				continue selectedLoop
+			}
 			if !selectedPendingPush() {
 				if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 					if controlCanceledByWorker(err) {
@@ -2255,6 +2272,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		readDone()
 		if completedWithDecision() {
 			return finish(result)
+		}
+		if selectedSavedReply() {
+			continue selectedLoop
 		}
 		if err := ctx.Err(); err != nil {
 			stopErr := stopWorker(err)

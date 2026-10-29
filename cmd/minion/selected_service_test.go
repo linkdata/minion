@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type terminalRecoveryGitHub struct {
@@ -519,6 +520,36 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 					NextPollAt:        now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
 				})
 				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				job := action.Job{
+					Version: action.ProtocolVersion,
+					Identity: action.Identity{
+						JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
+						Repository: accepted.Repository, RepositoryID: accepted.RepositoryID, OwnerID: accepted.OwnerID,
+						Requester: accepted.Requester, RequesterID: accepted.RequesterID,
+						Number: accepted.SubjectNumber, SubjectType: accepted.SubjectType,
+					},
+					Command: accepted.CommandName, Action: command.Comment,
+					Source:        workspace.Snapshot{Head: strings.Repeat("c", 40), Repository: []byte("saved source bundle")},
+					Main:          action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}},
+					RuntimeBudget: time.Minute,
+				}
+				record := action.AcceptedResultRecord{
+					Accepted: accepted, Job: job,
+					Result: action.Result{
+						Version: action.ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+						Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Complete: true}},
+					},
+				}
+				if err := record.Validate(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.WriteAcceptedResult(data); err != nil {
 					t.Fatal(err)
 				}
 				ctx, cancel := context.WithCancel(t.Context())

@@ -1043,6 +1043,107 @@ func TestSelectedSavedReplyDefersOlderWriteUntilPublisherFinishes(t *testing.T) 
 	})
 }
 
+func TestSelectedLiveSavedReplyStopsControlsAfterOlderLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		m.Now = time.Now
+		if err := store.ClearAcceptedResult(); err != nil {
+			t.Fatal(err)
+		}
+		store.Data.Accepted.ResultReady = false
+		store.Data.NextInviteCheckAt = now
+		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
+			AttemptID: "old-attempt", Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
+			Repository: accepted.Repository, Number: accepted.SubjectNumber,
+			Marker: "<!-- linkdataminion:old-job -->", Since: now,
+			StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+		}
+		_, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+
+		result := []byte(`{"result":"saved"}`)
+		lookupEntered := make(chan struct{})
+		releaseLookup := make(chan struct{})
+		lookupReturned := make(chan struct{})
+		defer func() {
+			select {
+			case <-releaseLookup:
+			default:
+				close(releaseLookup)
+			}
+		}()
+		gh.beforeVerify = func(context.Context, bool) error {
+			close(lookupEntered)
+			<-releaseLookup
+			close(lookupReturned)
+			return nil
+		}
+		var invitationChecks, terminalChecks atomic.Int32
+		gh.beforeList = func() { invitationChecks.Add(1) }
+		gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+			terminalChecks.Add(1)
+			return nil, nil
+		}
+		saved := make(chan error, 1)
+		releasePublisher := make(chan struct{})
+		defer func() {
+			select {
+			case <-releasePublisher:
+			default:
+				close(releasePublisher)
+			}
+		}()
+		finished := make(chan error, 1)
+		go func() {
+			finished <- m.runSelectedWithControls(t.Context(), store, jobFromAccepted(accepted), "", nil,
+				func(context.Context, Job) error {
+					<-lookupEntered
+					err := store.WithLock(func() error {
+						if err := store.WriteAcceptedResult(result); err != nil {
+							return err
+						}
+						store.Data.Accepted.ResultReady = true
+						return store.Save()
+					})
+					saved <- err
+					<-releasePublisher
+					return err
+				}, func(err error) error { return err })
+		}()
+		if err := <-saved; err != nil {
+			t.Fatal(err)
+		}
+		if got, err := store.ReadAcceptedResult(int64(len(result))); err != nil || string(got) != string(result) {
+			t.Fatalf("selected result was not durable: read=%q err=%v", got, err)
+		}
+		close(releaseLookup)
+		synctest.Wait()
+		select {
+		case <-lookupReturned:
+		default:
+			t.Fatal("older publication lookup did not return")
+		}
+		select {
+		case err := <-finished:
+			t.Fatalf("selected publisher finished before release: %v", err)
+		default:
+		}
+		if invitationChecks.Load() != 0 || terminalChecks.Load() != 0 ||
+			!store.Data.Processed[terminalID].IsZero() {
+			t.Fatalf("controls ran before selected publisher finished: invitations=%d terminal=%d processed=%v",
+				invitationChecks.Load(), terminalChecks.Load(), store.Data.Processed[terminalID])
+		}
+		close(releasePublisher)
+		if err := <-finished; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 func TestSelectedReviewNearDeadlineReconcilesOverdueWrite(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
