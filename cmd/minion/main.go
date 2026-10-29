@@ -45,7 +45,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 
 func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
-	mode := flag.String("mode", "in-process", "service mode: in-process, orchestrate, or execute")
+	mode := flag.String("mode", "orchestrate", "service mode: orchestrate or execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
 	check := flag.Bool("check", false, "verify Git readiness, AI settings, authentication, and repository access, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
@@ -56,7 +56,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 2
 	}
 	switch *mode {
-	case "in-process", "orchestrate":
+	case "orchestrate":
 	case "execute":
 		incompatible := false
 		flag.Visit(func(f *flag.Flag) {
@@ -71,7 +71,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		return runExecuteMode()
 	default:
-		logger.Printf("unsupported mode %q; use in-process, orchestrate, or execute", *mode)
+		logger.Printf("unsupported mode %q; use orchestrate or execute", *mode)
 		return 2
 	}
 	loadedPath, err := filepath.Abs(*configPath)
@@ -229,15 +229,12 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	orchestrator.BotID = user.ID
 	bindPublicationValidation(orchestrator, watcher)
 	watcher.Config, watcher.Handler = cfg, orchestrator
-	if *mode == "orchestrate" {
-		path, err := os.Executable()
-		if err != nil {
-			logger.Printf("locate executable: %v", err)
-			return 1
-		}
-		return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
+	path, err := os.Executable()
+	if err != nil {
+		logger.Printf("locate executable: %v", err)
+		return 1
 	}
-	return runMonitorLoop(ctx, watcher, store, *loop, nil, logger, false)
+	return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
 }
 
 func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool) int {

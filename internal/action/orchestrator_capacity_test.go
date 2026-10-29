@@ -26,7 +26,7 @@ func (e *readinessExecutor) WaitCapacity(context.Context) error {
 
 func TestOrchestratorWaitCapacityDelegatesWithoutExposingSecrets(t *testing.T) {
 	if err := (&Orchestrator{}).WaitCapacity(t.Context()); err != nil {
-		t.Fatalf("default in-process mode gained a readiness requirement: %v", err)
+		t.Fatalf("orchestrator without an executor required readiness: %v", err)
 	}
 	const secret = "selected-worker-secret"
 	cause := errors.New("worker unavailable")

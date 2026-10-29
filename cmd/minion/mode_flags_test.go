@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/linkdata/minion/internal/config"
 )
 
 func TestExecuteModeRejectsServiceFlagsBeforeStartup(t *testing.T) {
@@ -28,5 +30,17 @@ func TestExecuteModeRejectsServiceFlagsBeforeStartup(t *testing.T) {
 				t.Fatalf("invalid mode returned %d; want usage error 2", code)
 			}
 		})
+	}
+}
+
+func TestInProcessModeRejectedBeforeStartup(t *testing.T) {
+	code, output := runStartupFixtureWithRun(t, config.Config{}, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Fatal("retired mode reached Git preflight")
+			return nil
+		})
+	}, "-mode=in-process")
+	if code != 2 || !strings.Contains(output, `unsupported mode "in-process"; use orchestrate or execute`) {
+		t.Fatalf("retired mode: exit=%d log=%q", code, output)
 	}
 }
