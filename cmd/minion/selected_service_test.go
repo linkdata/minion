@@ -465,6 +465,7 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 		otherOverdue   bool
 		wantWake       time.Duration
 	}{
+		{"last fifty milliseconds", 50 * time.Millisecond, 0, false, false, 25 * time.Millisecond},
 		{"half second", 500 * time.Millisecond, 0, false, false, 250 * time.Millisecond},
 		{"just over one second", 1100 * time.Millisecond, 0, false, false, 550 * time.Millisecond},
 		{"overdue other write", 500 * time.Millisecond, 0, false, true, 250 * time.Millisecond},

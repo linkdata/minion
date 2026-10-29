@@ -306,8 +306,8 @@ func TestActiveTaskWriteWakeUsesOriginalDeadline(t *testing.T) {
 				if got := publicationWriteWake(store, now); !got.Equal(now.Add(250 * time.Millisecond)) {
 					t.Fatalf("active %s wake = %s, want half remaining", kind, got)
 				}
-				if got := publicationWriteWake(store, deadline.Add(-50*time.Millisecond)); !got.Equal(deadline) {
-					t.Fatalf("last %s wake = %s, want original deadline %s", kind, got, deadline)
+				if got := publicationWriteWake(store, deadline.Add(-50*time.Millisecond)); !got.Equal(deadline.Add(-25 * time.Millisecond)) {
+					t.Fatalf("last %s wake = %s, want a check before original deadline %s", kind, got, deadline)
 				}
 				if got := publicationWriteWake(store, deadline); !got.Equal(deadline.Add(publicationRecheckInterval)) {
 					t.Fatalf("expired action %s wake = %s, want ordinary interval", kind, got)
@@ -368,6 +368,39 @@ func TestActiveTaskWriteGraceTimeoutStillWakesBeforeActionDeadline(t *testing.T)
 			})
 		})
 	}
+}
+
+func TestPendingTaskReplyVisibleInLastActionWindow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, 50*time.Millisecond, "review", state.PublicationWritePending)
+		m.Now = time.Now
+		store.Data.Accepted.RetryAt = accepted.Deadline
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		handler := &recoveredResultHandler{}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || !next.Equal(now.Add(25*time.Millisecond)) || len(gh.verifiedCalls) != 1 ||
+			store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending {
+			t.Fatalf("last-window reply check was skipped: next=%s checks=%d write=%+v err=%v",
+				next, len(gh.verifiedCalls), store.Data.PublicationWrites[accepted.JobID], err)
+		}
+		time.Sleep(10 * time.Millisecond)
+		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		gh.reviewReplies = []github.Item{{Body: "published\n\n" + marker,
+			Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
+		time.Sleep(time.Until(next))
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(accepted.Deadline) || handler.publications != 1 || handler.executions != 0 ||
+			store.Data.Accepted != nil || store.Data.TerminalDecisions[accepted.JobID].Outcome != "succeeded" {
+			t.Fatalf("visible reply expired instead of completing: elapsed=%s handler=%+v accepted=%+v decision=%+v",
+				time.Since(now), handler, store.Data.Accepted, store.Data.TerminalDecisions[accepted.JobID])
+		}
+	})
 }
 
 func TestSavedReplyChecksPendingWriteGraceBeforeRetry(t *testing.T) {

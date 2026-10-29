@@ -215,6 +215,9 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 				actionDeadline = accepted.Deadline
 			}
 			checkAt := publicationWriteCheckAt(write, at, actionDeadline)
+			if !actionDeadline.IsZero() {
+				checkAt = activePublicationWriteWake(write, at, actionDeadline)
+			}
 			if next.IsZero() || checkAt.Before(next) {
 				next = checkAt
 			}
@@ -227,7 +230,7 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
 	checkAt := at.Add(publicationRecheckInterval)
 	if !actionDeadline.IsZero() && at.Before(actionDeadline) {
-		// Leave time for another lookup without a rapid loop at expiry.
+		// Ordinary retries avoid a rapid loop near expiry.
 		checkAt = publicationRetryAt(at, actionDeadline)
 	}
 	if write.Deadline.Before(checkAt) {
@@ -238,16 +241,16 @@ func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline ti
 
 func activePublicationWriteWake(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
 	next := publicationWriteCheckAt(write, at, actionDeadline)
-	if !next.After(at) {
-		// A lookup crossed the write grace. Leave one final check before action expiry.
-		if remaining := actionDeadline.Sub(at); remaining > publicationLastChanceInterval {
-			return at.Add(publicationLastChanceInterval)
-		} else if remaining > time.Nanosecond {
-			return at.Add(remaining / 2)
-		}
-		return actionDeadline
+	if next.After(at) && next.Before(actionDeadline) {
+		return next
 	}
-	return next
+	// Keep active checks inside the action window after write grace or near expiry.
+	if remaining := actionDeadline.Sub(at); remaining > publicationLastChanceInterval {
+		return at.Add(publicationLastChanceInterval)
+	} else if remaining > time.Millisecond {
+		return at.Add(remaining / 2)
+	}
+	return actionDeadline
 }
 
 func withPublicationWriteWake(next time.Time, store *state.Store, at time.Time) time.Time {
