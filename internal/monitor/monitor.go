@@ -1982,6 +1982,20 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		})
 		return ready
 	}
+	selectedPendingPush := func() bool {
+		if job.Command.Action != command.Fix {
+			return false
+		}
+		var pending bool
+		_ = store.WithLock(func() error {
+			accepted := store.Data.Accepted
+			push := store.Data.PublicationWrites[job.ID+"-push"]
+			pending = accepted != nil && accepted.JobID == job.ID && accepted.AttemptID == job.AttemptID &&
+				accepted.ResultReady && push.AttemptID == job.AttemptID && push.Status == state.PublicationWritePending
+			return nil
+		})
+		return pending
+	}
 	done := make(chan error, 1)
 	go func() {
 		result := error(ErrExecutionOutcomeUnknown)
@@ -2107,27 +2121,32 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			}
 		}
 		if !m.now().UTC().Before(nextPublicationCheck) {
-			skipJobID := job.ID + "-push"
-			if initialPublicationCheck {
-				skipJobID = job.ID // The worker and RunOnce check this active write.
-				initialPublicationCheck = false
-			}
-			readDone()
-			if completed && job.Command.Action == command.Fix {
-				return finish(result)
-			}
-			// Keep the fix's publication reserve before scanning older writes.
-			if !completed && (job.Command.Action != command.Fix || time.Until(job.Deadline) > fixPublicationReserve) {
-				if err := m.reconcilePublicationWrites(controlCtx, store, "", skipJobID); err != nil && !deferredControl(err) {
-					if controlCanceledByWorker(err) {
-						return finish(result)
-					}
-					return abort(err)
+			if selectedPendingPush() {
+				// The worker owns the issued push; older writes wait for its result.
+				nextPublicationCheck = job.Deadline
+			} else {
+				skipJobID := job.ID + "-push"
+				if initialPublicationCheck {
+					skipJobID = job.ID // The worker and RunOnce check this active write.
+					initialPublicationCheck = false
 				}
-			}
-			nextPublicationCheck = publicationWriteWakeExcept(store, m.now().UTC(), job.ID+"-push")
-			if nextPublicationCheck.IsZero() {
-				nextPublicationCheck = m.now().UTC().Add(publicationRecheckInterval)
+				readDone()
+				if completed && job.Command.Action == command.Fix {
+					return finish(result)
+				}
+				// Keep the fix's publication reserve before scanning older writes.
+				if !completed && (job.Command.Action != command.Fix || time.Until(job.Deadline) > fixPublicationReserve) {
+					if err := m.reconcilePublicationWrites(controlCtx, store, "", skipJobID); err != nil && !deferredControl(err) {
+						if controlCanceledByWorker(err) {
+							return finish(result)
+						}
+						return abort(err)
+					}
+				}
+				nextPublicationCheck = publicationWriteWakeExcept(store, m.now().UTC(), job.ID+"-push")
+				if nextPublicationCheck.IsZero() {
+					nextPublicationCheck = m.now().UTC().Add(publicationRecheckInterval)
+				}
 			}
 		}
 		completedAtStart := completed
@@ -2136,7 +2155,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			return finish(result)
 		}
 		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
-		if !reserveFixDeadline {
+		if !reserveFixDeadline && !selectedPendingPush() {
 			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 				if controlCanceledByWorker(err) {
 					return finish(result)
@@ -2147,11 +2166,14 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		reserveFixDeadline = job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		var next time.Time
 		var due []notificationScan
+		pendingSavedPush := selectedPendingPush()
 		_ = store.WithLock(func() error {
 			if reserveFixDeadline {
 				return nil
 			}
-			next = store.Data.NextInviteCheckAt
+			if !pendingSavedPush {
+				next = store.Data.NextInviteCheckAt
+			}
 			if len(terminalChecks) == 0 {
 				return nil
 			}
@@ -2210,11 +2232,13 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if completed && job.Command.Action == command.Fix {
 				return finish(result)
 			}
-			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
-				if controlCanceledByWorker(err) {
-					return finish(result)
+			if !selectedPendingPush() {
+				if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+					if controlCanceledByWorker(err) {
+						return finish(result)
+					}
+					return abort(err)
 				}
-				return abort(err)
 			}
 		}
 		reserveFixDeadline = job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)

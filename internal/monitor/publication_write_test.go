@@ -1104,12 +1104,15 @@ func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 			Marker: "<!-- linkdataminion:old-job -->", Since: now,
 			StartedAt: now, Deadline: now.Add(90 * time.Second), Status: state.PublicationWritePending,
 		}
+		store.Data.NextInviteCheckAt = now
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
 		var lookups atomic.Int32
 		var commentChecks atomic.Int32
+		var invitationChecks atomic.Int32
 		gh.beforeVerify = func(context.Context, bool) error { commentChecks.Add(1); return nil }
+		gh.beforeList = func() { invitationChecks.Add(1) }
 		gh.branch = func(context.Context, string, string) (github.Branch, error) {
 			lookups.Add(1)
 			return github.Branch{}, &github.StatusError{StatusCode: 404}
@@ -1157,15 +1160,15 @@ func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 		if err := <-finished; err != nil {
 			t.Fatal(err)
 		}
-		if initialChecks != 1 || periodicChecks != 1 || pushLookups != 0 || current.Status != state.PublicationWritePending ||
+		if initialChecks != 0 || periodicChecks != 0 || invitationChecks.Load() != 0 || pushLookups != 0 || current.Status != state.PublicationWritePending ||
 			taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
-			t.Fatalf("saved fix scanned older writes before its handler returned: initial=%d periodic=%d push lookups=%d push=%+v task=%+v old=%+v",
-				initialChecks, periodicChecks, pushLookups, current, taskWrite, olderWrite)
+			t.Fatalf("saved fix serviced unrelated work before its handler returned: initial=%d periodic=%d invitations=%d push lookups=%d push=%+v task=%+v old=%+v",
+				initialChecks, periodicChecks, invitationChecks.Load(), pushLookups, current, taskWrite, olderWrite)
 		}
 		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
-		if lookups.Load() != 1 || commentChecks.Load() != 3 {
+		if lookups.Load() != 1 || commentChecks.Load() != 2 {
 			t.Fatalf("deferred writes were not checked after the handler returned: push=%d comments=%d",
 				lookups.Load(), commentChecks.Load())
 		}

@@ -88,6 +88,7 @@ func (*pendingPushLoopGitHub) Permission(context.Context, string, string) (githu
 
 type pendingPushLoopHandler struct {
 	cancel       context.CancelFunc
+	cancelAfter  int
 	publications int
 }
 
@@ -97,7 +98,7 @@ func (*pendingPushLoopHandler) Execute(context.Context, monitor.Job) error {
 
 func (h *pendingPushLoopHandler) PublishRecovered(context.Context, monitor.Job) error {
 	h.publications++
-	if h.cancel != nil {
+	if h.cancel != nil && (h.cancelAfter == 0 || h.publications >= h.cancelAfter) {
 		h.cancel()
 	}
 	return monitor.ErrPostModelPublication
@@ -541,16 +542,23 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 }
 
 func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
-	for _, tc := range []struct{ name, action, writeKind string }{
+	for _, tc := range []struct {
+		name, action, writeKind string
+		slowSave                bool
+	}{
 		{name: "comment before first write", action: "comment"},
 		{name: "comment after observed write", action: "comment", writeKind: "comment"},
 		{name: "fix after observed push", action: "fix", writeKind: "push"},
+		{name: "comment retry overdue after slow save", action: "comment", slowSave: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				now := time.Now().UTC()
 				deadline := now.Add(500 * time.Millisecond)
 				retryAt := now.Add(250 * time.Millisecond)
+				if tc.slowSave {
+					retryAt = time.Time{}
+				}
 				jobID := strings.Repeat("a", 64)
 				attemptID := strings.Repeat("b", 32)
 				accepted := state.AcceptedAction{
@@ -598,9 +606,12 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 				if err := store.WriteAcceptedResult([]byte(`{"saved":true}`)); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel := context.WithCancel(t.Context())
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 				defer cancel()
 				handler := &pendingPushLoopHandler{cancel: cancel}
+				if tc.slowSave {
+					handler.cancelAfter = 2
+				}
 				watcher := &monitor.Monitor{
 					Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
 						tc.action: {Action: tc.action},
@@ -611,11 +622,26 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 					}},
 					Handler: handler, Now: time.Now,
 				}
+				if tc.slowSave {
+					delayed := false
+					watcher.Now = func() time.Time {
+						if !delayed && !store.Data.Accepted.RetryAt.IsZero() {
+							// Model time consumed after scheduling a saved retry but before returning its wake.
+							delayed = true
+							time.Sleep(300 * time.Millisecond)
+						}
+						return time.Now()
+					}
+				}
 				var logs bytes.Buffer
 				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
-				if elapsed := time.Since(now); code != 0 || handler.publications != 1 || elapsed != retryAt.Sub(now) {
+				wantElapsed, wantPublications := retryAt.Sub(now), 1
+				if tc.slowSave {
+					wantElapsed, wantPublications = 300*time.Millisecond, 2
+				}
+				if elapsed := time.Since(now); code != 0 || handler.publications != wantPublications || elapsed != wantElapsed {
 					t.Fatalf("loop missed saved publication retry: code=%d publications=%d elapsed=%s want=%s logs=%q",
-						code, handler.publications, elapsed, retryAt.Sub(now), logs.String())
+						code, handler.publications, elapsed, wantElapsed, logs.String())
 				}
 			})
 		})
