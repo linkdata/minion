@@ -1883,8 +1883,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				skipJobID = job.ID // The worker and RunOnce check this active write.
 				initialPublicationCheck = false
 			}
-			if err := m.reconcilePublicationWrites(actionCtx, store, "", skipJobID); err != nil {
-				return abort(err)
+			readDone()
+			// Keep two lookup budgets for the selected action before scanning older writes.
+			if !completed && time.Until(job.Deadline) > 2*publicationReconcileBudget {
+				if err := m.reconcilePublicationWrites(actionCtx, store, "", skipJobID); err != nil {
+					return abort(err)
+				}
 			}
 			nextPublicationCheck = publicationWriteWakeExcept(store, m.now().UTC(), job.ID+"-push")
 			if nextPublicationCheck.IsZero() {
