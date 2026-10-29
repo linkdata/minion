@@ -175,6 +175,15 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 	return store, path, accepted, gh, selectedMonitor(t, at, gh, nil)
 }
 
+func slowExistingInvitation(gh *fakeGitHub, checks *int) {
+	gh.invitations = []github.Invitation{{ID: 41, Repository: github.Repository{
+		FullName: "example-owner/example-repo", ID: 1,
+		Owner: github.User{Login: "example-owner", ID: 2},
+	}, Permissions: "write"}}
+	gh.beforeList = func() { (*checks)++; time.Sleep(20 * time.Second) }
+	gh.beforeAccept = func() { time.Sleep(15 * time.Second) }
+}
+
 func storedTaskWriteFixtureAt(t *testing.T, now time.Time, remaining time.Duration, kind, status string) (
 	*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor, string,
 ) {
@@ -412,7 +421,7 @@ func TestSavedReplyBackoffServicesDueControlsWithAmpleDeadline(t *testing.T) {
 	}
 }
 
-func TestSavedReplyBackoffBoundsInvitationByRetry(t *testing.T) {
+func TestSavedReplyBackoffUsesIndependentInvitationListDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
@@ -431,10 +440,166 @@ func TestSavedReplyBackoffBoundsInvitationByRetry(t *testing.T) {
 		handler := &recoveredResultHandler{}
 		m.Handler = handler
 		next, err := m.RunOnce(t.Context(), store)
-		if err != nil || waiting.checks != 1 || time.Since(now) != 5*time.Second ||
-			!next.Equal(store.Data.Accepted.RetryAt) || handler.publications != 0 || handler.executions != 0 {
-			t.Fatalf("invitation held saved retry past its wake: next=%s elapsed=%s checks=%d handler=%+v err=%v",
+		if err != nil || waiting.checks != 1 || time.Since(now) != 30*time.Second ||
+			!next.Equal(store.Data.Accepted.RetryAt) || next.After(time.Now()) ||
+			handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("invitation ignored its independent list deadline or lost the overdue retry: next=%s elapsed=%s checks=%d handler=%+v err=%v",
 				next, time.Since(now), waiting.checks, handler, err)
+		}
+	})
+}
+
+func TestSavedReplyBackoffFinishesDueTerminalAndInvitationBeforeRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
+		m.Now = time.Now
+		store.Data.Accepted.Deadline = now.Add(10 * time.Minute)
+		store.Data.Accepted.RetryAt = now.Add(publicationRecheckInterval)
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = store.Data.Accepted.Deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		currentItem := gh.currentItem
+		gh.currentItem = func(item github.Item) (github.Item, error) {
+			if item.Key == accepted.SourceKey {
+				return currentItem(item)
+			}
+			return item, nil
+		}
+		gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+			time.Sleep(2 * time.Minute)
+			return []github.Item{item}, nil
+		}
+		invitationChecks := 0
+		slowExistingInvitation(gh, &invitationChecks)
+		handler := &recoveredResultHandler{}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || time.Since(now) != 2*time.Minute+35*time.Second ||
+			!terminalReplyRecorded(gh, store, terminalID) || invitationChecks != 1 ||
+			len(gh.accepted) != 1 || gh.accepted[0] != 41 ||
+			!next.Equal(now.Add(publicationRecheckInterval)) || next.After(time.Now()) ||
+			store.Data.Accepted == nil || handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("saved result lost a due control or overdue retry: next=%s elapsed=%s replies=%v invitations=%v checks=%d handler=%+v accepted=%+v err=%v",
+				next, time.Since(now), gh.comments, gh.accepted, invitationChecks, handler, store.Data.Accepted, err)
+		}
+		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
+			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("overdue retry did not publish saved result on the next pass: err=%v handler=%+v accepted=%+v processed=%v",
+				err, handler, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+		}
+	})
+}
+
+func TestPendingTaskWriteChecksBeforeDueControlsAndRechecksOverdueWake(t *testing.T) {
+	for _, kind := range []string{"comment", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m, _ := storedTaskWriteFixtureAt(t, now, 10*time.Minute, kind, state.PublicationWritePending)
+				store.Data.Accepted.RetryAt = now.Add(5 * time.Minute)
+				write := store.Data.PublicationWrites[accepted.JobID]
+				write.Deadline = now.Add(6 * time.Minute)
+				store.Data.PublicationWrites[accepted.JobID] = write
+				item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+					state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+				store.Data.NextInviteCheckAt = now
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				currentItem := gh.currentItem
+				gh.currentItem = func(item github.Item) (github.Item, error) {
+					if item.Key == accepted.SourceKey {
+						return currentItem(item)
+					}
+					return item, nil
+				}
+				gh.threadItems = func(string, int, time.Time) ([]github.Item, error) {
+					time.Sleep(2 * time.Minute)
+					return []github.Item{item}, nil
+				}
+				invitationChecks := 0
+				slowExistingInvitation(gh, &invitationChecks)
+				gh.beforeVerify = func(context.Context, bool) error {
+					if len(gh.verifiedCalls) == 1 && (gh.threadCalls != 0 || invitationChecks != 0) {
+						t.Error("active publication was not checked before due controls")
+					}
+					return nil
+				}
+				handler := &recoveredResultHandler{}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if err != nil || time.Since(now) != 2*time.Minute+35*time.Second ||
+					!terminalReplyRecorded(gh, store, terminalID) || invitationChecks != 1 ||
+					len(gh.accepted) != 1 || gh.accepted[0] != 41 ||
+					len(gh.verifiedCalls) != 2 || gh.verifiedCalls[0] != (kind == "review") ||
+					!next.Equal(now.Add(publicationRecheckInterval)) || next.After(time.Now()) ||
+					store.Data.Accepted == nil || handler.publications != 0 || handler.executions != 0 {
+					t.Fatalf("pending %s write lost control service or overdue wake: next=%s elapsed=%s replies=%v invitations=%v checks=%d lookups=%v handler=%+v accepted=%+v err=%v",
+						kind, next, time.Since(now), gh.comments, gh.accepted, invitationChecks, gh.verifiedCalls, handler, store.Data.Accepted, err)
+				}
+				if _, err := m.RunOnce(t.Context(), store); err != nil || len(gh.verifiedCalls) != 3 ||
+					gh.verifiedCalls[2] != (kind == "review") ||
+					store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending ||
+					handler.publications != 0 || handler.executions != 0 {
+					t.Fatalf("overdue %s write was not rechecked on the next pass: err=%v lookups=%v write=%+v handler=%+v",
+						kind, err, gh.verifiedCalls, store.Data.PublicationWrites[accepted.JobID], handler)
+				}
+			})
+		})
+	}
+}
+
+func TestPendingFixPushServicesInvitationBeforeOverdueRecheck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		m.Now = time.Now
+		store.Data.Accepted.Deadline = now.Add(10 * time.Minute)
+		store.Data.Accepted.RetryAt = now.Add(5 * time.Minute)
+		failure := store.Data.JobFailures[accepted.JobID]
+		failure.Deadline = store.Data.Accepted.Deadline
+		store.Data.JobFailures[accepted.JobID] = failure
+		write := store.Data.PublicationWrites[accepted.JobID+"-push"]
+		write.Deadline = now.Add(6 * time.Minute)
+		store.Data.PublicationWrites[accepted.JobID+"-push"] = write
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		invitationChecks := 0
+		slowExistingInvitation(gh, &invitationChecks)
+		branchChecks := 0
+		gh.branch = func(context.Context, string, string) (github.Branch, error) {
+			branchChecks++
+			if branchChecks == 1 && invitationChecks != 0 {
+				t.Error("active fix push was not checked before invitation")
+			}
+			return github.Branch{}, &github.StatusError{StatusCode: 404}
+		}
+		handler := &recoveredResultHandler{}
+		m.Handler = handler
+		next, err := m.RunOnce(t.Context(), store)
+		if err != nil || time.Since(now) != 35*time.Second ||
+			branchChecks != 1 || invitationChecks != 1 || len(gh.accepted) != 1 || gh.accepted[0] != 41 ||
+			!next.Equal(now.Add(publicationRecheckInterval)) || next.After(time.Now()) ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
+			store.Data.Accepted == nil || handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("pending fix push lost invitation or overdue wake: next=%s elapsed=%s branch checks=%d invitations=%v checks=%d write=%+v handler=%+v accepted=%+v err=%v",
+				next, time.Since(now), branchChecks, gh.accepted, invitationChecks,
+				store.Data.PublicationWrites[accepted.JobID+"-push"], handler, store.Data.Accepted, err)
+		}
+		if _, err := m.RunOnce(t.Context(), store); err != nil || branchChecks != 2 ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
+			handler.publications != 0 || handler.executions != 0 {
+			t.Fatalf("overdue fix push was not rechecked on the next pass: err=%v branch checks=%d write=%+v handler=%+v",
+				err, branchChecks, store.Data.PublicationWrites[accepted.JobID+"-push"], handler)
 		}
 	})
 }
@@ -1147,8 +1312,8 @@ func TestPendingFixPushServicesDueSiblingBeforeReserve(t *testing.T) {
 		if err != nil || !terminalReplyRecorded(gh, store, terminalID) || branchChecks != 1 ||
 			store.Data.Accepted == nil || store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
 			store.Data.PublicationWrites["old-job"].Status != state.PublicationWritePending ||
-			time.Since(now) != 30*time.Second || !next.Equal(now.Add(time.Minute)) {
-			t.Fatalf("pending push did not service sibling or recompute wake: err=%v replies=%v checks=%d accepted=%+v next=%s elapsed=%s",
+			time.Since(now) != 30*time.Second || !next.Equal(now.Add(publicationRecheckInterval)) {
+			t.Fatalf("pending push did not service sibling or preserve its write wake: err=%v replies=%v checks=%d accepted=%+v next=%s elapsed=%s",
 				err, gh.comments, branchChecks, store.Data.Accepted, next, time.Since(now))
 		}
 		for _, includeReviews := range gh.verifiedCalls {

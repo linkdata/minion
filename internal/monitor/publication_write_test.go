@@ -309,6 +309,78 @@ func TestReconcileObservedFixPushSaveFailureClassification(t *testing.T) {
 	}
 }
 
+func TestUncertainSavedPublicationDefersRetryUntilActionDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fix  bool
+	}{
+		{name: "task reply"},
+		{name: "fix push", fix: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				var store *state.Store
+				var accepted state.AcceptedAction
+				var m *Monitor
+				writeKey := ""
+				if tc.fix {
+					store, _, accepted, _, m = storedIssuedFixPushFixtureAt(t, now)
+					writeKey = accepted.JobID + "-push"
+				} else {
+					store, _, accepted, _, m, _ = storedTaskWriteFixtureAt(t, now, 7*time.Minute, "review", state.PublicationWritePending)
+					writeKey = accepted.JobID
+				}
+				m.Now = time.Now
+				deadline := now.Add(7 * time.Minute)
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = time.Time{}
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				write := store.Data.PublicationWrites[writeKey]
+				write.Status, write.ResolvedAt = state.PublicationWriteUncertain, now
+				store.Data.PublicationWrites[writeKey] = write
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if !errors.Is(err, ErrPostModelPublication) || handler.publications != 1 || handler.executions != 0 ||
+					store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(deadline) || !next.Equal(deadline) {
+					t.Fatalf("uncertain %s kept fast retries: next=%s deadline=%s handler=%+v accepted=%+v err=%v",
+						tc.name, next, deadline, handler, store.Data.Accepted, err)
+				}
+				time.Sleep(publicationRecheckInterval)
+				if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
+					store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(deadline) {
+					t.Fatalf("uncertain %s retried before deadline: publications=%d accepted=%+v err=%v",
+						tc.name, handler.publications, store.Data.Accepted, err)
+				}
+			})
+		})
+	}
+}
+
+func TestStaleUncertainWriteDoesNotDelaySavedRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, _, accepted, _, m, _ := storedTaskWriteFixtureAt(t, now, 7*time.Minute, "review", state.PublicationWritePending)
+		write := store.Data.PublicationWrites[accepted.JobID]
+		write.AttemptID = "older-attempt"
+		write.Status, write.ResolvedAt = state.PublicationWriteUncertain, now
+		store.Data.PublicationWrites[accepted.JobID] = write
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		retryAt, err := m.scheduleAcceptedRetry(store, ErrPostModelPublication)
+		if err != nil || !retryAt.Equal(now.Add(publicationRecheckInterval)) {
+			t.Fatalf("stale uncertain write delayed saved reply: retry=%s err=%v", retryAt, err)
+		}
+	})
+}
+
 func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

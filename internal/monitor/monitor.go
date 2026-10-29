@@ -73,6 +73,7 @@ const (
 	maxJobAttempts          = 3
 	maxFailureReplyAttempts = 3
 	siblingReplyBudget      = 3 * time.Minute
+	invitationControlBudget = 70 * time.Second
 	fixPublicationReserve   = 3 * publicationReconcileBudget
 	failureReply            = "Minion could not complete this request. No further automatic attempts will run. Check the service log and post a new command after the cause is fixed."
 )
@@ -234,7 +235,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			if !next.IsZero() && next.Equal(accepted.RetryAt) && next.Before(accepted.Deadline) &&
 				savedReplyPriority(accepted, store.Data.PublicationWrites) &&
-				!savedReplyHasControlWindow(accepted, store.Data.PublicationWrites, at) {
+				!savedReplyHasControlWindow(accepted, at) {
 				return next
 			}
 		}
@@ -261,6 +262,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			task := store.Data.PublicationWrites[accepted.JobID]
 			if write, pending := pendingActiveWrite(accepted); pending && remaining > 0 {
 				writeWake := activePublicationWriteWake(write, now().UTC(), accepted.Deadline)
+				if savedReplyHasControlWindow(accepted, now().UTC()) {
+					return earlierWake(retryAt, writeWake), m.serviceSavedRetryControls(ctx, store)
+				}
 				if write.Kind != "push" {
 					return earlierWake(retryAt, writeWake), ctx.Err()
 				}
@@ -281,8 +285,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if retryAt.Before(accepted.Deadline) &&
 				(savedReplyPriority(accepted, store.Data.PublicationWrites) ||
 					accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved) {
-				if savedReplyHasControlWindow(accepted, store.Data.PublicationWrites, now().UTC()) {
-					if err := m.serviceSavedRetryControls(ctx, store, retryAt); err != nil {
+				if savedReplyHasControlWindow(accepted, now().UTC()) {
+					if err := m.serviceSavedRetryControls(ctx, store); err != nil {
 						return wake(retryAt, false), err
 					}
 				}
@@ -339,8 +343,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if err != nil && !errors.Is(err, ErrAcceptanceState) && ctx.Err() == nil && store.Data.Accepted != nil {
 			retryAt, saveErr := m.scheduleAcceptedRetry(store, err)
 			var controlErr error
-			if saveErr == nil && savedReplyHasControlWindow(store.Data.Accepted, store.Data.PublicationWrites, now().UTC()) {
-				controlErr = m.serviceSavedRetryControls(ctx, store, retryAt)
+			if saveErr == nil && savedReplyHasControlWindow(store.Data.Accepted, now().UTC()) {
+				controlErr = m.serviceSavedRetryControls(ctx, store)
 			}
 			return wake(retryAt, false), errors.Join(err, saveErr, controlErr)
 		}
@@ -1224,7 +1228,11 @@ func (m *Monitor) scheduleAcceptedRetry(store *state.Store, reason error) (time.
 	now := time.Now().UTC()
 	retryAt := now.Add(m.pollInterval())
 	if accepted.ResultReady && errors.Is(reason, ErrPostModelPublication) && !errors.Is(reason, ErrAcceptanceState) {
-		retryAt = publicationRetryAt(now, accepted.Deadline)
+		if acceptedPublicationUncertain(accepted, store.Data.PublicationWrites) {
+			retryAt = accepted.Deadline
+		} else {
+			retryAt = publicationRetryAt(now, accepted.Deadline)
+		}
 	}
 	if now.Before(accepted.Deadline) && accepted.Deadline.Before(retryAt) {
 		retryAt = accepted.Deadline
@@ -1246,43 +1254,48 @@ func publicationRetryAt(now, deadline time.Time) time.Time {
 }
 
 func savedReplyPriority(accepted *state.AcceptedAction, writes map[string]state.PublicationWrite) bool {
-	if accepted == nil || !accepted.ResultReady {
-		return false
-	}
-	if task := writes[accepted.JobID]; task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteUncertain {
+	if accepted == nil || !accepted.ResultReady || acceptedPublicationUncertain(accepted, writes) {
 		return false
 	}
 	if accepted.Action == string(command.Fix) {
-		push := writes[accepted.JobID+"-push"]
-		return push.Status != state.PublicationWritePending &&
-			(push.AttemptID != accepted.AttemptID || push.Status != state.PublicationWriteUncertain)
+		return writes[accepted.JobID+"-push"].Status != state.PublicationWritePending
 	}
 	return true
 }
 
-func savedReplyHasControlWindow(accepted *state.AcceptedAction, writes map[string]state.PublicationWrite, at time.Time) bool {
-	if accepted == nil || !accepted.ResultReady ||
-		!at.Add(siblingReplyBudget+fixPublicationReserve+publicationReconcileBudget).Before(accepted.Deadline) {
+func acceptedPublicationUncertain(accepted *state.AcceptedAction, writes map[string]state.PublicationWrite) bool {
+	if accepted == nil || !accepted.ResultReady {
 		return false
 	}
 	task, push := writes[accepted.JobID], writes[accepted.JobID+"-push"]
-	return (task.AttemptID != accepted.AttemptID || task.Status == "") &&
-		(push.AttemptID != accepted.AttemptID || push.Status == "")
+	return task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteUncertain ||
+		accepted.Action == string(command.Fix) && push.AttemptID == accepted.AttemptID && push.Status == state.PublicationWriteUncertain
 }
 
-func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.Store, retryAt time.Time) error {
-	controlCtx, cancel := context.WithDeadline(ctx, retryAt)
-	defer cancel()
-	if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil {
+func savedReplyHasControlWindow(accepted *state.AcceptedAction, at time.Time) bool {
+	return accepted != nil && accepted.ResultReady &&
+		at.Add(siblingReplyBudget+invitationControlBudget+fixPublicationReserve+publicationReconcileBudget).Before(accepted.Deadline)
+}
+
+func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.Store) error {
+	terminalCtx, cancelTerminal := context.WithTimeout(ctx, siblingReplyBudget)
+	m.serviceTerminalControlsBefore(terminalCtx, store,
+		store.Data.Accepted.Deadline.Add(-fixPublicationReserve-siblingReplyBudget))
+	cancelTerminal()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	invitationCtx, cancelInvitation := context.WithTimeout(ctx, invitationControlBudget)
+	defer cancelInvitation()
+	if err := m.checkDueInvitations(invitationCtx, store, m.now().UTC()); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if controlCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			return nil // The saved reply is due; retry it on the next pass.
+		if invitationCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return nil // The bounded invitation pass ended; publication retains its scheduled wake.
 		}
 		return err
 	}
-	m.serviceTerminalControlsBefore(controlCtx, store, retryAt)
 	return ctx.Err()
 }
 
