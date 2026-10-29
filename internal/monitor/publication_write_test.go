@@ -177,7 +177,7 @@ func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testin
 	})
 }
 
-func TestRunOnceNormalPollWakesForIssuedPublication(t *testing.T) {
+func TestRunOnceWithoutWorkerWakesForIssuedPublication(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		store := openState(t, now)
@@ -194,7 +194,7 @@ func TestRunOnceNormalPollWakesForIssuedPublication(t *testing.T) {
 		m := &Monitor{Config: config.Config{BotLogin: "bot", PollIntervalSeconds: 600}, GitHub: gh}
 		next, err := m.RunOnce(t.Context(), store)
 		if err != nil || !next.Equal(now.Add(publicationRecheckInterval)) || len(gh.verifiedCalls) != 1 {
-			t.Fatalf("normal poll skipped publication wake: next=%s err=%v checks=%d", next, err, len(gh.verifiedCalls))
+			t.Fatalf("workerless run skipped publication wake: next=%s err=%v checks=%d", next, err, len(gh.verifiedCalls))
 		}
 	})
 }
