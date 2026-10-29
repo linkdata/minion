@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type terminalRecoveryGitHub struct {
@@ -36,6 +37,28 @@ type pendingPushLoopGitHub struct {
 	cancel      context.CancelFunc
 	cancelAfter int
 	checks      int
+}
+
+type pendingTaskLoopGitHub struct {
+	monitor.GitHub
+	cancel      context.CancelFunc
+	marker      string
+	checks      int
+	otherChecks int
+}
+
+func (g *pendingTaskLoopGitHub) HasVerifiedBotPublication(_ context.Context, _ string, _ int, _ time.Time,
+	_ github.User, marker, _ string) (bool, error) {
+	if marker != g.marker {
+		g.otherChecks++
+		return false, nil
+	}
+	g.checks++
+	if g.checks == 2 {
+		g.cancel()
+		return false, context.Canceled
+	}
+	return false, nil
 }
 
 func (g *pendingPushLoopGitHub) Branch(context.Context, string, string) (github.Branch, error) {
@@ -64,7 +87,11 @@ func (*pendingPushLoopGitHub) Permission(context.Context, string, string) (githu
 	return github.Permission{Permission: "write", User: github.User{Login: "writer", ID: 7}}, nil
 }
 
-type pendingPushLoopHandler struct{ publications int }
+type pendingPushLoopHandler struct {
+	cancel       context.CancelFunc
+	cancelAfter  int
+	publications int
+}
 
 func (*pendingPushLoopHandler) Execute(context.Context, monitor.Job) error {
 	return errors.New("unexpected selected execution")
@@ -72,6 +99,9 @@ func (*pendingPushLoopHandler) Execute(context.Context, monitor.Job) error {
 
 func (h *pendingPushLoopHandler) PublishRecovered(context.Context, monitor.Job) error {
 	h.publications++
+	if h.cancel != nil && (h.cancelAfter == 0 || h.publications >= h.cancelAfter) {
+		h.cancel()
+	}
 	return monitor.ErrPostModelPublication
 }
 
@@ -99,6 +129,10 @@ func (g *terminalRecoveryGitHub) CurrentItem(context.Context, github.Item) (gith
 
 func (g *terminalRecoveryGitHub) Repository(context.Context, string) (github.Repository, error) {
 	return github.Repository{ID: 1, Owner: github.User{ID: 2}, DefaultBranch: "main"}, nil
+}
+
+func (*terminalRecoveryGitHub) IssueDetails(_ context.Context, _ string, number int) (github.Issue, error) {
+	return github.Issue{Number: number}, nil
 }
 
 func (g *terminalRecoveryGitHub) Permission(context.Context, string, string) (github.Permission, error) {
@@ -420,6 +454,225 @@ func TestMonitorLoopRechecksPendingPushAtSubsecondWake(t *testing.T) {
 					store.Data.Accepted == nil || handler.publications != wantPublications {
 					t.Fatalf("loop missed pending push wake: code=%d checks=%d elapsed=%s want=%s publications=%d logs=%q",
 						code, gh.checks, elapsed, tc.remaining/2, handler.publications, logs.String())
+				}
+			})
+		})
+	}
+}
+
+func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		remaining      time.Duration
+		writeDeadline  time.Duration
+		foreignAttempt bool
+		otherOverdue   bool
+		wantWake       time.Duration
+	}{
+		{"last fifty milliseconds", 50 * time.Millisecond, 0, false, false, 25 * time.Millisecond},
+		{"half second", 500 * time.Millisecond, 0, false, false, 250 * time.Millisecond},
+		{"just over one second", 1100 * time.Millisecond, 0, false, false, 550 * time.Millisecond},
+		{"overdue other write", 500 * time.Millisecond, 0, false, true, 250 * time.Millisecond},
+		{"unrelated attempt keeps one-second floor", 2 * time.Second, 100 * time.Millisecond, true, false, time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				deadline := now.Add(tc.remaining)
+				jobID := strings.Repeat("a", 64)
+				attemptID := strings.Repeat("b", 32)
+				writeAttempt := attemptID
+				if tc.foreignAttempt {
+					writeAttempt = strings.Repeat("c", 32)
+				}
+				writeDeadline := now.Add(time.Minute)
+				if tc.writeDeadline != 0 {
+					writeDeadline = now.Add(tc.writeDeadline)
+				}
+				marker := "<!-- linkdataminion:" + jobID + " -->"
+				accepted := state.AcceptedAction{
+					JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
+					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+					SubjectType: "Issue", SubjectNumber: 7,
+					SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
+					Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+					AcceptedAt: now, Deadline: deadline, RetryAt: deadline, Assigned: true, ResultReady: true,
+				}
+				writes := map[string]state.PublicationWrite{jobID: {
+					AttemptID: writeAttempt, Kind: "comment", BotLogin: "bot", BotID: 8,
+					Repository: "owner/repo", Number: 7, Marker: marker,
+					Since: now, StartedAt: now, Deadline: writeDeadline, Status: state.PublicationWritePending,
+				}}
+				if tc.otherOverdue {
+					writes["old-job"] = state.PublicationWrite{
+						AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8,
+						Repository: "owner/repo", Number: 9, Marker: "<!-- linkdataminion:old-job -->",
+						Since: now, StartedAt: now.Add(-time.Minute), Deadline: now.Add(-time.Second), Status: state.PublicationWritePending,
+					}
+				}
+				store := serviceStore(t, state.Data{
+					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
+						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+					},
+					Processed:         map[string]time.Time{},
+					TerminalDecisions: map[string]state.TerminalDecision{},
+					PublicationWrites: writes,
+					NextPollAt:        now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
+				})
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				job := action.Job{
+					Version: action.ProtocolVersion,
+					Identity: action.Identity{
+						JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
+						Repository: accepted.Repository, RepositoryID: accepted.RepositoryID, OwnerID: accepted.OwnerID,
+						Requester: accepted.Requester, RequesterID: accepted.RequesterID,
+						Number: accepted.SubjectNumber, SubjectType: accepted.SubjectType,
+					},
+					Command: accepted.CommandName, Action: command.Comment,
+					Source:        workspace.Snapshot{Head: strings.Repeat("c", 40), Repository: []byte("saved source bundle")},
+					Main:          action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}},
+					RuntimeBudget: time.Minute,
+				}
+				record := action.AcceptedResultRecord{
+					Accepted: accepted, Job: job,
+					Result: action.Result{
+						Version: action.ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+						Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Complete: true}},
+					},
+				}
+				if err := record.Validate(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(record)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.WriteAcceptedResult(data); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				gh := &pendingTaskLoopGitHub{cancel: cancel, marker: marker}
+				watcher := &monitor.Monitor{
+					Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
+						"comment": {Action: "comment"},
+					}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}}},
+					GitHub: gh, Now: time.Now,
+				}
+				var logs bytes.Buffer
+				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
+				if elapsed := time.Since(now); code != 0 || gh.checks != 2 || gh.otherChecks != 0 || elapsed != tc.wantWake {
+					t.Fatalf("loop missed pending task reply wake: code=%d checks=%d other checks=%d elapsed=%s want=%s logs=%q",
+						code, gh.checks, gh.otherChecks, elapsed, tc.wantWake, logs.String())
+				}
+			})
+		})
+	}
+}
+
+func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
+	for _, tc := range []struct {
+		name, action, writeKind string
+		slowSave                bool
+	}{
+		{name: "comment before first write", action: "comment"},
+		{name: "comment after observed write", action: "comment", writeKind: "comment"},
+		{name: "fix after observed push", action: "fix", writeKind: "push"},
+		{name: "comment retry overdue after slow save", action: "comment", slowSave: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				deadline := now.Add(500 * time.Millisecond)
+				retryAt := now.Add(250 * time.Millisecond)
+				if tc.slowSave {
+					retryAt = time.Time{}
+				}
+				jobID := strings.Repeat("a", 64)
+				attemptID := strings.Repeat("b", 32)
+				accepted := state.AcceptedAction{
+					JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
+					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+					SubjectType: "Issue", SubjectNumber: 7,
+					SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
+					Requester: "writer", RequesterID: 7, CommandName: tc.action, Action: tc.action,
+					AcceptedAt: now, Deadline: deadline, RetryAt: retryAt, Assigned: true, ResultReady: true,
+				}
+				writes := map[string]state.PublicationWrite{}
+				pendingFixes := map[string]state.PendingFix{}
+				if tc.writeKind != "" {
+					key := jobID
+					if tc.writeKind == "push" {
+						key += "-push"
+						pendingFixes[jobID] = state.PendingFix{SHA: strings.Repeat("c", 40)}
+					}
+					write := state.PublicationWrite{
+						AttemptID: attemptID, Kind: tc.writeKind, BotLogin: "bot", BotID: 8,
+						Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:" + jobID + " -->",
+						Since: now, StartedAt: now, Deadline: now.Add(time.Minute),
+						Status: state.PublicationWriteObserved, ResolvedAt: now,
+					}
+					if tc.writeKind == "push" {
+						write.Repository = "bot/repo"
+						write.Branch = "minion/fix-7-" + jobID[:12]
+						write.SHA = pendingFixes[jobID].SHA
+					}
+					writes[key] = write
+				}
+				store := serviceStore(t, state.Data{
+					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
+						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+					},
+					Processed:         map[string]time.Time{},
+					TerminalDecisions: map[string]state.TerminalDecision{},
+					PendingFixes:      pendingFixes,
+					PublicationWrites: writes,
+					NextPollAt:        now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
+				})
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.WriteAcceptedResult([]byte(`{"saved":true}`)); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				handler := &pendingPushLoopHandler{cancel: cancel}
+				if tc.slowSave {
+					handler.cancelAfter = 2
+				}
+				watcher := &monitor.Monitor{
+					Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
+						tc.action: {Action: tc.action},
+					}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{tc.action}}}},
+					GitHub: &terminalRecoveryGitHub{item: github.Item{
+						Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL,
+						Body: "@bot " + tc.action, Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID},
+					}},
+					Handler: handler, Now: time.Now,
+				}
+				if tc.slowSave {
+					delayed := false
+					watcher.Now = func() time.Time {
+						if !delayed && !store.Data.Accepted.RetryAt.IsZero() {
+							// Model time consumed after scheduling a saved retry but before returning its wake.
+							delayed = true
+							time.Sleep(300 * time.Millisecond)
+						}
+						return time.Now()
+					}
+				}
+				var logs bytes.Buffer
+				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
+				wantElapsed, wantPublications := retryAt.Sub(now), 1
+				if tc.slowSave {
+					wantElapsed, wantPublications = 300*time.Millisecond, 2
+				}
+				if elapsed := time.Since(now); code != 0 || handler.publications != wantPublications || elapsed != wantElapsed {
+					t.Fatalf("loop missed saved publication retry: code=%d publications=%d elapsed=%s want=%s logs=%q",
+						code, handler.publications, elapsed, wantElapsed, logs.String())
 				}
 			})
 		})

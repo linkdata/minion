@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,86 @@ func TestFixPushCheckpointKeepsExactTargetAndOriginalGraceAcrossRestart(t *testi
 	if got := store.Data.PublicationWrites[fixPushWriteKey(request.ID)]; got.Status != state.PublicationWriteObserved ||
 		got.ResolvedAt.IsZero() || got.Branch != branch || got.SHA != sha || !got.Deadline.Equal(write.Deadline) {
 		t.Fatalf("observed push checkpoint changed after restart: %+v", got)
+	}
+}
+
+func TestObservedFixPushSaveFailureClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		resultReady       bool
+		foreignAssignment bool
+	}{
+		{name: "active saved result", resultReady: true},
+		{name: "result not ready"},
+		{name: "foreign assignment", resultReady: true, foreignAssignment: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := testJob(command.Fix)
+			job.Identity.JobID = strings.Repeat("a", 64)
+			store, path, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
+			e := Orchestrator{Store: store, BotLogin: "bot", BotID: 8}
+			sha := strings.Repeat("b", 40)
+			branch := "minion/fix-7-aaaaaaaaaaaa"
+			if err := e.beginFixPush(t.Context(), request, "bot/repo", branch, sha, nil); err != nil {
+				t.Fatal(err)
+			}
+			key := fixPushWriteKey(request.ID)
+			write := store.Data.PublicationWrites[key]
+			if !tc.resultReady {
+				store.Data.Accepted.ResultReady = false
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observed := request
+			if tc.foreignAssignment {
+				observed.Repository.ID++
+			}
+			checkpoint := path + ".checkpoint"
+			if err := os.Rename(path, checkpoint); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err := e.observeFixPush(observed)
+			if tc.resultReady && !tc.foreignAssignment {
+				if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrAcceptanceState) {
+					t.Fatalf("active push observation save failure was not retryable: %v", err)
+				}
+			} else if !errors.Is(err, monitor.ErrAcceptanceState) || errors.Is(err, monitor.ErrPostModelPublication) {
+				t.Fatalf("inactive push observation save failure changed classification: %v", err)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(checkpoint, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = state.Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			e.Store = store
+			if got := store.Data.PublicationWrites[key]; got != write || store.Data.PendingFixes[request.ID].SHA != sha {
+				t.Fatalf("failed observation changed durable push checkpoint: write=%+v pending=%+v", got, store.Data.PendingFixes[request.ID])
+			}
+			if tc.resultReady && !tc.foreignAssignment {
+				if err := e.observeFixPush(request); err != nil {
+					t.Fatalf("active push observation did not retry: %v", err)
+				}
+				if got := store.Data.PublicationWrites[key]; got.Status != state.PublicationWriteObserved || got.SHA != sha || got.Branch != branch || got.ResolvedAt.IsZero() {
+					t.Fatalf("retried push observation changed exact checkpoint: %+v", got)
+				}
+			}
+		})
 	}
 }
 
@@ -467,6 +548,103 @@ func TestObservedTaskPublicationUpdatesEarlierUncertainResolution(t *testing.T) 
 	observed := store.Data.PublicationWrites[request.ID]
 	if observed.Status != state.PublicationWriteObserved || observed.ResolvedAt.Before(started) || observed.ResolvedAt.After(time.Now().UTC()) {
 		t.Fatalf("observed write retained stale resolution: %+v", observed)
+	}
+}
+
+func TestObservedTaskPublicationSaveFailureClassification(t *testing.T) {
+	for _, test := range []struct {
+		name, kind  string
+		action      command.Action
+		resultReady bool
+	}{
+		{name: "saved comment", kind: "comment", action: command.Comment, resultReady: true},
+		{name: "saved review", kind: "review", action: command.Review, resultReady: true},
+		{name: "result not saved", kind: "comment", action: command.Comment},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			store, err := state.Open(path, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			request := usageJob()
+			request.Command = command.Command{Name: test.kind, Action: test.action}
+			if test.action == command.Review {
+				request.SubjectType = "PullRequest"
+			}
+			reserveActionRequest(t, store, &request, true)
+			store.Data.Accepted.ResultReady = test.resultReady
+			store.Data.Accepted.RetryAt = request.Deadline
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			e := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
+			if err := e.beginTaskPublication(t.Context(), request, test.kind); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			err = e.observeTaskPublication(request)
+			if test.resultReady && (!errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrAcceptanceState)) ||
+				!test.resultReady && (!errors.Is(err, monitor.ErrAcceptanceState) || errors.Is(err, monitor.ErrPostModelPublication)) {
+				t.Fatalf("save failure after observed %s has wrong classification: %v", test.name, err)
+			}
+			if err := os.RemoveAll(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.observeTaskPublication(request); err != nil {
+				t.Fatalf("observed %s did not persist on retry: %v", test.kind, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved state.Data
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if got := saved.PublicationWrites[request.ID].Status; got != state.PublicationWriteObserved {
+				t.Fatalf("retried %s observation was not durable: %s", test.kind, got)
+			}
+			if got := saved.Accepted.RetryAt; test.resultReady && !got.IsZero() ||
+				!test.resultReady && !got.Equal(request.Deadline) {
+				t.Fatalf("observed %s changed accepted retry incorrectly: %s", test.name, got)
+			}
+		})
+	}
+}
+
+func TestUnissuedTaskPublicationSaveFailureRemainsFatal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	reserveActionRequest(t, store, &request, true)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "child"), []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
+	if err := e.beginTaskPublication(t.Context(), request, "comment"); !errors.Is(err, monitor.ErrAcceptanceState) ||
+		errors.Is(err, monitor.ErrPostModelPublication) {
+		t.Fatalf("pre-publication save failure changed classification: %v", err)
 	}
 }
 

@@ -160,6 +160,10 @@ func (e *Orchestrator) observeFixPush(job monitor.Job) error {
 		write.ResolvedAt = time.Now().UTC()
 		e.Store.Data.PublicationWrites[key] = write
 		if err := e.Store.Save(); err != nil {
+			if accepted := e.Store.Data.Accepted; accepted != nil && accepted.ResultReady &&
+				monitor.AssignmentMatchesAccepted(job, *accepted) {
+				return fmt.Errorf("%w: save observed fix push: %w", monitor.ErrPostModelPublication, err)
+			}
 			return fmt.Errorf("%w: save observed fix push: %w", monitor.ErrAcceptanceState, err)
 		}
 		return nil
@@ -323,12 +327,21 @@ func (e *Orchestrator) observeTaskPublication(job monitor.Job) error {
 		if !exists || !existingTaskPublicationMatches(write, job) {
 			return fmt.Errorf("%w: issued publication changed before observation", monitor.ErrAcceptanceState)
 		}
+		accepted := e.Store.Data.Accepted
+		savedResult := accepted != nil && accepted.ResultReady &&
+			accepted.JobID == job.ID && accepted.AttemptID == job.AttemptID
 		if write.Status != state.PublicationWriteObserved {
 			write.ResolvedAt = time.Now().UTC()
+			if savedResult {
+				accepted.RetryAt = time.Time{}
+			}
 		}
 		write.Status = state.PublicationWriteObserved
 		e.Store.Data.PublicationWrites[job.ID] = write
 		if err := e.Store.Save(); err != nil {
+			if savedResult {
+				return fmt.Errorf("%w: save observed publication: %w", monitor.ErrPostModelPublication, err)
+			}
 			return fmt.Errorf("%w: save observed publication: %w", monitor.ErrAcceptanceState, err)
 		}
 		return nil

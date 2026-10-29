@@ -272,10 +272,24 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 		wait := time.Until(next)
 		if wait < time.Second {
 			accepted := store.Data.Accepted
-			if wait <= 0 || accepted == nil ||
-				store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
-				!next.Before(accepted.Deadline) {
+			if accepted == nil || !next.Before(accepted.Deadline) {
 				wait = time.Second
+			} else {
+				push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+				reply := store.Data.PublicationWrites[accepted.JobID]
+				activePush := push.Status == state.PublicationWritePending && push.AttemptID == accepted.AttemptID
+				activeReply := accepted.ResultReady && reply.AttemptID == accepted.AttemptID &&
+					(reply.Status == state.PublicationWritePending ||
+						reply.Status == state.PublicationWriteObserved && !accepted.RetryAt.IsZero() && !next.After(accepted.RetryAt))
+				activeSavedRetry := accepted.ResultReady && next.Equal(accepted.RetryAt) &&
+					(accepted.Action != "fix" || push.Status != state.PublicationWritePending)
+				if wait <= 0 {
+					if !activeSavedRetry || next.IsZero() {
+						wait = time.Second
+					}
+				} else if !activePush && !activeReply && !activeSavedRetry {
+					wait = time.Second
+				}
 			}
 		}
 		timer := time.NewTimer(wait)

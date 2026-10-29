@@ -27,12 +27,15 @@ func (m *Monitor) ReconcilePublicationWrites(ctx context.Context, store *state.S
 func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.Store, onlyJobID, skipJobID string) error {
 	pending := make(map[string]state.PublicationWrite)
 	var cursor string
-	var activePushID string
+	var activeJobID, activePushID, activeAttemptID string
+	var activeResultReady bool
 	var activeDeadline time.Time
 	if err := store.WithLock(func() error {
 		cursor = store.Data.PublicationScanCursor
 		if accepted := store.Data.Accepted; accepted != nil {
+			activeJobID, activeAttemptID = accepted.JobID, accepted.AttemptID
 			activePushID, activeDeadline = accepted.JobID+"-push", accepted.Deadline
+			activeResultReady = accepted.ResultReady
 		}
 		for jobID, write := range store.Data.PublicationWrites {
 			if write.Status == state.PublicationWritePending && jobID != skipJobID && jobID != skipJobID+"-push" &&
@@ -84,10 +87,15 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 		if !expired {
 			lookupTimeout = min(lookupTimeout, write.Deadline.Sub(now))
 		}
-		if jobID == activePushID && write.Kind == "push" {
+		if (jobID == activePushID && write.Kind == "push") ||
+			(jobID == activeJobID && write.AttemptID == activeAttemptID && (write.Kind == "comment" || write.Kind == "review")) {
 			if remaining := activeDeadline.Sub(now); remaining > 0 {
-				// Leave time for another check and the saved fix reply.
-				lookupTimeout = min(lookupTimeout, remaining/2)
+				reserve := remaining / 2
+				if write.Kind == "comment" || write.Kind == "review" {
+					// Give the active reply one longer check while leaving time to finish locally.
+					reserve = min(reserve, publicationLastChanceInterval)
+				}
+				lookupTimeout = min(lookupTimeout, remaining-reserve)
 			}
 		}
 		lookupCtx, cancel := context.WithTimeout(passCtx, lookupTimeout)
@@ -131,6 +139,11 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 		if found {
 			changed, err := storePublicationWriteOutcome(store, jobID, write, state.PublicationWriteObserved, m.now().UTC())
 			if err != nil {
+				if activeResultReady && write.AttemptID == activeAttemptID &&
+					(jobID == activePushID && write.Kind == "push" ||
+						jobID == activeJobID && (write.Kind == "comment" || write.Kind == "review")) {
+					return fmt.Errorf("%w: record observed publication %s: %w", ErrPostModelPublication, jobID, err)
+				}
 				return fmt.Errorf("%w: record observed publication %s: %w", ErrAcceptanceState, jobID, err)
 			}
 			if changed {
@@ -172,9 +185,10 @@ func storePublicationWriteOutcome(store *state.Store, jobID string, original sta
 		current.Status = status
 		current.ResolvedAt = at
 		store.Data.PublicationWrites[jobID] = current
-		if status == state.PublicationWriteObserved && current.Kind == "push" {
-			if accepted := store.Data.Accepted; accepted != nil && accepted.JobID+"-push" == jobID &&
-				accepted.AttemptID == current.AttemptID && accepted.ResultReady {
+		if status == state.PublicationWriteObserved {
+			if accepted := store.Data.Accepted; accepted != nil && accepted.AttemptID == current.AttemptID && accepted.ResultReady &&
+				(current.Kind == "push" && accepted.JobID+"-push" == jobID ||
+					(current.Kind == "comment" || current.Kind == "review") && accepted.JobID == jobID) {
 				accepted.RetryAt = time.Time{}
 			}
 		}
@@ -199,11 +213,18 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 				continue
 			}
 			var actionDeadline time.Time
-			if accepted := store.Data.Accepted; accepted != nil && write.Kind == "push" &&
-				jobID == accepted.JobID+"-push" && at.Before(accepted.Deadline) {
+			if accepted := store.Data.Accepted; accepted != nil && at.Before(accepted.Deadline) &&
+				(write.Kind == "push" && jobID == accepted.JobID+"-push" ||
+					accepted.ResultReady && (write.Kind == "comment" || write.Kind == "review") &&
+						jobID == accepted.JobID && write.AttemptID == accepted.AttemptID) {
 				actionDeadline = accepted.Deadline
 			}
-			checkAt := publicationWriteCheckAt(write, at, actionDeadline)
+			var checkAt time.Time
+			if !actionDeadline.IsZero() {
+				checkAt = activePublicationWriteWake(write, at, actionDeadline)
+			} else {
+				checkAt = publicationWriteCheckAt(write, at, actionDeadline)
+			}
 			if next.IsZero() || checkAt.Before(next) {
 				next = checkAt
 			}
@@ -214,17 +235,27 @@ func publicationWriteWakeExcept(store *state.Store, at time.Time, skipJobID stri
 }
 
 func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
-	interval := publicationRecheckInterval
+	checkAt := at.Add(publicationRecheckInterval)
 	if !actionDeadline.IsZero() && at.Before(actionDeadline) {
-		remaining := actionDeadline.Sub(at)
-		// Leave time for another lookup without a rapid loop at expiry.
-		interval = min(interval, remaining, max(publicationLastChanceInterval, remaining/2))
+		// Ordinary retries avoid a rapid loop near expiry.
+		checkAt = publicationRetryAt(at, actionDeadline)
 	}
-	checkAt := at.Add(interval)
 	if write.Deadline.Before(checkAt) {
 		checkAt = write.Deadline
 	}
 	return checkAt
+}
+
+func activePublicationWriteWake(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
+	next := publicationWriteCheckAt(write, at, actionDeadline)
+	if next.After(at) && next.Before(actionDeadline) {
+		return next
+	}
+	// Keep active checks inside the action window after write grace or near expiry.
+	if remaining := actionDeadline.Sub(at); remaining > publicationLastChanceInterval {
+		return at.Add(min(publicationLastChanceInterval, remaining/2))
+	}
+	return publicationRetryAt(at, actionDeadline)
 }
 
 func withPublicationWriteWake(next time.Time, store *state.Store, at time.Time) time.Time {
