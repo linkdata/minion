@@ -183,7 +183,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	}
 	activeJobID := ""
 	activeWriteChecked := false
-	activeTaskReady := false
 	activeSavedReply := false
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
@@ -191,10 +190,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		activeSavedReply = savedReplyPriority(accepted, store.Data.PublicationWrites)
 		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending ||
 			store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWritePending
-		task := store.Data.PublicationWrites[activeJobID]
-		activeTaskReady = accepted.ResultReady && task.AttemptID == accepted.AttemptID &&
-			(task.Kind == "comment" || task.Kind == "review") &&
-			(task.Status == state.PublicationWritePending || task.Status == state.PublicationWriteObserved)
 	}
 	if err := m.reconcilePublicationWrites(ctx, store, activeJobID, ""); err != nil {
 		if accepted := store.Data.Accepted; accepted != nil && errors.Is(err, ErrPostModelPublication) {
@@ -334,7 +329,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		priorityRetry := errors.Is(err, ErrPostModelPublication) && !errors.Is(err, ErrAcceptanceState) &&
 			savedReplyPriority(store.Data.Accepted, store.Data.PublicationWrites)
 		urgentPublication := retriedObservedPush || (pushJustObserved && errors.Is(err, ErrPostModelPublication)) || reserveFix ||
-			activeTaskWrite || (activeTaskReady || activeSavedReply) && store.Data.Accepted == nil || priorityRetry
+			activeTaskWrite || activeSavedReply && store.Data.Accepted == nil || priorityRetry
 		if reconcileErr == nil && !urgentPublication {
 			postSkip := skipChecked
 			if pushBeforeScan == state.PublicationWritePending {
@@ -2024,11 +2019,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if accepted == nil || accepted.JobID != job.ID || accepted.AttemptID != job.AttemptID {
 				return nil
 			}
-			write := store.Data.PublicationWrites[job.ID]
-			ready = savedReplyPriority(accepted, store.Data.PublicationWrites) ||
-				accepted.ResultReady && write.AttemptID == job.AttemptID &&
-					(write.Kind == "comment" || write.Kind == "review") &&
-					(write.Status == state.PublicationWritePending || write.Status == state.PublicationWriteObserved)
+			ready = savedReplyPriority(accepted, store.Data.PublicationWrites)
 			return nil
 		})
 		return ready
