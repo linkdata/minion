@@ -2437,14 +2437,25 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	var issuedWrite bool
 	if err := store.WithLock(func() error {
 		write, exists := store.Data.PublicationWrites[job.ID]
-		if !exists {
-			return nil
+		if exists {
+			if write.Repository != job.Repository.Name || write.Number != job.Number || write.Marker != marker ||
+				(job.AttemptID != "" && write.AttemptID != job.AttemptID) {
+				return fmt.Errorf("%w: issued publication differs from failed action", ErrAcceptanceState)
+			}
+			issuedWrite = true
 		}
-		if write.Repository != job.Repository.Name || write.Number != job.Number || write.Marker != marker ||
-			(job.AttemptID != "" && write.AttemptID != job.AttemptID) {
-			return fmt.Errorf("%w: issued publication differs from failed action", ErrAcceptanceState)
+		push, exists := store.Data.PublicationWrites[job.ID+"-push"]
+		if exists {
+			pending, hasPending := store.Data.PendingFixes[job.ID]
+			_, repoName, hasRepo := strings.Cut(job.Repository.Name, "/")
+			if job.Command.Action != command.Fix || job.AttemptID == "" || push.Kind != "push" ||
+				push.AttemptID != job.AttemptID || push.Number != job.Number || push.Marker != marker ||
+				!hasRepo || !strings.EqualFold(push.Repository, strings.TrimSuffix(push.BotLogin, "[bot]")+"/"+repoName) ||
+				!hasPending || pending.SHA == "" || pending.SHA != push.SHA {
+				return fmt.Errorf("%w: issued fix push differs from failed action", ErrAcceptanceState)
+			}
+			issuedWrite = true
 		}
-		issuedWrite = true
 		return nil
 	}); err != nil {
 		return err
@@ -2464,7 +2475,7 @@ func (m *Monitor) finishFailedJobWithRetry(ctx context.Context, store *state.Sto
 	replied := issuedWrite
 	var err error
 	if issuedWrite {
-		m.logf("skip failure reply to %s: an earlier task publication was issued; reconcile its remote effect separately", itemLocation(job.Source))
+		m.logf("skip failure reply to %s: an earlier publication was issued; reconcile its remote effect separately", itemLocation(job.Source))
 	} else {
 		lookupCtx, cancelLookup := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancelLookup()

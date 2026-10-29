@@ -32,6 +32,9 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 	}()
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
 	defer cancel()
+	if err := e.reconcileFixPush(ctx, request); err != nil {
+		return err
+	}
 	if handled, err := e.resumeTaskPublication(ctx, request); handled || err != nil {
 		return err
 	}
@@ -140,6 +143,15 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return fmt.Errorf("%w: fix destination changed since accepted result; refusing to publish", monitor.ErrTerminalJob)
 	}
 	p.branch = fmt.Sprintf("minion/fix-%d-%s", request.Number, request.ID[:12])
+	var push state.PublicationWrite
+	var hasPush bool
+	_ = e.Store.WithLock(func() error {
+		push, hasPush = e.Store.Data.PublicationWrites[fixPushWriteKey(request.ID)]
+		return nil
+	})
+	if hasPush && (push.Repository != p.fork.FullName || push.Branch != p.branch) {
+		return fmt.Errorf("%w: issued fix push differs from the accepted destination", monitor.ErrAcceptanceState)
+	}
 	p.existing, err = e.GitHub.FindPullRequestByHead(ctx, p.repository.FullName, p.repository.DefaultBranch, e.BotLogin+":"+p.branch)
 	if err != nil {
 		return err
@@ -170,7 +182,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 		return fmt.Errorf("branch %s has a pull request but no remote branch", p.branch)
 	}
 	if expected.SHA != "" {
-		p.recoverFix = expected
+		return fmt.Errorf("%w: recorded fix push has no matching remote branch", monitor.ErrPostModelPublication)
 	}
 	if err := gitwork.Check(ctx, e.WorkRoot); err != nil {
 		return fmt.Errorf("Git readiness before recovered fix: %w", err)

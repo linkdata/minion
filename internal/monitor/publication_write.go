@@ -2,8 +2,11 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/github"
@@ -23,16 +26,24 @@ func (m *Monitor) ReconcilePublicationWrites(ctx context.Context, store *state.S
 func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.Store, onlyJobID, skipJobID string) error {
 	pending := make(map[string]state.PublicationWrite)
 	var cursor string
-	_ = store.WithLock(func() error {
+	if err := store.WithLock(func() error {
 		cursor = store.Data.PublicationScanCursor
 		for jobID, write := range store.Data.PublicationWrites {
 			if write.Status == state.PublicationWritePending && jobID != skipJobID &&
 				(onlyJobID == "" || jobID == onlyJobID) {
+				if write.Kind == "push" {
+					pending, exists := store.Data.PendingFixes[strings.TrimSuffix(jobID, "-push")]
+					if !exists || pending.SHA != write.SHA {
+						return fmt.Errorf("%w: issued fix push differs from its commit checkpoint", ErrAcceptanceState)
+					}
+				}
 				pending[jobID] = write
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
 	if len(pending) > 0 && m.GitHub == nil {
 		return fmt.Errorf("%w: GitHub client is missing for issued publication reconciliation", ErrAcceptanceState)
 	}
@@ -68,8 +79,30 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 			lookupTimeout = min(lookupTimeout, write.Deadline.Sub(now))
 		}
 		lookupCtx, cancel := context.WithTimeout(passCtx, lookupTimeout)
-		found, err := m.GitHub.HasVerifiedBotPublication(lookupCtx, write.Repository, write.Number, write.Since,
-			github.User{ID: write.BotID, Login: write.BotLogin}, write.Marker, write.Kind)
+		var found bool
+		var err error
+		if write.Kind == "push" {
+			branchClient, ok := m.GitHub.(interface {
+				Branch(context.Context, string, string) (github.Branch, error)
+			})
+			if !ok {
+				cancel()
+				return fmt.Errorf("%w: GitHub client cannot inspect an issued fix push", ErrAcceptanceState)
+			}
+			var branch github.Branch
+			branch, err = branchClient.Branch(lookupCtx, write.Repository, write.Branch)
+			if err == nil {
+				found = branch.Name == write.Branch && branch.Commit.SHA == write.SHA
+			} else {
+				var status *github.StatusError
+				if errors.As(err, &status) && status.StatusCode == http.StatusNotFound {
+					err = nil
+				}
+			}
+		} else {
+			found, err = m.GitHub.HasVerifiedBotPublication(lookupCtx, write.Repository, write.Number, write.Since,
+				github.User{ID: write.BotID, Login: write.BotLogin}, write.Marker, write.Kind)
+		}
 		cancel()
 		lastChecked = jobID
 		if err != nil {
@@ -117,8 +150,7 @@ func storePublicationWriteOutcome(store *state.Store, jobID string, original sta
 	changed := false
 	err := store.WithLock(func() error {
 		current, exists := store.Data.PublicationWrites[jobID]
-		if !exists || current.Status != state.PublicationWritePending || current.AttemptID != original.AttemptID ||
-			current.Kind != original.Kind || current.Marker != original.Marker {
+		if !exists || current != original || current.Status != state.PublicationWritePending {
 			return nil
 		}
 		current.Status = status

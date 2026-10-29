@@ -123,7 +123,7 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := monitor.Job{
-		ID: strings.Repeat("a", 64), Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2},
+		ID: strings.Repeat("a", 64), AttemptID: "attempt-1", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2},
 		SubjectType: "Issue", Number: 7,
 		Source:     github.Item{Author: github.User{ID: 7, Login: "writer"}, UpdatedAt: time.Now()},
 		Command:    command.Command{Name: "fix", Action: command.Fix},
@@ -131,6 +131,10 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 	}
 	orchestrator := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", BotID: 8, Store: store, WorkRoot: workRoot}
 	selectFixtureRequest(t, &orchestrator, &request, true)
+	store.Data.Accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	repo, fork, err := orchestrator.fixFork(t.Context(), request.Repository)
 	if err != nil {
 		t.Fatal(err)

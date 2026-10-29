@@ -52,6 +52,8 @@ type PublicationWrite struct {
 	Repository string    `json:"repository"`
 	Number     int       `json:"number"`
 	Marker     string    `json:"marker"`
+	Branch     string    `json:"branch,omitempty"`
+	SHA        string    `json:"sha,omitempty"`
 	Since      time.Time `json:"since"`
 	StartedAt  time.Time `json:"started_at"`
 	Deadline   time.Time `json:"deadline"`
@@ -68,13 +70,31 @@ func validPublicationWrite(jobID string, write PublicationWrite) bool {
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(write.AttemptID) ||
 		!ValidPublicationBotLogin(write.BotLogin) || write.BotID < 0 ||
 		!workspace.ValidRepository(write.Repository) || write.Number <= 0 ||
-		write.StartedAt.IsZero() || !write.Deadline.After(write.StartedAt) ||
-		write.Marker != "<!-- linkdataminion:"+jobID+" -->" {
+		write.StartedAt.IsZero() || !write.Deadline.After(write.StartedAt) {
 		return false
 	}
+	markerJobID := jobID
 	switch write.Kind {
 	case "comment", "review":
+		if write.Branch != "" || write.SHA != "" {
+			return false
+		}
+	case "push":
+		if !strings.HasSuffix(jobID, "-push") {
+			return false
+		}
+		markerJobID = strings.TrimSuffix(jobID, "-push")
+		owner, _, _ := strings.Cut(write.Repository, "/")
+		if write.BotID <= 0 || len(markerJobID) < 12 || !workspace.ValidIdentitySegment(markerJobID) ||
+			!strings.EqualFold(owner, strings.TrimSuffix(write.BotLogin, "[bot]")) ||
+			write.Branch != fmt.Sprintf("minion/fix-%d-%s", write.Number, markerJobID[:12]) ||
+			!workspace.ValidSHA(write.SHA) {
+			return false
+		}
 	default:
+		return false
+	}
+	if write.Marker != "<!-- linkdataminion:"+markerJobID+" -->" {
 		return false
 	}
 	switch write.Status {

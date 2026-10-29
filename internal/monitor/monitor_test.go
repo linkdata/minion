@@ -68,6 +68,14 @@ type fakeGitHub struct {
 	beforeVerify       func(context.Context, bool) error
 	rawIDs             bool
 	liveRepo           *github.Repository
+	branch             func(context.Context, string, string) (github.Branch, error)
+}
+
+func (f *fakeGitHub) Branch(ctx context.Context, repo, branch string) (github.Branch, error) {
+	if f.branch != nil {
+		return f.branch(ctx, repo, branch)
+	}
+	return github.Branch{}, &github.StatusError{StatusCode: http.StatusNotFound}
 }
 
 func (f *fakeGitHub) ListRepositoryNotifications(_ context.Context, repo string, since time.Time) ([]github.Notification, time.Duration, error) {

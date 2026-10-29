@@ -4,13 +4,167 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workspace"
 )
+
+func fixPushWriteKey(jobID string) string { return jobID + "-push" }
+
+func fixPushMatches(write state.PublicationWrite, pending state.PendingFix, job monitor.Job) bool {
+	return write.Kind == "push" && write.AttemptID == job.AttemptID &&
+		write.Number == job.Number && write.Marker == job.Marker() &&
+		write.Since.Equal(job.Source.UpdatedAt) && write.SHA == pending.SHA
+}
+
+// reconcileFixPush checks an issued push before recovered fix publication.
+func (e *Orchestrator) reconcileFixPush(ctx context.Context, job monitor.Job) error {
+	if job.Command.Action != command.Fix || e.Store == nil {
+		return nil
+	}
+	var write state.PublicationWrite
+	var pending state.PendingFix
+	var exists, hasPending bool
+	_ = e.Store.WithLock(func() error {
+		write, exists = e.Store.Data.PublicationWrites[fixPushWriteKey(job.ID)]
+		pending, hasPending = e.Store.Data.PendingFixes[job.ID]
+		return nil
+	})
+	if !exists {
+		return nil // Older SHA-only checkpoints can still match a remote branch.
+	}
+	if !hasPending || !fixPushMatches(write, pending, job) {
+		return fmt.Errorf("%w: issued fix push differs from its commit checkpoint", monitor.ErrAcceptanceState)
+	}
+	if write.Status == state.PublicationWriteUncertain {
+		return fmt.Errorf("%w: issued fix push remains uncertain", monitor.ErrPostModelPublication)
+	}
+	if write.Status == state.PublicationWriteObserved {
+		return nil
+	}
+	if !time.Now().Before(write.Deadline) {
+		return fmt.Errorf("%w: issued fix push grace elapsed", monitor.ErrPostModelPublication)
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(monitor.ErrPostModelPublication, err)
+	}
+	if e.GitHub == nil {
+		return fmt.Errorf("%w: GitHub client is missing for issued fix push", monitor.ErrAcceptanceState)
+	}
+	lookupCtx, cancel := context.WithDeadline(ctx, write.Deadline)
+	defer cancel()
+	lookupCtx, cancelLookup := context.WithTimeout(lookupCtx, 10*time.Second)
+	defer cancelLookup()
+	branch, err := e.GitHub.Branch(lookupCtx, write.Repository, write.Branch)
+	if err != nil {
+		return fmt.Errorf("%w: check issued fix push: %w", monitor.ErrPostModelPublication, err)
+	}
+	if branch.Name != write.Branch || branch.Commit.SHA != write.SHA {
+		return fmt.Errorf("%w: issued fix branch differs from the recorded commit", monitor.ErrPostModelPublication)
+	}
+	return e.observeFixPush(job)
+}
+
+// beginFixPush saves the exact branch and existing PendingFix SHA before Git can push.
+func (e *Orchestrator) beginFixPush(ctx context.Context, job monitor.Job, repository, branch, sha string, cap *state.CriticCap) error {
+	return e.beginFixPushAt(ctx, job, repository, branch, sha, cap, time.Now)
+}
+
+func (e *Orchestrator) beginFixPushAt(ctx context.Context, job monitor.Job, repository, branch, sha string, cap *state.CriticCap, now func() time.Time) error {
+	if e.Store == nil || job.Command.Action != command.Fix || !workspace.ValidIdentitySegment(job.AttemptID) ||
+		!state.ValidPublicationBotLogin(e.BotLogin) || e.BotID <= 0 ||
+		len(job.ID) < 12 || !workspace.ValidIdentitySegment(fixPushWriteKey(job.ID)) ||
+		!workspace.ValidRepository(repository) || !workspace.ValidSHA(sha) ||
+		branch != fmt.Sprintf("minion/fix-%d-%s", job.Number, job.ID[:12]) {
+		return fmt.Errorf("%w: fix push identity or target is invalid", monitor.ErrAcceptanceState)
+	}
+	owner, _, _ := strings.Cut(repository, "/")
+	if !strings.EqualFold(owner, strings.TrimSuffix(e.BotLogin, "[bot]")) {
+		return fmt.Errorf("%w: fix push fork does not belong to bot", monitor.ErrAcceptanceState)
+	}
+	return e.Store.WithLock(func() error {
+		key := fixPushWriteKey(job.ID)
+		if _, exists := e.Store.Data.PublicationWrites[key]; exists {
+			return fmt.Errorf("%w: fix push was already issued", monitor.ErrPostModelPublication)
+		}
+		if _, exists := e.Store.Data.PendingFixes[job.ID]; exists {
+			return fmt.Errorf("%w: fix commit was already reserved", monitor.ErrPostModelPublication)
+		}
+		started := now().UTC()
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		accepted := e.Store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || !accepted.Assigned || !accepted.ResultReady {
+			return fmt.Errorf("%w: selected result changed before fix push", monitor.ErrAcceptanceState)
+		}
+		if accepted.Terminal || !started.Before(accepted.Deadline) {
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		}
+		if _, decided := e.Store.Data.TerminalDecisions[job.ID]; decided {
+			return fmt.Errorf("%w: selected action is already decided", monitor.ErrTerminalJob)
+		}
+		grace := e.PublicationGrace
+		if grace <= 0 {
+			grace = time.Duration(config.DefaultPublicationGraceSeconds) * time.Second
+		}
+		write := state.PublicationWrite{
+			AttemptID: job.AttemptID, Kind: "push", BotLogin: e.BotLogin, BotID: e.BotID,
+			Repository: repository, Number: job.Number, Marker: job.Marker(), Since: job.Source.UpdatedAt,
+			Branch: branch, SHA: sha, StartedAt: started, Deadline: started.Add(grace), Status: state.PublicationWritePending,
+		}
+		e.Store.Data.PublicationWrites[key] = write
+		e.Store.Data.PendingFixes[job.ID] = state.PendingFix{SHA: sha, Cap: cap}
+		abortBeforePush := func(reason error) error {
+			delete(e.Store.Data.PublicationWrites, key)
+			delete(e.Store.Data.PendingFixes, job.ID)
+			if err := e.Store.Save(); err != nil {
+				return errors.Join(reason, fmt.Errorf("%w: clear unissued fix push: %w", monitor.ErrAcceptanceState, err))
+			}
+			return reason
+		}
+		if err := e.Store.Save(); err != nil {
+			return abortBeforePush(fmt.Errorf("%w: save issued fix push: %w", monitor.ErrAcceptanceState, err))
+		}
+		if err := ctx.Err(); err != nil {
+			return abortBeforePush(err)
+		}
+		if !now().Before(accepted.Deadline) {
+			return abortBeforePush(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded))
+		}
+		return nil
+	})
+}
+
+func (e *Orchestrator) observeFixPush(job monitor.Job) error {
+	return e.Store.WithLock(func() error {
+		key := fixPushWriteKey(job.ID)
+		write, exists := e.Store.Data.PublicationWrites[key]
+		pending, hasPending := e.Store.Data.PendingFixes[job.ID]
+		if !exists || !hasPending || !fixPushMatches(write, pending, job) {
+			return fmt.Errorf("%w: issued fix push changed before observation", monitor.ErrAcceptanceState)
+		}
+		if write.Status == state.PublicationWriteUncertain {
+			return fmt.Errorf("%w: issued fix push remains uncertain", monitor.ErrPostModelPublication)
+		}
+		if write.Status == state.PublicationWriteObserved {
+			return nil
+		}
+		write.Status = state.PublicationWriteObserved
+		write.ResolvedAt = time.Now().UTC()
+		e.Store.Data.PublicationWrites[key] = write
+		if err := e.Store.Save(); err != nil {
+			return fmt.Errorf("%w: save observed fix push: %w", monitor.ErrAcceptanceState, err)
+		}
+		return nil
+	})
+}
 
 func taskPublicationMatches(write state.PublicationWrite, job monitor.Job, kind string) bool {
 	return job.AttemptID != "" && write.AttemptID == job.AttemptID && write.Kind == kind &&

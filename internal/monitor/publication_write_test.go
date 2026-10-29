@@ -2,7 +2,9 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -103,6 +105,112 @@ func TestReconcilePublicationWriteExpiresWithoutRepost(t *testing.T) {
 			t.Fatalf("expired write was retried or not recorded: write=%+v checks=%d comments=%d", got, len(gh.verifiedCalls), gh.commentCalls)
 		}
 	})
+}
+
+func TestReconcileFixPushRequiresExactSHAUntilOriginalGraceExpires(t *testing.T) {
+	for _, tc := range []struct {
+		name, remoteSHA string
+	}{
+		{name: "matching", remoteSHA: strings.Repeat("b", 40)},
+		{name: "mismatched", remoteSHA: strings.Repeat("c", 40)},
+		{name: "missing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				path := filepath.Join(t.TempDir(), "state.json")
+				store := openStateAt(t, path, now)
+				jobID := strings.Repeat("a", 64)
+				branch := "minion/fix-7-aaaaaaaaaaaa"
+				sha := strings.Repeat("b", 40)
+				write := state.PublicationWrite{
+					AttemptID: "attempt-1", Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
+					Marker: "<!-- linkdataminion:" + jobID + " -->", Since: now,
+					Branch: branch, SHA: sha, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+				key := jobID + "-push"
+				store.Data.PendingFixes[jobID] = state.PendingFix{SHA: sha}
+				store.Data.PublicationWrites[key] = write
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				lookups := 0
+				gh := &fakeGitHub{branch: func(_ context.Context, repo, name string) (github.Branch, error) {
+					lookups++
+					if repo != "bot/repo" || name != branch {
+						t.Errorf("looked up wrong branch: %s %s", repo, name)
+					}
+					if tc.remoteSHA == "" {
+						return github.Branch{}, &github.StatusError{StatusCode: 404}
+					}
+					return github.Branch{Name: branch, Commit: github.BranchCommit{SHA: tc.remoteSHA}}, nil
+				}}
+				m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store = openStateAt(t, path, now)
+				got := store.Data.PublicationWrites[key]
+				if tc.remoteSHA == sha {
+					if got.Status != state.PublicationWriteObserved || got.ResolvedAt.IsZero() ||
+						!got.Deadline.Equal(write.Deadline) || lookups != 1 || len(gh.verifiedCalls) != 0 {
+						t.Fatalf("exact remote SHA was not observed after restart: write=%+v lookups=%d", got, lookups)
+					}
+					return
+				}
+				if got.Status != state.PublicationWritePending || !got.Deadline.Equal(write.Deadline) || lookups != 1 {
+					t.Fatalf("unmatched branch changed grace before restart: write=%+v lookups=%d", got, lookups)
+				}
+				time.Sleep(time.Minute)
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				got = store.Data.PublicationWrites[key]
+				if got.Status != state.PublicationWriteUncertain || got.ResolvedAt.IsZero() ||
+					got.Branch != branch || got.SHA != sha || !got.Deadline.Equal(write.Deadline) ||
+					lookups != 2 || gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 {
+					t.Fatalf("unmatched branch did not become inspectable after grace: write=%+v lookups=%d", got, lookups)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+				store = openStateAt(t, path, now)
+				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil ||
+					store.Data.PublicationWrites[key] != got || lookups != 2 {
+					t.Fatalf("uncertain push was retried after restart: write=%+v lookups=%d error=%v",
+						store.Data.PublicationWrites[key], lookups, err)
+				}
+			})
+		})
+	}
+}
+
+func TestReconcileFixPushRejectsChangedCommitCheckpoint(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	jobID := strings.Repeat("a", 64)
+	store.Data.PendingFixes[jobID] = state.PendingFix{SHA: strings.Repeat("c", 40)}
+	store.Data.PublicationWrites[jobID+"-push"] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "push", BotLogin: "bot", BotID: 8, Repository: "bot/repo", Number: 7,
+		Marker: "<!-- linkdataminion:" + jobID + " -->", Since: now,
+		Branch: "minion/fix-7-aaaaaaaaaaaa", SHA: strings.Repeat("b", 40),
+		StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	lookups := 0
+	gh := &fakeGitHub{branch: func(context.Context, string, string) (github.Branch, error) {
+		lookups++
+		return github.Branch{}, nil
+	}}
+	m := &Monitor{GitHub: gh}
+	if err := m.ReconcilePublicationWrites(t.Context(), store); !errors.Is(err, ErrAcceptanceState) || lookups != 0 {
+		t.Fatalf("changed checkpoint reached remote observation: lookups=%d error=%v", lookups, err)
+	}
 }
 
 func TestReconcilePublicationWriteChecksOnceAfterGraceOnNextPass(t *testing.T) {
