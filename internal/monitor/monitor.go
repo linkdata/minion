@@ -285,6 +285,16 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					if err := m.serviceSavedRetryControls(ctx, store, retryAt); err != nil {
 						return wake(retryAt, false), err
 					}
+					if at := now().UTC(); at.Before(retryAt) {
+						next := retryAt
+						if invite := store.Data.NextInviteCheckAt; invite.After(at) {
+							next = earlierWake(next, invite)
+						}
+						if terminal := m.terminalControlWake(store); terminal.After(at) {
+							next = earlierWake(next, terminal)
+						}
+						return next, nil
+					}
 				}
 				// Keep the saved reply ahead of unrelated publication scans until its retry.
 				return retryAt, nil
@@ -1275,7 +1285,7 @@ func savedReplyHasControlWindow(accepted *state.AcceptedAction, writes map[strin
 	}
 	task, push := writes[accepted.JobID], writes[accepted.JobID+"-push"]
 	return (task.AttemptID != accepted.AttemptID || task.Status == "") &&
-		(push.AttemptID != accepted.AttemptID || push.Status == "")
+		(push.AttemptID != accepted.AttemptID || push.Status == "" || push.Status == state.PublicationWriteObserved)
 }
 
 func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.Store, retryAt time.Time) error {

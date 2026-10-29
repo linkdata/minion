@@ -181,6 +181,19 @@ func storedTaskWriteFixtureAt(t *testing.T, now time.Time, remaining time.Durati
 	t.Helper()
 	store, path, accepted, gh, m := storedRecoveryFixtureAt(t, now)
 	m.Now = time.Now
+	if kind == "comment" {
+		oldJobID := accepted.JobID
+		accepted.CommandName, accepted.Action = "audit", "comment"
+		accepted.JobID = jobID(accepted.SourceKey, accepted.CommandName)
+		store.Data.Accepted.CommandName = accepted.CommandName
+		store.Data.Accepted.Action = accepted.Action
+		store.Data.Accepted.JobID = accepted.JobID
+		store.Data.JobFailures[accepted.JobID] = store.Data.JobFailures[oldJobID]
+		delete(store.Data.JobFailures, oldJobID)
+		item := selectedItem(now)
+		item.Body = "@linkdataminion audit"
+		gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+	}
 	accepted.Deadline = now.Add(remaining)
 	store.Data.Accepted.Deadline = accepted.Deadline
 	store.Data.Accepted.RetryAt = accepted.Deadline
@@ -735,6 +748,22 @@ func storedIssuedFixPushFixtureAt(t *testing.T, now time.Time) (*state.Store, st
 	return store, path, accepted, gh, m
 }
 
+func storedObservedFixPushFixtureAt(t *testing.T, now time.Time) (*state.Store, state.AcceptedAction, *fakeGitHub, *Monitor) {
+	t.Helper()
+	store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+	m.Now = time.Now
+	accepted.Deadline = now.Add(7 * time.Minute)
+	store.Data.Accepted.Deadline = accepted.Deadline
+	store.Data.Accepted.RetryAt = time.Time{}
+	failure := store.Data.JobFailures[accepted.JobID]
+	failure.Deadline = accepted.Deadline
+	store.Data.JobFailures[accepted.JobID] = failure
+	push := store.Data.PublicationWrites[accepted.JobID+"-push"]
+	push.Status, push.ResolvedAt = state.PublicationWriteObserved, now
+	store.Data.PublicationWrites[accepted.JobID+"-push"] = push
+	return store, accepted, gh, m
+}
+
 func TestObservedIssuedFixPushBypassesAcceptedRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, time.Now().UTC())
@@ -979,6 +1008,85 @@ func TestObservedFixPushImmediateRecoveryFailureUsesBackoff(t *testing.T) {
 		}
 		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 2 {
 			t.Fatalf("recovered publication bypassed backoff: err=%v publications=%d", err, handler.publications)
+		}
+	})
+}
+
+func TestObservedFixPushReplyBackoffServicesDueControls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, accepted, gh, m := storedObservedFixPushFixtureAt(t, now)
+		item, terminalID := queueTerminalControl(store, now.Add(-time.Second), 8,
+			state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		currentItem := gh.currentItem
+		gh.currentItem = func(source github.Item) (github.Item, error) {
+			if source.Key == accepted.SourceKey {
+				return currentItem(source)
+			}
+			return source, nil
+		}
+		gh.threadItems = terminalThreads(map[int]github.Item{8: item})
+		invitationChecks := 0
+		gh.beforeList = func() { invitationChecks++ }
+		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+		m.Handler = handler
+		retryAt := now.Add(publicationRecheckInterval)
+		next, err := m.RunOnce(t.Context(), store)
+		_, taskWrite := store.Data.PublicationWrites[accepted.JobID]
+		if !errors.Is(err, ErrPostModelPublication) || !next.Equal(retryAt) ||
+			!terminalReplyRecorded(gh, store, terminalID) || invitationChecks != 1 ||
+			handler.publications != 1 || handler.executions != 0 || taskWrite ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(retryAt) {
+			t.Fatalf("observed fix reply backoff skipped due controls: next=%s elapsed=%s replies=%v invitations=%d handler=%+v taskWrite=%t accepted=%+v err=%v",
+				next, time.Since(now), gh.comments, invitationChecks, handler, taskWrite, store.Data.Accepted, err)
+		}
+
+		store.Data.NextInviteCheckAt = now
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		waiting := &deadlineInvitationGitHub{fakeGitHub: gh}
+		m.GitHub = waiting
+		next, err = m.RunOnce(t.Context(), store)
+		if err != nil || waiting.checks != 1 || time.Since(now) != publicationRecheckInterval ||
+			!next.Equal(retryAt) || handler.publications != 1 || store.Data.Accepted == nil {
+			t.Fatalf("observed fix reply backoff exceeded retry wake: next=%s elapsed=%s invitations=%d publications=%d accepted=%+v err=%v",
+				next, time.Since(now), waiting.checks, handler.publications, store.Data.Accepted, err)
+		}
+	})
+}
+
+func TestObservedFixPushReplyBackoffWakesForFutureInvitation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, accepted, gh, m := storedObservedFixPushFixtureAt(t, now)
+		store.Data.NextInviteCheckAt = now.Add(5 * time.Second)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		invitationChecks := 0
+		gh.beforeList = func() { invitationChecks++ }
+		handler := &recoveredResultHandler{publish: func(Job) error { return ErrPostModelPublication }}
+		m.Handler = handler
+		retryAt := now.Add(publicationRecheckInterval)
+		next, err := m.RunOnce(t.Context(), store)
+		if !errors.Is(err, ErrPostModelPublication) || !next.Equal(now.Add(5*time.Second)) ||
+			invitationChecks != 0 || handler.publications != 1 || store.Data.Accepted == nil ||
+			!store.Data.Accepted.RetryAt.Equal(retryAt) {
+			t.Fatalf("future invitation did not set earlier wake: next=%s elapsed=%s checks=%d publications=%d accepted=%+v err=%v",
+				next, time.Since(now), invitationChecks, handler.publications, store.Data.Accepted, err)
+		}
+		time.Sleep(time.Until(next))
+		next, err = m.RunOnce(t.Context(), store)
+		_, taskWrite := store.Data.PublicationWrites[accepted.JobID]
+		if err != nil || time.Since(now) != 5*time.Second || invitationChecks != 1 ||
+			!next.Equal(retryAt) || handler.publications != 1 || taskWrite {
+			t.Fatalf("invitation was not serviced before saved reply retry: next=%s elapsed=%s checks=%d publications=%d taskWrite=%t err=%v",
+				next, time.Since(now), invitationChecks, handler.publications, taskWrite, err)
 		}
 	})
 }
