@@ -129,12 +129,13 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 		Command:    command.Command{Name: "fix", Action: command.Fix},
 		AcceptedAt: time.Now().UTC(),
 	}
-	orchestrator := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", Store: store, WorkRoot: workRoot}
+	orchestrator := Orchestrator{GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", BotID: 8, Store: store, WorkRoot: workRoot}
+	selectFixtureRequest(t, &orchestrator, &request, true)
 	repo, fork, err := orchestrator.fixFork(t.Context(), request.Repository)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared := &preparedAction{job: Job{Source: workspace.Snapshot{Head: base}}, request: request, issueNodeID: "issue-node", checkout: checkout, repository: repo, fork: fork, branch: branch}
+	prepared := &preparedAction{job: Job{Version: ProtocolVersion, Action: command.Fix, Source: workspace.Snapshot{Head: base}}, request: request, issueNodeID: "issue-node", checkout: checkout, repository: repo, fork: fork, branch: branch}
 	result := Result{Changes: []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}}
 	if err := orchestrator.publishFix(t.Context(), prepared, result, publication{answer: "Fixed."}); err != nil {
 		t.Fatal(err)
@@ -148,5 +149,8 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 	}
 	if !strings.Contains(comment, branch) || !strings.Contains(comment, wantSHA) || !strings.HasSuffix(comment, request.Marker()) {
 		t.Fatalf("published reply=%q", comment)
+	}
+	if write := store.Data.PublicationWrites[request.ID]; write.Status != state.PublicationWriteObserved {
+		t.Fatalf("published reply was not observed: %+v", write)
 	}
 }
