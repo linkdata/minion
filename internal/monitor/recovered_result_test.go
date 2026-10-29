@@ -562,9 +562,11 @@ func TestObservedTaskReplySaveFailureAfterDeadlineWakesForCleanup(t *testing.T) 
 		if _, err := m.RunOnce(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
-		if store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() || handler.executions != 0 {
-			t.Fatalf("expired acceptance did not complete after storage recovered: accepted=%+v processed=%v handler=%+v",
-				store.Data.Accepted, store.Data.Processed[accepted.JobID], handler)
+		if store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+			handler.executions != 0 || handler.publications != 0 ||
+			store.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
+			t.Fatalf("expired acceptance published after storage recovered: accepted=%+v processed=%v decision=%+v handler=%+v",
+				store.Data.Accepted, store.Data.Processed[accepted.JobID], store.Data.TerminalDecisions[accepted.JobID], handler)
 		}
 	})
 }
@@ -1804,11 +1806,11 @@ func TestStoredResultRecoveryDefersInvitationUntilPublicationFinishes(t *testing
 				time.Sleep(time.Minute)
 				synctest.Wait()
 				if len(gh.verifiedCalls) != 0 {
-					t.Fatalf("older publication delayed held %s: checks=%d", phase, len(gh.verifiedCalls))
+					t.Fatalf("older publication ran during held %s: checks=%d", phase, len(gh.verifiedCalls))
 				}
 				select {
 				case <-checked:
-					t.Fatalf("due invitation delayed held %s", phase)
+					t.Fatalf("due invitation ran during held %s", phase)
 				default:
 				}
 				select {
@@ -1895,7 +1897,7 @@ func TestStoredResultRecoveryDefersTerminalReplyUntilPublicationFinishes(t *test
 		synctest.Wait()
 		select {
 		case <-commented:
-			t.Fatal("due terminal reply delayed held publication")
+			t.Fatal("due terminal reply ran during held publication")
 		default:
 		}
 		select {

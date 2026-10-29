@@ -257,12 +257,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if retryAt := accepted.RetryAt; (decided || time.Now().Before(accepted.Deadline)) && time.Now().Before(retryAt) {
 			remaining := time.Until(accepted.Deadline)
 			task := store.Data.PublicationWrites[accepted.JobID]
-			if retryAt.Before(accepted.Deadline) &&
-				(savedReplyPriority(accepted, store.Data.PublicationWrites) ||
-					accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved) {
-				// Keep a saved reply ahead of unrelated checks until its retry.
-				return retryAt, nil
-			}
 			if write, pending := pendingActiveWrite(accepted); pending && remaining > 0 {
 				writeWake := activePublicationWriteWake(write, now().UTC(), accepted.Deadline)
 				if write.Kind != "push" {
@@ -281,6 +275,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				writeWake = activePublicationWriteWake(write, now().UTC(), accepted.Deadline)
 				next := earlierWake(earlierWake(retryAt, writeWake), terminalWake)
 				return next, ctx.Err()
+			}
+			if retryAt.Before(accepted.Deadline) &&
+				(savedReplyPriority(accepted, store.Data.PublicationWrites) ||
+					accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved) {
+				// Keep a saved reply ahead of unrelated checks until its retry.
+				return retryAt, nil
 			}
 			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
 				return wake(retryAt, false), err

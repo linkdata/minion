@@ -239,7 +239,13 @@ func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline ti
 func activePublicationWriteWake(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
 	next := publicationWriteCheckAt(write, at, actionDeadline)
 	if !next.After(at) {
-		return earlierWake(at.Add(publicationLastChanceInterval), actionDeadline)
+		// A lookup crossed the write grace. Leave one final check before action expiry.
+		if remaining := actionDeadline.Sub(at); remaining > publicationLastChanceInterval {
+			return at.Add(publicationLastChanceInterval)
+		} else if remaining > time.Nanosecond {
+			return at.Add(remaining / 2)
+		}
+		return actionDeadline
 	}
 	return next
 }

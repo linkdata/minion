@@ -323,28 +323,74 @@ func TestActiveTaskWriteWakeUsesOriginalDeadline(t *testing.T) {
 }
 
 func TestActiveTaskWriteGraceTimeoutStillWakesBeforeActionDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name                                 string
+		actionDeadline, writeGrace, wantWake time.Duration
+	}{
+		{name: "ordinary window", actionDeadline: 500 * time.Millisecond, writeGrace: 150 * time.Millisecond, wantWake: 250 * time.Millisecond},
+		{name: "last hundred milliseconds", actionDeadline: 180 * time.Millisecond, writeGrace: 80 * time.Millisecond, wantWake: 130 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, tc.actionDeadline, "review", state.PublicationWritePending)
+				m.Now = time.Now
+				store.Data.Accepted.RetryAt = accepted.Deadline
+				write := store.Data.PublicationWrites[accepted.JobID]
+				write.Deadline = now.Add(tc.writeGrace)
+				store.Data.PublicationWrites[accepted.JobID] = write
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
+				handler := &recoveredResultHandler{}
+				m.Handler = handler
+				next, err := m.RunOnce(t.Context(), store)
+				if err != nil || time.Since(now) != tc.writeGrace ||
+					!next.Equal(now.Add(tc.wantWake)) || len(gh.verifiedCalls) != 1 ||
+					store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending {
+					t.Fatalf("grace timeout lost the final check: elapsed=%s next=%s checks=%d write=%+v err=%v",
+						time.Since(now), next, len(gh.verifiedCalls), store.Data.PublicationWrites[accepted.JobID], err)
+				}
+				gh.beforeVerify = nil
+				gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+				gh.reviewReplies = []github.Item{{Body: "published\n\n" + marker,
+					Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
+				time.Sleep(time.Until(next))
+				if _, err := m.RunOnce(t.Context(), store); err != nil {
+					t.Fatal(err)
+				}
+				if !time.Now().Before(accepted.Deadline) || handler.publications != 1 || handler.executions != 0 ||
+					store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
+					t.Fatalf("final observation did not finish before deadline: elapsed=%s handler=%+v accepted=%+v processed=%v",
+						time.Since(now), handler, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+				}
+			})
+		})
+	}
+}
+
+func TestSavedReplyChecksPendingWriteGraceBeforeRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
-		store, _, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, 500*time.Millisecond, "review", state.PublicationWritePending)
+		store, _, accepted, gh, m, marker := storedTaskWriteFixtureAt(t, now, 2*time.Minute, "review", state.PublicationWritePending)
 		m.Now = time.Now
-		store.Data.Accepted.RetryAt = accepted.Deadline
+		store.Data.Accepted.RetryAt = now.Add(30 * time.Second)
 		write := store.Data.PublicationWrites[accepted.JobID]
-		write.Deadline = now.Add(150 * time.Millisecond)
+		write.Deadline = now.Add(time.Second)
 		store.Data.PublicationWrites[accepted.JobID] = write
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
-		gh.beforeVerify = func(ctx context.Context, _ bool) error { <-ctx.Done(); return ctx.Err() }
 		handler := &recoveredResultHandler{}
 		m.Handler = handler
 		next, err := m.RunOnce(t.Context(), store)
-		if err != nil || time.Since(now) != 150*time.Millisecond ||
-			!next.Equal(now.Add(250*time.Millisecond)) || len(gh.verifiedCalls) != 1 ||
+		if err != nil || !next.Equal(write.Deadline) || len(gh.verifiedCalls) != 1 ||
 			store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending {
-			t.Fatalf("grace timeout lost the final check: elapsed=%s next=%s checks=%d write=%+v err=%v",
-				time.Since(now), next, len(gh.verifiedCalls), store.Data.PublicationWrites[accepted.JobID], err)
+			t.Fatalf("saved reply skipped its write grace: next=%s checks=%d write=%+v err=%v",
+				next, len(gh.verifiedCalls), store.Data.PublicationWrites[accepted.JobID], err)
 		}
-		gh.beforeVerify = nil
+		time.Sleep(500 * time.Millisecond)
 		gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
 		gh.reviewReplies = []github.Item{{Body: "published\n\n" + marker,
 			Author: github.User{ID: 8, Login: "linkdataminion"}, UpdatedAt: now}}
@@ -352,10 +398,10 @@ func TestActiveTaskWriteGraceTimeoutStillWakesBeforeActionDeadline(t *testing.T)
 		if _, err := m.RunOnce(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
-		if !time.Now().Before(accepted.Deadline) || handler.publications != 1 || handler.executions != 0 ||
-			store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() {
-			t.Fatalf("final observation did not finish before deadline: elapsed=%s handler=%+v accepted=%+v processed=%v",
-				time.Since(now), handler, store.Data.Accepted, store.Data.Processed[accepted.JobID])
+		if handler.publications != 1 || handler.executions != 0 || store.Data.Accepted != nil ||
+			store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWriteObserved {
+			t.Fatalf("due write was not observed before general retry: elapsed=%s handler=%+v accepted=%+v write=%+v",
+				time.Since(now), handler, store.Data.Accepted, store.Data.PublicationWrites[accepted.JobID])
 		}
 	})
 }
