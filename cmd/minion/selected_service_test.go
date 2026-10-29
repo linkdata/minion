@@ -538,12 +538,12 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 }
 
 func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
-	for _, issuedWrite := range []bool{false, true} {
-		name := "before first write"
-		if issuedWrite {
-			name = "after observed write"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct{ name, action, writeKind string }{
+		{name: "comment before first write", action: "comment"},
+		{name: "comment after observed write", action: "comment", writeKind: "comment"},
+		{name: "fix after observed push", action: "fix", writeKind: "push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				now := time.Now().UTC()
 				deadline := now.Add(500 * time.Millisecond)
@@ -555,17 +555,29 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 					SubjectType: "Issue", SubjectNumber: 7,
 					SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1",
-					Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+					Requester: "writer", RequesterID: 7, CommandName: tc.action, Action: tc.action,
 					AcceptedAt: now, Deadline: deadline, RetryAt: retryAt, Assigned: true, ResultReady: true,
 				}
 				writes := map[string]state.PublicationWrite{}
-				if issuedWrite {
-					writes[jobID] = state.PublicationWrite{
-						AttemptID: attemptID, Kind: "comment", BotLogin: "bot", BotID: 8,
+				pendingFixes := map[string]state.PendingFix{}
+				if tc.writeKind != "" {
+					key := jobID
+					if tc.writeKind == "push" {
+						key += "-push"
+						pendingFixes[jobID] = state.PendingFix{SHA: strings.Repeat("c", 40)}
+					}
+					write := state.PublicationWrite{
+						AttemptID: attemptID, Kind: tc.writeKind, BotLogin: "bot", BotID: 8,
 						Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:" + jobID + " -->",
 						Since: now, StartedAt: now, Deadline: now.Add(time.Minute),
 						Status: state.PublicationWriteObserved, ResolvedAt: now,
 					}
+					if tc.writeKind == "push" {
+						write.Repository = "bot/repo"
+						write.Branch = "minion/fix-7-" + jobID[:12]
+						write.SHA = pendingFixes[jobID].SHA
+					}
+					writes[key] = write
 				}
 				store := serviceStore(t, state.Data{
 					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
@@ -573,6 +585,7 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 					},
 					Processed:         map[string]time.Time{},
 					TerminalDecisions: map[string]state.TerminalDecision{},
+					PendingFixes:      pendingFixes,
 					PublicationWrites: writes,
 					NextPollAt:        now.Add(time.Hour), NextInviteCheckAt: now.Add(time.Hour),
 				})
@@ -587,18 +600,18 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 				handler := &pendingPushLoopHandler{cancel: cancel}
 				watcher := &monitor.Monitor{
 					Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
-						"comment": {Action: "comment"},
-					}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}}},
+						tc.action: {Action: tc.action},
+					}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{tc.action}}}},
 					GitHub: &terminalRecoveryGitHub{item: github.Item{
 						Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL,
-						Body: "@bot comment", Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID},
+						Body: "@bot " + tc.action, Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID},
 					}},
 					Handler: handler, Now: time.Now,
 				}
 				var logs bytes.Buffer
 				code := runMonitorLoop(ctx, watcher, store, true, nil, log.New(&logs, "", 0), false)
 				if elapsed := time.Since(now); code != 0 || handler.publications != 1 || elapsed != retryAt.Sub(now) {
-					t.Fatalf("loop missed saved task retry: code=%d publications=%d elapsed=%s want=%s logs=%q",
+					t.Fatalf("loop missed saved publication retry: code=%d publications=%d elapsed=%s want=%s logs=%q",
 						code, handler.publications, elapsed, retryAt.Sub(now), logs.String())
 				}
 			})

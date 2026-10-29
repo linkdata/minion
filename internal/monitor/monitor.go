@@ -229,11 +229,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if accepted := store.Data.Accepted; accepted != nil && at.Before(accepted.Deadline) {
 			if write, pending := pendingActiveWrite(accepted); pending {
 				// Keep the active remote write ahead of unrelated reconciliation.
-				writeWake := publicationWriteCheckAt(write, at, accepted.Deadline)
-				if !writeWake.After(at) {
-					writeWake = earlierWake(at.Add(publicationLastChanceInterval), accepted.Deadline)
-				}
-				return writeWake
+				return activePublicationWriteWake(write, at, accepted.Deadline)
 			}
 			if !next.IsZero() && next.Equal(accepted.RetryAt) && next.Before(accepted.Deadline) &&
 				savedReplyPriority(accepted, store.Data.PublicationWrites) {
@@ -268,7 +264,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				return retryAt, nil
 			}
 			if write, pending := pendingActiveWrite(accepted); pending && remaining > 0 {
-				writeWake := publicationWriteCheckAt(write, now().UTC(), accepted.Deadline)
+				writeWake := activePublicationWriteWake(write, now().UTC(), accepted.Deadline)
 				if write.Kind != "push" {
 					return earlierWake(retryAt, writeWake), ctx.Err()
 				}
@@ -282,7 +278,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				// The active write takes priority over unrelated publication checks.
 				write, _ = pendingActiveWrite(accepted)
-				writeWake = publicationWriteCheckAt(write, now().UTC(), accepted.Deadline)
+				writeWake = activePublicationWriteWake(write, now().UTC(), accepted.Deadline)
 				next := earlierWake(earlierWake(retryAt, writeWake), terminalWake)
 				return next, ctx.Err()
 			}

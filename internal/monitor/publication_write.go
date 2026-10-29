@@ -236,6 +236,14 @@ func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline ti
 	return checkAt
 }
 
+func activePublicationWriteWake(write state.PublicationWrite, at, actionDeadline time.Time) time.Time {
+	next := publicationWriteCheckAt(write, at, actionDeadline)
+	if !next.After(at) {
+		return earlierWake(at.Add(publicationLastChanceInterval), actionDeadline)
+	}
+	return next
+}
+
 func withPublicationWriteWake(next time.Time, store *state.Store, at time.Time) time.Time {
 	pending := publicationWriteWake(store, at)
 	if !pending.IsZero() && (next.IsZero() || pending.Before(next)) {
