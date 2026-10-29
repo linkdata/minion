@@ -252,8 +252,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			remaining := time.Until(accepted.Deadline)
 			task := store.Data.PublicationWrites[accepted.JobID]
 			if accepted.ResultReady && task.AttemptID == accepted.AttemptID && task.Status == state.PublicationWriteObserved &&
-				retryAt.Before(accepted.Deadline) && time.Until(retryAt) <= publicationReconcileBudget {
-				// A backlog scan can outlast this saved reply's retry window.
+				retryAt.Before(accepted.Deadline) {
+				// Keep an observed saved reply ahead of unrelated checks until its retry.
 				return retryAt, nil
 			}
 			if write, pending := pendingActiveWrite(accepted); pending && remaining > 0 {
@@ -1816,6 +1816,15 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	if !time.Now().Before(job.Deadline) {
 		return finish(context.DeadlineExceeded)
 	}
+	var savedResultAtStart bool
+	_ = store.WithLock(func() error {
+		accepted := store.Data.Accepted
+		push := store.Data.PublicationWrites[job.ID+"-push"]
+		savedResultAtStart = accepted != nil && accepted.JobID == job.ID &&
+			accepted.AttemptID == job.AttemptID && accepted.ResultReady &&
+			(job.Command.Action != command.Fix || push.Status != state.PublicationWritePending)
+		return nil
+	})
 	controlDeadline := job.Deadline.Add(-fixPublicationReserve)
 	terminalChecks := make(map[string]time.Time)
 	// Leave a full failure-reply budget before the fix's final control reserve.
@@ -1998,7 +2007,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				(write.Status == state.PublicationWritePending || write.Status == state.PublicationWriteObserved)
 			return nil
 		})
-		if savedTaskReply {
+		if savedResultAtStart || savedTaskReply {
 			// Give the saved reply the remaining deadline instead of scanning unrelated work.
 			if completed {
 				return finish(result)

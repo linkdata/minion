@@ -703,6 +703,7 @@ func TestSelectedReviewNearDeadlineReconcilesOverdueWrite(t *testing.T) {
 		store, _, accepted, gh, m := storedRecoveryFixtureAt(t, now)
 		accepted.Deadline = now.Add(5 * time.Second)
 		store.Data.Accepted.Deadline = accepted.Deadline
+		store.Data.Accepted.ResultReady = false // This test models a live worker, not a saved result.
 		marker := "<!-- linkdataminion:old-job -->"
 		store.Data.PublicationWrites["old-job"] = state.PublicationWrite{
 			AttemptID: "old-attempt", Kind: "comment", BotLogin: "bot", BotID: 8,
@@ -782,9 +783,7 @@ func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 			t.Fatalf("selected handler ended before push started: %v", err)
 		}
 		synctest.Wait()
-		if commentChecks.Load() != 1 {
-			t.Fatalf("initial scan skipped older publication: checks=%d", commentChecks.Load())
-		}
+		initialChecks := commentChecks.Load()
 		if err := store.WithLock(func() error {
 			store.Data.PublicationWrites[accepted.JobID] = state.PublicationWrite{
 				AttemptID: accepted.AttemptID, Kind: "comment", BotLogin: "linkdataminion", BotID: 8,
@@ -806,14 +805,23 @@ func TestSelectedFixPushWaitsForHandlerBeforeReconciliation(t *testing.T) {
 			olderWrite = store.Data.PublicationWrites["old-job"]
 			return nil
 		})
-		if lookups.Load() != 0 || current.Status != state.PublicationWritePending ||
-			commentChecks.Load() != 1 || taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
-			t.Fatalf("active push or other writes were mishandled: push lookups=%d comment checks=%d push=%+v task=%+v old=%+v",
-				lookups.Load(), commentChecks.Load(), current, taskWrite, olderWrite)
-		}
+		periodicChecks := commentChecks.Load()
+		pushLookups := lookups.Load()
 		close(release)
 		if err := <-finished; err != nil {
 			t.Fatal(err)
+		}
+		if initialChecks != 1 || periodicChecks != 1 || pushLookups != 0 || current.Status != state.PublicationWritePending ||
+			taskWrite.Status != state.PublicationWritePending || olderWrite.Status != state.PublicationWritePending {
+			t.Fatalf("saved fix scanned older writes before its handler returned: initial=%d periodic=%d push lookups=%d push=%+v task=%+v old=%+v",
+				initialChecks, periodicChecks, pushLookups, current, taskWrite, olderWrite)
+		}
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if lookups.Load() != 1 || commentChecks.Load() != 3 {
+			t.Fatalf("deferred writes were not checked after the handler returned: push=%d comments=%d",
+				lookups.Load(), commentChecks.Load())
 		}
 	})
 }
