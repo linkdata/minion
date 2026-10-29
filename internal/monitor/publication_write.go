@@ -21,7 +21,7 @@ func (m *Monitor) ReconcilePublicationWrites(ctx context.Context, store *state.S
 	return m.reconcilePublicationWrites(ctx, store, "", "")
 }
 
-// Reconcile only remote effects of writes already recorded before their POST.
+// Reconcile only remote effects of writes recorded before their external operation.
 // The action's first terminal decision is independent of this observation.
 func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.Store, onlyJobID, skipJobID string) error {
 	pending := make(map[string]state.PublicationWrite)
@@ -29,8 +29,8 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 	if err := store.WithLock(func() error {
 		cursor = store.Data.PublicationScanCursor
 		for jobID, write := range store.Data.PublicationWrites {
-			if write.Status == state.PublicationWritePending && jobID != skipJobID &&
-				(onlyJobID == "" || jobID == onlyJobID) {
+			if write.Status == state.PublicationWritePending && jobID != skipJobID && jobID != skipJobID+"-push" &&
+				(onlyJobID == "" || jobID == onlyJobID || jobID == onlyJobID+"-push") {
 				if write.Kind == "push" {
 					pending, exists := store.Data.PendingFixes[strings.TrimSuffix(jobID, "-push")]
 					if !exists || pending.SHA != write.SHA {
@@ -156,6 +156,12 @@ func storePublicationWriteOutcome(store *state.Store, jobID string, original sta
 		current.Status = status
 		current.ResolvedAt = at
 		store.Data.PublicationWrites[jobID] = current
+		if status == state.PublicationWriteObserved && current.Kind == "push" {
+			if accepted := store.Data.Accepted; accepted != nil && accepted.JobID+"-push" == jobID &&
+				accepted.AttemptID == current.AttemptID && accepted.ResultReady {
+				accepted.RetryAt = time.Time{}
+			}
+		}
 		if err := store.Save(); err != nil {
 			return err
 		}

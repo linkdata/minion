@@ -181,7 +181,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	activeWriteChecked := false
 	if store.Data.Accepted != nil {
 		activeJobID = store.Data.Accepted.JobID
-		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending
+		activeWriteChecked = store.Data.PublicationWrites[activeJobID].Status == state.PublicationWritePending ||
+			store.Data.PublicationWrites[activeJobID+"-push"].Status == state.PublicationWritePending
 	}
 	if err := m.reconcilePublicationWrites(ctx, store, activeJobID, ""); err != nil {
 		return store.Data.NextPollAt, err

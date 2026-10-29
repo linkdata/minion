@@ -71,7 +71,7 @@ func (e *Orchestrator) reconcileFixPush(ctx context.Context, job monitor.Job) er
 	return e.observeFixPush(job)
 }
 
-// beginFixPush saves the exact branch and existing PendingFix SHA before Git can push.
+// beginFixPush saves the exact branch and PendingFix SHA before Git can push.
 func (e *Orchestrator) beginFixPush(ctx context.Context, job monitor.Job, repository, branch, sha string, cap *state.CriticCap) error {
 	return e.beginFixPushAt(ctx, job, repository, branch, sha, cap, time.Now)
 }

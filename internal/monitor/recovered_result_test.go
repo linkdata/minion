@@ -3,8 +3,10 @@ package monitor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -182,6 +184,109 @@ func TestObservedIssuedReviewBypassesAcceptedRetry(t *testing.T) {
 		t.Fatalf("observed task waited until accepted deadline: publications=%d write=%+v processed=%v accepted=%+v",
 			handler.publications, store.Data.PublicationWrites[accepted.JobID], store.Data.Processed[accepted.JobID], store.Data.Accepted)
 	}
+}
+
+func storedIssuedFixPushFixtureAt(t *testing.T, now time.Time) (*state.Store, string, state.AcceptedAction, *fakeGitHub, *Monitor) {
+	t.Helper()
+	store, path, _, gh, m := storedRecoveryFixtureAt(t, now)
+	accepted := *store.Data.Accepted
+	delete(store.Data.JobFailures, accepted.JobID)
+	accepted.JobID = jobID(accepted.SourceKey, "fix")
+	accepted.SubjectType, accepted.CommandName, accepted.Action = "Issue", "fix", "fix"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	accepted.Deadline = now.Add(15 * time.Second)
+	accepted.RetryAt = accepted.Deadline
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+	}
+	sha := strings.Repeat("b", 40)
+	branch := fmt.Sprintf("minion/fix-%d-%s", accepted.SubjectNumber, accepted.JobID[:12])
+	store.Data.PendingFixes[accepted.JobID] = state.PendingFix{SHA: sha}
+	store.Data.PublicationWrites[accepted.JobID+"-push"] = state.PublicationWrite{
+		AttemptID: accepted.AttemptID, Kind: "push", BotLogin: "linkdataminion", BotID: 8,
+		Repository: "linkdataminion/example-repo", Number: accepted.SubjectNumber,
+		Marker: "<!-- linkdataminion:" + accepted.JobID + " -->", Since: accepted.SourceUpdatedAt,
+		Branch: branch, SHA: sha, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	fixItem := selectedItem(now)
+	fixItem.Body = "@linkdataminion fix"
+	fixItem.HTMLURL = accepted.SourceURL
+	gh.currentItem = func(github.Item) (github.Item, error) { return fixItem, nil }
+	gh.branch = func(_ context.Context, repo, name string) (github.Branch, error) {
+		if repo != "linkdataminion/example-repo" || name != branch {
+			t.Errorf("checked wrong fix branch: %s %s", repo, name)
+		}
+		return github.Branch{Name: branch, Commit: github.BranchCommit{SHA: sha}}, nil
+	}
+	return store, path, accepted, gh, m
+}
+
+func TestObservedIssuedFixPushBypassesAcceptedRetry(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, time.Now().UTC())
+		branchChecks := 0
+		lookup := gh.branch
+		gh.branch = func(ctx context.Context, repo, name string) (github.Branch, error) {
+			branchChecks++
+			return lookup(ctx, repo, name)
+		}
+		handler := &recoveredResultHandler{publish: func(job Job) error {
+			if !time.Now().Before(job.Deadline) {
+				t.Errorf("recovered fix publication started after its original deadline")
+			}
+			return nil
+		}}
+		m.Handler = handler
+		if _, err := m.RunOnce(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if branchChecks != 1 || handler.publications != 1 || handler.executions != 0 ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved ||
+			store.Data.Processed[accepted.JobID].IsZero() || store.Data.Accepted != nil || gh.commentCalls != 0 {
+			t.Fatalf("confirmed fix push waited until accepted deadline: checks=%d handler=%+v write=%+v processed=%v accepted=%+v comments=%d",
+				branchChecks, handler, store.Data.PublicationWrites[accepted.JobID+"-push"],
+				store.Data.Processed[accepted.JobID], store.Data.Accepted, gh.commentCalls)
+		}
+	})
+}
+
+func TestStartupObservedFixPushRespectsLaterPublicationBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store, path, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+			t.Fatal(err)
+		}
+		if got := store.Data.Accepted.RetryAt; !got.IsZero() ||
+			store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWriteObserved {
+			t.Fatalf("startup observation did not release accepted retry: retry=%s write=%+v",
+				got, store.Data.PublicationWrites[accepted.JobID+"-push"])
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store = openStateAt(t, path, now)
+		if store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.IsZero() {
+			t.Fatalf("startup observation was not durable: accepted=%+v", store.Data.Accepted)
+		}
+		replyErr := errors.New("reply temporarily unavailable")
+		handler := &recoveredResultHandler{publish: func(Job) error { return replyErr }}
+		m.Handler = handler
+		if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, replyErr) || handler.publications != 1 ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(accepted.Deadline) {
+			t.Fatalf("observed push did not schedule failed reply: err=%v handler=%+v accepted=%+v",
+				err, handler, store.Data.Accepted)
+		}
+		if _, err := m.RunOnce(t.Context(), store); err != nil || handler.publications != 1 ||
+			store.Data.Accepted == nil || !store.Data.Accepted.RetryAt.Equal(accepted.Deadline) || gh.commentCalls != 0 {
+			t.Fatalf("observed push bypassed later publication backoff: err=%v handler=%+v accepted=%+v comments=%d",
+				err, handler, store.Data.Accepted, gh.commentCalls)
+		}
+	})
 }
 
 func TestMonitorPreservesControlFailureFromStoredResultPublisher(t *testing.T) {
