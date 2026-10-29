@@ -686,7 +686,7 @@ func TestPublishRecoveredFixReconcilesLostPushResponseWithoutSecondPush(t *testi
 	}
 }
 
-func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *testing.T) {
+func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchWithoutGitRetry(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)
 	job.Identity.Repository = "o/r"
