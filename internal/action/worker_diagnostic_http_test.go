@@ -344,6 +344,13 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		Logger: parentLogger, Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}}}
 	owner.Executor = executorFunc(func(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
 		jobs = append(jobs, job)
+		assignment, ok := sink.(assignmentCheckpoint)
+		if !ok || !assignment.AssignmentRequired() {
+			return Result{}, fmt.Errorf("selected worker has no assignment checkpoint")
+		}
+		if err := assignment.BeforeAssignment(job); err != nil {
+			return Result{}, err
+		}
 		f := newHTTPServerTest(t, ctx, job, sink, nil)
 		f.pull(t)
 		outcome := f.outcome(1, nil)
@@ -373,19 +380,18 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
 		Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
-		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock }}
-	for attempt := 1; attempt <= 3; attempt++ {
-		_, err := m.RunOnce(t.Context(), store)
-		if (err == nil) != (attempt == 3) || len(jobs) != attempt {
-			t.Fatalf("worker claims changed retry policy at attempt %d: jobs=%d state=%+v error=%v", attempt, len(jobs), store.Data, err)
-		}
-		if attempt < 3 && len(gh.replies) != 0 {
-			t.Fatalf("worker failure replied before final attempt %d: replies=%q", attempt, gh.replies)
-		}
-		if count := strings.Count(journal.String(), fmt.Sprintf("failed (attempt %d/3)", attempt)); count != 1 {
-			t.Fatalf("worker failure logged %d times at attempt %d: %q", count, attempt, journal.String())
-		}
-		clock = clock.Add(10 * time.Minute)
+		GitHub: gh, Handler: owner, Logger: parentLogger, Now: func() time.Time { return clock },
+		SelectedExecutorID: LocalExecutorID, SelectedCommands: map[string]bool{"comment": true}}
+	owner.Store, owner.assignmentRequired = store, true
+	owner.ValidateAssignment = func(ctx context.Context, job monitor.Job) error {
+		return m.RevalidateAssignment(ctx, store, job)
+	}
+	owner.ValidatePublication = func(ctx context.Context, job monitor.Job, requireAssigned bool) error {
+		return m.RevalidatePublication(ctx, store, job, requireAssigned)
+	}
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(jobs) != 1 ||
+		len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("selected worker failure did not finish once: jobs=%d state=%+v error=%v", len(jobs), store.Data, err)
 	}
 	if len(gh.replies) != 1 || !strings.Contains(gh.replies[0], "could not complete this request") ||
 		strings.Contains(gh.replies[0], "FORGED") || strings.Contains(gh.replies[0], message) ||

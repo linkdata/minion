@@ -175,6 +175,9 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	}
 	installActionTestSkills(t, testReviewSkillURL)
 	commands := map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}}
+	var acceptedBeforePublication state.AcceptedAction
+	var failureBeforePublication state.JobFailure
+	var resultBeforePublication []byte
 	run := func(at time.Time, store *state.Store) {
 		t.Helper()
 		client := testGitHub(server, "offline-token")
@@ -196,19 +199,49 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 		m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, Commands: commands,
 			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 			GitHub: client, Handler: orchestrator, Now: func() time.Time { return at }}
+		bindSelectedRunner(&m, store, orchestrator)
+		validatePublication := orchestrator.ValidatePublication
+		orchestrator.ValidatePublication = func(ctx context.Context, job monitor.Job, requireAssigned bool) error {
+			if err := validatePublication(ctx, job, requireAssigned); err != nil {
+				return err
+			}
+			if !requireAssigned || acceptedBeforePublication.JobID != "" {
+				return nil
+			}
+			return store.WithLock(func() error {
+				acceptedBeforePublication = *store.Data.Accepted
+				failureBeforePublication = store.Data.JobFailures[job.ID]
+				var err error
+				resultBeforePublication, err = store.ReadAcceptedResult(AcceptedResultMaxBytes)
+				return err
+			})
+		}
 		if _, err := m.RunOnce(t.Context(), store); err != nil {
 			t.Fatal(err)
 		}
 	}
 	run(now, store)
 	firstEvents, firstReviews := snapshot()
-	if !slices.Equal(firstEvents, []string{"verify request", "permission", "reaction", "model", "publish"}) ||
+	if !slices.Equal(firstEvents, []string{"verify request", "permission", "reaction", "verify request", "permission",
+		"model", "verify request", "permission", "publish"}) ||
 		len(firstReviews) != 1 || !strings.Contains(firstReviews[0].Body, "No findings.") || len(store.Data.Processed) != 1 {
 		t.Fatalf("first poll: events=%v reviews=%v processed=%v", firstEvents, firstReviews, store.Data.Processed)
 	}
-	// Simulate a crash after GitHub accepted the review but before the final state save.
-	delete(store.Data.Processed, fmt.Sprintf("%x", jobID))
-	if err := store.Save(); err != nil {
+	// Restore the durable reservation and result as they stood immediately before the GitHub write.
+	// Keep the observed publication receipt to simulate a crash before terminal completion.
+	if !acceptedBeforePublication.Assigned || !acceptedBeforePublication.ResultReady || len(resultBeforePublication) == 0 {
+		t.Fatalf("selected publication snapshot is incomplete: accepted=%+v result bytes=%d", acceptedBeforePublication, len(resultBeforePublication))
+	}
+	if err := store.WithLock(func() error {
+		store.Data.Accepted = &acceptedBeforePublication
+		store.Data.JobFailures[fmt.Sprintf("%x", jobID)] = failureBeforePublication
+		delete(store.Data.Processed, fmt.Sprintf("%x", jobID))
+		delete(store.Data.TerminalDecisions, fmt.Sprintf("%x", jobID))
+		if err := store.WriteAcceptedResult(resultBeforePublication); err != nil {
+			return err
+		}
+		return store.Save()
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -224,8 +257,7 @@ func TestOfflineReviewPollRecoversAfterPublication(t *testing.T) {
 	}
 	run(now.Add(time.Minute), store)
 	allEvents, allReviews := snapshot()
-	if !slices.Equal(allEvents, []string{"verify request", "permission", "reaction", "model", "publish",
-		"verify request", "permission", "reaction"}) || len(allReviews) != 1 || len(store.Data.Processed) != 1 ||
+	if !slices.Equal(allEvents, firstEvents) || len(allReviews) != 1 || len(store.Data.Processed) != 1 ||
 		store.Data.PublicationWrites[fmt.Sprintf("%x", jobID)].Status != state.PublicationWriteObserved {
 		t.Fatalf("replayed poll: events=%v reviews=%v processed=%v", allEvents, allReviews, store.Data.Processed)
 	}

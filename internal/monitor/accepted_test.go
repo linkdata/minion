@@ -696,7 +696,7 @@ func TestSelectedRecoveryKeepsReservationOnTransientSourceError(t *testing.T) {
 	}
 }
 
-func TestSelectedAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
+func TestPreWorkerAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
@@ -716,6 +716,7 @@ func TestSelectedAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
 	gh := &fakeGitHub{beforeList: func() { t.Fatal("invitation scan preceded recovery") },
 		permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil }}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("assigned action redispatched"); return nil }))
+	m.SelectedExecutorID = "" // Recovery runs before a new worker attaches.
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil {
 		t.Fatal(err)
 	}

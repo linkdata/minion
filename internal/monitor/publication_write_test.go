@@ -155,17 +155,8 @@ func TestReconcilePublicationWritesBoundsBacklogAndRotatesAfterRestart(t *testin
 		m := &Monitor{Config: config.Config{BotLogin: "bot", Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}, GitHub: gh}
 		for pass, id := range ids {
 			start := time.Now()
-			if pass == 0 {
-				if _, err := m.RunOnce(t.Context(), store); err != nil {
-					t.Fatal(err)
-				}
-				if len(gh.notificationCalls) != 1 {
-					t.Fatalf("bounded reconciliation did not reach notification polling: %d calls", len(gh.notificationCalls))
-				}
-			} else {
-				if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
-					t.Fatal(err)
-				}
+			if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+				t.Fatal(err)
 			}
 			if elapsed := time.Since(start); elapsed != publicationReconcileBudget {
 				t.Fatalf("pass %d occupied monitor for %s, want %s", pass, elapsed, publicationReconcileBudget)

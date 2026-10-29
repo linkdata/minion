@@ -52,6 +52,39 @@ func terminalReplyRecorded(gh *fakeGitHub, store *state.Store, id string) bool {
 		!store.Data.Processed[id].IsZero()
 }
 
+func TestRunOnceWithoutWorkerServicesTerminalReplyAndInvitationsOnly(t *testing.T) {
+	now := time.Now().UTC()
+	initial := now.Add(-time.Minute)
+	store := openState(t, initial)
+	due, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+		state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(now)},
+		permission:    github.Permission{Permission: "write"},
+		threadItems:   terminalThreads(map[int]github.Item{8: due}),
+		invitations: []github.Invitation{{ID: 41, Repository: github.Repository{
+			FullName: "example-owner/example-repo", ID: 1,
+			Owner: github.User{Login: "example-owner", ID: 2},
+		}, Permissions: "write"}},
+	}
+	handler := &capacityHandler{failAt: 1, err: errors.New("capacity checked without a selected worker")}
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Handler: handler, Now: func() time.Time { return now }}
+	next, err := m.RunOnce(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !terminalReplyRecorded(gh, store, id) || !slices.Equal(gh.accepted, []int64{41}) ||
+		len(gh.notificationCalls) != 0 || len(handler.jobs) != 0 || handler.waits != 0 ||
+		!store.Data.Cursor.Equal(initial) || !store.Data.NextPollAt.IsZero() ||
+		!next.Equal(store.Data.NextInviteCheckAt) {
+		t.Fatalf("pre-worker controls changed action discovery: next=%s replies=%v invites=%v calls=%v jobs=%v state=%+v",
+			next, gh.comments, gh.accepted, gh.notificationCalls, handler.jobs, store.Data)
+	}
+}
+
 func TestRunOnceServicesTerminalControlBeforeAcceptedRetryOrFuturePoll(t *testing.T) {
 	for _, test := range []struct {
 		name     string
