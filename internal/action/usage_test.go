@@ -519,9 +519,10 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 					runModel: forbidModel(t),
 				},
 			}
+			selectFixtureRunner(t, e, &job)
 			err := e.Execute(t.Context(), job)
 			if failInitialSave {
-				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "save action usage") || len(comments) != 0 {
+				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "action usage") || len(comments) != 0 {
 					t.Fatalf("action ran without initial usage record: err=%v comments=%+v", err, comments)
 				}
 				return

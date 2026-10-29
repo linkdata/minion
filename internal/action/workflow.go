@@ -53,21 +53,18 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 	}()
 	var result Result
 	if prepared.needsExecution() {
+		if e.Executor == nil {
+			return fmt.Errorf("%w: selected executor is unavailable", monitor.ErrAcceptanceState)
+		}
 		if _, err := privateRecordsDir(e.WorkRoot, "worker-diagnostics"); err != nil {
 			return preparationFailure("prepare private worker diagnostics", err)
-		}
-		executor := e.Executor
-		if executor == nil {
-			runner := e.Runner
-			runner.WorkRoot = e.WorkRoot
-			executor = &runner
 		}
 		checkpoints := newExecutionCheckpoints(e, prepared.job)
 		checkpoints.assignmentContext, checkpoints.assignmentRequest = ctx, prepared.request
 		if prepared.job.Action == command.Fix {
 			checkpoints.fixDestination = originalFixDestination(prepared.repository, prepared.fork)
 		}
-		result, err = executor.Execute(ctx, prepared.job, checkpoints)
+		result, err = e.Executor.Execute(ctx, prepared.job, checkpoints)
 		err = checkpoints.finish(result, err)
 		if err != nil {
 			evidence := checkpoints.failureEvidence()
@@ -263,37 +260,22 @@ func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Re
 
 // publicationAllowed checks the selected reservation immediately before a new write.
 func (e *Orchestrator) publicationAllowed(ctx context.Context, job monitor.Job, requireAssigned bool) error {
+	if job.AttemptID == "" {
+		return fmt.Errorf("%w: selected action attempt is missing before publication", monitor.ErrAcceptanceState)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
 		return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 	}
-	if job.AttemptID == "" {
-		if e.assignmentRequired {
-			return fmt.Errorf("%w: selected action attempt is missing before publication", monitor.ErrAcceptanceState)
-		}
-		if e.ValidatePublication != nil {
-			if err := e.ValidatePublication(ctx, job, false); err != nil {
-				return err
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !job.Deadline.IsZero() && !time.Now().Before(job.Deadline) {
-			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
-		}
-		return nil // In-process actions have no selected reservation.
-	}
 	if e.Store == nil {
 		return fmt.Errorf("%w: accepted state store is missing before publication", monitor.ErrAcceptanceState)
 	}
 	if e.ValidatePublication == nil {
-		if e.assignmentRequired {
-			return fmt.Errorf("%w: publication revalidation is unavailable", monitor.ErrAcceptanceState)
-		}
-	} else if err := e.ValidatePublication(ctx, job, requireAssigned); err != nil {
+		return fmt.Errorf("%w: publication revalidation is unavailable", monitor.ErrAcceptanceState)
+	}
+	if err := e.ValidatePublication(ctx, job, requireAssigned); err != nil {
 		return err
 	}
 	return e.Store.WithLock(func() error {

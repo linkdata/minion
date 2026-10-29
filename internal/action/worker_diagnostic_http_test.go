@@ -94,12 +94,13 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			}))
 			defer githubServer.Close()
 			var journal bytes.Buffer
-			owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0)}
+			owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
 			request := usageJob()
 			request.SubjectType = job.Identity.SubjectType
 			request.Source.Author = github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}
 			request.Source.UpdatedAt = time.Now()
 			request.Command = command.Command{Name: string(action), Action: action}
+			reserveActionRequest(t, owner.Store, &request, true)
 			if err := owner.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, got.result); err != nil {
 				t.Fatal(err)
 			}
@@ -219,7 +220,8 @@ func TestHTTPChangedFixPublishesBranchWithoutWorkerText(t *testing.T) {
 	defer server.Close()
 	root := t.TempDir()
 	var journal bytes.Buffer
-	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0)}
+	owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture-token"), BotLogin: "bot", Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
+	reserveActionRequest(t, owner.Store, &request, true)
 	repo := github.Repository{ID: 1, FullName: "o/r", Owner: github.User{ID: 2}, DefaultBranch: "main", Visibility: "public"}
 	fork := github.Repository{ID: 4, FullName: "bot/r", Fork: true, Parent: &repo, Source: &repo, Visibility: "public"}
 	prepared := &preparedAction{job: job, request: request, checkout: checkout, repository: repo, fork: fork, branch: branch, issueNodeID: "issue-node"}
@@ -531,10 +533,12 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	defer server.Close()
 	f.owner.GitHub = testGitHub(server, "fixture-token")
 	f.owner.Store = openState(t, time.Now())
+	f.owner.ValidatePublication = permitSelectedPublication
 	f.owner.BotLogin = "linkdataminion"
 	f.owner.BotID = 8
 	request := usageJob()
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	reserveActionRequest(t, f.owner.Store, &request, true)
 	if err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result); err != nil {
 		t.Fatal(err)
 	}
@@ -648,6 +652,9 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 			f.owner.GitHub = testGitHub(server, "fixture-token")
 			request := usageJob()
 			request.Command = command.Command{Name: string(action), Action: action}
+			f.owner.Store = openState(t, time.Now())
+			f.owner.ValidatePublication = permitSelectedPublication
+			reserveActionRequest(t, f.owner.Store, &request, true)
 			err := f.owner.publish(t.Context(), &preparedAction{job: f.job, request: request}, got.result)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes != 0 ||
 				posted != "" || strings.Contains(err.Error(), result.Refutations[0].Text) || strings.Contains(journal.String(), result.Refutations[0].Text) {
@@ -680,6 +687,13 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 		Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		assignment, ok := checkpoints.(assignmentCheckpoint)
+		if !ok {
+			return Result{}, fmt.Errorf("selected worker has no assignment checkpoint")
+		}
+		if err := assignment.BeforeAssignment(job); err != nil {
+			return Result{}, err
+		}
 		transport := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		transport.pull(t)
 		result := privateReviewResult(job)
@@ -715,13 +729,21 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 		sequence++
 		outcome := transport.outcome(sequence, nil)
 		outcome.Result = result
-		transport.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+		ack := transport.ack(t, "/outcome", outcome, http.StatusInternalServerError, sequence)
+		if ack.Failure == nil || !ack.Failure.Terminal || !strings.Contains(ack.Failure.Message, "publication contains private review evidence") {
+			t.Fatalf("private refutation was not refused at the selected outcome checkpoint: %+v", ack.Failure)
+		}
 		got := transport.result(t)
 		return got.result, got.err
 	})
 	request := usageJob()
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
 	request.Repository.Actions = []string{"comment"}
+	e.Store = openState(t, time.Now())
+	e.assignmentRequired = true
+	e.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
+	e.ValidatePublication = permitSelectedPublication
+	reserveActionRequest(t, e.Store, &request, false)
 	err := e.Execute(t.Context(), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes.Load() != 0 ||
 		strings.Contains(err.Error(), private) || strings.Contains(journal.String(), private) {

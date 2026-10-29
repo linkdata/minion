@@ -104,8 +104,9 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 				http.NotFound(w, r)
 			}))
 			defer server.Close()
-			e := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0)}
-			request := monitor.Job{ID: job.Identity.JobID, Number: 7, SubjectType: "Issue", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
+			e := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
+			request := monitor.Job{ID: job.Identity.JobID, Number: 7, SubjectType: "Issue", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
+			reserveActionRequest(t, e.Store, &request, true)
 			publishErr := e.publish(t.Context(), &preparedAction{job: job, request: request}, result)
 			if test.status == http.StatusCreated {
 				if publishErr != nil {
@@ -443,6 +444,12 @@ func TestPerformCheckpointsPrivateReviewBeforeLaterCalls(t *testing.T) {
 			})
 			request := usageJob()
 			request.Command, request.Repository.Actions = command.Command{Name: "comment", Action: command.Comment}, []string{"comment"}
+			request.AttemptID = e.attemptID
+			e.Store = openState(t, time.Now())
+			reserveActionRequest(t, e.Store, &request, true)
+			executor := e.Runner
+			executor.WorkRoot = e.WorkRoot
+			e.Executor = &executor
 			panicked := false
 			var runErr error
 			func() {

@@ -63,6 +63,7 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 				job.Source.BaseFiles = nil // The issue fix has no base; preserve that across the HTTP JSON round trip.
+				admitFixtureAssignment(t, checkpoints, job)
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe response."}
@@ -121,9 +122,16 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 				if tc.failed {
 					outcome.Failure = newHTTPFailure(errors.New("worker stopped after returning evidence"))
 				}
-				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+				status := http.StatusInternalServerError
+				if tc.failed {
+					status = http.StatusOK
+				}
+				ack := f.ack(t, "/outcome", outcome, status, sequence)
+				if status != http.StatusOK && ack.Failure == nil {
+					t.Fatal("hostile result was acknowledged")
+				}
 				got := f.result(t)
-				if (got.err != nil) != tc.failed {
+				if got.err == nil {
 					t.Fatalf("HTTP outcome error changed: %v", got.err)
 				}
 				return got.result, got.err
@@ -132,6 +140,7 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 			request.Source.UpdatedAt = time.Now()
 			request.Command = command.Command{Name: "fix", Action: command.Fix}
 			request.Repository.Actions = []string{"fix"}
+			selectFixtureRequest(t, e, &request, false)
 			err := e.Execute(t.Context(), request)
 			want := "unsafe or duplicate changed path"
 			if tc.encoded {

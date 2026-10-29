@@ -18,7 +18,6 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
-	"github.com/linkdata/minion/internal/state"
 )
 
 func TestCheckGitHubContext(t *testing.T) {
@@ -207,10 +206,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				}))
 				defer server.Close()
 				client := testGitHub(server, "test-token")
-				var store *state.Store
-				if tt.action == command.Fix {
-					store = openState(t, job.Source.UpdatedAt)
-				}
+				store := openState(t, job.Source.UpdatedAt)
 				var modelCalls int
 				orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 					BotLogin:              "linkdataminion",
@@ -235,6 +231,9 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 						},
 					},
 				}
+				fixedRefusal := orchestrator.ValidateFixedRefusal
+				selectFixtureRunner(t, orchestrator, &job)
+				orchestrator.ValidateFixedRefusal = fixedRefusal
 				err := orchestrator.Execute(t.Context(), job)
 				if mode == "refusal authority lost" {
 					mu.Lock()

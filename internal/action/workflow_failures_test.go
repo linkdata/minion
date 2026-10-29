@@ -127,10 +127,11 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 			store := openState(t, time.Now())
 			client := testGitHub(server, "fixture-token")
 			request := usageJob()
-			request.Source = github.Item{UpdatedAt: time.Now()}
-			request.Command = command.Command{Action: command.Fix}
+			request.Source = github.Item{UpdatedAt: time.Now(), Author: github.User{Login: "writer", ID: 7}}
+			request.Command = command.Command{Name: "fix", Action: command.Fix}
+			reserveActionRequest(t, store, &request, kind == "model result")
 			prepared := &preparedAction{request: request, issueNodeID: "issue-node", repository: github.Repository{FullName: "o/r", DefaultBranch: "main"}, fork: github.Repository{FullName: "bot/r"}}
-			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot"}
+			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot", ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil }}
 			var err error
 			switch kind {
 			case "fixed reply":
@@ -180,9 +181,11 @@ func TestFixedRepliesSkipWorkspaceAndModel(t *testing.T) {
 			request.Command = command.Command{Name: string(tc.action), Action: tc.action}
 			root := filepath.Join(t.TempDir(), "uncreated")
 			orchestrator := &Orchestrator{
-				GitHub: testGitHub(server, "fixture-token"), WorkRoot: root,
-				Runner: Runner{runModel: forbidModel(t)},
+				GitHub: testGitHub(server, "fixture-token"), WorkRoot: root, Store: openState(t, time.Now()),
+				ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },
+				Runner:              Runner{runModel: forbidModel(t)},
 			}
+			reserveActionRequest(t, orchestrator.Store, &request, false)
 			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); err != nil {
 				t.Fatal(err)
 			}
@@ -230,6 +233,7 @@ func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) 
 			request.Repository.Actions = []string{"audit"}
 			request.Source.Author.ID = 3
 			request.Command = command.Command{Name: "audit", Action: command.Comment}
+			selectFixtureRunner(t, &orchestrator, &request)
 			err := orchestrator.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 				t.Fatalf("source/result failure not terminal: calls=%d writes=%d err=%v", calls, writes, err)
@@ -410,6 +414,7 @@ func TestExecuteLogsCheckoutCleanupFailureAfterSuccessfulPublication(t *testing.
 			return aicli.Result{Answer: "No change is needed."}, nil
 		}},
 	}
+	selectFixtureRunner(t, &orchestrator, &request)
 	if err := orchestrator.Execute(t.Context(), request); err != nil {
 		t.Fatalf("successful publication became a failed action: %v", err)
 	}

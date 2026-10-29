@@ -172,7 +172,7 @@ func TestOpenInitializesMissingPublicationWrites(t *testing.T) {
 
 func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	valid := PublicationWrite{Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
+	valid := PublicationWrite{AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", Repository: "owner/repo", Number: 7,
 		Marker: "<!-- linkdataminion:job-1 -->", Since: at, StartedAt: at,
 		Deadline: at.Add(2 * time.Minute), Status: PublicationWritePending}
 	for _, test := range []struct {
@@ -180,6 +180,7 @@ func TestOpenRejectsInvalidPublicationWrite(t *testing.T) {
 		change      func(*PublicationWrite)
 	}{
 		{name: "bad job", jobID: "../job"},
+		{name: "missing attempt", jobID: "job-1", change: func(w *PublicationWrite) { w.AttemptID = "" }},
 		{name: "bad attempt", jobID: "job-1", change: func(w *PublicationWrite) { w.AttemptID = "../attempt" }},
 		{name: "bad kind", jobID: "job-1", change: func(w *PublicationWrite) { w.Kind = "push" }},
 		{name: "missing bot login", jobID: "job-1", change: func(w *PublicationWrite) { w.BotLogin = "" }},

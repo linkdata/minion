@@ -115,7 +115,7 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 	server := auditRecoveryServer(t, &posts)
 	root := t.TempDir()
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	t.Setenv("PATH", t.TempDir()) // The publishing validator is missing after the result was saved.
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, exec.ErrNotFound) || posts.Load() != 0 {
@@ -153,7 +153,7 @@ func TestSavedAuditWaitsForBrokenPublishingValidator(t *testing.T) {
 	var posts atomic.Int32
 	server := auditRecoveryServer(t, &posts)
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
 		t.Fatalf("original validator rejected saved audit: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(auditDir, 0700) })
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts.Load() != 0 {
 		t.Fatalf("retention I/O did not remain retryable: posts=%d error=%v", posts.Load(), err)
@@ -256,7 +256,7 @@ func TestSavedAuditRetriesCompletedRetentionDirectoryLayoutFailure(t *testing.T)
 		t.Fatal(err)
 	}
 	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
 		t.Fatalf("saved audit did not survive retention directory fault: posts=%d error=%v", posts.Load(), err)
@@ -316,7 +316,7 @@ func TestSavedAuditWaitsForReadablePublishingValidator(t *testing.T) {
 	var posts atomic.Int32
 	server := auditRecoveryServer(t, &posts)
 	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) ||
 		!errors.Is(err, os.ErrPermission) || posts.Load() != 0 {

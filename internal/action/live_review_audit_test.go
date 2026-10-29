@@ -50,6 +50,7 @@ func TestLiveReviewAction(t *testing.T) {
 			},
 		},
 	}
+	selectFixtureRunner(t, orchestrator, &job)
 	if err := orchestrator.Execute(ctx, job); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +156,7 @@ func TestLiveSecurityAuditAction(t *testing.T) {
 					},
 				},
 			}
+			selectFixtureRunner(t, orchestrator, &job)
 			if err := orchestrator.Execute(ctx, job); err != nil {
 				t.Fatal(err)
 			}

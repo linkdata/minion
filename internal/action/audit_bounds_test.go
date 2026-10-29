@@ -118,6 +118,7 @@ func TestHostileHTTPAuditWorkBudgetCannotPublish(t *testing.T) {
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 		job.Source.BaseFiles = nil
+		admitFixtureAssignment(t, checkpoints, job)
 		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		f.pull(t)
 		before := f.call(1)
@@ -144,13 +145,16 @@ func TestHostileHTTPAuditWorkBudgetCannotPublish(t *testing.T) {
 		if err := outcome.Result.Validate(job); err == nil || !strings.Contains(err.Error(), "repeated validation work limit") {
 			t.Fatalf("hostile audit passed Result.Validate: %v", err)
 		}
-		f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+		if ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3); ack.Failure == nil {
+			t.Fatal("invalid audit result was acknowledged")
+		}
 		got := f.result(t)
 		return got.result, got.err
 	})
 	request := usageJob()
 	request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
 	request.Repository.Actions = []string{"security-audit"}
+	selectFixtureRequest(t, e, &request, false)
 	if err := e.Execute(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) || writes.Load() != 0 {
 		t.Fatalf("hostile audit crossed publication boundary: error=%v writes=%d", err, writes.Load())
 	}

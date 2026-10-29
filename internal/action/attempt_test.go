@@ -19,7 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestExecuteScopesAttemptIdentity(t *testing.T) {
+func TestExecuteUsesSelectedAttemptIdentity(t *testing.T) {
 	for _, withUsage := range []bool{false, true} {
 		t.Run(fmt.Sprintf("usage=%t", withUsage), func(t *testing.T) {
 			gitFixtureRemote(t)
@@ -52,6 +52,9 @@ func TestExecuteScopesAttemptIdentity(t *testing.T) {
 			request.Repository.Actions = []string{"comment"}
 			for attempt := range 2 {
 				request.ID = fmt.Sprintf("%064x", attempt+1)
+				request.AttemptID = ""
+				selectFixtureRunner(t, &orchestrator, &request)
+				orchestrator.attemptID = "" // Execute owns its attempt-scoped copy.
 				if err := orchestrator.Execute(t.Context(), request); err != nil {
 					t.Fatal(err)
 				}

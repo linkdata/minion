@@ -99,6 +99,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 				if scenario.change == "budget refutation" || isAudit {
 					job.Source.BaseFiles = nil // Empty base files are omitted on the HTTP wire.
 				}
+				admitFixtureAssignment(t, checkpoints, job)
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Forged publication"}
@@ -249,9 +250,16 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 				if wantPathError != "" && !strings.Contains(validationErr.Error(), wantPathError) {
 					t.Fatalf("hostile result missed %s: %v", wantPathError, validationErr)
 				}
-				f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+				status := http.StatusInternalServerError
+				if scenario.change == "failed outcome" {
+					status = http.StatusOK
+				}
+				ack := f.ack(t, "/outcome", outcome, status, sequence)
+				if status != http.StatusOK && ack.Failure == nil {
+					t.Fatal("hostile outcome was acknowledged")
+				}
 				got := f.result(t)
-				if (got.err != nil) != (scenario.change == "failed outcome") || !reflect.DeepEqual(got.result, outcome.Result) {
+				if got.err == nil || !reflect.DeepEqual(got.result, outcome.Result) {
 					t.Fatalf("HTTP executor did not return the hostile result: got=%+v error=%v want=%+v", got.result, got.err, outcome.Result)
 				}
 				return got.result, got.err
@@ -259,6 +267,7 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 			request := usageJob()
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
+			selectFixtureRequest(t, e, &request, false)
 			if err := e.Execute(t.Context(), request); err == nil || (scenario.change != "failed outcome" && !errors.Is(err, monitor.ErrTerminalJob)) || writes.Load() != 0 || (scenario.change == "budget refutation" && !strings.Contains(err.Error(), "publication contains private review evidence")) {
 				t.Fatalf("hostile outcome published or lost failure classification: error=%v writes=%d", err, writes.Load())
 			}

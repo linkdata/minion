@@ -62,6 +62,7 @@ func TestExecuteCriticAdmissionUsesControlledWorkRoot(t *testing.T) {
 				request := usageJob()
 				request.Command = command.Command{Name: "comment", Action: command.Comment}
 				request.Repository.Actions = []string{"comment"}
+				selectFixtureRunner(t, e, &request)
 				err = e.Execute(t.Context(), request)
 				if unsafe {
 					if errors.Is(err, workroot.ErrUnsafe) || !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "model evidence directories must be selected by Minion") || calls != 0 {

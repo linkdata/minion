@@ -60,6 +60,7 @@ func TestHostileHTTPFixPathsCannotPublish(t *testing.T) {
 				Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 			}
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+				admitFixtureAssignment(t, checkpoints, job)
 				if path == "link/outside" && !slices.Contains(job.Source.Omitted, "link") {
 					t.Fatalf("symlink fixture was not omitted from the portable source: %v", job.Source.Omitted)
 				}
@@ -78,17 +79,21 @@ func TestHostileHTTPFixPathsCannotPublish(t *testing.T) {
 				}
 				outcome := f.outcome(3, nil)
 				outcome.Result = result
-				f.ack(t, "/outcome", outcome, http.StatusOK, 3)
-				got := f.result(t)
-				if got.err != nil {
-					t.Fatalf("receiver rejected shape-valid outcome: %v", got.err)
+				ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+				if ack.Failure == nil || !ack.Failure.Terminal || !strings.Contains(ack.Failure.Message, want) {
+					t.Fatalf("selected outcome did not reject hostile path: %+v", ack.Failure)
 				}
-				return got.result, nil
+				got := f.result(t)
+				if !errors.Is(got.err, monitor.ErrTerminalJob) {
+					t.Fatalf("receiver did not retain the rejected outcome: %v", got.err)
+				}
+				return got.result, got.err
 			})
 			request := usageJob()
 			request.Source.UpdatedAt = time.Now()
 			request.Command = command.Command{Name: "fix", Action: command.Fix}
 			request.Repository.Actions = []string{"fix"}
+			selectFixtureRequest(t, e, &request, false)
 			err := e.Execute(testActionContext(t), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || writes.Load() != 0 {
 				t.Fatalf("hostile path reached publication: error=%v writes=%d", err, writes.Load())

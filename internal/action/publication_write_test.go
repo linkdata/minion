@@ -24,6 +24,8 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
+func permitSelectedPublication(context.Context, monitor.Job, bool) error { return nil }
+
 func TestExpiredIssuedCommentNeverRepostsOrRerunsModel(t *testing.T) {
 	job := testJob(command.Comment)
 	store, _, request := savedRecoveryFixture(t, job, completedRecoveryResult(job))
@@ -70,6 +72,7 @@ func TestExpiredIssuedCommentNeverRepostsOrRerunsModel(t *testing.T) {
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) {
 		t.Fatalf("recovered uncertain publication = %v", err)
 	}
+	orchestrator.assignmentRequired = true
 	if err := orchestrator.Execute(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) {
 		t.Fatalf("executed uncertain publication = %v", err)
 	}
@@ -82,6 +85,8 @@ func TestExpiredIssuedCommentNeverRepostsOrRerunsModel(t *testing.T) {
 func TestTaskPublicationUsesConfiguredDefaultGrace(t *testing.T) {
 	store := openState(t, time.Now())
 	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	reserveActionRequest(t, store, &request, true)
 	e := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
 	if err := e.beginTaskPublication(t.Context(), request, "comment"); err != nil {
 		t.Fatal(err)
@@ -137,6 +142,8 @@ func TestTaskPublicationRequiresValidBotIdentityBeforeWrite(t *testing.T) {
 		t.Run(login, func(t *testing.T) {
 			store := openState(t, time.Now())
 			request := usageJob()
+			request.Command = command.Command{Name: "comment", Action: command.Comment}
+			reserveActionRequest(t, store, &request, true)
 			e := Orchestrator{Store: store, BotLogin: login, BotID: 8}
 			if err := e.beginTaskPublication(t.Context(), request, "comment"); !errors.Is(err, monitor.ErrAcceptanceState) || len(store.Data.PublicationWrites) != 0 {
 				t.Fatalf("invalid bot login issued a write: err=%v writes=%v", err, store.Data.PublicationWrites)
@@ -145,8 +152,11 @@ func TestTaskPublicationRequiresValidBotIdentityBeforeWrite(t *testing.T) {
 	}
 	t.Run("missing ID", func(t *testing.T) {
 		store := openState(t, time.Now())
+		request := usageJob()
+		request.Command = command.Command{Name: "comment", Action: command.Comment}
+		reserveActionRequest(t, store, &request, true)
 		e := Orchestrator{Store: store, BotLogin: "linkdataminion"}
-		if err := e.beginTaskPublication(t.Context(), usageJob(), "comment"); !errors.Is(err, monitor.ErrAcceptanceState) || len(store.Data.PublicationWrites) != 0 {
+		if err := e.beginTaskPublication(t.Context(), request, "comment"); !errors.Is(err, monitor.ErrAcceptanceState) || len(store.Data.PublicationWrites) != 0 {
 			t.Fatalf("missing bot ID issued a write: err=%v writes=%v", err, store.Data.PublicationWrites)
 		}
 	})
@@ -155,6 +165,8 @@ func TestTaskPublicationRequiresValidBotIdentityBeforeWrite(t *testing.T) {
 func TestObservedTaskPublicationUpdatesEarlierUncertainResolution(t *testing.T) {
 	store := openState(t, time.Now())
 	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	reserveActionRequest(t, store, &request, true)
 	e := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
 	if err := e.beginTaskPublication(t.Context(), request, "comment"); err != nil {
 		t.Fatal(err)
@@ -342,7 +354,8 @@ func TestTaskPublicationRecoversAcceptedPostWithLostResponseAfterBotSwitch(t *te
 				_ = response.Body.Close() // The server accepted the POST; its response is lost to the client.
 				return nil, io.ErrUnexpectedEOF
 			})
-			orchestrator := Orchestrator{Store: store, GitHub: client, BotLogin: "linkdataminion", BotID: 8, WorkRoot: t.TempDir()}
+			orchestrator := Orchestrator{Store: store, GitHub: client, BotLogin: "linkdataminion", BotID: 8, WorkRoot: t.TempDir(),
+				ValidatePublication: permitSelectedPublication}
 			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, io.ErrUnexpectedEOF) || posts.Load() != 1 {
 				t.Fatalf("accepted POST did not leave an issued write: err=%v posts=%d", err, posts.Load())
 			}
@@ -374,8 +387,9 @@ func TestTaskPublicationRecoversAcceptedPostWithLostResponseAfterBotSwitch(t *te
 func TestIssuedTaskCommentResponseIsObservedBeforeTerminalDecision(t *testing.T) {
 	store := openState(t, time.Now())
 	request := usageJob()
-	request.Command.Action = command.Comment
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
 	request.Deadline = time.Now().Add(time.Minute)
+	reserveActionRequest(t, store, &request, true)
 	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -470,10 +484,12 @@ func TestIssuedReviewReconcilesUsingRecordedKindAfterCommandRemap(t *testing.T) 
 	store := openState(t, time.Now())
 	request := usageJob()
 	request.SubjectType = "PullRequest"
+	request.Command = command.Command{Name: "review", Action: command.Review}
 	request.Source.UpdatedAt = time.Now().UTC()
 	request.AcceptedAt = time.Now().UTC()
 	request.Deadline = request.AcceptedAt.Add(time.Minute)
-	orchestrator := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
+	reserveActionRequest(t, store, &request, true)
+	orchestrator := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8, assignmentRequired: true}
 	if err := orchestrator.beginTaskPublication(t.Context(), request, "review"); err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +526,11 @@ func TestIssuedReviewReconcilesUsingRecordedKindAfterCommandRemap(t *testing.T) 
 	}))
 	t.Cleanup(server.Close)
 	orchestrator.GitHub = testGitHub(server, "token")
-	if err := orchestrator.Execute(t.Context(), request); err != nil ||
+	if err := orchestrator.Execute(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "selected action differs from its reservation") || timelines.Load() != 0 || writes.Load() != 0 {
+		t.Fatalf("remapped command reused the selected reservation: err=%v timelines=%d writes=%d", err, timelines.Load(), writes.Load())
+	}
+	reconciler := &monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion"}, GitHub: orchestrator.GitHub}
+	if err := reconciler.ReconcilePublicationWrites(t.Context(), store); err != nil ||
 		timelines.Load() != 1 || provenance.Load() != 1 || writes.Load() != 0 {
 		t.Fatalf("remapped command did not reconcile the issued review: err=%v timelines=%d provenance=%d writes=%d",
 			err, timelines.Load(), provenance.Load(), writes.Load())
@@ -523,11 +543,12 @@ func TestIssuedReviewReconcilesUsingRecordedKindAfterCommandRemap(t *testing.T) 
 func TestIssuedCommentReconcilesUsingRecordedSinceAfterSourceEdit(t *testing.T) {
 	store := openState(t, time.Now())
 	request := usageJob()
-	request.Command.Action = command.Comment
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
 	request.Source.UpdatedAt = time.Now().UTC()
 	request.AcceptedAt = time.Now().UTC()
 	request.Deadline = request.AcceptedAt.Add(time.Minute)
-	orchestrator := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8}
+	reserveActionRequest(t, store, &request, true)
+	orchestrator := Orchestrator{Store: store, BotLogin: "linkdataminion", BotID: 8, assignmentRequired: true}
 	if err := orchestrator.beginTaskPublication(t.Context(), request, "comment"); err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +571,11 @@ func TestIssuedCommentReconcilesUsingRecordedSinceAfterSourceEdit(t *testing.T) 
 	}))
 	t.Cleanup(server.Close)
 	orchestrator.GitHub = testGitHub(server, "token")
-	if err := orchestrator.Execute(t.Context(), request); err != nil || reads.Load() != 1 || writes.Load() != 0 {
+	if err := orchestrator.Execute(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) || !strings.Contains(err.Error(), "selected action differs from its reservation") || reads.Load() != 0 || writes.Load() != 0 {
+		t.Fatalf("edited source reused the selected reservation: err=%v reads=%d writes=%d", err, reads.Load(), writes.Load())
+	}
+	reconciler := &monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion"}, GitHub: orchestrator.GitHub}
+	if err := reconciler.ReconcilePublicationWrites(t.Context(), store); err != nil || reads.Load() != 1 || writes.Load() != 0 {
 		t.Fatalf("edited source lost the original write observation: err=%v reads=%d writes=%d", err, reads.Load(), writes.Load())
 	}
 	if write := store.Data.PublicationWrites[request.ID]; write.Status != state.PublicationWriteObserved || !write.Since.Equal(issuedSince) {

@@ -217,6 +217,9 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	}
 	var selectedCallAllowed func() error
 	if c.AssignmentRequired() {
+		if !c.assigned {
+			return c.fail(fmt.Errorf("%w: selected assignment was not delivered before model call", monitor.ErrAcceptanceState))
+		}
 		if c.assignmentContext == nil || c.owner.Store == nil {
 			return c.fail(fmt.Errorf("%w: selected action context or state is missing before model call", monitor.ErrAcceptanceState))
 		}
@@ -354,6 +357,9 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 	claimedSuccess := runErr == nil
 	if c.failure != nil && !errors.Is(runErr, c.failure) {
 		runErr = errors.Join(runErr, c.failure)
+	}
+	if claimedSuccess && c.AssignmentRequired() && !c.assigned {
+		return c.fail(fmt.Errorf("%w: selected assignment was not delivered", monitor.ErrAcceptanceState))
 	}
 	if !claimedSuccess {
 		// An admitted model call may have incurred a charge even without a receipt.

@@ -91,19 +91,28 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	defer func() {
 		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
 	}()
-	acceptedAt := job.AcceptedAt
-	if acceptedAt.IsZero() {
-		acceptedAt = time.Now()
+	if !e.assignmentRequired {
+		return fmt.Errorf("%w: selected assignment checkpoint is unavailable", monitor.ErrAcceptanceState)
 	}
-	deadline := runtimeDeadline(acceptedAt, e.MaxRuntime)
-	if !job.Deadline.IsZero() {
-		if job.AcceptedAt.IsZero() || !job.Deadline.After(job.AcceptedAt) {
-			return fmt.Errorf("%w: invalid accepted action deadline", monitor.ErrTerminalJob)
+	if job.AttemptID == "" || !workspace.ValidIdentitySegment(job.AttemptID) {
+		return fmt.Errorf("%w: selected action attempt is missing or invalid", monitor.ErrAcceptanceState)
+	}
+	if job.AcceptedAt.IsZero() || !job.Deadline.After(job.AcceptedAt) {
+		return fmt.Errorf("%w: invalid accepted action deadline", monitor.ErrAcceptanceState)
+	}
+	if e.Store == nil {
+		return fmt.Errorf("%w: selected action state is missing", monitor.ErrAcceptanceState)
+	}
+	if err := e.Store.WithLock(func() error {
+		accepted := e.Store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) {
+			return fmt.Errorf("%w: selected action differs from its reservation", monitor.ErrAcceptanceState)
 		}
-		deadline = job.Deadline
+		return nil
+	}); err != nil {
+		return fmt.Errorf("%w: validate selected action: %w", monitor.ErrAcceptanceState, err)
 	}
-	job.AcceptedAt = acceptedAt
-	ctx, cancel := context.WithDeadline(ctx, deadline)
+	ctx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
 	if handled, err := e.resumeTaskPublication(ctx, job); handled || err != nil {
 		return err
@@ -146,14 +155,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	attempt := *e
 	e = &attempt
 	e.usageCheckpoint = nil
-	if job.AttemptID != "" {
-		if !workspace.ValidIdentitySegment(job.AttemptID) {
-			return fmt.Errorf("%w: invalid accepted action attempt ID", monitor.ErrTerminalJob)
-		}
-		e.attemptID = job.AttemptID
-	} else if e.attemptID, err = monitor.NewAttemptID(); err != nil {
-		return err
-	}
+	e.attemptID = job.AttemptID
 	// A panic leaves the last running checkpoint instead of claiming success.
 	returned := false
 	if e.Usage != nil {
@@ -177,9 +179,7 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 			limits += fmt.Sprintf(" and %d bytes per title", maxActionTitleBytes)
 			shorten = "the title, thread text or requester notes"
 		}
-		if e.assignmentRequired && job.AttemptID == "" {
-			resultErr = fmt.Errorf("%w: selected action attempt is missing before fixed refusal", monitor.ErrAcceptanceState)
-		} else if e.ValidateFixedRefusal == nil {
+		if e.ValidateFixedRefusal == nil {
 			resultErr = fmt.Errorf("%w: fixed refusal validator is unavailable", monitor.ErrAcceptanceState)
 		} else if err := e.ValidateFixedRefusal(replyCtx, job); err != nil {
 			resultErr = err
@@ -207,8 +207,8 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 
 // recordPublishedOutcome records publication before local cleanup can observe a later stop.
 func (e *Orchestrator) recordPublishedOutcome(job monitor.Job) error {
-	if job.AttemptID == "" { // In-process actions have no selected reservation.
-		return nil
+	if job.AttemptID == "" {
+		return fmt.Errorf("%w: selected action attempt is missing after publication", monitor.ErrAcceptanceState)
 	}
 	if e.Store == nil {
 		return fmt.Errorf("%w: selected action state is missing after publication", monitor.ErrAcceptanceState)
@@ -241,10 +241,6 @@ func (e *Orchestrator) recordPublishedOutcome(job monitor.Job) error {
 func terminalGitworkFailure(err error) bool {
 	return errors.Is(err, gitwork.ErrTooManyFiles) || errors.Is(err, gitwork.ErrDiffTooLarge) ||
 		errors.Is(err, gitwork.ErrCheckoutTooLarge) || errors.Is(err, gitwork.ErrUnsupportedSource)
-}
-
-func runtimeDeadline(acceptedAt time.Time, maxRuntime time.Duration) time.Time {
-	return acceptedAt.Add(cmp.Or(maxRuntime, config.DefaultMaxRuntime))
 }
 
 func (e *Orchestrator) validateCommand(job monitor.Job) error {

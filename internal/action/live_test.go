@@ -109,7 +109,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 	t.Setenv("GH_TOKEN", fixture.botToken)
 	modelCalls := 0
 	orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: bot,
-		BotLogin: cfg.BotLogin,
+		BotLogin: cfg.BotLogin, BotID: fixture.botUser.ID,
 		Store:    store,
 		Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		Runner: Runner{
@@ -126,6 +126,7 @@ func TestLiveFixPublishesBranch(t *testing.T) {
 			},
 		},
 	}
+	selectFixtureRunner(t, orchestrator, &job)
 	if err := orchestrator.CheckFixFork(ctx, job.Repository); err != nil {
 		t.Fatal(err)
 	}

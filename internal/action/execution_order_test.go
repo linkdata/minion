@@ -175,6 +175,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 			return aicli.Result{Answer: response, Tokens: want.Tokens, UsageComplete: true}, nil
 		}},
 	}
+	selectFixtureRunner(t, &e, &request)
 	var workerDone chan error
 	var remote *HTTPExecutor
 	if overHTTP {
@@ -208,7 +209,12 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped, loseObservatio
 		}
 		workerDone = make(chan error, 1)
 		go func() { workerDone <- RunHTTP(workerCtx, client, transport.URL, "local", &worker) }()
-		e.Executor = remote
+		e.Executor = executorFunc(func(ctx context.Context, job Job, sink Checkpoints) (Result, error) {
+			if err := sink.(assignmentCheckpoint).BeforeAssignment(job); err != nil {
+				return Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}, err
+			}
+			return remote.Execute(ctx, job, sink)
+		})
 	}
 	if err := e.Execute(t.Context(), request); err != nil {
 		t.Fatal(err)

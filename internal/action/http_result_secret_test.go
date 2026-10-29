@@ -120,6 +120,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				if tc.audit {
 					job.Source.BaseFiles = nil // The issue audit has no base; preserve that across the HTTP JSON round trip.
 				}
+				admitFixtureAssignment(t, checkpoints, job)
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				before := f.call(1)
@@ -142,13 +143,16 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				if err := outcome.Result.Validate(job); err != nil {
 					t.Fatalf("hostile result was not otherwise publishable: %v", err)
 				}
-				f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+				if ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3); ack.Failure == nil {
+					t.Fatal("hostile result was acknowledged")
+				}
 				got := f.result(t)
 				return got.result, got.err
 			})
 			request := usageJob()
 			request.Command = command.Command{Name: name, Action: action}
 			request.Repository.Actions = []string{name}
+			selectFixtureRequest(t, e, &request, false)
 			err := e.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
 				t.Fatalf("hostile result crossed publication boundary: error=%v writes=%d", err, writes.Load())
@@ -213,6 +217,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 		job.Source.BaseFiles = nil // The issue fix has no base across the HTTP JSON round trip.
+		admitFixtureAssignment(t, checkpoints, job)
 		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		f.pull(t)
 		before := f.call(1)
@@ -227,7 +232,9 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 		}
 		outcome := f.outcome(3, nil)
 		outcome.Result = result
-		f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+		if ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3); ack.Failure == nil {
+			t.Fatal("hostile result was acknowledged")
+		}
 		got := f.result(t)
 		return got.result, got.err
 	})
@@ -235,6 +242,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 	request.Source.UpdatedAt = time.Now()
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
 	request.Repository.Actions = []string{"fix"}
+	selectFixtureRequest(t, e, &request, false)
 	err := e.Execute(testActionContext(t), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
 		t.Fatalf("entity-encoded key crossed publication boundary: error=%v writes=%d", err, writes.Load())
@@ -272,6 +280,7 @@ func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 		job.Source.BaseFiles = nil // The issue fix has no base across the HTTP JSON round trip.
+		admitFixtureAssignment(t, checkpoints, job)
 		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		f.pull(t)
 		result := privateReviewResult(job)
@@ -308,7 +317,9 @@ func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 		}
 		outcome := f.outcome(sequence, nil)
 		outcome.Result = result
-		f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
+		if ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, sequence); ack.Failure == nil {
+			t.Fatal("hostile result was acknowledged")
+		}
 		got := f.result(t)
 		return got.result, got.err
 	})
@@ -316,6 +327,7 @@ func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 	request.Source.UpdatedAt = time.Now()
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
 	request.Repository.Actions = []string{"fix"}
+	selectFixtureRequest(t, e, &request, false)
 	err := e.Execute(testActionContext(t), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes.Load() != 0 {
 		t.Fatalf("NUL-containing private refutation crossed publication boundary: error=%v writes=%d", err, writes.Load())

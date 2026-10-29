@@ -66,6 +66,9 @@ func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	request.Repository.Actions = []string{"audit"}
 	request.Source.Author.ID = 3
 	request.Command = command.Command{Name: "audit", Action: command.Comment}
+	request.AttemptID = strings.Repeat("a", 32)
+	reserveActionRequest(t, e.Store, &request, true)
+	e.ValidatePublication = permitSelectedPublication
 	ctx := testActionContext(t)
 	e = attemptFixture(e)
 	installedHome := os.Getenv("HOME")
@@ -152,7 +155,8 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	failure := errors.New("private provider failure detail")
 	const report = "Private incomplete findings requiring validation."
 	var sourceDir, reportDir string
-	e := &Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), GitHub: client, Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
+	e := &Orchestrator{WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), GitHub: client, Store: openState(t, time.Now()),
+		Commands: map[string]config.CommandMapping{"security-audit": {Action: "security-audit", Skills: []string{testAuditSkillURL}}},
 		Runner: Runner{
 			Logger: log.New(&journal, "", 0), runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 				dir, output := modelRequest.dir, modelRequest.outputDir
@@ -167,6 +171,11 @@ func TestFailedAuditRetainsLabelledPartialArtifactsWithoutPublication(t *testing
 	request.Repository.Actions = []string{"security-audit"}
 	request.Source.Author.ID = 3
 	request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
+	request.AttemptID = strings.Repeat("a", 32)
+	reserveActionRequest(t, e.Store, &request, true)
+	runner := e.Runner
+	runner.WorkRoot = e.WorkRoot
+	e.Executor = &runner
 	ctx := testActionContext(t)
 	if err := attemptFixture(e).perform(ctx, request); !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("audit failure=%v", err)
@@ -216,10 +225,12 @@ func TestPublishFixWithoutChangesPostsNormalReply(t *testing.T) {
 	}))
 	defer server.Close()
 	client := testGitHub(server, "token")
-	e := Orchestrator{GitHub: client}
+	store := openState(t, time.Now())
+	e := Orchestrator{GitHub: client, Store: store, ValidatePublication: permitSelectedPublication}
 	request := usageJob()
-	request.Source = github.Item{UpdatedAt: time.Now()}
+	request.Source.UpdatedAt = time.Now()
 	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	reserveActionRequest(t, store, &request, true)
 	if err := e.publishFix(t.Context(), &preparedAction{request: request, issueNodeID: "issue-node"}, Result{Answer: "Tests passed."}, publication{answer: "Tests passed."}); err != nil {
 		t.Fatal(err)
 	}

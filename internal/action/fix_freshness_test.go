@@ -39,7 +39,7 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 				SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64),
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix", UpdatedAt: requestAt},
-				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: requestAt,
+				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC(),
 			}
 			store := openState(t, requestAt)
 			var modelRan atomic.Bool
@@ -99,7 +99,8 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				orchestrator.Adversarial = "claude"
 				orchestrator.CriticStopping = config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: new(int)}
 			}
-			err := attemptFixture(orchestrator).perform(testActionContext(t), request)
+			selectFixtureRunner(t, orchestrator, &request)
+			err := orchestrator.perform(testActionContext(t), request)
 			if tc.queryFailure {
 				if !errors.Is(err, monitor.ErrPostModelPublication) || reply != "" {
 					t.Fatalf("query failure published or lost retry classification: reply=%q err=%v", reply, err)

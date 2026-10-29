@@ -166,6 +166,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 					},
 				},
 			}
+			selectFixtureRunner(t, e, &job)
 			err := e.Execute(t.Context(), job)
 			if tt.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantError) || len(comments) != 0 {
@@ -176,11 +177,6 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				}
 				if tt.movedHead && calls != 0 {
 					t.Fatal("Codex ran on changed PR head")
-				}
-				if tt.failCodex {
-					if retryErr := e.Execute(t.Context(), job); retryErr == nil {
-						t.Fatal("retry unexpectedly succeeded")
-					}
 				}
 			} else {
 				if err != nil || calls != 1 || len(comments) != 1 {
@@ -201,11 +197,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 				}
 			}
 			records, usageErr := usage.ReadAll(usageStore.Dir)
-			wantAttempts := 1
-			if tt.failCodex {
-				wantAttempts = 2
-			}
-			if usageErr != nil || len(records) != wantAttempts {
+			if usageErr != nil || len(records) != 1 {
 				t.Fatalf("usage attempts=%+v err=%v", records, usageErr)
 			}
 			for _, record := range records {

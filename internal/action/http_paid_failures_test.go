@@ -261,11 +261,16 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- RunHTTP(ctx, workerServer.Client(), workerServer.URL, "local", &runner) }()
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
-	orchestrator := Orchestrator{Executor: remote, WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "bot", Usage: store,
+	orchestrator := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "bot", Usage: store,
 		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}}
+	orchestrator.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+		admitFixtureAssignment(t, checkpoints, job)
+		return remote.Execute(ctx, job, checkpoints)
+	})
 	request := usageJob()
 	request.Repository.Actions = []string{"comment"}
 	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	selectFixtureRequest(t, &orchestrator, &request, false)
 	parentErr := orchestrator.Execute(ctx, request)
 	var workerErr error
 	select {
