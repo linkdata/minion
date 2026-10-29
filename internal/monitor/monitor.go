@@ -1508,29 +1508,24 @@ func (m *Monitor) RevalidateFixedRefusal(ctx context.Context, store *state.Store
 	if m == nil || m.GitHub == nil {
 		return fmt.Errorf("%w: fixed refusal validator is unavailable", ErrAcceptanceState)
 	}
+	if job.AttemptID == "" || store == nil {
+		return fmt.Errorf("%w: selected action state is missing before fixed refusal", ErrAcceptanceState)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if job.AttemptID != "" {
-		if store == nil {
-			return fmt.Errorf("%w: selected action state is missing before fixed refusal", ErrAcceptanceState)
-		}
-		if err := store.WithLock(func() error { return validateFixedRefusalReservation(store, job) }); err != nil {
-			return err
-		}
+	if err := store.WithLock(func() error { return validateFixedRefusalReservation(store, job) }); err != nil {
+		return err
 	}
 	if err := m.revalidateJobSource(ctx, job); err != nil {
 		return err
 	}
-	if job.AttemptID != "" {
-		return store.WithLock(func() error {
-			if err := validateFixedRefusalReservation(store, job); err != nil {
-				return err
-			}
-			return ctx.Err()
-		})
-	}
-	return ctx.Err()
+	return store.WithLock(func() error {
+		if err := validateFixedRefusalReservation(store, job); err != nil {
+			return err
+		}
+		return ctx.Err()
+	})
 }
 
 func validateFixedRefusalReservation(store *state.Store, job Job) error {

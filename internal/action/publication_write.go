@@ -13,19 +13,22 @@ import (
 )
 
 func taskPublicationMatches(write state.PublicationWrite, job monitor.Job, kind string) bool {
-	return (job.AttemptID == "" || write.AttemptID == job.AttemptID) && write.Kind == kind &&
+	return job.AttemptID != "" && write.AttemptID == job.AttemptID && write.Kind == kind &&
 		write.Repository == job.Repository.Name && write.Number == job.Number &&
 		write.Marker == job.Marker() && write.Since.Equal(job.Source.UpdatedAt)
 }
 
 func existingTaskPublicationMatches(write state.PublicationWrite, job monitor.Job) bool {
 	return (write.Kind == "comment" || write.Kind == "review") &&
-		(job.AttemptID == "" || write.AttemptID == job.AttemptID) &&
+		job.AttemptID != "" && write.AttemptID == job.AttemptID &&
 		write.Repository == job.Repository.Name && write.Number == job.Number && write.Marker == job.Marker()
 }
 
 // resumeTaskPublication reconciles an issued write before any model work or new write.
 func (e *Orchestrator) resumeTaskPublication(ctx context.Context, job monitor.Job) (bool, error) {
+	if job.AttemptID == "" {
+		return true, fmt.Errorf("%w: selected attempt is missing before publication recovery", monitor.ErrAcceptanceState)
+	}
 	if e.Store == nil {
 		return false, nil
 	}
@@ -86,6 +89,9 @@ func (e *Orchestrator) beginTaskPublication(ctx context.Context, job monitor.Job
 }
 
 func (e *Orchestrator) beginTaskPublicationAt(ctx context.Context, job monitor.Job, kind string, now func() time.Time) error {
+	if job.AttemptID == "" {
+		return fmt.Errorf("%w: selected attempt is missing before publication", monitor.ErrAcceptanceState)
+	}
 	if e.Store == nil {
 		return fmt.Errorf("%w: publication state is missing", monitor.ErrAcceptanceState)
 	}
@@ -106,43 +112,28 @@ func (e *Orchestrator) beginTaskPublicationAt(ctx context.Context, job monitor.J
 		if !job.Deadline.IsZero() && !started.Before(job.Deadline) {
 			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		}
-		if job.AttemptID != "" {
-			accepted := e.Store.Data.Accepted
-			if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || !accepted.Assigned {
-				return fmt.Errorf("%w: selected assignment changed before publication", monitor.ErrAcceptanceState)
-			}
-			if accepted.Terminal {
-				return fmt.Errorf("%w: selected action is terminal", monitor.ErrTerminalJob)
-			}
-			if _, decided := e.Store.Data.TerminalDecisions[job.ID]; decided {
-				return fmt.Errorf("%w: selected action is already decided", monitor.ErrTerminalJob)
-			}
-			if !started.Before(accepted.Deadline) {
-				return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
-			}
-		} else if e.assignmentRequired {
-			return fmt.Errorf("%w: selected attempt is missing before publication", monitor.ErrAcceptanceState)
+		accepted := e.Store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || !accepted.Assigned {
+			return fmt.Errorf("%w: selected assignment changed before publication", monitor.ErrAcceptanceState)
+		}
+		if accepted.Terminal {
+			return fmt.Errorf("%w: selected action is terminal", monitor.ErrTerminalJob)
+		}
+		if _, decided := e.Store.Data.TerminalDecisions[job.ID]; decided {
+			return fmt.Errorf("%w: selected action is already decided", monitor.ErrTerminalJob)
+		}
+		if !started.Before(accepted.Deadline) {
+			return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		}
 		grace := e.PublicationGrace
 		if grace <= 0 {
 			grace = time.Duration(config.DefaultPublicationGraceSeconds) * time.Second
 		}
-		attemptID := job.AttemptID
-		if attemptID == "" {
-			attemptID = e.attemptID
-		}
-		if attemptID == "" {
-			var err error
-			attemptID, err = monitor.NewAttemptID()
-			if err != nil {
-				return err
-			}
-		}
 		if e.Store.Data.PublicationWrites == nil {
 			e.Store.Data.PublicationWrites = make(map[string]state.PublicationWrite)
 		}
 		write := state.PublicationWrite{
-			AttemptID: attemptID, Kind: kind, BotLogin: e.BotLogin, BotID: e.BotID, Repository: job.Repository.Name,
+			AttemptID: job.AttemptID, Kind: kind, BotLogin: e.BotLogin, BotID: e.BotID, Repository: job.Repository.Name,
 			Number: job.Number, Marker: job.Marker(), Since: job.Source.UpdatedAt,
 			StartedAt: started, Deadline: started.Add(grace), Status: state.PublicationWritePending,
 		}

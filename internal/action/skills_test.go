@@ -234,6 +234,7 @@ func TestExecuteMissingRequiredSkillDoesNotClone(t *testing.T) {
 	job := usageJob()
 	job.Repository.Actions = []string{"inspect"}
 	job.Command = command.Command{Name: "inspect", Action: command.Comment}
+	selectFixtureRequest(t, orchestrator, &job, false)
 	err := orchestrator.Execute(t.Context(), job)
 	if err == nil || !strings.Contains(err.Error(), "skill is not installed") || errors.Is(err, monitor.ErrTerminalJob) || requests != 0 {
 		t.Fatalf("missing skill reached preparation: requests=%d error=%v", requests, err)

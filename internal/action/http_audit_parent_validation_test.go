@@ -46,6 +46,7 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 		job.Source.BaseFiles = nil // The issue audit has no base; preserve that across the HTTP JSON round trip.
+		admitFixtureAssignment(t, checkpoints, job)
 		f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 		f.pull(t)
 		before := f.call(1)
@@ -77,6 +78,7 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 	request := usageJob()
 	request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
 	request.Repository.Actions = []string{"security-audit"}
+	selectFixtureRequest(t, e, &request, false)
 	err := e.Execute(testActionContext(t), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "validate-findings.cjs failed: exit status 17") || writes.Load() != 0 {
 		t.Fatalf("hostile audit crossed the parent validator: error=%v writes=%d", err, writes.Load())

@@ -12,7 +12,6 @@ import (
 
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
-	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -35,9 +34,6 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 	orchestrator := newOrchestrator(cfg, client, store, logger, func() error { return admissionErr })
 	if orchestrator.GitHub != client || orchestrator.Store != store || orchestrator.Logger != logger || orchestrator.Runner.Logger != logger {
 		t.Fatal("service lost client, state or logger")
-	}
-	if err := orchestrator.Execute(t.Context(), monitor.Job{}); !errors.Is(err, admissionErr) {
-		t.Fatalf("wired admission did not stop execution: %v", err)
 	}
 	if orchestrator.WorkRoot != cfg.WorkRoot || !errors.Is(orchestrator.CheckWorkRoot(), admissionErr) ||
 		orchestrator.CriticStopping.NonblockingAfterRound == nil || *orchestrator.CriticStopping.NonblockingAfterRound != 0 {

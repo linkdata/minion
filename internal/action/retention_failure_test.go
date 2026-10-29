@@ -170,7 +170,7 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
 			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
-				Runner: Runner{runModel: forbidModel(t)}}
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, os.ErrPermission) || posts.Load() != 0 {
 				t.Fatalf("retention I/O did not keep saved result retryable: posts=%d error=%v", posts.Load(), err)
@@ -204,7 +204,7 @@ func TestSavedPrivateRetentionRetriesDirectoryLayoutFailure(t *testing.T) {
 				t.Fatal(err)
 			}
 			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
-				Runner: Runner{runModel: forbidModel(t)}}
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 			if err := e.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
 				errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
 				t.Fatalf("saved result did not survive private directory fault: posts=%d error=%v", posts.Load(), err)
@@ -233,7 +233,7 @@ func TestSavedPrivateRecordConflictHoldsReceiptForRepair(t *testing.T) {
 			var posts atomic.Int32
 			server := auditRecoveryServer(t, &posts)
 			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
-				Runner: Runner{runModel: forbidModel(t)}}
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 			var err error
 			if name == "reviews" {
 				err = e.retainReviewEvidence(job, result)
@@ -284,7 +284,7 @@ func TestSavedPrivateDirectoryDisappearsDuringSync(t *testing.T) {
 			var posts atomic.Int32
 			server := auditRecoveryServer(t, &posts)
 			e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
-				Runner: Runner{runModel: forbidModel(t)}}
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 			var err error
 			if name == "reviews" {
 				err = e.retainReviewEvidence(job, result)

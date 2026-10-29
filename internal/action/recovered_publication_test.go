@@ -217,7 +217,8 @@ func TestSelectedExecuteAlreadyAcknowledgedPersistsSuccessWithoutWorker(t *testi
 	}))
 	t.Cleanup(server.Close)
 	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion",
-		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		assignmentRequired: true,
+		Commands:           map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		Executor: executorFunc(func(context.Context, Job, Checkpoints) (Result, error) {
 			executions.Add(1)
 			return Result{}, errors.New("already acknowledged action ran worker")
@@ -301,7 +302,7 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 	}))
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -439,8 +440,8 @@ func TestPublishRecoveredNoChangeFixRepliesWithoutFork(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || replies.Load() != 1 ||
 		!strings.Contains(comment, "AI returned a response without changing files.") || !strings.Contains(comment, "Saved complete answer") ||
 		!strings.HasSuffix(comment, request.Marker()) {
@@ -526,8 +527,8 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
-		Runner: Runner{runModel: forbidModel(t)}}
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -634,8 +635,8 @@ func TestPublishRecoveredFixRebuildsRecordedCommitAfterFailedPush(t *testing.T) 
 		}
 	}))
 	defer server.Close()
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: root,
-		Runner: Runner{runModel: forbidModel(t)}}
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: root,
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || comment != "" {
 		t.Fatalf("failed fork push did not retain complete result: comment=%q error=%v", comment, err)
 	}
@@ -744,8 +745,8 @@ func TestPublishRecoveredFixKeepsCheckpointAfterMissingBranchAndGitFailure(t *te
 	}))
 	defer server.Close()
 	t.Setenv("PATH", t.TempDir()) // A missing branch needs Git before rebuilding from the saved result.
-	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := orchestrator.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git readiness before recovered fix") ||
 		replies.Load() != 0 || branchLookups.Load() != 1 || store.Data.PendingFixes[request.ID].SHA != sha {
 		t.Fatalf("missing branch lookup lost checkpoint: replies=%d checkpoint=%+v error=%v", replies.Load(), store.Data.PendingFixes[request.ID], err)
@@ -813,7 +814,7 @@ func TestPublishRecoveredFixChecksGitBeforeRestoringSource(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	e := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	if err := e.PublishRecovered(t.Context(), request); err == nil || errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "Git 2.45.1 or later") || writes.Load() != 0 {
 		t.Fatalf("unchecked Git reached recovery publication: writes=%d error=%v", writes.Load(), err)
 	}
@@ -859,7 +860,7 @@ func TestPublishRecoveredFixRejectsUnrecordedBranchSHA(t *testing.T) {
 	}))
 	defer server.Close()
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}}
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	err := orchestrator.PublishRecovered(t.Context(), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "without a matching recorded bot commit") || writes.Load() != 0 {
 		t.Fatalf("foreign branch was reused: writes=%d error=%v", writes.Load(), err)
@@ -907,7 +908,7 @@ func TestPublishRecoveredFixRejectsDestinationDrift(t *testing.T) {
 			t.Cleanup(server.Close)
 			t.Setenv("PATH", t.TempDir()) // A destination mismatch must stop before Git publication.
 			orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", WorkRoot: t.TempDir(),
-				Runner: Runner{runModel: forbidModel(t)}}
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 			err := orchestrator.PublishRecovered(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "fix destination changed since accepted result") || writes.Load() != 0 {
 				t.Fatalf("changed destination was used: writes=%d error=%v", writes.Load(), err)

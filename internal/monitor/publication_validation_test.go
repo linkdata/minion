@@ -73,13 +73,13 @@ func TestRevalidateFixedRefusalChecksLiveAuthorityAfterOriginalDeadline(t *testi
 			}
 		})
 	}
-	m, _, job, _, _ := assignmentValidationFixture(t)
-	job.AttemptID = "" // In-process fixed replies use the same live-source check.
-	job.Deadline = time.Now().Add(-time.Minute)
-	if err := m.RevalidateFixedRefusal(t.Context(), nil, job); err != nil {
-		t.Fatalf("in-process fixed refusal lost its separate reply budget: %v", err)
-	}
 	m, store, job, _, _ := assignmentValidationFixture(t)
+	job.AttemptID = ""
+	job.Deadline = time.Now().Add(-time.Minute)
+	if err := m.RevalidateFixedRefusal(t.Context(), store, job); !errors.Is(err, ErrAcceptanceState) {
+		t.Fatalf("fixed refusal without a selected attempt was accepted: %v", err)
+	}
+	m, store, job, _, _ = assignmentValidationFixture(t)
 	if err := store.WithLock(func() error {
 		_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "succeeded", time.Now().UTC())
 		return err

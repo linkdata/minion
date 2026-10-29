@@ -10,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
-	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workroot"
 )
 
@@ -19,7 +17,10 @@ func TestExecuteChecksWorkRootBeforeGitHub(t *testing.T) {
 	e := &Orchestrator{
 		CheckWorkRoot: func() error { return workroot.ErrUnsafe },
 	}
-	if err := e.Execute(t.Context(), monitor.Job{}); !errors.Is(err, workroot.ErrUnsafe) {
+	job := usageJob()
+	job.Command = command.Command{Name: "review", Action: command.Review}
+	selectFixtureRequest(t, e, &job, false)
+	if err := e.Execute(t.Context(), job); !errors.Is(err, workroot.ErrUnsafe) {
 		t.Fatalf("unsafe work root did not stop job before GitHub access: %v", err)
 	}
 }
@@ -43,7 +44,9 @@ func TestExecuteRechecksWorkRootAfterActionError(t *testing.T) {
 			return nil
 		},
 	}
-	job := monitor.Job{Repository: config.Repository{Name: "o/r"}, SubjectType: "Issue", Number: 1, Command: command.Command{Action: "unsupported"}}
+	job := usageJob()
+	job.Command = command.Command{Name: "unsupported", Action: command.Comment}
+	selectFixtureRequest(t, e, &job, false)
 	err := e.Execute(t.Context(), job)
 	if err == nil || checks != 2 || errors.Is(err, workroot.ErrUnsafe) || !strings.Contains(err.Error(), "is not enabled") || !strings.Contains(logs.String(), "work root after action failure:") {
 		t.Fatalf("action failure after root filled = %v, checks=%d", err, checks)

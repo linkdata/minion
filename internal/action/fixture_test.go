@@ -69,6 +69,54 @@ func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
 	return &attempt
 }
 
+// reserveActionRequest gives a direct orchestration test the monitor's saved reservation.
+func reserveActionRequest(t *testing.T, store *state.Store, request *monitor.Job, assigned bool) {
+	t.Helper()
+	if request.AttemptID == "" {
+		var err error
+		request.AttemptID, err = monitor.NewAttemptID()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if request.Source.Key == "" {
+		request.Source.Key = "source-key"
+	}
+	if request.Source.NodeID == "" {
+		request.Source.NodeID = "source-node"
+	}
+	if request.Source.HTMLURL == "" {
+		request.Source.HTMLURL = sourceURL(*request) + "#issuecomment-1"
+	}
+	if request.Source.UpdatedAt.IsZero() {
+		request.Source.UpdatedAt = time.Now().UTC()
+	}
+	if request.AcceptedAt.IsZero() {
+		request.AcceptedAt = time.Now().UTC()
+	}
+	if request.Deadline.IsZero() {
+		request.Deadline = request.AcceptedAt.Add(config.DefaultMaxRuntime)
+	}
+	accepted := &state.AcceptedAction{
+		JobID: request.ID, AttemptID: request.AttemptID, ExecutorID: LocalExecutorID,
+		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
+		SubjectType: request.SubjectType, SubjectNumber: request.Number,
+		SourceKey: request.Source.Key, SourceNodeID: request.Source.NodeID, SourceURL: request.Source.HTMLURL,
+		SourceUpdatedAt: request.Source.UpdatedAt,
+		Requester:       request.Source.Author.Login, RequesterID: request.Source.Author.ID,
+		CommandName: request.Command.Name, Action: string(request.Command.Action),
+		AcceptedAt: request.AcceptedAt, Deadline: request.Deadline, Assigned: assigned,
+	}
+	if err := accepted.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = accepted
+	store.Data.JobFailures[request.ID] = state.JobFailure{Attempts: 1, AcceptedAt: request.AcceptedAt, Deadline: request.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Regenerate with the fixed identity/date commands in testdata/README.md.
 //
 //go:embed testdata/source.bundle

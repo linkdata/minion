@@ -19,6 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
@@ -39,7 +40,7 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
 				SubjectType: "Issue", Number: 7, ID: strings.Repeat("a", 64),
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}, Body: "@linkdataminion fix", UpdatedAt: requestAt},
-				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: requestAt,
+				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC(),
 			}
 			store := openState(t, requestAt)
 			var modelRan atomic.Bool
@@ -77,7 +78,7 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 			}))
 			defer server.Close()
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"),
-				BotLogin: "linkdataminion", Store: store,
+				BotLogin: "linkdataminion", BotID: 8, Store: store,
 				Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 					if modelRequest.role == roleCritic {
@@ -99,13 +100,19 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				orchestrator.Adversarial = "claude"
 				orchestrator.CriticStopping = config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: new(int)}
 			}
-			err := attemptFixture(orchestrator).perform(testActionContext(t), request)
+			selectFixtureRunner(t, orchestrator, &request)
+			err := orchestrator.perform(testActionContext(t), request)
 			if tc.queryFailure {
 				if !errors.Is(err, monitor.ErrPostModelPublication) || reply != "" {
 					t.Fatalf("query failure published or lost retry classification: reply=%q err=%v", reply, err)
 				}
 			} else if err != nil || !strings.Contains(reply, "issue changed after this `fix` request") || strings.Contains(reply, "stale model answer") {
 				t.Fatalf("stale issue was published: reply=%q err=%v", reply, err)
+			}
+			if !tc.queryFailure {
+				if write := store.Data.PublicationWrites[request.ID]; write.Kind != "comment" || write.Status != state.PublicationWriteObserved {
+					t.Fatalf("issue-changed reply bypassed publication ledger: %+v", write)
+				}
 			}
 			if !modelRan.Load() || queries.Load() != 2 || len(store.Data.PendingFixes) != 0 {
 				t.Fatalf("freshness checks or checkpoint wrong: model=%t queries=%d pending=%v", modelRan.Load(), queries.Load(), store.Data.PendingFixes)

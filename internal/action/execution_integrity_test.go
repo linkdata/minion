@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -48,7 +49,7 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 			mainTokens, criticTokens := usage.Tokens{Input: 10, CachedInput: 2, Output: 3}, usage.Tokens{Input: 7, CachedInput: 1, Output: 2}
 			var journal bytes.Buffer
 			zero, calls := 0, 0
-			e := Orchestrator{WorkRoot: work, Usage: store, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Main: "codex", Adversarial: "claude", Logger: log.New(&journal, "", 0),
+			e := Orchestrator{WorkRoot: work, Usage: store, Store: openState(t, time.Now()), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Main: "codex", Adversarial: "claude", Logger: log.New(&journal, "", 0),
 				CriticStopping: config.CriticStopping{MaxRounds: 3, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
 				Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -76,6 +77,7 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 			}
 			request := usageJob()
 			request.Command, request.Repository.Actions = command.Command{Name: "comment", Action: command.Comment}, []string{"comment"}
+			selectFixtureRunner(t, &e, &request)
 			err := e.Execute(t.Context(), request)
 			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "supplied repository changed") || !strings.Contains(err.Error(), "Git metadata changed") || calls != 2 || publications.Load() != 0 {
 				t.Fatalf("supplied metadata integrity failure continued or published: calls=%d publications=%d error=%v", calls, publications.Load(), err)

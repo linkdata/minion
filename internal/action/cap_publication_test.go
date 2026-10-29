@@ -87,10 +87,14 @@ func TestCappedPublicationProjectsEveryPublicBodyAndRetainedAudit(t *testing.T) 
 					}
 				}))
 				defer server.Close()
-				request := monitor.Job{ID: job.Identity.JobID, Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: job.Identity.SubjectType, Number: 7,
+				request := monitor.Job{ID: job.Identity.JobID, AttemptID: job.Identity.AttemptID,
+					Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, SubjectType: job.Identity.SubjectType, Number: 7,
 					Source: github.Item{Author: github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}, UpdatedAt: time.Now()}, Command: command.Command{Name: job.Command, Action: action}}
 				root := t.TempDir()
-				orchestrator := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now())}
+				store := openState(t, time.Now())
+				reserveActionRequest(t, store, &request, true)
+				orchestrator := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "token"), BotLogin: "linkdataminion", BotID: 8,
+					Store: store, ValidatePublication: permitSelectedPublication}
 				if err := orchestrator.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, result); err != nil {
 					t.Fatal(err)
 				}

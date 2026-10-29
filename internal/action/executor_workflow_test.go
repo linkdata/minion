@@ -176,6 +176,7 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 			e := &Orchestrator{WorkRoot: work, Usage: store, BotLogin: "bot", Main: "codex", Adversarial: "claude", GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0),
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+					admitFixtureAssignment(t, checkpoints, job)
 					result := privateReviewResult(job)
 					want = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 					if mode == "omitted" {
@@ -237,6 +238,7 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 			request := usageJob()
 			request.Command = command.Command{Name: "comment", Action: command.Comment}
 			request.Repository.Actions = []string{"comment"}
+			selectFixtureRequest(t, e, &request, false)
 			if err := e.Execute(t.Context(), request); !errors.Is(err, executorErr) || reply != "" {
 				t.Fatalf("failed executor published or lost error: reply=%q error=%v", reply, err)
 			}
@@ -279,6 +281,7 @@ func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testin
 			e := &Orchestrator{WorkRoot: t.TempDir(), Usage: store, Store: openState(t, time.Now()), BotLogin: "bot", BotID: 8, GitHub: testGitHub(server, "fixture"),
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+					admitFixtureAssignment(t, checkpoints, job)
 					call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
 					fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}
 					if mode == "ignored refusal" {
@@ -313,6 +316,7 @@ func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testin
 			request := usageJob()
 			request.Command = command.Command{Name: "comment", Action: command.Comment}
 			request.Repository.Actions = []string{"comment"}
+			selectFixtureRequest(t, e, &request, false)
 			err := e.Execute(t.Context(), request)
 			if mode == "complete" {
 				if err != nil || !strings.Contains(reply, "Public answer") {

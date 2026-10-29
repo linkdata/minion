@@ -86,11 +86,12 @@ func TestCommentCommandReportsIssueAndPullRequest(t *testing.T) {
 					},
 				},
 			}
+			selectFixtureRunner(t, orchestrator, &job)
 			var err error
 			if subject == "Issue" {
 				err = orchestrator.Execute(t.Context(), job)
 			} else {
-				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+				err = orchestrator.perform(testActionContext(t), job)
 			}
 			if err != nil {
 				t.Fatal(err)

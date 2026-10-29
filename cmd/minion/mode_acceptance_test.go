@@ -31,6 +31,14 @@ type cancelAfterReactionGitHub struct {
 	cancel context.CancelFunc
 }
 
+type cancelBeforeAssignmentExecutor struct{}
+
+func (cancelBeforeAssignmentExecutor) WaitCapacity(context.Context) error { return nil }
+
+func (cancelBeforeAssignmentExecutor) Execute(context.Context, action.Job, action.Checkpoints) (action.Result, error) {
+	panic("canceled poll must not execute a Job")
+}
+
 func (g cancelAfterReactionGitHub) ReactEyes(ctx context.Context, nodeID string) error {
 	if err := g.GitHub.ReactEyes(ctx, nodeID); err != nil {
 		return err
@@ -208,8 +216,10 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	// worker assignment. A restarted service must resume this same attempt.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	firstOwner := newOrchestrator(cfg, client, store, log.New(&bytes.Buffer{}, "", 0), nil)
+	firstOwner.Executor = cancelBeforeAssignmentExecutor{}
 	first := &monitor.Monitor{Config: cfg, GitHub: cancelAfterReactionGitHub{GitHub: client, cancel: cancel},
-		Handler: newOrchestrator(cfg, client, store, log.New(&bytes.Buffer{}, "", 0), nil),
+		Handler: firstOwner,
 		Now:     func() time.Time { return now }, SelectedExecutorID: action.LocalExecutorID,
 		SelectedCommands: map[string]bool{"comment": true}}
 	if _, err := first.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {

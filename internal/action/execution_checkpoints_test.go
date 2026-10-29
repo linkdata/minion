@@ -112,12 +112,16 @@ func TestExecutionBeforeCallRechecksSelectedStateAfterUsageSave(t *testing.T) {
 	store := openState(t, time.Now())
 	f.owner.Store = store
 	f.owner.assignmentRequired = true
+	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	f.sink.assignmentContext = t.Context()
 	accepted := acceptedForJob(f.job)
-	accepted.Assigned = true
+	f.sink.assignmentRequest = monitor.Job{Deadline: accepted.Deadline}
 	store.Data.Accepted = accepted
 	store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
 	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatal(err)
 	}
 	f.owner.usageCheckpoint = &usageCheckpoint{save: func() error {
@@ -140,8 +144,8 @@ func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T)
 		store := openState(t, time.Now())
 		f.owner.Store = store
 		f.owner.assignmentRequired = true
+		f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 		accepted := acceptedForJob(f.job)
-		accepted.Assigned = true
 		accepted.AcceptedAt = time.Now().UTC()
 		accepted.Deadline = accepted.AcceptedAt.Add(time.Second)
 		store.Data.Accepted = accepted
@@ -152,6 +156,10 @@ func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T)
 		ctx, cancel := context.WithDeadline(t.Context(), accepted.Deadline)
 		defer cancel()
 		f.sink.assignmentContext = ctx
+		f.sink.assignmentRequest = monitor.Job{Deadline: accepted.Deadline}
+		if err := f.sink.BeforeAssignment(f.job); err != nil {
+			t.Fatal(err)
+		}
 		f.owner.usageCheckpoint = &usageCheckpoint{save: func() error { time.Sleep(2 * time.Second); return nil }}
 		err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
 		if !errors.Is(err, context.DeadlineExceeded) || f.sink.pending != nil ||

@@ -877,7 +877,8 @@ func TestCommentPublishesCompletedCriticResultWithActualOutcome(t *testing.T) {
 				Source:  github.Item{Author: github.User{ID: 7, Login: "writer"}},
 				Command: command.Command{Name: "audit", Action: command.Comment},
 			}
-			err := attemptFixture(e).perform(testActionContext(t), job)
+			selectFixtureRunner(t, e, &job)
+			err := e.perform(testActionContext(t), job)
 			if tt.wantError {
 				if !errors.Is(err, monitor.ErrTerminalJob) || published != "" || tt.wantErrorText != "" && !strings.Contains(err.Error(), tt.wantErrorText) {
 					t.Fatalf("unapproved result published: error=%v body=%q", err, published)

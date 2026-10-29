@@ -143,27 +143,22 @@ func TestPrecheckDeadlineStopsJobBeforeModel(t *testing.T) {
 		}))
 		client := testGitHub(server, "test-token")
 		orchestrator := &Orchestrator{
-			GitHub:     client,
-			BotLogin:   "linkdataminion",
-			MaxRuntime: 20 * time.Millisecond,
-			Commands:   map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
-			Runner:     Runner{runModel: forbidModel(t)},
+			GitHub:   client,
+			BotLogin: "linkdataminion",
+			Store:    openState(t, time.Now().UTC()),
+			Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+			Runner:   Runner{runModel: forbidModel(t)},
 		}
 		job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}}, SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review}}
+		job.Source.Author = github.User{ID: 7, Login: "writer"}
+		job.AcceptedAt = time.Now().UTC()
+		job.Deadline = job.AcceptedAt.Add(20 * time.Millisecond)
+		reserveActionRequest(t, orchestrator.Store, &job, false)
+		fixtureSelectedValidators(orchestrator)
 		if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("precheck deadline was refundable: %v", err)
 		}
 	})
-}
-
-func TestRuntimeDeadlineUsesAcceptedTime(t *testing.T) {
-	acceptedAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
-	if got, want := runtimeDeadline(acceptedAt, 37*time.Minute), acceptedAt.Add(37*time.Minute); !got.Equal(want) {
-		t.Fatalf("supplied runtime deadline = %s, want %s", got, want)
-	}
-	if got, want := runtimeDeadline(acceptedAt, 0), acceptedAt.Add(config.DefaultMaxRuntime); !got.Equal(want) {
-		t.Fatalf("default runtime deadline = %s, want %s", got, want)
-	}
 }
 
 func TestExpiredAcceptedDeadlineStopsBeforeModel(t *testing.T) {
@@ -181,6 +176,10 @@ func TestExpiredAcceptedDeadlineStopsBeforeModel(t *testing.T) {
 	job := monitor.Job{Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"}},
 		SubjectType: "PullRequest", Number: 7, ID: strings.Repeat("a", 64), Command: command.Command{Name: "review", Action: command.Review},
 		AcceptedAt: acceptedAt, Deadline: acceptedAt.Add(time.Minute)}
+	job.Source.Author = github.User{ID: 7, Login: "writer"}
+	orchestrator.Store = openState(t, time.Now().UTC())
+	reserveActionRequest(t, orchestrator.Store, &job, false)
+	fixtureSelectedValidators(orchestrator)
 	if err := orchestrator.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expired accepted action was not terminal: %v", err)
 	}
@@ -283,7 +282,49 @@ func bindSelectedRunner(m *monitor.Monitor, store *state.Store, owner *Orchestra
 	owner.ValidateFixedRefusal = func(ctx context.Context, job monitor.Job) error {
 		return m.RevalidateFixedRefusal(ctx, store, job)
 	}
-	owner.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+	attachSelectedRunner(owner)
+}
+
+func fixtureSelectedValidators(owner *Orchestrator) {
+	owner.assignmentRequired = true
+	owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
+	owner.ValidatePublication = func(context.Context, monitor.Job, bool) error { return nil }
+	owner.ValidateFixedRefusal = func(context.Context, monitor.Job) error { return nil }
+}
+
+func selectFixtureRequest(t *testing.T, owner *Orchestrator, request *monitor.Job, assigned bool) {
+	t.Helper()
+	if owner.Store == nil {
+		owner.Store = openState(t, time.Now().UTC())
+	}
+	reserveActionRequest(t, owner.Store, request, assigned)
+	owner.attemptID = request.AttemptID
+	fixtureSelectedValidators(owner)
+}
+
+func selectFixtureRunner(t *testing.T, owner *Orchestrator, request *monitor.Job) {
+	t.Helper()
+	selectFixtureRequest(t, owner, request, false)
+	attachSelectedRunner(owner)
+}
+
+func admitFixtureAssignment(t *testing.T, checkpoints Checkpoints, job Job) {
+	t.Helper()
+	selected, ok := checkpoints.(assignmentCheckpoint)
+	if !ok || !selected.AssignmentRequired() {
+		t.Fatal("selected assignment checkpoint is missing")
+	}
+	if err := selected.BeforeAssignment(job); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type readyExecutor struct{ Executor }
+
+func (readyExecutor) WaitCapacity(context.Context) error { return nil }
+
+func attachSelectedRunner(owner *Orchestrator) {
+	owner.Executor = readyExecutor{executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 		assignment, ok := checkpoints.(assignmentCheckpoint)
 		if !ok || !assignment.AssignmentRequired() {
 			return Result{}, fmt.Errorf("selected runner has no assignment checkpoint")
@@ -302,7 +343,7 @@ func bindSelectedRunner(m *monitor.Monitor, store *state.Store, owner *Orchestra
 			err = receiver.ReceiveCompletedResult(result)
 		}
 		return result, err
-	})
+	})}
 }
 
 func TestReviewEchoDoesNotSuppressSecurityAuditInMonitor(t *testing.T) {
@@ -463,7 +504,8 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		Store:    store,
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
-	if err := attemptFixture(orchestrator).perform(testActionContext(t), job); err != nil {
+	selectFixtureRunner(t, orchestrator, &job)
+	if err := orchestrator.perform(testActionContext(t), job); err != nil {
 		t.Fatal(err)
 	}
 	if comments != 1 || len(store.Data.PendingFixes) != 0 || !strings.Contains(refusal, "changed after this `fix` request") {
@@ -606,7 +648,8 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				job.Source.Body = "@linkdataminion fix\nOversized notes"
 				orchestrator.MaxGitHubContextBytes = 1
 			}
-			err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+			selectFixtureRunner(t, orchestrator, &job)
+			err = orchestrator.perform(testActionContext(t), job)
 			if tt.retryReply {
 				if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || commentAttempts != 1 {
 					t.Fatalf("reply failure lost recovery state/classification: attempts=%d error=%v", commentAttempts, err)
@@ -624,7 +667,7 @@ func TestFixRecoversOnlyRecordedBranch(t *testing.T) {
 				}
 				orchestrator.Store = store
 				orchestrator.CriticStopping = config.CriticStopping{MaxRounds: 9}
-				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+				err = orchestrator.perform(testActionContext(t), job)
 				if err != nil || commentAttempts != 2 || commentBody != failedBody {
 					t.Fatalf("restart/config change altered the original reply: attempts=%d first=%q recovered=%q error=%v", commentAttempts, failedBody, commentBody, err)
 				}
@@ -725,7 +768,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 				Command: command.Command{Name: "fix", Action: command.Fix}, AcceptedAt: time.Now().UTC(),
 			}
 			if test.runExecute {
-				job.AcceptedAt = time.Time{} // Exercise Execute's default accepted time through the commit path.
+				job.Deadline = job.AcceptedAt.Add(config.DefaultMaxRuntime)
 			}
 			store, err := state.Open(statePath, time.Now())
 			if err != nil {
@@ -785,6 +828,7 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			orchestrator := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client,
 				Commands:       map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				BotLogin:       "linkdataminion",
+				BotID:          8,
 				Store:          store,
 				CriticStopping: config.CriticStopping{MaxRounds: 1, NonblockingAfterRound: &strict},
 				Runner: Runner{
@@ -818,9 +862,6 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 								t.Fatalf("late live edit not exercised: %q,%v", data, err)
 							}
 							liveMutated = true
-							if test.saveFailure {
-								store.Data.Cursor = time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
-							}
 							if test.capped {
 								return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Blocking defect remains."}`}, nil
 							}
@@ -860,10 +901,19 @@ func TestFixPushesBranchForRequesterPullRequest(t *testing.T) {
 			if withCritic {
 				orchestrator.Adversarial = "claude"
 			}
+			selectFixtureRunner(t, orchestrator, &job)
+			if test.saveFailure {
+				orchestrator.ValidatePublication = func(context.Context, monitor.Job, bool) error {
+					if liveMutated {
+						store.Data.Cursor = time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+					}
+					return nil
+				}
+			}
 			if test.runExecute {
-				err = attemptFixture(orchestrator).Execute(t.Context(), job)
+				err = orchestrator.Execute(t.Context(), job)
 			} else {
-				err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+				err = orchestrator.perform(testActionContext(t), job)
 			}
 			if test.saveFailure {
 				if err == nil || !errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "record commit before push") || commentBody != "" {
@@ -983,6 +1033,10 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 			_, _ = fmt.Fprint(w, publicRepositoryJSON)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/pulls/7":
 			_, _ = fmt.Fprintf(w, `{"title":%q,"body":%q,"user":{"id":8,"login":"outsider"},"base":{"ref":"main"},"head":{"sha":%q}}`, title, description, head)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
+			_, _ = fmt.Fprint(w, `[]`)
+		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/pulls/7/reviews":
 			postCalls++
 			http.Error(w, "unavailable", http.StatusBadGateway)
@@ -1015,19 +1069,20 @@ func TestReviewMarksOnlyPostModelPublicationFailure(t *testing.T) {
 			},
 		},
 	}
-	err := attemptFixture(orchestrator).perform(testActionContext(t), job)
+	selectFixtureRunner(t, orchestrator, &job)
+	err := orchestrator.perform(testActionContext(t), job)
 	if err == nil || errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 0 {
 		t.Fatalf("pre-model outage: err=%v runs=%d", err, modelRuns)
 	}
 	repoFail = false
 	failAfterModel = true
-	err = attemptFixture(orchestrator).perform(testActionContext(t), job)
+	err = orchestrator.perform(testActionContext(t), job)
 	if !errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 1 || postCalls != 0 {
 		t.Fatalf("post-model repository outage: err=%v runs=%d posts=%d", err, modelRuns, postCalls)
 	}
 	repoFail, failAfterModel = false, false
-	err = attemptFixture(orchestrator).perform(testActionContext(t), job)
-	if !errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 2 || postCalls != 1 {
+	err = orchestrator.PublishRecovered(testActionContext(t), job)
+	if !errors.Is(err, monitor.ErrPostModelPublication) || modelRuns != 1 || postCalls != 1 {
 		t.Fatalf("post-model outage: err=%v runs=%d posts=%d", err, modelRuns, postCalls)
 	}
 }

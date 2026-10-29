@@ -103,6 +103,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 				job.Source.BaseFiles = nil // The issue audit has no base; preserve that across the HTTP JSON round trip.
 				executed = true
+				admitFixtureAssignment(t, checkpoints, job)
 				f := newHTTPServerTest(t, ctx, job, checkpoints, nil)
 				f.pull(t)
 				before := f.call(1)
@@ -150,13 +151,17 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 				if err := outcome.Result.Validate(job); err == nil || !strings.Contains(err.Error(), test.want) {
 					t.Fatalf("hostile audit passed parent validation: %v", err)
 				}
-				f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+				ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+				if ack.Failure == nil || !ack.Failure.Terminal || !strings.Contains(ack.Failure.Message, test.want) {
+					t.Fatalf("selected outcome did not reject invalid audit: %+v", ack.Failure)
+				}
 				got := f.result(t)
 				return got.result, got.err
 			})
 			request := usageJob()
 			request.Command = command.Command{Name: "security-audit", Action: command.SecurityAudit}
 			request.Repository.Actions = []string{"security-audit"}
+			selectFixtureRequest(t, e, &request, false)
 			if err := e.Execute(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) || writes.Load() != 0 {
 				t.Fatalf("hostile audit crossed publication boundary: error=%v writes=%d", err, writes.Load())
 			}

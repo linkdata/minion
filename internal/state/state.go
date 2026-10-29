@@ -45,7 +45,7 @@ const (
 
 // PublicationWrite tracks one GitHub write independently of the action's terminal decision.
 type PublicationWrite struct {
-	AttemptID  string    `json:"attempt_id,omitempty"`
+	AttemptID  string    `json:"attempt_id"`
 	Kind       string    `json:"kind"`
 	BotLogin   string    `json:"bot_login"`
 	BotID      int64     `json:"bot_id,omitempty"`
@@ -65,7 +65,7 @@ func ValidPublicationBotLogin(login string) bool {
 }
 
 func validPublicationWrite(jobID string, write PublicationWrite) bool {
-	if !workspace.ValidIdentitySegment(jobID) || write.AttemptID != "" && !workspace.ValidIdentitySegment(write.AttemptID) ||
+	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(write.AttemptID) ||
 		!ValidPublicationBotLogin(write.BotLogin) || write.BotID < 0 ||
 		!workspace.ValidRepository(write.Repository) || write.Number <= 0 ||
 		write.StartedAt.IsZero() || !write.Deadline.After(write.StartedAt) ||

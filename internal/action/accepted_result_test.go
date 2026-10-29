@@ -359,7 +359,7 @@ func TestSelectedAuditValidatesAfterSavingResultAndOutcomeACK(t *testing.T) {
 	server := auditRecoveryServer(t, &posts)
 	checkpoints := f.tx.sink.(*executionCheckpoints)
 	recovered := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8,
-		WorkRoot: checkpoints.owner.WorkRoot, Runner: Runner{runModel: forbidModel(t)}}
+		WorkRoot: checkpoints.owner.WorkRoot, Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
 	t.Setenv("PATH", t.TempDir()) // The publishing validator disappears after the outcome ACK.
 	if err := recovered.PublishRecovered(t.Context(), checkpoints.assignmentRequest); !errors.Is(err, monitor.ErrPostModelPublication) ||
 		errors.Is(err, monitor.ErrTerminalJob) || posts.Load() != 0 {
