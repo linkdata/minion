@@ -1225,8 +1225,11 @@ func (m *Monitor) scheduleAcceptedRetry(store *state.Store, reason error) (time.
 
 func publicationRetryAt(now, deadline time.Time) time.Time {
 	remaining := deadline.Sub(now)
-	if remaining <= publicationLastChanceInterval {
+	if remaining <= time.Millisecond {
 		return deadline
+	}
+	if remaining <= publicationLastChanceInterval {
+		return now.Add(remaining / 2)
 	}
 	return now.Add(min(publicationRecheckInterval, max(publicationLastChanceInterval, remaining/2)))
 }

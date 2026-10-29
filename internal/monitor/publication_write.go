@@ -247,10 +247,8 @@ func activePublicationWriteWake(write state.PublicationWrite, at, actionDeadline
 	// Keep active checks inside the action window after write grace or near expiry.
 	if remaining := actionDeadline.Sub(at); remaining > publicationLastChanceInterval {
 		return at.Add(publicationLastChanceInterval)
-	} else if remaining > time.Millisecond {
-		return at.Add(remaining / 2)
 	}
-	return actionDeadline
+	return publicationRetryAt(at, actionDeadline)
 }
 
 func withPublicationWriteWake(next time.Time, store *state.Store, at time.Time) time.Time {
