@@ -640,31 +640,41 @@ func TestSelectedFixDefersUncancelableSiblingTerminalReply(t *testing.T) {
 }
 
 func TestPendingFixPushGetsSubsecondWakeBeforeDeadline(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		now := time.Now().UTC()
-		store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
-		m.Now = time.Now
-		deadline := now.Add(500 * time.Millisecond)
-		store.Data.Accepted.Deadline = deadline
-		store.Data.Accepted.RetryAt = deadline
-		failure := store.Data.JobFailures[accepted.JobID]
-		failure.Deadline = deadline
-		store.Data.JobFailures[accepted.JobID] = failure
-		if err := store.Save(); err != nil {
-			t.Fatal(err)
-		}
-		checks := 0
-		gh.branch = func(context.Context, string, string) (github.Branch, error) {
-			checks++
-			return github.Branch{}, &github.StatusError{StatusCode: 404}
-		}
-		next, err := m.RunOnce(t.Context(), store)
-		if err != nil || checks != 1 || !next.After(now) || !next.Before(deadline) ||
-			!next.Equal(publicationWriteWake(store, now)) || store.Data.Accepted == nil {
-			t.Fatalf("pending push has no pre-deadline subsecond check: next=%s deadline=%s err=%v checks=%d accepted=%+v",
-				next, deadline, err, checks, store.Data.Accepted)
-		}
-	})
+	for _, tc := range []struct {
+		name      string
+		remaining time.Duration
+	}{
+		{"half second", 500 * time.Millisecond},
+		{"just over one second", 1100 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				now := time.Now().UTC()
+				store, _, accepted, gh, m := storedIssuedFixPushFixtureAt(t, now)
+				m.Now = time.Now
+				deadline := now.Add(tc.remaining)
+				store.Data.Accepted.Deadline = deadline
+				store.Data.Accepted.RetryAt = deadline
+				failure := store.Data.JobFailures[accepted.JobID]
+				failure.Deadline = deadline
+				store.Data.JobFailures[accepted.JobID] = failure
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				checks := 0
+				gh.branch = func(context.Context, string, string) (github.Branch, error) {
+					checks++
+					return github.Branch{}, &github.StatusError{StatusCode: 404}
+				}
+				next, err := m.RunOnce(t.Context(), store)
+				if err != nil || checks != 1 || !next.Equal(now.Add(tc.remaining/2)) ||
+					!next.Equal(publicationWriteWake(store, now)) || store.Data.Accepted == nil {
+					t.Fatalf("pending push wake: next=%s want=%s deadline=%s err=%v checks=%d accepted=%+v",
+						next, now.Add(tc.remaining/2), deadline, err, checks, store.Data.Accepted)
+				}
+			})
+		})
+	}
 }
 
 func TestRecoveredFixPushResultPreemptsOlderWriteNearDeadline(t *testing.T) {

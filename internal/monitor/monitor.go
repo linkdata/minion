@@ -1739,14 +1739,13 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	if !time.Now().Before(job.Deadline) {
 		return finish(context.DeadlineExceeded)
 	}
-	checks, _ := terminalControlChecks(store, job.ID)
-	if job.Command.Action == command.Fix {
-		// Sibling failure replies may outlive cancellation and consume this fix's deadline.
-		clear(checks)
-	}
-	terminalChecks := make(map[string]time.Time, len(checks))
-	for key, check := range checks {
-		terminalChecks[key] = check.checkAt
+	terminalChecks := make(map[string]time.Time)
+	// Sibling failure replies may outlive cancellation and consume a fix's deadline.
+	if job.Command.Action != command.Fix {
+		checks, _ := terminalControlChecks(store, job.ID)
+		for key, check := range checks {
+			terminalChecks[key] = check.checkAt
+		}
 	}
 	commandSets := make(map[string]map[string]command.Action)
 	if len(terminalChecks) != 0 {
@@ -1898,7 +1897,6 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		if completedWithDecision() {
 			return finish(result)
 		}
-		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		if !m.now().UTC().Before(nextPublicationCheck) {
 			skipJobID := job.ID + "-push"
 			if initialPublicationCheck {
@@ -1918,7 +1916,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			}
 		}
 		completedAtStart := completed
-		reserveFixDeadline = job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
+		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		if !reserveFixDeadline {
 			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 				return abort(err)

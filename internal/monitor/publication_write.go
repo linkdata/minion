@@ -202,12 +202,8 @@ func publicationWriteCheckAt(write state.PublicationWrite, at, actionDeadline ti
 	interval := publicationRecheckInterval
 	if !actionDeadline.IsZero() && at.Before(actionDeadline) {
 		remaining := actionDeadline.Sub(at)
-		if remaining > time.Second {
-			interval = min(interval, max(time.Second, remaining/2))
-		} else {
-			// Leave time for one last lookup without a rapid loop at expiry.
-			interval = min(remaining, max(publicationLastChanceInterval, remaining/2))
-		}
+		// Leave time for another lookup without a rapid loop at expiry.
+		interval = min(interval, remaining, max(publicationLastChanceInterval, remaining/2))
 	}
 	checkAt := at.Add(interval)
 	if write.Deadline.Before(checkAt) {

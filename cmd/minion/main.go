@@ -274,7 +274,7 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			accepted := store.Data.Accepted
 			if wait <= 0 || accepted == nil ||
 				store.Data.PublicationWrites[accepted.JobID+"-push"].Status != state.PublicationWritePending ||
-				time.Until(accepted.Deadline) > time.Second || !next.Before(accepted.Deadline) {
+				!next.Before(accepted.Deadline) {
 				wait = time.Second
 			}
 		}
