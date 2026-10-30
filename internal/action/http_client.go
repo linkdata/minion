@@ -285,8 +285,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		cause = errors.Join(cause, monitor.ErrTerminalJob)
 	}
 	runErr = errors.Join(runErr, cause)
-	cancelStatus() // Optional observation never holds the final Result upload.
+	jobRunner.statusUpdate("upload", 0, "", runErr)
 	outcomeErr := checkpoints.outcome(result, runErr)
+	cancelStatus() // Optional observation never holds work after the final Result upload.
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
 	if watchErr != nil {

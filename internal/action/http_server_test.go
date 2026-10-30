@@ -1401,14 +1401,12 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 		Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Calls: paidCalls, CriticStopReason: "round_cap",
 	}}, http.StatusOK, paidSequence)
-	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "upload", 0, ""
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 10)
-	status.Sequence, status.Phase = 11, "cleanup"
+	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "cleanup", 0, ""
 	status.WorkerState = "stopping"
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 11)
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 10)
 	reject("worker state rollback", func(s *Status) { s.WorkerState = "busy" })
-	status.Sequence, status.WorkerState = 12, "ready"
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 12)
+	status.Sequence, status.WorkerState = 11, "ready"
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 11)
 	reject("terminal state rollback", func(s *Status) { s.WorkerState = "stopping" })
 	reject("terminal state changes", func(s *Status) { s.WorkerState = "unclean" })
 	if got, ok := f.tx.ctx.Deadline(); !ok || !got.Equal(deadline) {

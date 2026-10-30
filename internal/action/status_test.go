@@ -49,6 +49,21 @@ func TestStatusContractRoundTripAndIndependentSequences(t *testing.T) {
 	}
 }
 
+func TestStatusCleanupPrecedesFinalUpload(t *testing.T) {
+	job := testJob(command.Comment)
+	cleanup := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Sequence: 1, WorkerState: "busy", Phase: "cleanup"}
+	upload := cleanup
+	upload.Sequence, upload.Phase = 2, "upload"
+	if err := upload.follows(cleanup, job.rounds()); err != nil {
+		t.Fatalf("final upload after cleanup: %v", err)
+	}
+	cleanup.Sequence = 3
+	if err := cleanup.follows(upload, job.rounds()); err == nil || !strings.Contains(err.Error(), "phase regressed") {
+		t.Fatalf("cleanup after final upload accepted: %v", err)
+	}
+}
+
 func TestStatusRejectsForeignAndMalformedObservations(t *testing.T) {
 	job := testJob(command.Comment)
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,

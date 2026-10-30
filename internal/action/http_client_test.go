@@ -129,8 +129,10 @@ func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 					events <- kind
 				case "status":
 					var value httpObservation
-					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value.Status.Validate(job) != nil {
-						t.Errorf("invalid worker status: %+v error=%v", value, err)
+					decodeErr := httpDecode(r.Body, httpControlBytes, &value)
+					validationErr := value.Status.Validate(job)
+					if decodeErr != nil || validationErr != nil {
+						t.Errorf("invalid worker status: %+v decode=%v validation=%v", value, decodeErr, validationErr)
 					}
 					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Status.Sequence, Kind: kind})
 					return
@@ -275,6 +277,109 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 		outcome := <-outcomes
 		if outcome.Failure != nil || outcome.Result.Answer != "Complete" || len(outcome.Result.Calls) != 1 {
 			t.Fatalf("successful result lost: %+v", outcome)
+		}
+	})
+}
+
+func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		statuses := make(chan Status, 16)
+		outcomeEntered := make(chan struct{}, 1)
+		releaseModel := make(chan struct{})
+		releaseOutcome := make(chan struct{})
+		releaseModelOnce := sync.OnceFunc(func() { close(releaseModel) })
+		releaseOutcomeOnce := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer releaseModelOnce()
+		defer releaseOutcomeOnce()
+		var parent *httpServerTest
+		parent = newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						outcomeEntered <- struct{}{}
+						<-releaseOutcome
+					}
+					next.ServeHTTP(w, r)
+					if r.URL.Path == "/status" {
+						if status, _, ok := parent.executor.Status(); ok {
+							statuses <- status
+						}
+					}
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) })
+		client := parent.server.Client()
+		client.Timeout = 0
+		modelEntered := make(chan struct{}, 1)
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			if request.role != roleMain || request.round != 1 {
+				t.Errorf("unexpected model call: %+v", request)
+			}
+			modelEntered <- struct{}{}
+			select {
+			case <-releaseModel:
+			case <-ctx.Done():
+				return aicli.Result{}, ctx.Err()
+			}
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+		}}
+		workerDone := make(chan error, 1)
+		go func() { workerDone <- RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, runner) }()
+		select {
+		case <-modelEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before model call: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not reach model call")
+		}
+		waitStatus := func(phase string, after uint64) Status {
+			t.Helper()
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			for {
+				select {
+				case status := <-statuses:
+					if status.Phase == phase && status.Sequence > after {
+						return status
+					}
+				case <-timer.C:
+					t.Fatalf("no %s Status after sequence %d", phase, after)
+				}
+			}
+		}
+		main := waitStatus("main", 0)
+		if main.Round != 1 || main.ProgressSequence < 2 {
+			t.Fatalf("Runner main call did not reach Status: %+v", main)
+		}
+		releaseModelOnce()
+		<-outcomeEntered
+		upload := waitStatus("upload", main.Sequence)
+		if upload.ProgressSequence <= main.ProgressSequence || upload.Round != 0 {
+			t.Fatalf("cleanup did not precede upload: main=%+v upload=%+v", main, upload)
+		}
+		synctest.Wait()
+		for draining := true; draining; {
+			select {
+			case next := <-statuses:
+				if next.Phase == "upload" && next.Sequence > upload.Sequence {
+					upload = next
+				}
+			default:
+				draining = false
+			}
+		}
+		time.Sleep(statusHeartbeatInterval)
+		synctest.Wait()
+		heartbeat := waitStatus("upload", upload.Sequence)
+		if heartbeat.ProgressSequence != upload.ProgressSequence || heartbeat.ProgressAge <= upload.ProgressAge {
+			t.Fatalf("final upload lost its 15-second heartbeat: upload=%+v heartbeat=%+v", upload, heartbeat)
+		}
+		releaseOutcomeOnce()
+		if err := <-workerDone; err != nil {
+			t.Fatal(err)
+		}
+		if got := parent.result(t); got.err != nil || got.result.Answer != "Complete" {
+			t.Fatalf("final upload failed: %+v", got)
 		}
 	})
 }

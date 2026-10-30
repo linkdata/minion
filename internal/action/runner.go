@@ -432,9 +432,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		result.Changes, result.Answer = nil, ""
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
-	if r.statusUpdate != nil {
-		r.statusUpdate("upload", 0, "", nil)
-	}
 	return result, nil
 }
 
