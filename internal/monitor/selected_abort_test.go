@@ -59,7 +59,10 @@ func TestSelectedCancelAfterAmbiguousResultSaveIsDurable(t *testing.T) {
 					}
 					cancel()
 					if stage == "result marker" {
-						store.Data.Accepted.ResultReady = false // A post-rename save error rolls back memory only.
+						_ = store.WithLock(func() error {
+							store.Data.Accepted.ResultReady = false // A post-rename save error rolls back memory only.
+							return nil
+						})
 						return errors.Join(ErrAcceptanceState, errors.New("result marker sync failed"))
 					}
 					backup := path + ".before-decision"
@@ -258,13 +261,18 @@ func TestSelectedSavedResultDoesNotHideInvitationStateFailure(t *testing.T) {
 		}
 		ready := make(chan struct{})
 		release := make(chan struct{})
-		gh.beforeList = func() { <-ready }
+		entered := make(chan struct{})
+		gh.beforeList = func() {
+			close(entered)
+			<-ready
+		}
 		m.afterInvitationCheck = func() {
 			close(release)
 			synctest.Wait() // Let the saved-result worker finish after the context check.
 			store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 		}
 		run := func(context.Context, Job) error {
+			<-entered // Keep the invitation check in flight before saving the result.
 			if err := store.WithLock(func() error {
 				if err := store.WriteAcceptedResult([]byte(`{"result":"saved"}`)); err != nil {
 					return err

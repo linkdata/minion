@@ -52,6 +52,156 @@ func terminalReplyRecorded(gh *fakeGitHub, store *state.Store, id string) bool {
 		!store.Data.Processed[id].IsZero()
 }
 
+func TestProcessTerminalItemsSkipsReplyAfterIdentifiedCheckFails(t *testing.T) {
+	lookupErr := errors.New("source lookup unavailable")
+	for _, test := range []struct {
+		name      string
+		configure func(*fakeGitHub, github.Item, context.CancelFunc)
+		cancelled bool
+	}{
+		{name: "current item error", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(github.Item) (github.Item, error) { return github.Item{}, lookupErr }
+		}},
+		{name: "current item 404", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(github.Item) (github.Item, error) {
+				return github.Item{}, &github.StatusError{StatusCode: 404}
+			}
+		}},
+		{name: "current item canceled", cancelled: true, configure: func(gh *fakeGitHub, _ github.Item, cancel context.CancelFunc) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				cancel()
+				return item, nil
+			}
+		}},
+		{name: "current identity changed", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				item.NodeID = "different-node"
+				return item, nil
+			}
+		}},
+		{name: "current command malformed", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				item.Body = "@linkdataminion unknown-command"
+				return item, nil
+			}
+		}},
+		{name: "permission error", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.permissionErr = errors.New("permission lookup unavailable")
+		}},
+		{name: "permission identity changed", configure: func(gh *fakeGitHub, item github.Item, _ context.CancelFunc) {
+			gh.permission.User = github.User{Login: item.Author.Login, ID: item.Author.ID + 1}
+		}},
+		{name: "permission revoked", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.permission.Permission = "read"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			path := filepath.Join(t.TempDir(), "state.json")
+			store := openStateAt(t, path, now.Add(-time.Minute))
+			item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+				state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+			sibling := item
+			sibling.Key, sibling.NodeID = "comment:sibling", "node:sibling"
+			siblingID := jobID(sibling.Key, "review")
+			siblingFailure := state.JobFailure{Attempts: 1, NotificationKey: store.Data.JobFailures[id].NotificationKey,
+				AcceptedAt: now, Deadline: now.Add(time.Hour)}
+			store.Data.JobFailures[siblingID] = siblingFailure
+			decision := state.TerminalDecision{AttemptID: "first-attempt", Outcome: "failed", DecidedAt: now}
+			store.Data.TerminalDecisions[id] = decision
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			checks, _ := terminalControlChecks(store, "")
+			failure := store.Data.JobFailures[id]
+			entry := checks[failure.NotificationKey].entry
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			items := []github.Item{item, sibling}
+			gh := &fakeGitHub{items: items, permission: github.Permission{Permission: "write"}}
+			test.configure(gh, item, cancel)
+			cfg := testConfig(t)
+			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+			next := m.processTerminalItems(ctx, store, "", entry, cfg.Repositories[0], "PullRequest", 8,
+				items, m.controlCommands(cfg.Repositories[0]))
+			wantNext := siblingFailure.Deadline
+			if test.cancelled {
+				wantNext = time.Time{}
+			}
+			if !next.Equal(wantNext) || (ctx.Err() != nil) != test.cancelled || gh.commentCalls != 0 ||
+				store.Data.Processed[id].IsZero() || len(store.Data.JobFailures) != 1 ||
+				store.Data.JobFailures[siblingID] != siblingFailure || len(store.Data.PublicationWrites) != 0 ||
+				len(store.Data.PendingNotifications) != 1 || store.Data.TerminalDecisions[id] != decision {
+				t.Fatalf("failed terminal check retried or changed the outcome: next=%s canceled=%v calls=%d state=%+v",
+					next, ctx.Err(), gh.commentCalls, store.Data)
+			}
+			currentChecks, permissionChecks := gh.currentChecks, gh.checks
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, now)
+			m.serviceTerminalControls(t.Context(), store)
+			if gh.commentCalls != 0 || gh.currentChecks != currentChecks || gh.checks != permissionChecks ||
+				store.Data.Processed[id].IsZero() || len(store.Data.JobFailures) != 1 ||
+				store.Data.JobFailures[siblingID] != siblingFailure ||
+				store.Data.TerminalDecisions[id] != decision {
+				t.Fatalf("restart repeated a skipped terminal reply: calls=%d current=%d permission=%d state=%+v",
+					gh.commentCalls, gh.currentChecks, gh.checks, store.Data)
+			}
+		})
+	}
+}
+
+func TestProcessTerminalItemsCleanupSaveFailureKeepsTerminalJob(t *testing.T) {
+	now := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "state.json")
+	backup := path + ".saved"
+	store := openStateAt(t, path, now.Add(-time.Minute))
+	item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+		state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+	failure := store.Data.JobFailures[id]
+	decision := state.TerminalDecision{AttemptID: "first-attempt", Outcome: "failed", DecidedAt: now}
+	store.Data.TerminalDecisions[id] = decision
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checks, _ := terminalControlChecks(store, "")
+	entry := checks[failure.NotificationKey].entry
+	gh := &fakeGitHub{items: []github.Item{item}, currentItem: func(github.Item) (github.Item, error) {
+		return github.Item{}, errors.New("source lookup unavailable")
+	}}
+	cfg := testConfig(t)
+	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+	next := m.processTerminalItems(t.Context(), store, "", entry, cfg.Repositories[0], "PullRequest", 8,
+		[]github.Item{item}, m.controlCommands(cfg.Repositories[0]))
+	if !next.Equal(now.Add(time.Minute)) || gh.commentCalls != 0 || !store.Data.Processed[id].IsZero() ||
+		store.Data.JobFailures[id] != failure || store.Data.TerminalDecisions[id] != decision {
+		t.Fatalf("failed retirement save lost terminal job: next=%s calls=%d state=%+v", next, gh.commentCalls, store.Data)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, now)
+	m.serviceTerminalControls(t.Context(), store)
+	if gh.commentCalls != 0 || gh.currentChecks != 2 || store.Data.Processed[id].IsZero() ||
+		len(store.Data.JobFailures) != 0 || store.Data.TerminalDecisions[id] != decision {
+		t.Fatalf("retirement did not recover after save failure: calls=%d checks=%d state=%+v",
+			gh.commentCalls, gh.currentChecks, store.Data)
+	}
+}
+
 func TestRunOnceWithoutWorkerServicesTerminalReplyAndInvitationsOnly(t *testing.T) {
 	now := time.Now().UTC()
 	initial := now.Add(-time.Minute)
@@ -189,7 +339,7 @@ func TestRunOnceServicesTerminalDeadlineDuringHeldCapacity(t *testing.T) {
 	})
 }
 
-func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
+func TestSelectedExecuteSkipsTerminalReplyOnIdentityMismatch(t *testing.T) {
 	for _, identity := range []string{"current author", "permission user"} {
 		t.Run(identity, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -211,15 +361,12 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 				var terminalChecks atomic.Int32
 				base.currentItem = func(item github.Item) (github.Item, error) {
 					if item.Key == terminal.Key {
-						check := terminalChecks.Add(1)
-						if identity == "current author" && check == 1 {
+						terminalChecks.Add(1)
+						if identity == "current author" {
 							item.Author.ID++
 						}
 						if identity == "permission user" {
-							base.permission.User.ID = 7
-							if check == 1 {
-								base.permission.User.ID++
-							}
+							base.permission.User.ID = item.Author.ID + 1
 						}
 					}
 					return item, nil
@@ -240,9 +387,9 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 				time.Sleep(31 * time.Second)
 				synctest.Wait()
 				_, comments := gh.commentsSnapshot()
-				if terminalChecks.Load() != 1 || len(comments) != 0 || held.executions.Load() != 1 {
-					t.Errorf("first terminal identity check did not happen during Execute: checks=%d comments=%v executions=%d",
-						terminalChecks.Load(), comments, held.executions.Load())
+				if terminalChecks.Load() != 1 || len(comments) != 0 || store.Data.Processed[id].IsZero() || held.executions.Load() != 1 {
+					t.Errorf("terminal identity mismatch did not finish without a reply: checks=%d comments=%v processed=%v executions=%d",
+						terminalChecks.Load(), comments, store.Data.Processed[id], held.executions.Load())
 				}
 				time.Sleep(time.Minute + time.Second)
 				synctest.Wait()
@@ -256,10 +403,9 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if terminalChecks.Load() < 2 || len(comments) != 1 ||
-					!strings.HasSuffix(comments[0].Body, "\n\n<!-- linkdataminion:"+id+" -->") || processed.IsZero() ||
+				if terminalChecks.Load() != 1 || len(comments) != 0 || processed.IsZero() ||
 					held.executions.Load() != 1 || !accepted || len(gh.reactions) != 1 {
-					t.Errorf("terminal identity was not retried during Execute: checks=%d comments=%v processed=%v executions=%d accepted=%+v",
+					t.Errorf("terminal identity mismatch caused another reply check: checks=%d comments=%v processed=%v executions=%d accepted=%+v",
 						terminalChecks.Load(), comments, processed, held.executions.Load(), accepted)
 				}
 				select {
@@ -380,48 +526,33 @@ func TestSelectedExecuteGuardsTerminalControlAgainstLiveRepositoryIdentityMismat
 	}
 }
 
-func TestRunOnceCompletedScanWakesForTerminalDeadlineOrReplyRetry(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		failure state.JobFailure
-		retry   time.Duration
-	}{
-		{name: "deadline", failure: state.JobFailure{Attempts: 1}, retry: 5 * time.Minute},
-		{name: "reply retry", failure: state.JobFailure{Attempts: maxJobAttempts, ReplyAttempts: 1}, retry: 2 * time.Minute},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
-				now := time.Now().UTC()
-				store := openState(t, now.Add(-time.Minute))
-				failure := test.failure
-				if test.name == "deadline" {
-					failure.AcceptedAt = now.Add(-time.Minute)
-					failure.Deadline = now.Add(2 * time.Minute)
-				}
-				_, id := queueTerminalControl(store, now.Add(-time.Second), 8, failure, now.Add(test.retry))
-				store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
-				if err := store.Save(); err != nil {
-					t.Fatal(err)
-				}
-				cfg := testConfig(t)
-				cfg.PollIntervalSeconds = 30 * 60
-				gh := &fakeGitHub{}
-				handler := &capacityHandler{}
-				m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now },
-					SelectedExecutorID: "local"}
-				next, err := m.RunOnce(t.Context(), store)
-				want := now.Add(2 * time.Minute)
-				if err != nil || !next.Equal(want) || !store.Data.NextPollAt.Equal(now.Add(30*time.Minute)) ||
-					!store.Data.Processed[id].IsZero() || len(gh.comments) != 0 || len(gh.notificationCalls) != 1 || handler.waits != 1 {
-					t.Fatalf("completed scan missed terminal wake: next=%s want=%s err=%v state=%+v calls=%v waits=%d",
-						next, want, err, store.Data, gh.notificationCalls, handler.waits)
-				}
-			})
-		})
-	}
+func TestRunOnceCompletedScanWakesForTerminalDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now.Add(-time.Minute))
+		failure := state.JobFailure{Attempts: 1, AcceptedAt: now.Add(-time.Minute), Deadline: now.Add(2 * time.Minute)}
+		_, id := queueTerminalControl(store, now.Add(-time.Second), 8, failure, now.Add(5*time.Minute))
+		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.PollIntervalSeconds = 30 * 60
+		gh := &fakeGitHub{}
+		handler := &capacityHandler{}
+		m := &Monitor{Config: cfg, GitHub: gh, Handler: handler, Now: func() time.Time { return now },
+			SelectedExecutorID: "local"}
+		next, err := m.RunOnce(t.Context(), store)
+		want := now.Add(2 * time.Minute)
+		if err != nil || !next.Equal(want) || !store.Data.NextPollAt.Equal(now.Add(30*time.Minute)) ||
+			!store.Data.Processed[id].IsZero() || len(gh.comments) != 0 || len(gh.notificationCalls) != 1 || handler.waits != 1 {
+			t.Fatalf("completed scan missed terminal wake: next=%s want=%s err=%v state=%+v calls=%v waits=%d",
+				next, want, err, store.Data, gh.notificationCalls, handler.waits)
+		}
+	})
 }
 
-func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
+func TestSelectedNewerSameThreadCommandKeepsUncertainReplyOneShot(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		older := selectedItem(now.Add(-2 * time.Second))
@@ -435,24 +566,22 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		statePath := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, statePath, now.Add(-time.Minute))
 		store.Data.JobFailures[olderID] = state.JobFailure{
-			Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key,
+			Attempts: maxJobAttempts, NotificationKey: key,
 		}
 		store.Data.PendingNotifications[key] = state.PendingNotification{
 			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
 			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
 			Since: now.Add(-time.Minute), UpdatedAt: older.UpdatedAt,
-			RetryAt: now.Add(5 * time.Minute), Failures: 1,
 		}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
-		commentErr := errors.New("temporary comment failure")
 		gh := &fakeGitHub{
 			notifications: []github.Notification{notice},
 			items:         []github.Item{older, newer},
 			permission:    github.Permission{Permission: "write"},
-			commentErr:    commentErr,
+			commentErr:    errors.New("temporary comment failure"),
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
@@ -474,29 +603,25 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		synctest.Wait()
 		pending := store.Data.PendingNotifications[key]
 		failure := store.Data.JobFailures[olderID]
-		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() ||
-			failure.ReplyAttempts != 2 || pending.Failures != 2 || !pending.RetryAt.After(time.Now()) ||
+		if gh.commentCalls != 1 || store.Data.Processed[olderID].IsZero() ||
+			failure.Attempts != 0 || pending.Failures != 0 ||
 			!pending.UpdatedAt.Equal(notice.UpdatedAt) {
-			t.Errorf("newer command lost older reply backoff: calls=%d processed=%v failure=%+v pending=%+v",
+			t.Errorf("newer command lost older one-shot reply: calls=%d processed=%v failure=%+v pending=%+v",
 				gh.commentCalls, store.Data.Processed[olderID], failure, pending)
 		}
-		if untilRetry := pending.RetryAt.Sub(time.Now()) / 2; untilRetry > 0 {
-			time.Sleep(untilRetry)
-		}
+		time.Sleep(time.Minute)
 		synctest.Wait()
-		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() {
-			t.Errorf("older reply repeated before its retry time: calls=%d processed=%v retry=%s now=%s",
+		if gh.commentCalls != 1 || store.Data.Processed[olderID].IsZero() {
+			t.Errorf("older reply repeated: calls=%d processed=%v retry=%s now=%s",
 				gh.commentCalls, store.Data.Processed[olderID], pending.RetryAt, time.Now())
 		}
 		close(held.release)
 		synctest.Wait()
-		if err := <-result; !errors.Is(err, commentErr) {
+		if err := <-result; err != nil {
 			t.Errorf("RunOnce after older reply failure: %v", err)
 		}
-		if gh.commentCalls != 1 || !store.Data.Processed[olderID].IsZero() ||
-			store.Data.Processed[newerID].IsZero() || store.Data.JobFailures[olderID].ReplyAttempts != 2 ||
-			store.Data.PendingNotifications[key].Failures != pending.Failures ||
-			!store.Data.PendingNotifications[key].RetryAt.Equal(pending.RetryAt) {
+		if gh.commentCalls != 1 || store.Data.Processed[olderID].IsZero() ||
+			store.Data.Processed[newerID].IsZero() || store.Data.PublicationWrites[olderID].Status != state.PublicationWritePending {
 			t.Errorf("release retried or deferred older reply again: calls=%d processed=%v failures=%+v pending=%+v",
 				gh.commentCalls, store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications)
 		}
@@ -508,10 +633,8 @@ func TestSelectedNewerSameThreadCommandKeepsFailedReplyRetry(t *testing.T) {
 		if err := json.Unmarshal(stateBytes, &saved); err != nil {
 			t.Fatal(err)
 		}
-		if saved.JobFailures[olderID].ReplyAttempts != 2 || !saved.Processed[olderID].IsZero() ||
-			saved.PendingNotifications[key].Failures != pending.Failures ||
-			!saved.PendingNotifications[key].RetryAt.Equal(pending.RetryAt) {
-			t.Errorf("older reply retry was not durable: saved failure=%+v processed=%v pending=%+v",
+		if saved.PublicationWrites[olderID].Status != state.PublicationWritePending || saved.Processed[olderID].IsZero() {
+			t.Errorf("older one-shot reply was not durable: saved failure=%+v processed=%v pending=%+v",
 				saved.JobFailures[olderID], saved.Processed[olderID], saved.PendingNotifications[key])
 		}
 	})

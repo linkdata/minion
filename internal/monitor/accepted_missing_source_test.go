@@ -13,16 +13,17 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
+func TestTerminalReplyLookupErrorSkipsAcceptedSourceCheck(t *testing.T) {
 	accepted := selectedAcceptance(t, time.Now().UTC())
 	accepted.SubjectType = "Issue"
 	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
 	stop := errors.New("reply lookup reached")
 	var remaining time.Duration
 	var hasDeadline bool
+	issueCalls := 0
 	gh := &fakeGitHub{
 		issueDetails: func(_ string, number int) (github.Issue, error) {
-			time.Sleep(8 * time.Second)
+			issueCalls++
 			return github.Issue{Number: number}, nil
 		},
 		beforeVerify: func(ctx context.Context, _ bool) error {
@@ -33,13 +34,40 @@ func TestTerminalIssueAndReplyLookupsHaveSeparateBudgets(t *testing.T) {
 		},
 	}
 	m := selectedMonitor(t, accepted.AcceptedAt, gh, nil)
-	store := &state.Store{Data: state.Data{Accepted: &accepted}}
+	store := openState(t, accepted.AcceptedAt)
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	synctest.Test(t, func(t *testing.T) {
-		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now(), state.JobFailure{}); !errors.Is(err, stop) {
-			t.Fatalf("reply lookup did not follow issue lookup: %v", err)
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now()); err != nil ||
+			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 {
+			t.Fatalf("failed reply lookup did not finish without POST: %v state=%+v", err, store.Data)
 		}
-		if !hasDeadline || remaining < 9*time.Second {
-			t.Fatalf("reply lookup inherited issue lookup's spent budget: remaining=%s", remaining)
+		if !hasDeadline || remaining < 9*time.Second || issueCalls != 0 {
+			t.Fatalf("failed reply lookup continued accepted source check: remaining=%s issue calls=%d", remaining, issueCalls)
+		}
+	})
+}
+
+func TestTerminalReplyLookupPastDeadlineSkipsPost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		at := time.Now().UTC()
+		accepted := selectedAcceptance(t, at)
+		accepted.SubjectType = "Issue"
+		accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+		gh := &fakeGitHub{beforeVerify: func(context.Context, bool) error {
+			time.Sleep(11 * time.Second)
+			return nil // The lookup ignores its expired context.
+		}}
+		m := selectedMonitor(t, at, gh, nil)
+		store := openState(t, at)
+		store.Data.Accepted = &accepted
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), at); err != nil ||
+			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 ||
+			len(store.Data.PublicationWrites) != 0 || gh.repoChecks != 0 {
+			t.Fatalf("late reply lookup allowed a POST or source check: err=%v state=%+v repo checks=%d",
+				err, store.Data, gh.repoChecks)
 		}
 	})
 }
@@ -65,9 +93,7 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 		permission: github.Permission{Permission: "write"},
 		issueDetails: func(_ string, number int) (github.Issue, error) {
 			issueCalls++
-			if issueCalls == 2 {
-				time.Sleep(25 * time.Second)
-			}
+			time.Sleep(25 * time.Second)
 			return github.Issue{Number: number}, nil
 		},
 		currentItem: func(github.Item) (github.Item, error) {
@@ -79,12 +105,43 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 	store := openState(t, now)
 	store.Data.Accepted = &accepted
 	synctest.Test(t, func(t *testing.T) {
-		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), now, state.JobFailure{}); err != nil {
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), now); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil || repositoryCalls != 2 || issueCalls != 2 {
+	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil || repositoryCalls != 2 || issueCalls != 1 {
 		t.Fatalf("successful source checks did not finish the fixed reply: comments=%d repo=%d issue=%d state=%+v", len(gh.comments), repositoryCalls, issueCalls, store.Data)
+	}
+}
+
+func TestTerminalAcceptedSourceRechecksRepositoryIdentityBeforePost(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	accepted.SubjectType = "Issue"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	accepted.CommandName, accepted.Action = "audit", "comment"
+	accepted.JobID = jobID(accepted.SourceKey, accepted.CommandName)
+	current := selectedItem(at)
+	current.Body = "@linkdataminion audit"
+	current.HTMLURL = accepted.SourceURL
+	wrongRepo := fixtureRepository(github.Repository{FullName: accepted.Repository})
+	wrongRepo.ID = 9
+	checks := 0
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"},
+		currentItem: func(github.Item) (github.Item, error) { return current, nil }}
+	gh.beforeRepository = func() {
+		checks++
+		if checks == 2 {
+			gh.liveRepo = &wrongRepo
+		}
+	}
+	m := selectedMonitor(t, at, gh, nil)
+	store := openState(t, at)
+	store.Data.Accepted = &accepted
+	if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), at); err != nil ||
+		checks != 2 || store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 ||
+		len(store.Data.PublicationWrites) != 0 {
+		t.Fatalf("changed final repository identity allowed POST: err=%v checks=%d state=%+v", err, checks, store.Data)
 	}
 }
 
@@ -121,7 +178,7 @@ func TestSelectedRecoveryReleasesDeletedSource(t *testing.T) {
 	}
 }
 
-func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
+func TestSelectedDeletedIssueHTTPStatusReleasesAssigned404(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		assigned bool
@@ -179,21 +236,17 @@ func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
 			} else if gh.threadCalls != 1 || len(gh.verifiedCalls) != 0 {
 				t.Fatalf("unexpected recovery lookups: replies=%v thread=%d", gh.verifiedCalls, gh.threadCalls)
 			}
-			if test.status == http.StatusGone {
+			if test.status == http.StatusGone || test.assigned {
 				if err != nil || store.Data.Accepted != nil || len(store.Data.Processed) != 1 ||
 					len(store.Data.JobFailures) != 0 || len(gh.comments) != 0 || len(gh.reactions) != 0 {
 					t.Fatalf("deleted issue kept global reservation or received a reply: err=%v state=%+v", err, store.Data)
 				}
 			} else {
 				failure := store.Data.JobFailures[accepted.JobID]
-				wantAttempts := 1
-				if test.assigned {
-					wantAttempts = maxJobAttempts
-				}
 				if !errors.Is(err, statusErr) || store.Data.Accepted == nil ||
 					store.Data.Accepted.AttemptID != accepted.AttemptID || !store.Data.Accepted.Deadline.Equal(accepted.Deadline) ||
 					!store.Data.Accepted.RetryAt.Equal(next) || !next.After(time.Now()) ||
-					failure.Attempts != wantAttempts || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
+					failure.Attempts != 1 || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
 					t.Fatalf("404 did not retain scheduled retry: next=%s err=%v state=%+v", next, err, store.Data)
 				}
 			}
@@ -201,7 +254,7 @@ func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
 				t.Fatal(err)
 			}
 			reopened := openStateAt(t, path, at.Add(-time.Minute))
-			if test.status == http.StatusGone {
+			if test.status == http.StatusGone || test.assigned {
 				if reopened.Data.Accepted != nil || len(reopened.Data.Processed) != 1 || len(reopened.Data.JobFailures) != 0 {
 					t.Fatalf("deleted issue reservation survived restart: %+v", reopened.Data)
 				}

@@ -977,7 +977,9 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				t.Fatalf("watch fault lost acknowledged paid facts: call=%+v saved=%+v pending=%+v", call, f.sink.calls, f.sink.pending)
 			}
 			if test.early || test.afterPaid {
-				if test.early && !errors.Is(workerErr, context.Canceled) || got.result.Answer != "" || f.sink.finish(got.result, got.err) == nil {
+				// After the paid ACK, watch failure may race with Runner completion.
+				answerValid := got.result.Answer == "" || test.afterPaid && got.result.Answer == "Known candidate"
+				if test.early && !errors.Is(workerErr, context.Canceled) || !answerValid || f.sink.finish(got.result, got.err) == nil {
 					t.Fatalf("watch error that stopped Runner became success: worker=%v parent=%v result=%+v", workerErr, got.err, got.result)
 				}
 			} else if got.result.Answer != "Known candidate" || got.result.Validate(f.job) != nil || (f.sink.finish(got.result, got.err) != nil) != parentFailed {

@@ -16,6 +16,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -37,24 +38,11 @@ func (g *synchronizedCommentsGitHub) commentsSnapshot() (int, []github.Comment) 
 	return g.commentCalls, append([]github.Comment(nil), g.comments...)
 }
 
-func (g *synchronizedCommentsGitHub) setCommentError(err error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.commentErr = err
-}
-
 type controlReplyLog struct {
-	failed    chan struct{}
 	completed chan struct{}
 }
 
 func (w controlReplyLog) Write(p []byte) (int, error) {
-	if strings.Contains(string(p), "terminal control in ") {
-		select {
-		case w.failed <- struct{}{}:
-		default:
-		}
-	}
 	if strings.Contains(string(p), "stop retrying failed ") {
 		select {
 		case w.completed <- struct{}{}:
@@ -333,7 +321,7 @@ func TestSelectedActionChecksTerminalDeadlineBeforePendingRetry(t *testing.T) {
 	})
 }
 
-func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
+func TestSelectedActionKeepsTerminalSiblingReplyOneShotWhileBlocked(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		selected := selectedItem(now.Add(-2 * time.Second))
@@ -349,17 +337,11 @@ func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 		}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		var gh *fakeGitHub
-		gh = &fakeGitHub{
+		gh := &fakeGitHub{
 			notifications: []github.Notification{testNotification(selected.UpdatedAt)},
 			items:         []github.Item{selected, sibling},
 			permission:    github.Permission{Permission: "write"},
 			commentErr:    errors.New("temporary reply failure"),
-			beforeComment: func() {
-				if gh.commentCalls == 2 {
-					gh.commentErr = nil
-				}
-			},
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
@@ -375,15 +357,14 @@ func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 		}
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if gh.commentCalls != 2 || len(gh.comments) != 1 ||
-			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+siblingID+" -->") ||
+		if gh.commentCalls != 1 || len(gh.comments) != 0 ||
 			store.Data.Processed[siblingID].IsZero() || held.executions.Load() != 1 || store.Data.Accepted == nil {
-			t.Fatalf("terminal sibling reply was not retried once: calls=%d comments=%v processed=%v executions=%d accepted=%+v",
+			t.Fatalf("terminal sibling reply was not completed once: calls=%d comments=%v processed=%v executions=%d accepted=%+v",
 				gh.commentCalls, gh.comments, store.Data.Processed[siblingID], held.executions.Load(), store.Data.Accepted)
 		}
 		time.Sleep(time.Minute)
 		synctest.Wait()
-		if gh.commentCalls != 2 || len(gh.comments) != 1 {
+		if gh.commentCalls != 1 || len(gh.comments) != 0 {
 			t.Fatalf("terminal sibling reply was duplicated: calls=%d comments=%v", gh.commentCalls, gh.comments)
 		}
 		select {
@@ -399,153 +380,62 @@ func TestSelectedActionRetriesTerminalSiblingReplyWhileBlocked(t *testing.T) {
 	})
 }
 
-func TestSelectedActionRetainsTerminalReplyAfterStateSaveFailure(t *testing.T) {
+func TestFailureReplyCheckpointSurvivesLaterStateSaveFailure(t *testing.T) {
 	for _, test := range []struct {
-		name          string
-		firstReplyErr error
-		firstComments int
-		wantCalls     int
+		name       string
+		postErr    error
+		wantStatus string
+		comments   int
 	}{
-		{name: "published reply", firstComments: 1, wantCalls: 1},
-		{name: "failed reply retry", firstReplyErr: errors.New("reply unavailable"), wantCalls: 2},
+		{name: "posted", wantStatus: state.PublicationWriteObserved, comments: 1},
+		{name: "response uncertain", postErr: errors.New("response lost"), wantStatus: state.PublicationWritePending},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			deadline := time.NewTimer(10 * time.Second)
-			defer deadline.Stop()
-			synctest.Test(t, func(t *testing.T) {
-				now := time.Now().UTC()
-				selected := selectedItem(now.Add(-2 * time.Second))
-				selected.HTMLURL = "https://github.com/example-owner/example-repo/pull/8#issuecomment-selected"
-				terminal := selectedItem(now.Add(-time.Second))
-				terminal.Key, terminal.NodeID = "comment:terminal", "node:terminal"
-				id := jobID(terminal.Key, "review")
-				terminalNotice := testNotification(terminal.UpdatedAt)
-				terminalKey := notificationKey(terminalNotice)
-				selectedNotice := testNotification(selected.UpdatedAt)
-				selectedNotice.ID = "thread-8"
-				selectedNotice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/8"
-				retryAt := now.Add(time.Minute)
-				path := filepath.Join(t.TempDir(), "state.json")
-				backup := path + ".saved"
-				store := openStateAt(t, path, now.Add(-time.Minute))
-				store.Data.PendingNotifications[terminalKey] = state.PendingNotification{
-					Repository: terminalNotice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
-					SubjectType: terminalNotice.Subject.Type, SubjectURL: terminalNotice.Subject.URL,
-					Since: now.Add(-time.Minute), UpdatedAt: terminalNotice.UpdatedAt, RetryAt: retryAt,
-				}
-				store.Data.JobFailures[id] = state.JobFailure{
-					Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: terminalKey,
-				}
-				store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
-				if err := store.Save(); err != nil {
-					t.Fatal(err)
-				}
-				obstructed := false
-				held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-				gh := &synchronizedCommentsGitHub{fakeGitHub: &fakeGitHub{
-					notifications: []github.Notification{selectedNotice},
-					permission:    github.Permission{Permission: "write"},
-					commentErr:    test.firstReplyErr,
-					threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
-						if number == 7 {
-							return []github.Item{terminal}, nil
-						}
-						return []github.Item{selected}, nil
-					},
-					beforeComment: func() {
-						if held.executions.Load() != 1 {
-							t.Error("terminal reply was attempted before selected Execute")
-						}
-						if obstructed {
-							return
-						}
-						obstructed = true
-						if err := os.Rename(path, backup); err != nil {
-							t.Errorf("move state before failed save: %v", err)
-							return
-						}
-						if err := os.Mkdir(path, 0700); err != nil {
-							t.Errorf("obstruct state save: %v", err)
-						}
-					},
+			now := time.Now().UTC()
+			cfg := testConfig(t)
+			item := selectedItem(now)
+			job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+				Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+			path := filepath.Join(t.TempDir(), "state.json")
+			backup := path + ".saved"
+			store := openStateAt(t, path, now.Add(-time.Minute))
+			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"},
+				commentErr: test.postErr, beforeComment: func() {
+					if err := os.Rename(path, backup); err != nil {
+						t.Error(err)
+					}
+					if err := os.Mkdir(path, 0700); err != nil {
+						t.Error(err)
+					}
 				}}
-				signals := controlReplyLog{failed: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
-				cfg := testConfig(t)
-				cfg.MaxRuntimeMinutes = 7
-				m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
-					SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
-				ctx, cancel := context.WithCancel(t.Context())
-				defer cancel()
-				result := make(chan error, 1)
-				go func() { _, err := m.RunOnce(ctx, store); result <- err }()
-				select {
-				case <-held.entered:
-				case err := <-result:
-					t.Fatalf("selected action did not start: %v", err)
-				}
-				synctest.Wait()
-				calls, comments := gh.commentsSnapshot()
-				if calls != 0 {
-					t.Fatalf("terminal reply ran before active retry was due: %d", calls)
-				}
-				time.Sleep(time.Minute)
-				select {
-				case <-signals.failed:
-				case <-deadline.C:
-					t.Fatal("active control did not report failed state save")
-				}
-				var processed time.Time
-				var failure state.JobFailure
-				var pending state.PendingNotification
-				if err := store.WithLock(func() error {
-					processed = store.Data.Processed[id]
-					failure = store.Data.JobFailures[id]
-					pending = store.Data.PendingNotifications[terminalKey]
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				calls, comments = gh.commentsSnapshot()
-				if calls != 1 || len(comments) != test.firstComments ||
-					!processed.IsZero() || failure.Attempts != maxJobAttempts || failure.ReplyAttempts != 1 ||
-					!pending.RetryAt.Equal(retryAt) {
-					t.Fatalf("failed save lost active terminal reply: calls=%d comments=%v processed=%v failure=%+v pending=%+v",
-						calls, comments, processed, failure, pending)
-				}
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Rename(backup, path); err != nil {
-					t.Fatal(err)
-				}
-				gh.setCommentError(nil)
-				time.Sleep(time.Minute)
-				select {
-				case <-signals.completed:
-				case <-deadline.C:
-					t.Fatal("active control did not finish after state path recovery")
-				}
-				var accepted bool
-				if err := store.WithLock(func() error {
-					processed = store.Data.Processed[id]
-					failure = store.Data.JobFailures[id]
-					accepted = store.Data.Accepted != nil
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				calls, comments = gh.commentsSnapshot()
-				if calls != test.wantCalls || len(comments) != 1 ||
-					processed.IsZero() || failure.Attempts != 0 || !accepted {
-					t.Fatalf("restored state did not deduplicate reply: calls=%d processed=%v failure=%+v accepted=%t",
-						calls, processed, failure, accepted)
-				}
-				cancel()
-				synctest.Wait()
-				if err := <-result; !errors.Is(err, context.Canceled) {
-					t.Fatalf("RunOnce after cancellation: %v", err)
-				}
-			})
+			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+			if err := m.finishFailedJob(t.Context(), store, job, now); err == nil ||
+				gh.commentCalls != 1 || len(gh.comments) != test.comments || !store.Data.Processed[job.ID].IsZero() {
+				t.Fatalf("later save failure changed one POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(backup, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, now)
+			gh.commentErr = nil
+			if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil ||
+				store.Data.PublicationWrites[job.ID].Status != test.wantStatus {
+				t.Fatalf("checkpoint could not reconcile after restart: err=%v state=%+v", err, store.Data)
+			}
+			if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
+				gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() {
+				t.Fatalf("restored state repeated POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+			}
 		})
 	}
 }
@@ -575,7 +465,7 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 			Since: now.Add(-time.Minute), UpdatedAt: terminalNotice.UpdatedAt, RetryAt: now.Add(time.Minute),
 		}
 		for _, id := range []string{firstID, secondID} {
-			store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: terminalKey}
+			store.Data.JobFailures[id] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: terminalKey}
 		}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
@@ -600,7 +490,7 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		signals := controlReplyLog{failed: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
+		signals := controlReplyLog{completed: make(chan struct{}, 1)}
 		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
@@ -613,10 +503,6 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 			t.Fatalf("selected action did not start: %v", err)
 		}
 		synctest.Wait()
-		calls, comments := gh.commentsSnapshot()
-		if calls != 0 {
-			t.Fatalf("terminal replies were attempted before active retry became due: %d", calls)
-		}
 		time.Sleep(time.Minute)
 		select {
 		case <-signals.completed:
@@ -634,11 +520,10 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		calls, comments = gh.commentsSnapshot()
+		calls, comments := gh.commentsSnapshot()
 		if calls != 2 || len(comments) != 1 ||
 			!strings.HasSuffix(comments[0].Body, "\n\n<!-- linkdataminion:"+secondID+" -->") ||
-			firstFailure.ReplyAttempts != 2 || !firstProcessed.IsZero() ||
-			secondProcessed.IsZero() || !retryAt.After(time.Now()) {
+			firstFailure.Attempts != 0 || firstProcessed.IsZero() || secondProcessed.IsZero() {
 			t.Fatalf("first reply failure deferred another due command: calls=%d comments=%v first=%+v processed=(%v, %v) retry=%v",
 				calls, comments, firstFailure, firstProcessed, secondProcessed, retryAt)
 		}
@@ -796,7 +681,7 @@ func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
 	})
 }
 
-func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.T) {
+func TestSelectedControlHandlesTerminalFailuresDuringReview(t *testing.T) {
 	for _, test := range []struct {
 		name                string
 		removedInFetch      bool
@@ -953,20 +838,21 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 						missingFetches.Load(), fixFetches.Load())
 				}
 				_, missingFailure := store.Data.JobFailures[missingID]
-				transient := test.transientCurrent || test.transientPermission
-				if transient {
+				retryMissing := test.ambiguousFetch && test.transientCurrent
+				if retryMissing {
 					if !store.Data.Processed[missingID].IsZero() || !missingFailure ||
 						store.Data.PendingNotifications[missingKey].Repository == "" {
-						t.Fatalf("transient lookup retired the failed job: processed=%v failures=%+v pending=%+v",
+						t.Fatalf("unidentified command was retired after an uncertain lookup: processed=%v failures=%+v pending=%+v",
 							store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications)
 					}
 				} else if store.Data.Processed[missingID].IsZero() || missingFailure {
 					t.Fatalf("missing source was not retired: processed=%v failures=%+v",
 						store.Data.Processed, store.Data.JobFailures)
 				}
-				if !store.Data.Processed[fixID].IsZero() || store.Data.JobFailures[fixID].Attempts != maxJobAttempts ||
-					store.Data.PendingNotifications[fixKey].Repository == "" || gh.commentCalls != 0 || held.executions.Load() != 1 {
-					t.Fatalf("valid fix was lost during review: processed=%v failures=%+v pending=%+v comments=%d executions=%d",
+				_, fixFailure := store.Data.JobFailures[fixID]
+				if store.Data.Processed[fixID].IsZero() || fixFailure ||
+					gh.commentCalls != 0 || held.executions.Load() != 1 {
+					t.Fatalf("identified fix with failed reply check was retried: processed=%v failures=%+v pending=%+v comments=%d executions=%d",
 						store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications, gh.commentCalls, held.executions.Load())
 				}
 				close(held.release)
@@ -980,13 +866,14 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 					(!test.transientPermission || !errors.Is(err, permissionLookupErr)) {
 					t.Fatalf("follow-up poll: %v", err)
 				}
-				if _, pending := store.Data.PendingNotifications[missingKey]; pending != transient {
+				if _, pending := store.Data.PendingNotifications[missingKey]; pending != retryMissing {
 					t.Fatalf("missing source pending state after follow-up poll: pending=%t want=%t entries=%+v",
-						pending, transient, store.Data.PendingNotifications)
+						pending, retryMissing, store.Data.PendingNotifications)
 				}
-				if store.Data.PendingNotifications[fixKey].Repository == "" || store.Data.JobFailures[fixID].Attempts != maxJobAttempts {
-					t.Fatalf("valid unsupported fix was lost after follow-up poll: failures=%+v pending=%+v",
-						store.Data.JobFailures, store.Data.PendingNotifications)
+				_, fixFailure = store.Data.JobFailures[fixID]
+				if store.Data.Processed[fixID].IsZero() || fixFailure || gh.commentCalls != 0 {
+					t.Fatalf("fixed reply check was repeated after follow-up poll: failures=%+v pending=%+v replies=%d",
+						store.Data.JobFailures, store.Data.PendingNotifications, gh.commentCalls)
 				}
 			})
 		})
@@ -1222,7 +1109,7 @@ func TestSelectedActionChecksOnlyTerminalThreadInPendingBacklog(t *testing.T) {
 	})
 }
 
-func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
+func TestSelectedRetryKeepsOneShotReplyAndServicesDueInvitations(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		selected := selectedItem(now.Add(-2 * time.Second))
@@ -1239,7 +1126,7 @@ func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
 			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
 			Since: now.Add(-time.Minute), UpdatedAt: notice.UpdatedAt, RetryAt: now.Add(time.Minute),
 		}
-		store.Data.JobFailures[terminalID] = state.JobFailure{Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key}
+		store.Data.JobFailures[terminalID] = state.JobFailure{Attempts: maxJobAttempts, NotificationKey: key}
 		store.Data.NextInviteCheckAt = now.Add(time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -1288,8 +1175,8 @@ func TestSelectedRetryServicesControlsDueAtCompletion(t *testing.T) {
 			t.Fatalf("RunOnce returned before Execute: %v", err)
 		}
 		synctest.Wait()
-		if len(gh.comments) != 0 {
-			t.Fatalf("terminal reply posted before its retry time: %v", gh.comments)
+		if len(gh.comments) != 1 || store.Data.Processed[terminalID].IsZero() {
+			t.Fatalf("terminal reply did not finish on its first pass: %v", gh.comments)
 		}
 		clock = now.Add(time.Minute)
 		close(release)
@@ -1372,126 +1259,51 @@ func TestSelectedReviewKeepsOlderTerminalFixForControlReply(t *testing.T) {
 	})
 }
 
-func TestSelectedTerminalReplyWaitsForPersistedRetryAt(t *testing.T) {
+func TestTerminalReplyRemainsOneShotAfterRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
-		terminal := selectedItem(now.Add(-2 * time.Second))
-		terminal.Key, terminal.NodeID = "comment:terminal", "node:terminal"
-		terminal.HTMLURL = "https://github.com/example-owner/example-repo/pull/6#issuecomment-terminal"
-		review := selectedItem(now.Add(-time.Second))
-		notice := testNotification(terminal.UpdatedAt)
-		notice.Subject.URL = "https://api.github.com/repos/example-owner/example-repo/pulls/6"
-		key := notificationKey(notice)
-		id := jobID(terminal.Key, "review")
-		retryAt := now.Add(5 * time.Minute)
+		item := selectedItem(now)
 		path := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, path, now.Add(-time.Minute))
-		store.Data.PendingNotifications[key] = state.PendingNotification{
-			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
-			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
-			Since: now.Add(-time.Minute), UpdatedAt: terminal.UpdatedAt, RetryAt: retryAt,
-		}
-		store.Data.JobFailures[id] = state.JobFailure{
-			Attempts: maxJobAttempts, ReplyAttempts: 1, NotificationKey: key,
-		}
-		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
+		cfg := testConfig(t)
+		job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+			Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
-		gh := &fakeGitHub{
-			notifications: []github.Notification{testNotification(review.UpdatedAt)},
-			permission:    github.Permission{Permission: "write"},
-			threadItems: func(_ string, number int, _ time.Time) ([]github.Item, error) {
-				switch number {
-				case 6:
-					return []github.Item{terminal}, nil
-				case 7:
-					return []github.Item{review}, nil
-				default:
-					return nil, fmt.Errorf("unexpected thread #%d", number)
-				}
-			},
-		}
-		allowReply := false
-		attempted := make(chan struct{})
-		var attempts atomic.Int32
-		gh.beforeComment = func() {
-			if attempts.Add(1) == 1 {
-				close(attempted)
-			}
-			if !allowReply {
-				gh.commentErr = errors.New("temporary rate limit")
-			} else {
-				gh.commentErr = nil
-			}
-		}
-		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
-		cfg := testConfig(t)
-		cfg.MaxRuntimeMinutes = 7
-		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held,
-			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
-		ctx, cancel := context.WithCancel(t.Context())
-		defer cancel()
-		result := make(chan error, 1)
-		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
-		select {
-		case <-held.entered:
-		case err := <-result:
-			t.Fatalf("review did not start: %v", err)
-		}
-		synctest.Wait()
-		time.Sleep(2 * time.Minute)
-		var processed time.Time
-		var failure state.JobFailure
-		var pending state.PendingNotification
-		if err := store.WithLock(func() error {
-			processed = store.Data.Processed[id]
-			failure = store.Data.JobFailures[id]
-			pending = store.Data.PendingNotifications[key]
-			return nil
-		}); err != nil {
+		gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"},
+			commentErr: errors.New("response lost")}
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: time.Now}
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 			t.Fatal(err)
 		}
-		if attempts.Load() != 0 || !processed.IsZero() || failure.ReplyAttempts != 1 || !pending.RetryAt.Equal(retryAt) {
-			t.Fatalf("terminal reply retried before saved deadline: calls=%d processed=%v failure=%+v pending=%+v",
-				attempts.Load(), processed, failure, pending)
-		}
-		time.Sleep(3 * time.Minute)
-		<-attempted
-		close(held.release)
-		if err := <-result; err != nil {
-			t.Fatalf("RunOnce after active reply failure: %v", err)
-		}
-		nextRetryAt := store.Data.PendingNotifications[key].RetryAt
-		if gh.commentCalls != 1 || store.Data.JobFailures[id].ReplyAttempts != 2 ||
-			!store.Data.Processed[id].IsZero() || !nextRetryAt.After(time.Now()) {
-			t.Fatalf("active reply failure did not save its next retry: calls=%d failure=%+v processed=%v pending=%+v",
-				gh.commentCalls, store.Data.JobFailures[id], store.Data.Processed[id], store.Data.PendingNotifications[key])
+		write := store.Data.PublicationWrites[job.ID]
+		if gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() ||
+			write.Status != state.PublicationWritePending {
+			t.Fatalf("uncertain POST was not checkpointed: calls=%d state=%+v", gh.commentCalls, store.Data)
 		}
 		if err := store.Close(); err != nil {
 			t.Fatal(err)
 		}
-		reopened := openStateAt(t, path, now.Add(-time.Minute))
-		if !reopened.Data.PendingNotifications[key].RetryAt.Equal(nextRetryAt) {
-			t.Fatalf("reply backoff was not durable: pending=%+v", reopened.Data.PendingNotifications[key])
+		store = openStateAt(t, path, now)
+		gh.commentErr = nil
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil {
+			t.Fatal(err)
 		}
-		allowReply = true
-		if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 1 ||
-			reopened.Data.JobFailures[id].ReplyAttempts != 2 {
-			t.Fatalf("restart retried before saved deadline: err=%v calls=%d failure=%+v",
-				err, gh.commentCalls, reopened.Data.JobFailures[id])
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
+			gh.commentCalls != 1 || store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
+			t.Fatalf("restart repeated uncertain POST: err=%v calls=%d write=%+v", err, gh.commentCalls, store.Data.PublicationWrites[job.ID])
 		}
-		time.Sleep(nextRetryAt.Sub(time.Now()))
-		if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 2 || len(gh.comments) != 1 ||
-			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+id+" -->") ||
-			reopened.Data.Processed[id].IsZero() {
-			t.Fatalf("terminal reply was not posted when saved retry became due: err=%v calls=%d comments=%v processed=%v",
-				err, gh.commentCalls, gh.comments, reopened.Data.Processed[id])
+		time.Sleep(write.Deadline.Sub(time.Now()) + time.Second)
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil ||
+			gh.commentCalls != 1 || store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteUncertain {
+			t.Fatalf("absent marker authorized a second POST: err=%v calls=%d write=%+v", err, gh.commentCalls, store.Data.PublicationWrites[job.ID])
 		}
 	})
 }
 
-func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
+func TestSelectedControlDoesNotReturnUncertainReplyAsScanError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		terminal := selectedItem(now.Add(-2 * time.Second))
@@ -1509,13 +1321,7 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 			notifications: []github.Notification{notice},
 			items:         []github.Item{terminal, review},
 			permission:    github.Permission{Permission: "write"},
-		}
-		base.beforeComment = func() {
-			if base.commentCalls == 1 {
-				base.commentErr = errors.New("temporary comment failure")
-			} else {
-				base.commentErr = nil
-			}
+			commentErr:    errors.New("temporary comment failure"),
 		}
 		gh := &synchronizedCommentsGitHub{fakeGitHub: base}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
@@ -1531,20 +1337,19 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 			t.Fatalf("review did not start: %v", err)
 		}
 		synctest.Wait()
-		var retryAt, processed time.Time
+		var processed time.Time
 		if err := store.WithLock(func() error {
-			retryAt = store.Data.PendingNotifications[notificationKey(notice)].RetryAt
 			processed = store.Data.Processed[id]
 			return nil
 		}); err != nil {
 			t.Fatal(err)
 		}
 		calls, _ := gh.commentsSnapshot()
-		if calls != 1 || !processed.IsZero() || !retryAt.After(time.Now()) {
-			t.Fatalf("first reply failure did not retain a future retry: calls=%d processed=%v pending=%+v",
+		if calls != 1 || processed.IsZero() || store.Data.PublicationWrites[id].Status != state.PublicationWritePending {
+			t.Fatalf("first reply failure did not retain an issued write: calls=%d processed=%v pending=%+v",
 				calls, processed, store.Data.PendingNotifications)
 		}
-		time.Sleep(retryAt.Sub(time.Now()) / 2)
+		time.Sleep(time.Minute)
 		synctest.Wait()
 		if err := store.WithLock(func() error {
 			processed = store.Data.Processed[id]
@@ -1553,21 +1358,19 @@ func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
 			t.Fatal(err)
 		}
 		calls, _ = gh.commentsSnapshot()
-		if calls != 1 || !processed.IsZero() {
-			t.Fatalf("terminal reply repeated before retry time: calls=%d processed=%v",
+		if calls != 1 || processed.IsZero() {
+			t.Fatalf("terminal reply repeated after uncertain POST: calls=%d processed=%v",
 				calls, processed)
 		}
-		time.Sleep(retryAt.Sub(time.Now()) + time.Second)
 		synctest.Wait()
 		close(held.release)
 		synctest.Wait()
 		if err := <-result; err != nil {
 			t.Fatalf("resolved terminal reply still returned scan error: %v", err)
 		}
-		if gh.commentCalls != 2 || len(gh.comments) != 1 ||
-			!strings.HasSuffix(gh.comments[0].Body, "\n\n<!-- linkdataminion:"+id+" -->") ||
+		if gh.commentCalls != 1 || len(gh.comments) != 0 ||
 			store.Data.Processed[id].IsZero() || len(store.Data.PendingNotifications) != 0 {
-			t.Fatalf("resolved terminal reply was lost or re-deferred: calls=%d comments=%v processed=%v pending=%+v",
+			t.Fatalf("uncertain terminal reply was repeated or re-deferred: calls=%d comments=%v processed=%v pending=%+v",
 				gh.commentCalls, gh.comments, store.Data.Processed[id], store.Data.PendingNotifications)
 		}
 	})

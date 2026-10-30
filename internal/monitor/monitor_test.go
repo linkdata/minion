@@ -653,7 +653,7 @@ func TestFailureReplyGetsFreshPostBudgetAfterLookup(t *testing.T) {
 		job.AttemptID = "" // Terminal controls may outlive the selected reservation.
 		gh.permission = github.Permission{Permission: "write"}
 		m := &Monitor{Config: testConfig(t), BotID: 8, GitHub: gh}
-		if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{}); err != nil {
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 			t.Fatal(err)
 		}
 		if gh.commentCalls != 1 || len(store.Data.Processed) != 1 {
@@ -679,7 +679,7 @@ func TestPullRequestCommentAndFixFailureReplySkipsReviewLookup(t *testing.T) {
 			job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
 				Command: command.Command{Name: name, Action: command.Action(cfg.Commands[name].Action)}, ID: jobID(item.Key, name)}
 			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh}
-			if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil {
+			if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 				t.Fatal(err)
 			}
 			if len(gh.verifiedCalls) != 1 || gh.verifiedCalls[0] || len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
@@ -706,7 +706,7 @@ func TestFailureReplyChecksCurrentBotProvenance(t *testing.T) {
 	job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: request,
 		Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(request.Key, "review")}
 	m := &Monitor{Config: cfg, GitHub: gh, BotID: 8}
-	if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil {
+	if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 {
@@ -734,7 +734,7 @@ func TestFailureReplyMatchesPinnedBotID(t *testing.T) {
 			gh := &fakeGitHub{items: []github.Item{request, reply}, permission: github.Permission{Permission: "write"}}
 			store := openState(t, now.Add(-time.Minute))
 			m := &Monitor{Config: cfg, GitHub: gh, BotID: 8}
-			if err := m.finishFailedJob(t.Context(), store, job, now, state.JobFailure{Attempts: maxJobAttempts}); err != nil {
+			if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 				t.Fatal(err)
 			}
 			wantPosts := 0
@@ -817,7 +817,7 @@ func TestRunOnceExecutorErrorCannotForgeLogLines(t *testing.T) {
 	}
 }
 
-func TestFailureReplyStopsAfterFailedAttempts(t *testing.T) {
+func TestFailureReplyPostsOnceAfterUncertainResponse(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	item := selectedItem(now)
 	gh := &fakeGitHub{notifications: []github.Notification{testNotification(now)}, items: []github.Item{item}, permission: github.Permission{Permission: "write"}, commentErr: errors.New("comment service unavailable")}
@@ -833,25 +833,22 @@ func TestFailureReplyStopsAfterFailedAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
-	for attempt := 1; attempt <= maxFailureReplyAttempts; attempt++ {
-		failure := store.Data.JobFailures[job.ID]
-		err := m.finishFailedJobWithRetry(t.Context(), store, job, now, failure, &entry)
-		if (err != nil) != (attempt < maxFailureReplyAttempts) {
-			t.Fatalf("reply attempt %d error = %v", attempt, err)
-		}
-		if attempt < maxFailureReplyAttempts {
-			failure = store.Data.JobFailures[job.ID]
-			if failure.Attempts != maxJobAttempts || failure.ReplyAttempts != attempt {
-				t.Fatalf("failure disposition was not saved: %+v", failure)
-			}
-		}
+	if err := m.finishFailedJobWithNotification(t.Context(), store, job, now, true); err != nil {
+		t.Fatal(err)
 	}
-	if gh.commentCalls != maxFailureReplyAttempts || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
-		t.Fatalf("failed reply pinned job: replies=%d state=%+v", gh.commentCalls, store.Data)
+	write := store.Data.PublicationWrites[job.ID]
+	if gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() || len(store.Data.JobFailures) != 0 ||
+		write.Status != state.PublicationWritePending || write.BotID != 8 || write.Marker != job.Marker() ||
+		write.Deadline.Sub(write.StartedAt) != time.Duration(config.DefaultPublicationGraceSeconds)*time.Second {
+		t.Fatalf("uncertain reply did not finish with a fixed write checkpoint: replies=%d state=%+v", gh.commentCalls, store.Data)
+	}
+	gh.commentErr = nil
+	if err := m.finishFailedJobWithNotification(t.Context(), store, job, now, true); err != nil || gh.commentCalls != 1 {
+		t.Fatalf("uncertain reply was posted again: err=%v posts=%d", err, gh.commentCalls)
 	}
 }
 
-func TestQueuedFailureReplyRespectsCallerDeadline(t *testing.T) {
+func TestQueuedFailureReplyFinishesOnCallerDeadline(t *testing.T) {
 	for _, phase := range []string{"lookup", "post"} {
 		t.Run(phase, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -862,9 +859,6 @@ func TestQueuedFailureReplyRespectsCallerDeadline(t *testing.T) {
 				if err := store.Save(); err != nil {
 					t.Fatal(err)
 				}
-				failure := store.Data.JobFailures[id]
-				checks, _ := terminalControlChecks(store, "")
-				control := checks[failure.NotificationKey]
 				cfg := testConfig(t)
 				ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 				defer cancel()
@@ -881,23 +875,50 @@ func TestQueuedFailureReplyRespectsCallerDeadline(t *testing.T) {
 				m := &Monitor{Config: cfg, GitHub: gh, BotID: 8, Now: time.Now}
 				job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 8, Source: item,
 					Command: command.Command{Name: "review", Action: command.Review}, ID: id}
-				err := m.finishFailedJobWithRetry(ctx, store, job, now, failure, &control.entry)
+				err := m.finishFailedJobWithNotification(ctx, store, job, now, true)
 				wantElapsed := time.Second
 				if phase == "post" {
 					wantElapsed = 0
 				}
-				if !errors.Is(err, context.DeadlineExceeded) || time.Since(now) != wantElapsed || gh.commentCalls != 0 ||
-					!store.Data.Processed[id].IsZero() || store.Data.JobFailures[id] != failure {
-					t.Fatalf("queued reply ignored caller deadline: err=%v elapsed=%s comments=%d processed=%v failure=%+v",
+				if err != nil || time.Since(now) != wantElapsed || gh.commentCalls != 0 ||
+					store.Data.Processed[id].IsZero() || len(store.Data.JobFailures) != 0 || len(store.Data.PublicationWrites) != 0 {
+					t.Fatalf("queued reply did not finish after caller deadline: err=%v elapsed=%s comments=%d processed=%v failure=%+v",
 						err, time.Since(now), gh.commentCalls, store.Data.Processed[id], store.Data.JobFailures[id])
 				}
 				gh.beforeVerify = nil
 				m.serviceTerminalControls(t.Context(), store)
-				if !terminalReplyRecorded(gh, store, id) {
-					t.Fatalf("deferred reply was not serviced: comments=%v processed=%v", gh.comments, store.Data.Processed[id])
+				if gh.commentCalls != 0 || store.Data.Processed[id].IsZero() {
+					t.Fatalf("skipped reply was retried: posts=%d processed=%v", gh.commentCalls, store.Data.Processed[id])
 				}
 			})
 		})
+	}
+}
+
+func TestQueuedFailureReplyHonorsCancellationDuringPOST(t *testing.T) {
+	now := time.Now().UTC()
+	item := selectedItem(now)
+	cfg := testConfig(t)
+	job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+		Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+	store := openState(t, now.Add(-time.Minute))
+	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
+	decision := state.TerminalDecision{AttemptID: "original-attempt", Outcome: "failed", DecidedAt: now}
+	store.Data.TerminalDecisions[job.ID] = decision
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"},
+		beforeComment: cancel}
+	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+	if err := m.finishFailedJobWithNotification(ctx, store, job, now, true); err != nil ||
+		gh.commentCalls != 1 || len(gh.comments) != 0 || store.Data.Processed[job.ID].IsZero() ||
+		store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending ||
+		store.Data.TerminalDecisions[job.ID] != decision {
+		t.Fatalf("canceled POST changed terminal outcome or issued another reply: err=%v calls=%d comments=%v state=%+v",
+			err, gh.commentCalls, gh.comments, store.Data)
 	}
 }
 

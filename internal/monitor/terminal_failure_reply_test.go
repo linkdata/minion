@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -19,7 +22,6 @@ func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 		name      string
 		change    func(*fakeGitHub, Job)
 		wantReply bool
-		wantRetry bool
 	}{
 		{name: "valid after action deadline", wantReply: true},
 		{name: "edited command", change: func(gh *fakeGitHub, job Job) {
@@ -32,7 +34,15 @@ func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 		}},
 		{name: "transient lookup", change: func(gh *fakeGitHub, _ Job) {
 			gh.permissionErr = lookupErr
-		}, wantRetry: true},
+		}},
+		{name: "404 lookup", change: func(gh *fakeGitHub, _ Job) {
+			gh.permissionErr = &github.StatusError{StatusCode: 404}
+		}},
+		{name: "verified marker", change: func(gh *fakeGitHub, job Job) {
+			gh.items = append(gh.items, github.Item{Body: "Already replied.\n\n" + job.Marker(),
+				Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: job.Source.UpdatedAt})
+			gh.currentItem = func(item github.Item) (github.Item, error) { return item, nil }
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Now().UTC()
@@ -53,22 +63,154 @@ func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 				test.change(gh, job)
 			}
 			m := selectedMonitor(t, now, gh, nil)
-			err := m.finishFailedJob(t.Context(), store, job, now, failure)
-			if test.wantRetry {
-				if !errors.Is(err, lookupErr) || len(gh.comments) != 0 || !store.Data.Processed[job.ID].IsZero() ||
-					store.Data.JobFailures[job.ID] != failure {
-					t.Fatalf("transient authority failure was not retried: err=%v comments=%v state=%+v", err, gh.comments, store.Data)
-				}
-				return
-			}
+			err := m.finishFailedJob(t.Context(), store, job, now)
 			if err != nil || (len(gh.comments) == 1) != test.wantReply || store.Data.Processed[job.ID].IsZero() ||
 				len(store.Data.JobFailures) != 0 {
 				t.Fatalf("failure reply ignored live authority: err=%v comments=%v state=%+v", err, gh.comments, store.Data)
 			}
-			if test.wantReply && !strings.Contains(gh.comments[0].Body, job.Marker()) {
-				t.Fatalf("valid expired request lost its marked fixed reply: %+v", gh.comments)
+			if test.wantReply && (!strings.Contains(gh.comments[0].Body, job.Marker()) ||
+				store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved) {
+				t.Fatalf("valid expired request lost its marked fixed reply or checkpoint: %+v", store.Data)
 			}
 		})
+	}
+}
+
+func TestFailureReplySkipsIncompleteSourceIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*github.Item)
+	}{
+		{name: "missing key", change: func(item *github.Item) { item.Key = "" }},
+		{name: "missing node ID", change: func(item *github.Item) { item.NodeID = "" }},
+		{name: "missing author ID", change: func(item *github.Item) { item.Author.ID = 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			item := selectedItem(now)
+			test.change(&item)
+			cfg := testConfig(t)
+			job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+				Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+			store := openState(t, now.Add(-time.Minute))
+			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
+			gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh}
+			if err := m.finishFailedJobWithNotification(t.Context(), store, job, now, true); err != nil ||
+				gh.commentCalls != 0 || store.Data.Processed[job.ID].IsZero() || len(store.Data.JobFailures) != 0 ||
+				len(store.Data.PublicationWrites) != 0 {
+				t.Fatalf("incomplete source identity allowed a fixed reply: err=%v comments=%d state=%+v",
+					err, gh.commentCalls, store.Data)
+			}
+		})
+	}
+}
+
+func TestTerminalFailureReplyLostResponseReconcilesMarkerAfterRestart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		cfg := testConfig(t)
+		item := selectedItem(now)
+		job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+			Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+		path := filepath.Join(t.TempDir(), "state.json")
+		store := openStateAt(t, path, now.Add(-time.Minute))
+		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
+		decision := state.TerminalDecision{AttemptID: "original-attempt", Outcome: "failed", DecidedAt: now}
+		store.Data.TerminalDecisions[job.ID] = decision
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		var gh *fakeGitHub
+		gh = &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"},
+			commentErr: errors.New("response lost"), beforeComment: func() {
+				gh.items = append(gh.items, github.Item{Body: failureReply + "\n\n" + job.Marker(),
+					Author: github.User{Login: cfg.BotLogin, ID: 8}, UpdatedAt: now})
+			}}
+		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: time.Now}
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
+			gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() ||
+			store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
+			t.Fatalf("lost response was not checkpointed: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store = openStateAt(t, path, now)
+		gh.commentErr = nil
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil ||
+			store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved ||
+			store.Data.TerminalDecisions[job.ID] != decision {
+			t.Fatalf("restart did not observe original reply and outcome: err=%v state=%+v", err, store.Data)
+		}
+		if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
+			gh.commentCalls != 1 {
+			t.Fatalf("verified reply was posted again: err=%v calls=%d", err, gh.commentCalls)
+		}
+	})
+}
+
+func TestSelectedTerminalCleanupUsesDetachedContextAfterExecutorCancel(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := selectedAcceptance(t, now)
+	job := jobFromAccepted(accepted)
+	store := openState(t, now.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts,
+		AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{selectedItem(now)}, permission: github.Permission{Permission: "write"},
+		currentItem: func(github.Item) (github.Item, error) { return selectedItem(now), nil }}
+	m := selectedMonitor(t, now, gh, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := m.finishFailedJob(ctx, store, job, now); err != nil ||
+		gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() ||
+		store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved {
+		t.Fatalf("selected terminal cleanup did not finish after executor cancellation: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestFailureReplyCheckpointSaveFailurePreventsPOST(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := testConfig(t)
+	item := selectedItem(now)
+	job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+		Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+	path := filepath.Join(t.TempDir(), "state.json")
+	backup := path + ".saved"
+	store := openStateAt(t, path, now.Add(-time.Minute))
+	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+	if err := m.finishFailedJob(t.Context(), store, job, now); !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
+		!store.Data.Processed[job.ID].IsZero() || len(store.Data.PublicationWrites) != 0 {
+		t.Fatalf("failed checkpoint allowed POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, now)
+	if err := m.finishFailedJob(t.Context(), store, job, now); err != nil ||
+		gh.commentCalls != 1 || store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved {
+		t.Fatalf("restored state could not make its first POST: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
 	}
 }
 
@@ -131,7 +273,7 @@ func TestIssuedFixPushSuppressesTerminalFailureReplyAndKeepsCheckpoint(t *testin
 			}
 			gh := &fakeGitHub{}
 			m := selectedMonitor(t, now, gh, nil)
-			err := m.finishFailedJob(t.Context(), store, job, now, failure)
+			err := m.finishFailedJob(t.Context(), store, job, now)
 			if !tc.valid {
 				if !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
 					store.Data.Accepted == nil || !store.Data.Processed[job.ID].IsZero() {

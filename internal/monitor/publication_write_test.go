@@ -911,7 +911,7 @@ func TestIssuedTaskWriteSuppressesFailureReply(t *testing.T) {
 	}
 	gh := &fakeGitHub{}
 	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
-	if err := m.finishFailedJob(t.Context(), store, job, now, failure); err != nil {
+	if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 		t.Fatal(err)
 	}
 	if gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 || store.Data.Processed[job.ID].IsZero() ||
@@ -937,7 +937,7 @@ func TestIssuedReviewStillSuppressesReplyAfterCommandRemap(t *testing.T) {
 	}
 	gh := &fakeGitHub{}
 	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh}
-	if err := m.finishFailedJob(t.Context(), store, job, now, failure); err != nil {
+	if err := m.finishFailedJob(t.Context(), store, job, now); err != nil {
 		t.Fatal(err)
 	}
 	if gh.commentCalls != 0 || len(gh.verifiedCalls) != 0 || store.Data.Processed[job.ID].IsZero() ||
