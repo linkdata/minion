@@ -98,6 +98,7 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 					sequence++
 				}
 				for i, call := range result.Calls {
+					binding.Ordinal = i + 1
 					binding.Call = callMetadata(call)
 					f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 					sequence++

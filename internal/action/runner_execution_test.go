@@ -83,6 +83,28 @@ func TestRunnerWaitDelayKeepsReceiptWithoutAutomaticRetry(t *testing.T) {
 	}
 }
 
+func TestRunnerFailedStartKeepsOrdinalWithoutRetry(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	var before, after []CallCheckpoint
+	nativeCalls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		nativeCalls++
+		return aicli.Result{}, exec.ErrNotFound
+	}}
+	checkpoints := runnerExecutionCheckpoints{
+		before: func(value CallCheckpoint) error { before = append(before, value); return nil },
+		after:  func(value CallCheckpoint) error { after = append(after, value); return nil },
+	}
+	result, err := runner.Execute(t.Context(), job, checkpoints)
+	if !errors.Is(err, exec.ErrNotFound) || nativeCalls != 1 || len(before) != 1 || len(after) != 1 ||
+		before[0].Ordinal != 1 || after[0].Ordinal != 1 ||
+		before[0].Call != callMetadata(after[0].Call) ||
+		len(result.Calls) != 1 || result.Calls[0] != after[0].Call ||
+		result.Calls[0].Complete || result.Calls[0].Tokens != (usage.Tokens{}) || result.Answer != "" {
+		t.Fatalf("failed start lost or retried ordinal: result=%+v before=%+v after=%+v calls=%d error=%v", result, before, after, nativeCalls, err)
+	}
+}
+
 func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	tokens := usage.Tokens{Input: 11, CachedInput: 3, Output: 2}
@@ -111,7 +133,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 	}
 	checkpoints := runnerExecutionCheckpoints{
 		before: func(value CallCheckpoint) error {
-			if value.Version != ProtocolVersion || value.Identity != job.Identity || value.SourceRef != job.Source.Head {
+			if value.Version != ProtocolVersion || value.Identity != job.Identity || value.SourceRef != job.Source.Head || value.Ordinal != len(calls)+1 {
 				t.Fatalf("before-call binding changed: %+v", value)
 			}
 			role, phase := job.Main, ""
@@ -126,7 +148,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			return nil
 		},
 		after: func(value CallCheckpoint) error {
-			if value.Version != ProtocolVersion || value.Identity != job.Identity || value.SourceRef != job.Source.Head || value.Call.Tokens != tokens || !value.Call.Complete {
+			if value.Version != ProtocolVersion || value.Identity != job.Identity || value.SourceRef != job.Source.Head || value.Ordinal != len(calls)+1 || value.Call.Tokens != tokens || !value.Call.Complete {
 				t.Fatalf("after-call lost binding or returned usage: %+v", value)
 			}
 			critic := value.Call.Role == roleCritic
@@ -152,6 +174,64 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 	}
 	if err != nil || result.Answer != "Complete answer" || result.CriticStopReason != "approved" || !slices.Equal(result.Calls, calls) || !slices.Equal(events, wantEvents) {
 		t.Fatalf("execution changed checkpoint order: result=%+v error=%v events=%v", result, err, events)
+	}
+}
+
+func TestRunnerExecuteOrdinalsAcrossRevisionAndFreshReview(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.CriticMaxRounds = 2
+	want := []struct {
+		role, phase string
+		round       int
+		fresh       bool
+	}{
+		{role: roleMain, round: 1},
+		{role: roleCritic, round: 1, phase: reviewFull, fresh: true},
+		{role: roleMain, round: 2},
+		{role: roleCritic, round: 2, phase: reviewVerification},
+		{role: roleCritic, round: 2, phase: reviewFull, fresh: true},
+	}
+	var before, after []CallCheckpoint
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+		index := len(after)
+		if index >= len(want) || request.role != want[index].role || request.round != want[index].round ||
+			request.reviewPhase != want[index].phase || request.freshConversation != want[index].fresh {
+			t.Fatalf("unexpected model call %d: %+v", index+1, request)
+		}
+		answer := approvedCritiqueJSON
+		if request.role == roleMain {
+			answer = proposalJSON("Candidate", "")
+		} else if index == 1 {
+			answer = criticFeedbackJSON(true, "Revise the candidate.")
+		}
+		return aicli.Result{Answer: answer, UsageComplete: true}, nil
+	}}
+	checkpoints := runnerExecutionCheckpoints{
+		before: func(value CallCheckpoint) error {
+			if value.Ordinal != len(before)+1 || value.Ordinal != len(after)+1 {
+				t.Fatalf("before ordinal %d after %d completed calls", value.Ordinal, len(after))
+			}
+			before = append(before, value)
+			return nil
+		},
+		after: func(value CallCheckpoint) error {
+			if value.Ordinal != len(after)+1 || value.Ordinal != before[len(after)].Ordinal ||
+				callMetadata(value.Call) != before[len(after)].Call {
+				t.Fatalf("after call %d does not match before: %+v", len(after)+1, value)
+			}
+			after = append(after, value)
+			return nil
+		},
+	}
+	result, err := runner.Execute(t.Context(), job, checkpoints)
+	if err != nil || result.CriticStopReason != "approved" || len(result.Calls) != len(want) ||
+		len(before) != len(want) || len(after) != len(want) || result.Validate(job) != nil {
+		t.Fatalf("multi-round call sequence: result=%+v before=%d after=%d error=%v", result, len(before), len(after), err)
+	}
+	for index, call := range result.Calls {
+		if after[index].Call != call {
+			t.Fatalf("result call %d differs from acknowledged ordinal %d", index+1, after[index].Ordinal)
+		}
 	}
 }
 
@@ -188,12 +268,18 @@ func TestRunnerExecuteCallCheckpointFailurePreservesReturnedFacts(t *testing.T) 
 			}}
 			checkpoints := runnerExecutionCheckpoints{
 				before: func(value CallCheckpoint) error {
+					if value.Ordinal != len(captured)+1 {
+						t.Fatalf("before-call ordinal = %d, want %d", value.Ordinal, len(captured)+1)
+					}
 					if test.before && value.Call.Role == test.role {
 						return checkpointErr
 					}
 					return nil
 				},
 				after: func(value CallCheckpoint) error {
+					if value.Ordinal != len(captured)+1 {
+						t.Fatalf("after-call ordinal = %d, want %d", value.Ordinal, len(captured)+1)
+					}
 					captured = append(captured, value.Call)
 					if !test.before && value.Call.Role == test.role {
 						return checkpointErr

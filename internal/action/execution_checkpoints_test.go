@@ -37,7 +37,8 @@ func newExecutionAdapterFixture(t *testing.T, job Job) *executionAdapterFixture 
 }
 
 func (f *executionAdapterFixture) call(call CallUsage) CallCheckpoint {
-	return CallCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Call: call}
+	return CallCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+		Ordinal: len(f.sink.calls) + 1, Call: call}
 }
 
 func (f *executionAdapterFixture) review(calls []CallUsage, refs []Refutation, reason string) ReviewCheckpoint {
@@ -436,6 +437,8 @@ func TestExecutionBeforeCallRejectsForeignOrUnpinnedFacts(t *testing.T) {
 		{"version", func(f *CallCheckpoint) { f.Version++ }},
 		{"identity", func(f *CallCheckpoint) { f.Identity.AttemptID = "foreign" }},
 		{"source", func(f *CallCheckpoint) { f.SourceRef = strings.Repeat("b", 40) }},
+		{"zero ordinal", func(f *CallCheckpoint) { f.Ordinal = 0 }},
+		{"skipped ordinal", func(f *CallCheckpoint) { f.Ordinal++ }},
 		{"provider", func(f *CallCheckpoint) { f.Call.Provider = "claude" }},
 		{"role", func(f *CallCheckpoint) { f.Call.Role = roleCritic }},
 		{"round", func(f *CallCheckpoint) { f.Call.Round = 2 }},
@@ -462,8 +465,64 @@ func TestExecutionBeforeCallRejectsForeignOrUnpinnedFacts(t *testing.T) {
 	}
 }
 
+func TestExecutionCallRejectsOrdinalAfterAcceptedPrefix(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		ordinal int
+		after   bool
+	}{{"stale before", 1, false}, {"skipped before", 3, false}, {"stale after", 1, true}, {"skipped after", 3, true}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+			main := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
+			critic := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull}
+			f.saveReview(nil, nil, "")
+			f.ack(main)
+			f.saveReview([]CallUsage{main}, nil, "")
+
+			fact := f.call(critic)
+			if test.after {
+				if err := f.sink.BeforeCall(fact); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fact.Ordinal = test.ordinal
+			var err error
+			if test.after {
+				err = f.sink.AfterCall(fact)
+			} else {
+				err = f.sink.BeforeCall(fact)
+			}
+			if !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("critic call with ordinal %d was admitted: %v", test.ordinal, err)
+			}
+			if len(f.sink.calls) != 1 || f.sink.calls[0] != main || (f.sink.pending != nil) != test.after || !slices.Equal(f.sink.review.Calls, []CallUsage{main}) {
+				t.Fatalf("rejected ordinal changed accepted prefix: calls=%+v review=%+v pending=%+v", f.sink.calls, f.sink.review, f.sink.pending)
+			}
+			if saved := readPrivateReview(t, f.owner.WorkRoot); !slices.Equal(saved.Calls, []CallUsage{main}) {
+				t.Fatalf("rejected ordinal changed saved review prefix: %+v", saved.Calls)
+			}
+			if err := f.sink.BeforeCall(f.call(critic)); !errors.Is(err, monitor.ErrTerminalJob) || (f.sink.pending != nil) != test.after || len(f.sink.calls) != 1 {
+				t.Fatalf("later critic call was admitted after rejected ordinal: calls=%+v pending=%+v error=%v", f.sink.calls, f.sink.pending, err)
+			}
+		})
+	}
+}
+
+func TestExecutionBeforeOnlyCallCannotStartLaterOrdinal(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	main := CallUsage{Provider: "codex", Role: roleMain, Round: 1}
+	if err := f.sink.BeforeCall(f.call(main)); err != nil {
+		t.Fatal(err)
+	}
+	later := f.call(main)
+	later.Ordinal = 2
+	if err := f.sink.BeforeCall(later); !errors.Is(err, monitor.ErrTerminalJob) || f.sink.pending == nil || *f.sink.pending != main || len(f.sink.calls) != 0 {
+		t.Fatalf("later ordinal was admitted before first AfterCall: calls=%+v pending=%+v error=%v", f.sink.calls, f.sink.pending, err)
+	}
+}
+
 func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
-	for _, scenario := range []string{"missing callbacks", "missing Before", "duplicate Before", "missing After", "duplicate After", "changed After metadata", "changed Result", "complete"} {
+	for _, scenario := range []string{"missing callbacks", "missing Before", "duplicate Before", "missing After", "duplicate After", "changed After metadata", "changed After ordinal", "changed Result", "complete"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, testJob(command.Comment))
 			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
@@ -485,6 +544,9 @@ func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
 				fact := f.call(call)
 				if scenario == "changed After metadata" {
 					fact.Call.Model = "other"
+				}
+				if scenario == "changed After ordinal" {
+					fact.Ordinal++
 				}
 				runErr = f.sink.AfterCall(fact)
 				if scenario == "duplicate After" {

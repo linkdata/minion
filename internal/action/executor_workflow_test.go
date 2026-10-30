@@ -133,7 +133,7 @@ func TestSelectedExecuteRecordsPublicationBeforeMonitorCleanup(t *testing.T) {
 				return Result{}, err
 			}
 			call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
-			fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}
+			fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}
 			if err := sink.BeforeCall(fact); err != nil {
 				return Result{}, err
 			}
@@ -190,7 +190,7 @@ func TestFailedExecutorRetainsOnlyCheckpointCapturedReviewEvidence(t *testing.T)
 						t.Fatal(err)
 					}
 					for i, call := range result.Calls {
-						fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: callMetadata(call)}
+						fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: i + 1, Call: callMetadata(call)}
 						if err := checkpoints.BeforeCall(fact); err != nil {
 							t.Fatal(err)
 						}
@@ -286,7 +286,7 @@ func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testin
 				Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 					admitFixtureAssignment(t, checkpoints, job)
 					call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
-					fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}
+					fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}
 					if mode == "ignored refusal" {
 						store.Dir = blocked
 						refusal = checkpoints.BeforeCall(fact)

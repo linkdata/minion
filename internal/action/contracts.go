@@ -18,7 +18,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 12
+const ProtocolVersion = 13
 
 const (
 	maxDiagnostics            = 100
@@ -384,6 +384,8 @@ func (r Result) matchesJob(j Job) bool {
 }
 
 func (r Result) validateCalls(j Job, complete bool) error {
+	// Position plus one is the direct-call ordinal, including a failed result's
+	// returned but unacknowledged final receipt.
 	rounds := j.rounds()
 	policy := criticPolicy{job: j}
 	var advanceToFull bool

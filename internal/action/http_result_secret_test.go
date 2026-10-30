@@ -127,7 +127,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				f.ack(t, "/before", before, http.StatusOK, 1)
 				call := before.Checkpoint.Call
 				call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
-				f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, http.StatusOK, 2)
+				f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}}, http.StatusOK, 2)
 				outcome := f.outcome(3, nil)
 				outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe result", Calls: []CallUsage{call}}
 				if tc.audit {
@@ -225,7 +225,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 		f.ack(t, "/before", before, http.StatusOK, 1)
 		call := before.Checkpoint.Call
 		call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
-		f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, http.StatusOK, 2)
+		f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}}, http.StatusOK, 2)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe response.", Calls: []CallUsage{call},
 			Changes: []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture-&#x73;ecret\n")}}}
 		if err := result.Validate(job); err != nil {
@@ -298,6 +298,7 @@ func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 		f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
 		sequence++
 		for i, call := range result.Calls {
+			binding.Ordinal = i + 1
 			binding.Call = callMetadata(call)
 			f.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 			sequence++

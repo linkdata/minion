@@ -62,7 +62,7 @@ func TestOrchestratorAllowsQuotedRequestNotesButRejectsNewPrivateText(t *testing
 				for i, call := range result.Calls {
 					call.Complete = true
 					result.Calls[i] = call
-					fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: callMetadata(call)}
+					fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: i + 1, Call: callMetadata(call)}
 					if err := checkpoints.BeforeCall(fact); err != nil {
 						t.Fatal(err)
 					}

@@ -36,6 +36,13 @@ func httpCallShape(call CallUsage) error {
 	return nil
 }
 
+func httpCallCheckpointShape(checkpoint CallCheckpoint) error {
+	if checkpoint.Ordinal < 1 || checkpoint.Ordinal > 3*config.MaxCriticMaxRounds-1 {
+		return errHTTPShape
+	}
+	return httpCallShape(checkpoint.Call)
+}
+
 func httpReviewShape(review ReviewCheckpoint) error {
 	if err := httpBindingShape(httpBinding{review.Version, review.Identity, review.SourceRef}); err != nil {
 		return err

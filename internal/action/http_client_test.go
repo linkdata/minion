@@ -622,7 +622,7 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: t.Context(), action: t.Context(), binding: binding}
-			call := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}}
+			call := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}}
 			err = checkpoints.BeforeCall(call)
 			if name == "known failure" {
 				if !errors.Is(err, workroot.ErrUnsafe) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {

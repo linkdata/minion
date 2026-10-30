@@ -488,9 +488,12 @@ func TestHTTPPrivateRefutationAtWireLimitStaysInReviewRecord(t *testing.T) {
 	transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
 	for i, call := range result.Calls {
 		sequence++
-		transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: f.call(callMetadata(call))}, http.StatusOK, sequence)
+		binding := f.call(callMetadata(call))
+		binding.Ordinal = i + 1
+		transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 		sequence++
-		transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: f.call(call)}, http.StatusOK, sequence)
+		binding.Call = call
+		transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 		sequence++
 		var refs []Refutation
 		if call.Round >= 2 {
@@ -618,9 +621,12 @@ func TestHTTPResultCannotPublishPrivateRefutation(t *testing.T) {
 			transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: f.review(nil, nil, "")}, http.StatusOK, sequence)
 			for i, call := range result.Calls {
 				sequence++
-				transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: f.call(callMetadata(call))}, http.StatusOK, sequence)
+				binding := f.call(callMetadata(call))
+				binding.Ordinal = i + 1
+				transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 				sequence++
-				transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: f.call(call)}, http.StatusOK, sequence)
+				binding.Call = call
+				transport.ack(t, "/after", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 				sequence++
 				var refs []Refutation
 				if call.Round >= 2 {
@@ -709,6 +715,7 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 		transport.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: review}, http.StatusOK, sequence)
 		sequence++
 		for i, call := range result.Calls {
+			binding.Ordinal = i + 1
 			binding.Call = callMetadata(call)
 			transport.ack(t, "/before", httpCall{Sequence: sequence, Checkpoint: binding}, http.StatusOK, sequence)
 			sequence++

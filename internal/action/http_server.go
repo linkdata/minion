@@ -860,7 +860,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		err = httpServerRead(w, r, httpControlBytes, &call, tx)
 		binding, sequence = httpBinding{call.Checkpoint.Version, call.Checkpoint.Identity, call.Checkpoint.SourceRef}, call.Sequence
 		if err == nil {
-			err = httpCallShape(call.Checkpoint.Call)
+			err = httpCallCheckpointShape(call.Checkpoint)
 		}
 		if kind == "before" {
 			fact := call.Checkpoint.Call

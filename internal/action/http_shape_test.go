@@ -64,6 +64,18 @@ func TestHTTPShapeTextByteBounds(t *testing.T) {
 	}
 }
 
+func TestHTTPCallCheckpointOrdinalBounds(t *testing.T) {
+	for _, test := range []struct {
+		ordinal int
+		valid   bool
+	}{{0, false}, {1, true}, {3*config.MaxCriticMaxRounds - 1, true}, {3 * config.MaxCriticMaxRounds, false}} {
+		err := httpCallCheckpointShape(CallCheckpoint{Ordinal: test.ordinal})
+		if (err == nil) != test.valid || err != nil && !errors.Is(err, errHTTPShape) {
+			t.Fatalf("ordinal %d: valid=%t error=%v", test.ordinal, test.valid, err)
+		}
+	}
+}
+
 func TestHTTPPrivateRefutationControlsMatchLocalContract(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)
