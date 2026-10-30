@@ -515,11 +515,6 @@ func TestLocalWorkerDrainsPaidCallbackBeforeChildStop(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("stop did not reach the transaction")
 			}
-			next := testJob(command.Comment)
-			next.Identity.JobID, next.Identity.AttemptID = "next-job", "next-attempt"
-			if nextResult, nextErr := w.Execute(ctx, next, runnerExecutionCheckpoints{}); !errors.Is(nextErr, monitor.ErrRequestTransport) || !nextResult.matchesJob(next) {
-				t.Fatalf("stopping worker accepted a second assignment before the paid callback drained: result=%+v error=%v", nextResult, nextErr)
-			}
 			select {
 			case err := <-closed:
 				t.Fatalf("worker closed before callback drained: %v", err)

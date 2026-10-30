@@ -137,6 +137,12 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 					time.Sleep(2 * time.Second)
 				}
 				release := make(chan struct{})
+				released := false
+				defer func() {
+					if !released {
+						close(release)
+					}
+				}()
 				run := func(ctx context.Context, _ Job) error {
 					<-ctx.Done()
 					<-release // Keep abort on the unfinished-worker path.
@@ -178,6 +184,7 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 				default:
 				}
 				close(release)
+				released = true
 				err = <-finished
 				if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrAcceptanceState) ||
 					store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || listCalls != 1 ||
