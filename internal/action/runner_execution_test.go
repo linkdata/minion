@@ -50,6 +50,26 @@ func TestRunnerExecuteRequiresCheckpoints(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsCleanupAfterModel(t *testing.T) {
+	var phases []string
+	runner := Runner{
+		WorkRoot: t.TempDir(),
+		statusUpdate: func(phase string, _ int, _ string) {
+			phases = append(phases, phase)
+		},
+		runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			phases = append(phases, "native")
+			return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
+		},
+	}
+	if _, err := runner.Run(t.Context(), testJob(command.Comment)); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"main", "native", "main", "cleanup"}; !slices.Equal(phases, want) {
+		t.Fatalf("Runner phase order = %v, want %v", phases, want)
+	}
+}
+
 func TestRunnerWaitDelayKeepsReceiptWithoutAutomaticRetry(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	tokens := usage.Tokens{Input: 13, Output: 4}
