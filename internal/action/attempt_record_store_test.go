@@ -6,6 +6,7 @@ import (
 	"errors"
 	"html"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -693,5 +694,41 @@ func TestAttemptRecordsLogicalEventCapAcrossReopen(t *testing.T) {
 				t.Fatalf("durable highwater after cap check: lines=%d error=%v", bytes.Count(saved, []byte{'\n'}), err)
 			}
 		})
+	}
+}
+
+func TestAttemptRecordsMaximumValidLineFits(t *testing.T) {
+	root := t.TempDir()
+	record := attemptRecordFixture(1, attemptRecordDiscussion, strings.Repeat("\x01", maxAttemptRecordTextBytes))
+	record.Identity.JobID = strings.Repeat("j", 100)
+	record.Identity.AttemptID = strings.Repeat("a", 100)
+	record.Identity.ExecutorID = strings.Repeat("e", 100)
+	record.Identity.Repository = strings.Repeat("o", 100) + "/" + strings.Repeat("r", 100)
+	record.Identity.RepositoryID = math.MaxInt64
+	record.Identity.OwnerID = math.MaxInt64
+	record.Identity.Requester = strings.Repeat("u", 100) + "[bot]"
+	record.Identity.RequesterID = math.MaxInt64
+	record.Identity.Number = math.MaxInt
+	record.Identity.SubjectType = "PullRequest"
+	record.Call = strings.Repeat("\x01", 128)
+	record.Agent = strings.Repeat("\x01", 128)
+	record.Role = strings.Repeat("\x01", 128)
+	record.EventSource = strings.Repeat("\x01", 128)
+	record.More = true
+	store, err := openAttemptRecordStore(root, record.Identity, record.SourceRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if ack, err := store.Append(record); err != nil || ack != 1 {
+		t.Fatalf("maximum first fragment: ack=%d error=%v", ack, err)
+	}
+	record.Sequence = 999999 // Conservative six-digit upper bound under the 64 MiB store cap.
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded)+1 > maxAttemptRecordLineBytes {
+		t.Fatalf("maximum valid line = %d, cap = %d", len(encoded)+1, maxAttemptRecordLineBytes)
 	}
 }
