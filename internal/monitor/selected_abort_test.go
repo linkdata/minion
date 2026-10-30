@@ -59,7 +59,10 @@ func TestSelectedCancelAfterAmbiguousResultSaveIsDurable(t *testing.T) {
 					}
 					cancel()
 					if stage == "result marker" {
-						store.Data.Accepted.ResultReady = false // A post-rename save error rolls back memory only.
+						_ = store.WithLock(func() error {
+							store.Data.Accepted.ResultReady = false // A post-rename save error rolls back memory only.
+							return nil
+						})
 						return errors.Join(ErrAcceptanceState, errors.New("result marker sync failed"))
 					}
 					backup := path + ".before-decision"
