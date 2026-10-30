@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -20,7 +21,8 @@ const (
 	maxAttemptRecordBytes     int64 = 64 << 20
 	maxAttemptRecordTextBytes       = 16 << 10
 	maxAttemptMarkerTextBytes       = 256
-	maxAttemptRecordLineBytes       = maxAttemptRecordTextBytes*6 + 2048
+	maxAttemptRecordLineBytes       = maxAttemptRecordTextBytes*6 + 4096
+	maxAttemptEventBytes            = aicli.MaxEventBytes
 )
 
 const (
@@ -40,11 +42,16 @@ var errAttemptRecordConflict = errors.New("attempt record conflicts with saved a
 
 // Reference kinds point to the existing per-attempt review and worker files.
 type attemptRecord struct {
-	Identity  Identity `json:"identity"`
-	SourceRef string   `json:"source_ref"`
-	Sequence  uint64   `json:"sequence"`
-	Kind      string   `json:"kind"`
-	Text      string   `json:"text,omitempty"`
+	Identity    Identity `json:"identity"`
+	SourceRef   string   `json:"source_ref"`
+	Sequence    uint64   `json:"sequence"`
+	Kind        string   `json:"kind"`
+	Text        string   `json:"text,omitempty"`
+	Call        string   `json:"call,omitempty"`
+	Agent       string   `json:"agent,omitempty"`
+	Role        string   `json:"role,omitempty"`
+	EventSource string   `json:"event_source,omitempty"`
+	More        bool     `json:"more,omitempty"`
 }
 
 type attemptRecordLine struct {
@@ -53,19 +60,22 @@ type attemptRecordLine struct {
 }
 
 type attemptRecordStore struct {
-	file       *os.File
-	identity   Identity
-	sourceRef  string
-	limit      int64
-	size       int64
-	lines      []attemptRecordLine
-	stop       bool
-	coverage   bool
-	stopSpace  int64
-	coverSpace int64
-	uncertain  bool
-	writeAt    func([]byte, int64) (int, error)
-	syncFile   func() error
+	file         *os.File
+	identity     Identity
+	sourceRef    string
+	limit        int64
+	eventLimit   int // Tests may reduce the fixed logical-event cap.
+	size         int64
+	lines        []attemptRecordLine
+	stop         bool
+	coverage     bool
+	fragment     attemptRecord
+	fragmentText string
+	stopSpace    int64
+	coverSpace   int64
+	uncertain    bool
+	writeAt      func([]byte, int64) (int, error)
+	syncFile     func() error
 }
 
 func openAttemptRecordStore(workRoot string, identity Identity, sourceRef string) (*attemptRecordStore, error) {
@@ -110,7 +120,7 @@ func openAttemptRecordStoreWithLimit(workRoot string, identity Identity, sourceR
 	if !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, fmt.Errorf("%w: attempt record file is not regular or exceeds cap", errAttemptRecordConflict)
 	}
-	store := &attemptRecordStore{file: file, identity: identity, sourceRef: sourceRef, limit: limit}
+	store := &attemptRecordStore{file: file, identity: identity, sourceRef: sourceRef, limit: limit, eventLimit: maxAttemptEventBytes}
 	store.writeAt, store.syncFile = file.WriteAt, file.Sync
 	store.stopSpace = store.markerSpace(attemptRecordStop)
 	store.coverSpace = store.markerSpace(attemptRecordCoverage)
@@ -141,12 +151,15 @@ func openAttemptRecordStoreWithLimit(workRoot string, identity Identity, sourceR
 }
 
 func (s *attemptRecordStore) markerSpace(kind string) int64 {
-	marker := attemptRecord{Identity: s.identity, SourceRef: s.sourceRef, Sequence: math.MaxUint64, Kind: kind, Text: strings.Repeat("\x01", maxAttemptMarkerTextBytes)}
+	marker := attemptRecord{Identity: s.identity, SourceRef: s.sourceRef, Sequence: math.MaxUint64, Kind: kind}
+	if kind == attemptRecordStop {
+		marker.Text = strings.Repeat("\x01", maxAttemptMarkerTextBytes)
+	}
 	data, _ := json.Marshal(marker)
 	return int64(len(data) + 1)
 }
 
-func (r attemptRecord) validateText() error {
+func (r attemptRecord) validateShape() error {
 	limit := maxAttemptRecordTextBytes
 	switch r.Kind {
 	case attemptRecordInput, attemptRecordDiscussion, attemptRecordDiagnostic, attemptRecordReport:
@@ -160,7 +173,53 @@ func (r attemptRecord) validateText() error {
 	if len(r.Text) > limit || !utf8.ValidString(r.Text) || strings.ContainsRune(r.Text, 0) {
 		return errors.New("attempt record text is invalid or exceeds limit")
 	}
+	if r.Kind == attemptRecordCoverage && r.Text != "" {
+		return errors.New("attempt record coverage must have empty text")
+	}
+	if (r.Kind == attemptRecordReviewReference || r.Kind == attemptRecordWorkerReference) && r.More {
+		return errors.New("attempt record reference cannot have a continuation")
+	}
+	for _, value := range []string{r.Call, r.Agent, r.Role, r.EventSource} {
+		if len(value) > 128 || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+			return errors.New("attempt record metadata is invalid or exceeds limit")
+		}
+	}
+	if (r.Kind == attemptRecordStop || r.Kind == attemptRecordCoverage) &&
+		(r.Call != "" || r.Agent != "" || r.Role != "" || r.EventSource != "" || r.More) {
+		return errors.New("attempt record marker has metadata")
+	}
 	return nil
+}
+
+func (s *attemptRecordStore) validateFragment(record attemptRecord) error {
+	if record.Kind != attemptRecordStop && record.Kind != attemptRecordCoverage &&
+		(record.More || s.fragment.More) && len(s.fragmentText)+len(record.Text) > s.eventLimit {
+		return errAttemptRecordsFull
+	}
+	if !s.fragment.More {
+		return nil
+	}
+	if record.Kind == attemptRecordStop {
+		return nil
+	}
+	if record.Kind != s.fragment.Kind || record.Call != s.fragment.Call || record.Agent != s.fragment.Agent ||
+		record.Role != s.fragment.Role || record.EventSource != s.fragment.EventSource {
+		return errAttemptRecordConflict
+	}
+	return nil
+}
+
+func (s *attemptRecordStore) noteFragment(record attemptRecord) {
+	if record.Kind == attemptRecordStop || record.Kind == attemptRecordCoverage {
+		return
+	}
+	if record.More {
+		s.fragmentText += record.Text
+	} else {
+		s.fragmentText = ""
+	}
+	s.fragment = record
+	s.fragment.Text = ""
 }
 
 func (s *attemptRecordStore) scan() error {
@@ -193,7 +252,7 @@ func (s *attemptRecordStore) scan() error {
 		canonical, err := json.Marshal(record)
 		if err != nil || !bytes.Equal(canonical, line[:len(line)-1]) ||
 			record.Identity != s.identity || record.SourceRef != s.sourceRef || record.Sequence != uint64(len(s.lines)+1) ||
-			record.validateText() != nil || record.Kind == attemptRecordStop && s.stop || record.Kind == attemptRecordCoverage && s.coverage {
+			record.validateShape() != nil || s.validateFragment(record) != nil || s.coverage || record.Kind == attemptRecordStop && s.stop {
 			return fmt.Errorf("%w: invalid complete line at sequence %d", errAttemptRecordConflict, len(s.lines)+1)
 		}
 		if record.Kind == attemptRecordStop {
@@ -202,6 +261,7 @@ func (s *attemptRecordStore) scan() error {
 		if record.Kind == attemptRecordCoverage {
 			s.coverage = true
 		}
+		s.noteFragment(record)
 		s.lines = append(s.lines, attemptRecordLine{offset: offset, length: len(line)})
 		offset += int64(len(line))
 	}
@@ -233,7 +293,7 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 	if record.Identity != s.identity || record.SourceRef != s.sourceRef || record.Sequence == 0 {
 		return 0, errAttemptRecordConflict
 	}
-	if err := record.validateText(); err != nil {
+	if err := record.validateShape(); err != nil {
 		return 0, err
 	}
 	rawText := record.Text
@@ -258,12 +318,17 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 	} else if unsafeText {
 		return 0, errors.New("attempt record text retains a configured credential")
 	}
-	if err := record.validateText(); err != nil {
+	if err := record.validateShape(); err != nil {
 		return 0, err
 	}
 	data, err := json.Marshal(record)
 	if err != nil {
 		return 0, err
+	}
+	for _, secret := range secrets {
+		if secret != "" && containsConfiguredKey(data, secret) {
+			return 0, errors.New("attempt record retains a configured credential")
+		}
 	}
 	data = append(data, '\n')
 	if len(data) > maxAttemptRecordLineBytes {
@@ -281,8 +346,23 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 		}
 		return highest, nil
 	}
-	if record.Sequence != highest+1 || record.Kind == attemptRecordStop && s.stop || record.Kind == attemptRecordCoverage && s.coverage {
+	if record.Sequence != highest+1 || s.coverage || record.Kind == attemptRecordStop && s.stop {
 		return 0, errAttemptRecordConflict
+	}
+	if err := s.validateFragment(record); err != nil {
+		return 0, err
+	}
+	if s.fragment.More && record.Kind != attemptRecordStop {
+		joinedText := s.fragmentText + record.Text
+		joinedJSON, err := json.Marshal(joinedText)
+		if err != nil {
+			return 0, err
+		}
+		for _, secret := range secrets {
+			if secret != "" && (containsConfiguredKey([]byte(joinedText), secret) || containsConfiguredKey(joinedJSON, secret)) {
+				return 0, errors.New("attempt record continuation retains a configured credential")
+			}
+		}
 	}
 	reserve := int64(0)
 	if !s.stop && record.Kind != attemptRecordStop {
@@ -315,6 +395,7 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 	if record.Kind == attemptRecordCoverage {
 		s.coverage = true
 	}
+	s.noteFragment(record)
 	return uint64(len(s.lines)), nil
 }
 

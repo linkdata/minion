@@ -94,10 +94,25 @@ func newHTTPServerTestWithServer(t *testing.T, ctx context.Context, job Job, sin
 }
 
 func newHTTPServerTestWithStopServer(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, stopBudget time.Duration, credentials ...WorkerCredentials) *httpServerTest {
+	return newHTTPServerTestWithStopServerRoot(t, ctx, job, sink, wrap, newServer, stopBudget, "", credentials...)
+}
+
+func newHTTPServerTestWithRoot(t *testing.T, ctx context.Context, job Job, sink Checkpoints, workRoot string) *httpServerTest {
+	return newHTTPServerTestWithStopServerRoot(t, ctx, job, sink, nil, func(h http.Handler) *httptest.Server {
+		return httptest.NewTestServer(t, h)
+	}, 0, workRoot)
+}
+
+func newHTTPServerTestWithStopServerRoot(t *testing.T, ctx context.Context, job Job, sink Checkpoints, wrap func(http.Handler) http.Handler, newServer func(http.Handler) *httptest.Server, stopBudget time.Duration, workRoot string, credentials ...WorkerCredentials) *httpServerTest {
 	t.Helper()
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if workRoot != "" {
+		if err := executor.SetWorkRoot(workRoot); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if len(credentials) > 0 {
 		if err := executor.SetWorkerCredentials(credentials[0]); err != nil {
@@ -1328,14 +1343,22 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	job := testJob(command.Comment)
 	job.Critic = &RoleSettings{Provider: "claude"}
 	job.CriticMaxRounds = 2
-	f := newHTTPServerTest(t, ctx, job, runnerExecutionCheckpoints{}, nil)
+	f := newHTTPServerTestWithRoot(t, ctx, job, runnerExecutionCheckpoints{}, t.TempDir())
 	f.pull(t)
 	f.tx.mu.Lock()
 	f.tx.started = f.tx.started.Add(-time.Second) // Keep synthetic nanosecond ages below measured elapsed time on Windows.
 	f.tx.mu.Unlock()
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
-		Sequence: 2, ProgressSequence: 4, ProgressAge: 2 * time.Nanosecond, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
+		Sequence: 3, ProgressSequence: 4, ProgressAge: 2 * time.Nanosecond, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
+	record := func(sequence uint64) attemptRecord {
+		return attemptRecord{Identity: job.Identity, SourceRef: job.Source.Head, Sequence: sequence, Kind: attemptRecordDiscussion, Text: "observed"}
+	}
+	for sequence := uint64(1); sequence <= 2; sequence++ {
+		prior := status
+		prior.Sequence, prior.LogSequence, prior.ProgressAge = sequence, sequence, 0
+		f.ack(t, "/status", httpObservation{Status: prior, Logs: []attemptRecord{record(sequence)}}, http.StatusOK, sequence)
+	}
+	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{record(3)}}, http.StatusOK, 3)
 	reject := func(name string, edit func(*Status)) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
@@ -1375,13 +1398,13 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	checkpoint("before", roleCritic, 1, reviewFull)
 	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 5, "critic", 1, reviewFull
 	status.ProgressSequence, status.ProgressAge, status.LogSequence = 5, time.Nanosecond, 4
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 5)
+	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{record(4)}}, http.StatusOK, 5)
 	reject("phase rollback", func(s *Status) { s.Phase, s.Round, s.ReviewPhase = "main", 1, "" })
 	reject("progress rollback", func(s *Status) { s.ProgressSequence-- })
 	reject("log rollback", func(s *Status) { s.LogSequence-- })
 	reject("progress age rollback", func(s *Status) { s.ProgressAge-- })
 	status.Sequence, status.ProgressAge, status.LogSequence = 6, 2*time.Nanosecond, 5
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 6)
+	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{record(5)}}, http.StatusOK, 6)
 	checkpoint("after", roleCritic, 1, reviewFull)
 	checkpoint("before", roleMain, 2, "")
 	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 7, "main", 2, ""

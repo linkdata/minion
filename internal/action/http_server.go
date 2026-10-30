@@ -21,6 +21,7 @@ import (
 type HTTPExecutor struct {
 	mu             sync.Mutex
 	executorID     string
+	workRoot       string
 	credentials    WorkerCredentials
 	credentialsSet bool
 	active         *httpTransaction
@@ -38,6 +39,7 @@ type httpTransaction struct {
 	mu           sync.Mutex
 	mutation     sync.Mutex
 	observation  sync.Mutex
+	recordSync   sync.Mutex
 	handlers     sync.WaitGroup
 	requiredACKs sync.WaitGroup
 
@@ -56,6 +58,9 @@ type httpTransaction struct {
 	stopUntil      time.Time
 	onStop         func(time.Time)
 	beforeDelivery func(Job) error
+	records        *attemptRecordStore
+	recordRoot     string
+	recordSecrets  []string
 
 	ready              bool
 	delivered          bool
@@ -92,6 +97,27 @@ func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
 		return nil, errors.New("invalid HTTP executor identity")
 	}
 	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout}, nil
+}
+
+// SetWorkRoot enables durable attempt records before the executor starts.
+func (e *HTTPExecutor) SetWorkRoot(workRoot string) error {
+	if e == nil {
+		return errors.New("HTTP executor is missing")
+	}
+	root, err := workspace.CanonicalPath(workRoot)
+	if err != nil {
+		return err
+	}
+	if err := workspace.CheckRoot(root); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.workRoot != "" || e.active != nil || e.pull || e.closed || e.unavailable {
+		return errors.New("HTTP executor work root cannot change after startup")
+	}
+	e.workRoot = root
+	return nil
 }
 
 // SetWorkerCredentials configures assignment-only credentials before the worker pulls.
@@ -157,6 +183,8 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		return result, errors.New("HTTP executor is closed, unavailable or busy")
 	}
 	tx.credentials = e.credentials
+	tx.recordRoot = e.workRoot
+	tx.recordSecrets = []string{e.credentials.CodexAPIKey, e.credentials.CodexNativeAPIKey, e.credentials.CodexAccessToken, e.credentials.ClaudeAPIKey}
 	e.active, e.status, e.statusAt = tx, Status{}, time.Time{}
 	if state != nil {
 		state.admitted = true
@@ -174,6 +202,10 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		cancel()
 		// Saves have no context. An entered fsync must drain even after control grace expires.
 		tx.handlers.Wait()
+		var recordsCloseErr error
+		if tx.records != nil {
+			recordsCloseErr = tx.records.Close()
+		}
 		if !stopWatch() {
 			<-stopWatchDone
 		}
@@ -203,6 +235,7 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 				runErr = errors.Join(runErr, tx.requiredControlErr)
 			}
 		}
+		runErr = errors.Join(runErr, recordsCloseErr)
 		quarantine := tx.quarantine
 		tx.mu.Unlock()
 		if stopCancel != nil {
@@ -571,19 +604,32 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, "status", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has no observation slot"))
 		return
 	}
+	observationLocked := true
+	defer func() {
+		if observationLocked {
+			tx.observation.Unlock()
+		}
+	}()
 	tx.mu.Lock()
 	if tx.fenced || !tx.delivered || (!tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil)) {
 		tx.mu.Unlock()
-		tx.observation.Unlock()
 		httpServerReject(w, "status", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed observation admission"))
 		return
 	}
 	tx.mu.Unlock()
+	enteredStatus := false
+	defer func() {
+		if enteredStatus {
+			tx.handlers.Done()
+		}
+	}()
 	var observation httpObservation
 	err := httpServerRead(w, r, httpControlBytes, &observation, tx)
 	status := observation.Status
 	binding := httpBinding{status.Version, status.Identity, status.SourceRef}
 	code := httpInputStatus(err)
+	var logSequence uint64
+	var appendFailed bool
 	if err == nil {
 		err = httpBindingShape(binding)
 	}
@@ -593,6 +639,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		// Execute validates the Job before an assignment can be delivered.
 		err = status.validate(tx.job)
 		if err == nil {
+			tx.recordSync.Lock()
 			e.mu.Lock()
 			tx.mu.Lock()
 			if tx.fenced || !tx.delivered || (!tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil)) {
@@ -607,25 +654,111 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 				err = status.follows(e.status, tx.job.rounds())
 			}
 			if err == nil {
-				e.status, e.statusAt = status, time.Now()
+				// Empty Status also updates e.status; Execute must drain it before clearing the transaction.
+				tx.handlers.Add(1)
+				enteredStatus = true
 			}
 			tx.mu.Unlock()
 			e.mu.Unlock()
+			if err == nil {
+				logSequence, err = tx.appendStatusLogs(status, observation.Logs, httpStatusBearerToken(r))
+				appendFailed = err != nil
+				if err == nil {
+					e.mu.Lock()
+					e.status, e.statusAt = status, time.Now()
+					e.mu.Unlock()
+				}
+			}
+			tx.recordSync.Unlock()
+			if enteredStatus {
+				tx.handlers.Done()
+				enteredStatus = false
+			}
 		}
 		if err != nil {
 			code = http.StatusConflict
+			if appendFailed && !errors.Is(err, errAttemptRecordConflict) {
+				code = http.StatusInternalServerError
+			}
 		}
 	}
 	if err == nil {
 		code = http.StatusOK
 	}
 	tx.observation.Unlock()
+	observationLocked = false
 	// Observation delivery never admits paid work or changes its sequence or outcome.
 	if err != nil {
 		httpServerReject(w, "status", code, binding, status.Sequence, err, tx)
 		return
 	}
-	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence}, tx)
+	_ = httpServerWrite(w, code, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Sequence, LogSequence: logSequence}, tx)
+}
+
+func httpStatusBearerToken(r *http.Request) string {
+	values := r.Header.Values("Authorization")
+	if len(values) != 1 || !strings.HasPrefix(values[0], "Bearer ") {
+		return ""
+	}
+	token := strings.TrimPrefix(values[0], "Bearer ")
+	if validExecutionToken(token) {
+		return token
+	}
+	return ""
+}
+
+func (tx *httpTransaction) appendStatusLogs(status Status, logs []attemptRecord, bearerToken string) (uint64, error) {
+	if tx.recordRoot == "" {
+		if status.LogSequence != 0 || len(logs) != 0 {
+			return 0, errAttemptRecordConflict
+		}
+		return 0, nil
+	}
+	if tx.records == nil && len(logs) == 0 && status.LogSequence == 0 {
+		return 0, nil
+	}
+	if tx.records == nil {
+		var err error
+		tx.records, err = openAttemptRecordStore(tx.recordRoot, tx.job.Identity, tx.job.Source.Head)
+		if err != nil {
+			return 0, err
+		}
+	}
+	highest := uint64(len(tx.records.lines))
+	if len(logs) == 0 && status.LogSequence != highest {
+		return highest, errAttemptRecordConflict
+	}
+	if len(logs) > 1 {
+		return highest, errAttemptRecordConflict
+	}
+	for _, record := range logs {
+		if record.Identity != tx.job.Identity || record.SourceRef != tx.job.Source.Head || record.Sequence == 0 ||
+			record.validateShape() != nil {
+			return highest, errAttemptRecordConflict
+		}
+	}
+	if len(logs) > 0 {
+		if logs[0].Sequence > highest+1 || status.LogSequence != logs[len(logs)-1].Sequence {
+			return highest, errAttemptRecordConflict
+		}
+	}
+	for _, record := range logs {
+		secrets := tx.recordSecrets
+		if bearerToken != "" {
+			secrets = append(secrets, bearerToken)
+		}
+		var err error
+		highest, err = tx.records.Append(record, secrets...)
+		if err != nil {
+			if tx.records.uncertain {
+				closeErr := tx.records.Close()
+				tx.records = nil
+				err = errors.Join(err, closeErr)
+			}
+			return highest, err
+		}
+	}
+	return highest, nil
 }
 
 func (tx *httpTransaction) controlDeadline() time.Time {
@@ -768,6 +901,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
+			// An entered Status save may continue after its request is canceled.
+			tx.recordSync.Lock()
+			defer tx.recordSync.Unlock()
 			var terminalResult error
 			// A successful outcome is acknowledged only after its optional parent
 			// receiver has validated and saved the complete selected attempt.

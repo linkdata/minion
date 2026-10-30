@@ -290,8 +290,11 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if checkpoints.failure == nil && (job.Critic == nil && len(result.Calls) != 0 || job.Critic != nil && result.CriticStopReason != "") {
 		jobRunner.statusUpdate("upload", 0, "")
 	}
-	outcomeErr := checkpoints.outcome(result, runErr)
-	cancelStatus() // Optional observation never holds work after the final Result upload.
+	outcomeErr := statusFeed.finish(actionCtx, transport, func() error {
+		err := checkpoints.outcome(result, runErr)
+		cancelStatus() // Keep heartbeats available throughout the final Result upload.
+		return err
+	})
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
 	if watchErr != nil {

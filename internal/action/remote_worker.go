@@ -48,6 +48,11 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	if err != nil {
 		return nil, nil, err
 	}
+	if e.WorkRoot != "" {
+		if err := executor.SetWorkRoot(e.WorkRoot); err != nil {
+			return nil, nil, err
+		}
+	}
 	credentials := WorkerCredentials{}
 	uses := func(provider string) bool {
 		return e.mainProvider() == provider || e.Adversarial == provider

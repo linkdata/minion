@@ -85,7 +85,8 @@ type httpReview struct {
 }
 
 type httpObservation struct {
-	Status Status `json:"status"`
+	Status Status          `json:"status"`
+	Logs   []attemptRecord `json:"logs,omitempty"`
 }
 
 type httpOutcome struct {
@@ -96,9 +97,10 @@ type httpOutcome struct {
 
 type httpAcknowledgement struct {
 	httpBinding
-	Sequence uint64       `json:"sequence"`
-	Kind     string       `json:"kind"`
-	Failure  *httpFailure `json:"failure,omitempty"`
+	Sequence    uint64       `json:"sequence"`
+	LogSequence uint64       `json:"log_sequence,omitempty"`
+	Kind        string       `json:"kind"`
+	Failure     *httpFailure `json:"failure,omitempty"`
 }
 
 type httpCancellation struct {
