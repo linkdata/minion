@@ -31,7 +31,6 @@ type HTTPExecutor struct {
 	changed        chan struct{}
 	outcomeGrace   time.Duration
 	status         Status
-	hasStatus      bool
 	statusAt       time.Time
 }
 
@@ -157,7 +156,7 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		return result, errors.New("HTTP executor is closed, unavailable or busy")
 	}
 	tx.credentials = e.credentials
-	e.active, e.status, e.hasStatus, e.statusAt = tx, Status{}, false, time.Time{}
+	e.active, e.status, e.statusAt = tx, Status{}, time.Time{}
 	if state != nil {
 		state.admitted = true
 	}
@@ -311,7 +310,7 @@ func (e *HTTPExecutor) Close() error {
 func (e *HTTPExecutor) Status() (Status, time.Time, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.status, e.statusAt, e.hasStatus
+	return e.status, e.statusAt, !e.statusAt.IsZero()
 }
 
 func (e *HTTPExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -589,11 +588,11 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 				err = errors.New("HTTP Status phase exceeds accepted callback facts")
 			} else if status.ProgressAge > time.Since(tx.started) {
 				err = errors.New("HTTP Status progress age exceeds elapsed action time")
-			} else if e.hasStatus {
+			} else if !e.statusAt.IsZero() {
 				err = status.follows(e.status, tx.job.rounds())
 			}
 			if err == nil {
-				e.status, e.statusAt, e.hasStatus = status, time.Now(), true
+				e.status, e.statusAt = status, time.Now()
 			}
 			tx.mu.Unlock()
 			e.mu.Unlock()
