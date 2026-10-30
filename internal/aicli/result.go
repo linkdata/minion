@@ -24,3 +24,15 @@ type StreamEvent struct {
 	Kind     string
 	Text     string
 }
+
+// PreparedInput is the exact direct invocation Minion constructed before Start.
+// It does not prove the CLI consumed the input or started successfully.
+type PreparedInput struct {
+	NativeID string
+	Mode     string
+	Path     string
+	Args     []string
+	Dir      string
+	Stdin    string
+	Schema   string
+}

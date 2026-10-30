@@ -41,16 +41,18 @@ func TestJSONLOutputStreamsOnlyCompleteKnownItems(t *testing.T) {
 		data = data[chunk:]
 	}
 	output.stream.Finish()
-	if len(got) != 8 || got[0] != (aicli.StreamEvent{Kind: "assistant"}) || got[1] != (aicli.StreamEvent{NativeID: "native-root", Kind: "assistant", Text: "complete message"}) {
+	if len(got) != 9 || got[0] != (aicli.StreamEvent{Kind: "assistant"}) ||
+		got[1] != (aicli.StreamEvent{NativeID: "native-root", Kind: "identity"}) ||
+		got[2] != (aicli.StreamEvent{NativeID: "native-root", Kind: "assistant", Text: "complete message"}) {
 		t.Fatalf("stream identity or filters: %+v", got)
 	}
-	for _, event := range got[2:] {
+	for _, event := range got[3:] {
 		if event.Kind != "tool" || event.NativeID != "native-root" || !json.Valid([]byte(event.Text)) {
 			t.Fatalf("tool was not complete native item JSON: %+v", event)
 		}
 	}
-	if !strings.Contains(got[2].Text, `"command":"go test ./..."`) || !strings.Contains(got[2].Text, `"aggregated_output":"PASS"`) ||
-		!strings.Contains(got[3].Text, `"changes":[`) || !strings.Contains(got[4].Text, `"result":"done"`) {
+	if !strings.Contains(got[3].Text, `"command":"go test ./..."`) || !strings.Contains(got[3].Text, `"aggregated_output":"PASS"`) ||
+		!strings.Contains(got[4].Text, `"changes":[`) || !strings.Contains(got[5].Text, `"result":"done"`) {
 		t.Fatalf("tool payload fields lost: %+v", got)
 	}
 	if output.threadID != "native-root" || !output.completed || output.finalMessage != "complete message" {
@@ -73,7 +75,7 @@ func TestJSONLOutputStreamGapOnceAndStopsAfterIdentityConflict(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"agent_message","text":"kept"}}` + "\n" +
 		`{"type":"thread.started","thread_id":"foreign"}` + "\n" +
 		`{"type":"item.completed","item":{"type":"agent_message","text":"after conflict"}}` + "\n"))
-	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "assistant"}, {NativeID: "expected", Kind: "assistant", Text: "kept"}}) || output.stopErr == nil {
+	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "assistant"}, {NativeID: "expected", Kind: "identity"}, {NativeID: "expected", Kind: "assistant", Text: "kept"}}) || output.stopErr == nil {
 		t.Fatalf("gap repeated, redaction escaped, or conflict emitted: got=%+v error=%v", got, output.stopErr)
 	}
 }
@@ -83,7 +85,7 @@ func TestJSONLOutputUnknownCompletedItemLeavesCoverageUnproved(t *testing.T) {
 	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
 	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" +
 		`{"type":"item.completed","item":{"type":"new_tool","result":"visible"}}` + "\n"))
-	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "unknown_item"}}) {
+	if !slices.Equal(got, []aicli.StreamEvent{{NativeID: "root", Kind: "identity"}, {Kind: "unknown_item"}}) {
 		t.Fatalf("unknown native item falsely treated as covered: %+v", got)
 	}
 }
@@ -96,7 +98,7 @@ func TestJSONLOutputMissingCompletedItemLeavesCoverageUnproved(t *testing.T) {
 		`{"type":"item.completed","item":null}` + "\n" +
 		`{"type":"item.completed","item":{"type":"agent_message","text":"known"}}` + "\n" +
 		`{"type":"turn.completed"}` + "\n"))
-	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "missing_item"}, {NativeID: "root", Kind: "assistant", Text: "known"}}) || !output.completed {
+	if !slices.Equal(got, []aicli.StreamEvent{{NativeID: "root", Kind: "identity"}, {Kind: "missing_item"}, {NativeID: "root", Kind: "assistant", Text: "known"}}) || !output.completed {
 		t.Fatalf("missing item falsely treated as covered: events=%+v complete=%t", got, output.completed)
 	}
 }
@@ -142,9 +144,9 @@ printf '%s\n' '{"type":"turn.completed"}'
 		}
 	}
 	want := []aicli.StreamEvent{
-		{NativeID: "root", Kind: "assistant", Text: "message-1"}, {NativeID: "root", Kind: "final", Text: "message-1"},
-		{NativeID: "root", Kind: "assistant", Text: "message-2"}, {NativeID: "root", Kind: "final", Text: "message-2"},
-		{NativeID: "fresh", Kind: "assistant", Text: "message-3"}, {NativeID: "fresh", Kind: "final", Text: "message-3"},
+		{NativeID: "root", Kind: "identity"}, {NativeID: "root", Kind: "assistant", Text: "message-1"}, {NativeID: "root", Kind: "final", Text: "message-1"},
+		{NativeID: "root", Kind: "identity"}, {NativeID: "root", Kind: "assistant", Text: "message-2"}, {NativeID: "root", Kind: "final", Text: "message-2"},
+		{NativeID: "fresh", Kind: "identity"}, {NativeID: "fresh", Kind: "assistant", Text: "message-3"}, {NativeID: "fresh", Kind: "final", Text: "message-3"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("native identities or final events = %+v, want %+v", got, want)
@@ -182,11 +184,12 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 				if event.Kind == "final" {
 					finals++
 				}
-				if event.NativeID != "root" || strings.Contains(event.Text, "secret-key") || !strings.Contains(event.Text, "[redacted]") {
+				if event.NativeID != "root" || strings.Contains(event.Text, "secret-key") ||
+					event.Kind != "identity" && !strings.Contains(event.Text, "[redacted]") {
 					t.Fatalf("stream credential escaped or content lost: %+v", event)
 				}
 			}
-			if (finals == 1) != test.wantFinal || len(got) != 2+finals {
+			if (finals == 1) != test.wantFinal || len(got) != 3+finals {
 				t.Fatalf("false final event or missing completed item: %+v", got)
 			}
 		})

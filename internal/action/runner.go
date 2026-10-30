@@ -326,8 +326,27 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			if configured.eventSink != nil {
+				request.onInput = func(input aicli.PreparedInput) {
+					text, unavailable := preparedInputText(input, configured.secretValues()...)
+					if unavailable != "" {
+						text = unavailableInputText(unavailable)
+					}
+					configured.eventSink(attemptRecord{Kind: attemptRecordInput, Text: text,
+						Call: strconv.Itoa(checkpoint.Ordinal), Agent: input.NativeID, Role: request.role,
+						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + ".input.prepared"})
+					if unavailable != "" {
+						// Keep the call's prepared-input gap visible and withhold coverage.
+						configured.eventSink(attemptRecord{Kind: attemptRecordDiscussion,
+							Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role, Round: request.round,
+							ReviewPhase: request.reviewPhase, EventSource: request.provider + ".input.unavailable"})
+					}
+				}
 				request.onEvent = func(event aicli.StreamEvent) {
-					configured.eventSink(attemptRecord{Kind: attemptRecordDiscussion, Text: event.Text,
+					kind := attemptRecordDiscussion
+					if event.Kind == "identity" {
+						kind = attemptRecordInput
+					}
+					configured.eventSink(attemptRecord{Kind: kind, Text: event.Text,
 						Call: strconv.Itoa(checkpoint.Ordinal), Agent: event.NativeID, Role: request.role,
 						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + "." + event.Kind})
 				}

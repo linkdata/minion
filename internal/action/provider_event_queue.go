@@ -36,7 +36,7 @@ func (q *providerEventQueue) add(event attemptRecord) {
 	if q.stopped.Load() {
 		return
 	}
-	if event.Agent == "" {
+	if event.Agent == "" && event.Kind != attemptRecordInput {
 		q.failed.Store(true)
 		return
 	}
