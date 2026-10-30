@@ -897,11 +897,15 @@ func TestRunHTTPBoundsAssignmentBodyAfterHeadersAndAllowsLongPoll(t *testing.T) 
 					t.Fatal("assignment headers did not arrive after the controlled long poll")
 				}
 				var err error
+				bodyTimeout := httpControlTimeout
+				if !negative {
+					bodyTimeout = httpTransferTimeout(httpJobBytes) // Unknown assignment length may reach the route cap.
+				}
 				select {
 				case err = <-done:
 					finished = true
-				case <-time.After(httpControlTimeout + 5*time.Second):
-					t.Fatal("assignment body outlived its 30-second transfer bound")
+				case <-time.After(bodyTimeout + 5*time.Second):
+					t.Fatalf("assignment body outlived its %s transfer bound", bodyTimeout)
 				}
 				if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, context.DeadlineExceeded) || requests.Load() != 1 || native.Load() != 0 || requestDeadline.Load() || client.Timeout != 0 {
 					t.Fatalf("body timeout changed failure, long-poll context, or caller client: error=%v requests=%d native=%d deadline=%t timeout=%s", err, requests.Load(), native.Load(), requestDeadline.Load(), client.Timeout)

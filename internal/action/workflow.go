@@ -1,6 +1,7 @@
 package action
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -181,8 +182,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 	job := Job{
 		Version: ProtocolVersion,
 		Identity: Identity{
-			// Local executor correlation label; remote transport authentication is #123 work.
-			JobID: request.ID, AttemptID: e.attemptID, ExecutorID: LocalExecutorID,
+			JobID: request.ID, AttemptID: e.attemptID, ExecutorID: cmp.Or(e.ExecutorID, LocalExecutorID),
 			Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 			Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
 			Number: request.Number, SubjectType: request.SubjectType,

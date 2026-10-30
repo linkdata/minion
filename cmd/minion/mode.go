@@ -41,6 +41,14 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		logger.Printf("reconcile issued publication before worker startup: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
+	if watcher.Config.RemoteExecutor != nil {
+		endpoint, err := attachSelectedRemoteWorker(owner, watcher)
+		if err != nil {
+			logger.Printf("start selected remote worker: %s", monitor.InertLogText(err.Error()))
+			return 1
+		}
+		return runSelectedRemoteService(ctx, owner, watcher, store, loop, logger, endpoint, readyTimeout)
+	}
 	done, closeWorker, err := attachSelectedLocalWorker(ctx, owner, watcher, path, []string{"-mode=execute"}, readyTimeout)
 	if err != nil {
 		logger.Printf("start selected worker: %s", monitor.InertLogText(err.Error()))

@@ -82,6 +82,7 @@ type httpExecutionState struct {
 	admitted       bool
 	delivered      bool
 	outcome        bool
+	pullDone       <-chan struct{}
 	onStop         func(time.Time)
 	beforeDelivery func(Job) error
 }
@@ -241,12 +242,26 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 	e.mu.Lock()
 	e.notifyLocked()
 	e.mu.Unlock()
-	select {
-	case <-tx.done:
-		return result, nil
-	case <-actionCtx.Done():
-	case <-tx.stop:
+	var pullDone <-chan struct{}
+	if state != nil {
+		pullDone = state.pullDone
 	}
+	for {
+		select {
+		case <-tx.done:
+			return result, nil
+		case <-actionCtx.Done():
+			goto stopped
+		case <-tx.stop:
+			goto stopped
+		case <-pullDone:
+			if tx.stopUndelivered(fmt.Errorf("%w: authenticated HTTP pull closed before assignment", monitor.ErrRequestTransport)) {
+				return result, nil
+			}
+			pullDone = nil // A claimed assignment remains uncertain after its pull closes.
+		}
+	}
+stopped:
 	tx.stopExecution(nil, false)
 	tx.mu.Lock()
 	delivered, transportErr, stopContext, outcome := tx.delivered, tx.transportErr, tx.stopContext, tx.outcome
@@ -622,14 +637,28 @@ func (tx *httpTransaction) controlDeadline() time.Time {
 // stopExecution begins the single control drain; a known store refusal need not cancel the worker before its error returns.
 func (tx *httpTransaction) stopExecution(err error, cancel bool) {
 	tx.mu.Lock()
-	if err != nil && tx.transportErr == nil {
-		tx.transportErr = err
+	if err != nil {
+		tx.transportErr = errors.Join(tx.transportErr, err)
 	}
 	tx.startStopLocked(false)
 	tx.mu.Unlock()
 	if cancel {
 		tx.cancel()
 	}
+}
+
+func (tx *httpTransaction) stopUndelivered(err error) bool {
+	tx.mu.Lock()
+	if tx.delivered || tx.fenced {
+		tx.mu.Unlock()
+		return false
+	}
+	tx.transportErr = errors.Join(tx.transportErr, err)
+	tx.startStopLocked(false)
+	tx.fenced = true // Serialize the refund decision with assignment claim.
+	tx.mu.Unlock()
+	tx.cancel()
+	return true
 }
 
 func (tx *httpTransaction) forceStop() {
@@ -961,8 +990,15 @@ func httpServerRead(w http.ResponseWriter, r *http.Request, limit int, value any
 	if len(encodings) > 1 || len(encodings) == 1 && encodings[0] != "" && !strings.EqualFold(strings.TrimSpace(encodings[0]), "identity") {
 		return errors.New("HTTP execution does not accept content encoding")
 	}
+	if r.ContentLength > int64(limit) {
+		return errHTTPBodyLimit
+	}
 	controller := http.NewResponseController(w)
-	deadline := httpControlDeadline(transaction)
+	size := r.ContentLength
+	if size < 0 {
+		size = int64(limit)
+	}
+	deadline := httpTransferDeadline(transaction, min(size, int64(limit)))
 	if err := controller.SetReadDeadline(deadline); err != nil {
 		return err
 	}
@@ -994,7 +1030,16 @@ func httpServerWrite(w http.ResponseWriter, status int, value any, transaction .
 }
 
 func httpControlDeadline(transaction []*httpTransaction) time.Time {
-	deadline := time.Now().Add(httpControlTimeout)
+	return httpTransferDeadline(transaction, 0)
+}
+
+// Transfer time allows one second per 64 KiB, with the control floor.
+func httpTransferTimeout(size int64) time.Duration {
+	return max(httpControlTimeout, time.Duration((size+(64<<10)-1)/(64<<10))*time.Second)
+}
+
+func httpTransferDeadline(transaction []*httpTransaction, size int64) time.Time {
+	deadline := time.Now().Add(httpTransferTimeout(size))
 	if len(transaction) != 0 {
 		if stopUntil := transaction[0].controlDeadline(); !stopUntil.IsZero() && stopUntil.Before(deadline) {
 			return stopUntil
@@ -1065,7 +1110,7 @@ func httpServerWatchReason(w http.ResponseWriter, cancellation httpCancellation,
 
 func httpServerWriteBytes(w http.ResponseWriter, status int, body []byte, transaction ...*httpTransaction) (writeErr error) {
 	controller := http.NewResponseController(w)
-	deadline := httpControlDeadline(transaction)
+	deadline := httpTransferDeadline(transaction, int64(len(body)))
 	if err := controller.SetWriteDeadline(deadline); err != nil {
 		return err
 	}

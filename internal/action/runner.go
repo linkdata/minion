@@ -31,11 +31,12 @@ import (
 var errUnsupportedEvidenceDirs = errors.New("model evidence directories must be selected by Minion")
 
 // Runner computes an action using supplied files and installed tools only.
-// Authentication belongs to this host configuration, never to Job or Result.
+// Credentials come from trusted startup data or a remote assignment, never Job or Result.
 type Runner struct {
 	Codex       config.CodexConfig
 	Claude      config.ClaudeConfig
 	selection   *WorkerSelection
+	remote      bool
 	runModel    modelCall
 	aroundModel func(context.Context, modelRun, modelCall) (aicli.Result, error)
 	Logger      *log.Logger
@@ -43,6 +44,11 @@ type Runner struct {
 	// recordReview synchronously persists borrowed evidence without mutating it.
 	recordReview func([]CallUsage, []Refutation, string) error
 	statusUpdate func(string, int, string)
+}
+
+// NewRemoteRunner validates each assignment's CLI after its credentials arrive.
+func NewRemoteRunner(workRoot string) *Runner {
+	return &Runner{WorkRoot: workRoot, remote: true}
 }
 
 func (r Runner) secretValues() []string {
@@ -134,6 +140,18 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}
 	if len(configured.Codex.ReadOnlyDirs) != 0 || len(configured.Claude.ReadOnlyDirs) != 0 {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, errUnsupportedEvidenceDirs)
+	}
+	if r.remote {
+		roles := []RoleSettings{job.Main}
+		if job.Critic != nil {
+			roles = append(roles, *job.Critic)
+		}
+		for _, role := range roles {
+			message, err := checkSelectedRoleCLI(ctx, &configured, role, true)
+			if err != nil {
+				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
+			}
+		}
 	}
 	if job.Critic != nil {
 		if err := checkpointReview(nil); err != nil {

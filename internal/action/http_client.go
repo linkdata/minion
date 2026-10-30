@@ -263,7 +263,12 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
-	startStop()
+	// A normal Runner return can still have a large Result to upload. Keep its
+	// accepted runtime and transfer bound; only a stopped action or failed
+	// required control exchange starts the short stop budget.
+	if actionCtx.Err() != nil || checkpoints.failure != nil {
+		startStop()
+	}
 	clearCredentials()
 	for _, diagnostic := range result.Diagnostics {
 		if diagnostic.Code == "cleanup_failed" {
@@ -366,9 +371,16 @@ func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte
 		return nil, failure(err)
 	}
 	if pullCancel != nil {
-		// The assignment wait is unbounded; only its received body uses control time.
+		// The assignment wait is unbounded; size bounds only its received body.
 		cancel, done := pullCancel, make(chan struct{})
-		timer := time.AfterFunc(httpControlTimeout, func() {
+		size := response.ContentLength
+		if size < 0 {
+			size = httpJobBytes
+		}
+		if response.StatusCode != http.StatusOK {
+			size = 0 // A rejection carries only a control acknowledgement.
+		}
+		timer := time.AfterFunc(httpTransferTimeout(min(size, httpJobBytes)), func() {
 			cancel(context.DeadlineExceeded)
 			close(done)
 		})
@@ -437,7 +449,7 @@ func (c *httpExecutionClient) watch(ctx context.Context, response *http.Response
 }
 
 func (c *httpClientCheckpoints) acknowledge(parent context.Context, kind string, data []byte, sequence uint64) error {
-	ctx, cancel := context.WithTimeout(parent, httpControlTimeout)
+	ctx, cancel := context.WithTimeout(parent, httpTransferTimeout(int64(len(data)))+httpControlTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return httpClientUnknown(kind, err)

@@ -118,7 +118,7 @@ type Monitor struct {
 	Logger                 *log.Logger
 	Now                    func() time.Time
 	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
-	SelectedExecutorID     string          // Nonempty only while a selected local worker owns actions.
+	SelectedExecutorID     string          // Nonempty only while a selected worker owns actions.
 	afterSelectedRunReturn func()          // Test seam after the worker's terminal decision.
 	afterInvitationCheck   func()          // Test seam after the invitation context check.
 }
@@ -938,6 +938,12 @@ func (m *Monitor) availableCommands(repo config.Repository) map[string]command.A
 		}
 		mapping, ok := m.Config.Commands[name]
 		if !ok {
+			continue
+		}
+		if m.Config.RemoteExecutor != nil {
+			if mapping.SupportsProvider(m.Config.Main) {
+				available[name] = command.Action(mapping.Action)
+			}
 			continue
 		}
 		installed, err := m.Config.CommandInstalled(name)
@@ -2606,7 +2612,7 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 	failureErr := fmt.Errorf("%s from %s: %w", job.Command.Action, itemLocation(job.Source), err)
 	publicationFailure := errors.Is(err, ErrPostModelPublication)
 	outcomeUnknown := errors.Is(err, ErrExecutionOutcomeUnknown)
-	if !accepted.Assigned && !failure.ModelCallStarted && !outcomeUnknown && !publicationFailure &&
+	if m.Config.RemoteExecutor == nil && !accepted.Assigned && !failure.ModelCallStarted && !outcomeUnknown && !publicationFailure &&
 		!errors.Is(err, ErrTerminalJob) && time.Now().Before(job.Deadline) {
 		installed, _ := m.Config.CommandInstalled(job.Command.Name)
 		if !installed {

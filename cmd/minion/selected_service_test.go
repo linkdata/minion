@@ -741,6 +741,27 @@ func (*unavailableSelectedHandler) Execute(context.Context, monitor.Job) error {
 	return errors.New("unavailable worker received a Job")
 }
 
+type canceledRemoteHandler struct{ cancel context.CancelFunc }
+
+func (h canceledRemoteHandler) WaitCapacity(context.Context) error {
+	h.cancel()
+	return action.ErrRemoteWorkerUnavailable
+}
+
+func (canceledRemoteHandler) Execute(context.Context, monitor.Job) error {
+	return errors.New("canceled remote worker received a Job")
+}
+
+func TestSelectedRemoteServiceSignalWinsConcurrentWorkerLoss(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := &monitor.Monitor{Handler: canceledRemoteHandler{cancel: cancel}, SelectedExecutorID: "remote"}
+	store := serviceStore(t, state.Data{NextInviteCheckAt: time.Now().Add(time.Hour)})
+	if code := runMonitorLoop(ctx, watcher, store, true, make(chan struct{}), log.New(io.Discard, "", 0), false); code != 0 {
+		t.Fatalf("concurrent signal and remote loss exited %d, want clean shutdown", code)
+	}
+}
+
 func TestSelectedLocalServiceStopsAfterWorkerLoss(t *testing.T) {
 	handler := &unavailableSelectedHandler{}
 	watcher := &monitor.Monitor{Handler: handler, SelectedExecutorID: action.LocalExecutorID}
@@ -800,7 +821,7 @@ func TestSelectedLocalServiceStopsDuringScheduledSleep(t *testing.T) {
 		synctest.Wait()
 		select {
 		case code := <-result:
-			if code != 1 || closed != 1 || !time.Now().Before(store.Data.NextPollAt) || !strings.Contains(logs.String(), "selected local worker exited") {
+			if code != 1 || closed != 1 || !time.Now().Before(store.Data.NextPollAt) || !strings.Contains(logs.String(), "selected worker exited") {
 				t.Fatalf("child exit did not interrupt the poll sleep: code=%d closed=%d now=%s next=%s logs=%q", code, closed, time.Now(), store.Data.NextPollAt, logs.String())
 			}
 		default:

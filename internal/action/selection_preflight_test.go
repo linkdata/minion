@@ -205,7 +205,7 @@ exit 99
 	}
 }
 
-func TestPreflightSelectionRejectsClaudeModelAlias(t *testing.T) {
+func TestPreflightSelectionKeepsLocalClaudePinnedButAcceptsRemoteAlias(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake Claude CLI uses a POSIX shell")
 	}
@@ -260,6 +260,10 @@ fi
 	}
 	if err := runner.PreflightSelection(t.Context()); err != nil {
 		t.Fatalf("resolved Claude model failed preflight: %v", err)
+	}
+	selected.Main.Model = "default"
+	if message, err := checkSelectedRoleCLI(t.Context(), runner, selected.Main, true); err != nil || message != "" {
+		t.Fatalf("remote Claude alias failed CLI validation: message=%q error=%v", message, err)
 	}
 }
 

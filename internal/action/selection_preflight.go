@@ -144,38 +144,44 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 		roles = append(roles, *r.selection.Critic)
 	}
 	for _, role := range roles {
-		switch role.Provider {
-		case "codex":
-			settings := configured.Codex
-			settings.Model, settings.ReasoningEffort = role.Model, role.Effort
-			message = preflightCodexLoginUnavailable
-			if err := codexcli.CheckLogin(ctx, settings); err != nil {
-				return fmt.Errorf("codex login: %w", err)
-			}
-			message = preflightCodexBoundaryUnavailable
-			if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
-				return fmt.Errorf("codex instruction boundary: %w", err)
-			}
-			message = preflightCodexInvocationUnsupported
-			validated, err := codexcli.Validate(ctx, settings)
-			if err != nil {
-				return fmt.Errorf("codex settings: %w", err)
-			}
-			if validated.Model != role.Model || validated.ReasoningEffort != role.Effort {
-				return errors.New("selected Codex model or effort was not resolved at startup")
-			}
-		case "claude":
-			settings := configured.Claude
-			settings.Model, settings.Effort = role.Model, role.Effort
-			message = preflightClaudeSettingsUnavailable
-			validated, err := claudecli.Validate(ctx, settings)
-			if err != nil {
-				return fmt.Errorf("claude settings: %w", err)
-			}
-			if validated.Model != role.Model || validated.Effort != role.Effort {
-				return errors.New("selected Claude model or effort was not resolved at startup")
-			}
+		message, err = checkSelectedRoleCLI(ctx, &configured, role, false)
+		if err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings, allowClaudeAlias bool) (string, error) {
+	switch role.Provider {
+	case "codex":
+		settings := configured.Codex
+		settings.Model, settings.ReasoningEffort = role.Model, role.Effort
+		if err := codexcli.CheckLogin(ctx, settings); err != nil {
+			return preflightCodexLoginUnavailable, fmt.Errorf("codex login: %w", err)
+		}
+		if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
+			return preflightCodexBoundaryUnavailable, fmt.Errorf("codex instruction boundary: %w", err)
+		}
+		validated, err := codexcli.Validate(ctx, settings)
+		if err != nil {
+			return preflightCodexInvocationUnsupported, fmt.Errorf("codex settings: %w", err)
+		}
+		if validated.Model != role.Model || validated.ReasoningEffort != role.Effort {
+			return preflightCodexInvocationUnsupported, errors.New("selected Codex model or effort was not resolved at startup")
+		}
+	case "claude":
+		settings := configured.Claude
+		settings.Model, settings.Effort = role.Model, role.Effort
+		validated, err := claudecli.Validate(ctx, settings)
+		if err != nil {
+			return preflightClaudeSettingsUnavailable, fmt.Errorf("claude settings: %w", err)
+		}
+		if validated.Effort != role.Effort || !allowClaudeAlias && validated.Model != role.Model {
+			return preflightClaudeSettingsUnavailable, errors.New("selected Claude model or effort was not resolved at startup")
+		}
+	default:
+		return preflightSelectionUnavailable, errors.New("unsupported action provider")
+	}
+	return "", nil
 }

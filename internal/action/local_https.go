@@ -19,14 +19,14 @@ import (
 	"time"
 )
 
-const localExecutionConnectionLimit = 16
+const executionConnectionLimit = 16
 
-type boundedLocalListener struct {
+type boundedExecutionListener struct {
 	net.Listener
 	slots chan struct{}
 }
 
-func (l *boundedLocalListener) Accept() (net.Conn, error) {
+func (l *boundedExecutionListener) Accept() (net.Conn, error) {
 	for {
 		connection, err := l.Listener.Accept()
 		if err != nil {
@@ -34,20 +34,20 @@ func (l *boundedLocalListener) Accept() (net.Conn, error) {
 		}
 		select {
 		case l.slots <- struct{}{}:
-			return &boundedLocalConn{Conn: connection, slots: l.slots}, nil
+			return &boundedExecutionConn{Conn: connection, slots: l.slots}, nil
 		default:
 			_ = connection.Close()
 		}
 	}
 }
 
-type boundedLocalConn struct {
+type boundedExecutionConn struct {
 	net.Conn
 	slots     chan struct{}
 	closeOnce sync.Once
 }
 
-func (c *boundedLocalConn) Close() error {
+func (c *boundedExecutionConn) Close() error {
 	err := c.Conn.Close()
 	c.closeOnce.Do(func() { <-c.slots })
 	return err
@@ -79,17 +79,36 @@ func (a LocalEndpointAccess) validate() error {
 	if _, err := x509.ParseCertificate(a.Certificate); err != nil {
 		return fmt.Errorf("local worker endpoint certificate: %w", err)
 	}
-	token, err := base64.RawURLEncoding.DecodeString(a.Token)
-	if err != nil || len(token) != 32 || base64.RawURLEncoding.EncodeToString(token) != a.Token {
+	if !validExecutionToken(a.Token) {
 		return errors.New("local worker endpoint token is invalid")
 	}
 	return nil
 }
 
+func validExecutionToken(token string) bool {
+	decoded, err := base64.RawURLEncoding.DecodeString(token)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == token
+}
+
+func authenticatedExecutionHandler(executor *HTTPExecutor, token string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values := r.Header.Values("Authorization")
+		want := "Bearer " + token
+		if len(values) != 1 || len(values[0]) != len(want) || subtle.ConstantTimeCompare([]byte(values[0]), []byte(want)) != 1 {
+			// Reject from headers before any protocol body is decoded.
+			w.Header().Set("Connection", "close")
+			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		executor.ServeHTTP(w, r)
+	})
+}
+
 // LocalEndpoint serves the existing bounded HTTP protocol on one private TLS origin.
 type LocalEndpoint struct {
 	executor  *HTTPExecutor
-	listener  *boundedLocalListener
+	listener  *boundedExecutionListener
 	server    *http.Server
 	access    LocalEndpointAccess
 	serveDone chan struct{}
@@ -137,18 +156,7 @@ func ListenLocalExecution(executor *HTTPExecutor) (*LocalEndpoint, error) {
 		return nil, errors.Join(err, listener.Close())
 	}
 	server := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			values := r.Header.Values("Authorization")
-			want := "Bearer " + access.Token
-			if len(values) != 1 || len(values[0]) != len(want) || subtle.ConstantTimeCompare([]byte(values[0]), []byte(want)) != 1 {
-				// Reject from headers: a foreign local process must not reach protocol decoding or hold body drain.
-				w.Header().Set("Connection", "close")
-				_ = http.NewResponseController(w).SetReadDeadline(time.Now())
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			executor.ServeHTTP(w, r)
-		}),
+		Handler:           authenticatedExecutionHandler(executor, access.Token),
 		ReadHeaderTimeout: httpControlTimeout,
 		MaxHeaderBytes:    httpControlBytes,
 		TLSConfig: &tls.Config{
@@ -157,7 +165,7 @@ func ListenLocalExecution(executor *HTTPExecutor) (*LocalEndpoint, error) {
 		},
 	}
 	e := &LocalEndpoint{
-		executor: executor, listener: &boundedLocalListener{Listener: listener, slots: make(chan struct{}, localExecutionConnectionLimit)},
+		executor: executor, listener: &boundedExecutionListener{Listener: listener, slots: make(chan struct{}, executionConnectionLimit)},
 		server: server, access: access, serveDone: make(chan struct{}),
 	}
 	go func() {
@@ -209,15 +217,15 @@ func (e *LocalEndpoint) closeUntil(until time.Time) error {
 	return e.closeErr
 }
 
-type localAuthenticatedTransport struct {
+type authenticatedExecutionTransport struct {
 	*http.Transport
 	host  string
 	token string
 }
 
-func (t *localAuthenticatedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+func (t *authenticatedExecutionTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	if request.URL.Scheme != "https" || request.URL.Host != t.host || request.URL.User != nil {
-		return nil, errors.New("local execution client refused another origin")
+		return nil, errors.New("execution client refused another origin")
 	}
 	copy := request.Clone(request.Context())
 	copy.Header.Set("Authorization", "Bearer "+t.token)
@@ -233,7 +241,7 @@ func NewLocalExecutionClient(access LocalEndpointAccess) (*http.Client, error) {
 	roots := x509.NewCertPool()
 	roots.AddCert(certificate)
 	u, _ := url.Parse(access.BaseURL)
-	transport := &localAuthenticatedTransport{
+	transport := &authenticatedExecutionTransport{
 		Transport: &http.Transport{
 			TLSClientConfig:    &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots, ServerName: "127.0.0.1"},
 			DisableCompression: true,

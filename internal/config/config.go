@@ -1,14 +1,17 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -93,6 +96,15 @@ type Repository struct {
 	AllowedActorIDs map[string]int64 `json:"allowed_actor_ids,omitempty"`
 }
 
+// RemoteExecutorConfig serves one configured worker over authenticated HTTPS.
+type RemoteExecutorConfig struct {
+	ExecutorID  string `json:"executor_id"`
+	Listen      string `json:"listen"`
+	TLSCertFile string `json:"tls_cert_file"`
+	TLSKeyFile  string `json:"tls_key_file"`
+	Token       string `json:"token"`
+}
+
 // CodexConfig contains authentication, model settings, and job skill paths.
 type CodexConfig struct {
 	Model           string `json:"model,omitempty"`
@@ -167,10 +179,11 @@ type Config struct {
 	// Main selects codex or claude; an empty value selects codex.
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects the other provider as a read-only critic.
-	Adversarial    string         `json:"adversarial,omitempty"`
-	CriticStopping CriticStopping `json:"critic_stopping"`
-	Codex          CodexConfig    `json:"codex,omitempty"`
-	Claude         ClaudeConfig   `json:"claude,omitempty"`
+	Adversarial    string                `json:"adversarial,omitempty"`
+	CriticStopping CriticStopping        `json:"critic_stopping"`
+	Codex          CodexConfig           `json:"codex,omitempty"`
+	Claude         ClaudeConfig          `json:"claude,omitempty"`
+	RemoteExecutor *RemoteExecutorConfig `json:"remote_executor,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
@@ -281,6 +294,36 @@ func (c *Config) Validate(configDir string) error {
 	c.Claude.Effort = strings.TrimSpace(c.Claude.Effort)
 	if !validModelSetting(c.Claude.Model) || !validModelSetting(c.Claude.Effort) {
 		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
+	}
+	if remote := c.RemoteExecutor; remote != nil {
+		if !workspace.ValidIdentitySegment(remote.ExecutorID) {
+			return errors.New("remote_executor.executor_id is invalid")
+		}
+		_, port, err := net.SplitHostPort(remote.Listen)
+		if err != nil {
+			return fmt.Errorf("remote_executor.listen: %w", err)
+		}
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return errors.New("remote_executor.listen requires a numeric port from 1 to 65535")
+		}
+		if remote.TLSCertFile == "" || remote.TLSKeyFile == "" {
+			return errors.New("remote_executor.tls_cert_file and tls_key_file are required")
+		}
+		if !filepath.IsAbs(remote.TLSCertFile) {
+			remote.TLSCertFile = filepath.Join(configDir, remote.TLSCertFile)
+		}
+		if !filepath.IsAbs(remote.TLSKeyFile) {
+			remote.TLSKeyFile = filepath.Join(configDir, remote.TLSKeyFile)
+		}
+		token, err := base64.RawURLEncoding.DecodeString(remote.Token)
+		if err != nil || len(token) != 32 || base64.RawURLEncoding.EncodeToString(token) != remote.Token {
+			return errors.New("remote_executor.token must be 32 bytes in unpadded base64url")
+		}
+		if (c.Main == "codex" || c.Adversarial == "codex") && (c.Codex.Model == "" || c.Codex.ReasoningEffort == "") ||
+			(c.Main == "claude" || c.Adversarial == "claude") && (c.Claude.Model == "" || c.Claude.Effort == "") {
+			return errors.New("remote_executor requires explicit model and effort for each selected provider")
+		}
 	}
 	if c.AlwaysOnSkills == nil {
 		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}
