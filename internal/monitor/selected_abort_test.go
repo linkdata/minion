@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
@@ -11,9 +12,9 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func selectedAbortFixture(t *testing.T) (*Monitor, *state.Store, Job, *fakeGitHub, time.Time) {
+func selectedAbortFixture(t *testing.T) (*Monitor, *state.Store, Job, *fakeGitHub, time.Time, string) {
 	t.Helper()
-	m, store, job, gh, _ := assignmentValidationFixture(t)
+	m, store, job, gh, path := assignmentValidationFixture(t)
 	now := time.Now().UTC()
 	job.AcceptedAt, job.Deadline = now, now.Add(time.Second)
 	store.Data.Accepted.AcceptedAt = job.AcceptedAt
@@ -21,7 +22,7 @@ func selectedAbortFixture(t *testing.T) (*Monitor, *state.Store, Job, *fakeGitHu
 	store.Data.Accepted.Assigned = true
 	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
 	m.Now = time.Now
-	return m, store, job, gh, now
+	return m, store, job, gh, now, path
 }
 
 func TestSelectedCancelAfterAmbiguousResultSaveIsDurable(t *testing.T) {
@@ -109,7 +110,7 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 	for _, check := range []string{"initial", "after terminal notification"} {
 		t.Run(check, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				m, store, job, gh, now := selectedAbortFixture(t)
+				m, store, job, gh, now, path := selectedAbortFixture(t)
 				repositoryChecks := 0
 				if check == "initial" {
 					store.Data.NextInviteCheckAt = now
@@ -136,6 +137,12 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 					time.Sleep(2 * time.Second)
 				}
 				release := make(chan struct{})
+				released := false
+				defer func() {
+					if !released {
+						close(release)
+					}
+				}()
 				run := func(ctx context.Context, _ Job) error {
 					<-ctx.Done()
 					<-release // Keep abort on the unfinished-worker path.
@@ -149,11 +156,33 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 				<-listed
 				time.Sleep(2 * time.Second)
 				synctest.Wait()
-				if got := store.Data.TerminalDecisions[job.ID].Outcome; got != "expired" {
-					t.Fatalf("deadline did not decide expiry before worker cleanup: %q", got)
+				decision := store.Data.TerminalDecisions[job.ID]
+				if decision.AttemptID != job.AttemptID || decision.Outcome != "expired" ||
+					store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID ||
+					store.Data.Accepted.AttemptID != job.AttemptID || !store.Data.Accepted.Terminal ||
+					!store.Data.Processed[job.ID].IsZero() {
+					t.Fatalf("deadline did not retain terminal reservation before worker cleanup: state=%+v", store.Data)
+				}
+				stateBytes, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var saved state.Data
+				if err := json.Unmarshal(stateBytes, &saved); err != nil {
+					t.Fatal(err)
+				}
+				if saved.TerminalDecisions[job.ID] != decision || saved.Accepted == nil ||
+					saved.Accepted.JobID != job.ID || saved.Accepted.AttemptID != job.AttemptID || !saved.Accepted.Terminal {
+					t.Fatalf("deadline decision was not durable before worker cleanup: state=%+v", saved)
+				}
+				select {
+				case err := <-finished:
+					t.Fatalf("selected monitor returned before worker cleanup: %v", err)
+				default:
 				}
 				close(release)
-				err := <-finished
+				released = true
+				err = <-finished
 				if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrAcceptanceState) ||
 					store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || listCalls != 1 ||
 					(check == "after terminal notification" && repositoryChecks == 0) {
@@ -166,7 +195,7 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 
 func TestSelectedDiscardDuringInvitationDeadlineDoesNotBecomeStateFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m, store, job, gh, now := selectedAbortFixture(t)
+		m, store, job, gh, now, _ := selectedAbortFixture(t)
 		store.Data.NextInviteCheckAt = now
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -207,7 +236,7 @@ func TestSelectedDiscardDuringInvitationDeadlineDoesNotBecomeStateFailure(t *tes
 
 func TestSelectedCompletedRetryDuringInvitationDeadlineExpires(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m, store, job, gh, now := selectedAbortFixture(t)
+		m, store, job, gh, now, _ := selectedAbortFixture(t)
 		store.Data.NextInviteCheckAt = now
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -233,7 +262,7 @@ func TestSelectedCompletedRetryDuringInvitationDeadlineExpires(t *testing.T) {
 
 func TestSelectedInvitationStateFailureRemainsFatal(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m, store, job, _, now := selectedAbortFixture(t)
+		m, store, job, _, now, _ := selectedAbortFixture(t)
 		store.Data.NextInviteCheckAt = now
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -254,7 +283,7 @@ func TestSelectedInvitationStateFailureRemainsFatal(t *testing.T) {
 
 func TestSelectedSavedResultDoesNotHideInvitationStateFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		m, store, job, gh, now := selectedAbortFixture(t)
+		m, store, job, gh, now, _ := selectedAbortFixture(t)
 		store.Data.NextInviteCheckAt = now
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
