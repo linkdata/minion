@@ -64,6 +64,7 @@ type attemptRecordStore struct {
 	identity     Identity
 	sourceRef    string
 	limit        int64
+	eventLimit   int // Tests may reduce the fixed logical-event cap.
 	size         int64
 	lines        []attemptRecordLine
 	stop         bool
@@ -119,7 +120,7 @@ func openAttemptRecordStoreWithLimit(workRoot string, identity Identity, sourceR
 	if !info.Mode().IsRegular() || info.Size() > limit {
 		return nil, fmt.Errorf("%w: attempt record file is not regular or exceeds cap", errAttemptRecordConflict)
 	}
-	store := &attemptRecordStore{file: file, identity: identity, sourceRef: sourceRef, limit: limit}
+	store := &attemptRecordStore{file: file, identity: identity, sourceRef: sourceRef, limit: limit, eventLimit: maxAttemptEventBytes}
 	store.writeAt, store.syncFile = file.WriteAt, file.Sync
 	store.stopSpace = store.markerSpace(attemptRecordStop)
 	store.coverSpace = store.markerSpace(attemptRecordCoverage)
@@ -192,7 +193,7 @@ func (r attemptRecord) validateShape() error {
 
 func (s *attemptRecordStore) validateFragment(record attemptRecord) error {
 	if record.Kind != attemptRecordStop && record.Kind != attemptRecordCoverage &&
-		(record.More || s.fragment.More) && len(s.fragmentText)+len(record.Text) > maxAttemptEventBytes {
+		(record.More || s.fragment.More) && len(s.fragmentText)+len(record.Text) > s.eventLimit {
 		return errAttemptRecordsFull
 	}
 	if !s.fragment.More {

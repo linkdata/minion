@@ -23,7 +23,6 @@ type workerStatus struct {
 	pending    *attemptRecord
 	supplied   bool
 	incomplete bool
-	continued  bool
 	closed     bool
 }
 
@@ -132,6 +131,9 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	if event.Kind == attemptRecordStop || event.Kind == attemptRecordCoverage {
 		return fail(errors.New("HTTP status log event cannot be a marker"))
 	}
+	if event.More {
+		return fail(errors.New("HTTP status log event must be assembled before transport"))
+	}
 	if !utf8.ValidString(event.Text) {
 		return fail(errors.New("HTTP status log event is not valid UTF-8"))
 	}
@@ -176,7 +178,7 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 		}
 		remaining = remaining[len(part):]
 		record := event
-		record.Text, record.More, record.Sequence = part, len(remaining) != 0 || event.More, s.ack+1
+		record.Text, record.More, record.Sequence = part, len(remaining) != 0, s.ack+1
 		if err := record.validateShape(); err != nil {
 			return fail(err)
 		}
@@ -188,7 +190,6 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 			}
 		}
 		if len(remaining) == 0 {
-			s.continued = event.More
 			return nil
 		}
 	}
@@ -214,7 +215,7 @@ func (s *workerStatus) drain(ctx context.Context, transport *httpExecutionClient
 			return err
 		}
 	}
-	if s.incomplete || s.continued {
+	if s.incomplete {
 		return errors.New("HTTP status log coverage is incomplete")
 	}
 	marker := attemptRecord{Identity: s.value.Identity, SourceRef: s.value.SourceRef,

@@ -649,3 +649,49 @@ func TestAttemptRecordsRejectLongEncodedCredentialAcrossFragments(t *testing.T) 
 		t.Fatalf("rejected fragment changed durable highwater: bytes=%d error=%v", len(saved), err)
 	}
 }
+
+func TestAttemptRecordsLogicalEventCapAcrossReopen(t *testing.T) {
+	const capBytes = 1000
+	for _, test := range []struct {
+		name       string
+		finalBytes int
+		wantFull   bool
+	}{
+		{"exact cap", 500, false},
+		{"one byte over", 501, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := openAttemptFixture(t, root)
+			store.eventLimit = capBytes
+			first := attemptRecordFixture(1, attemptRecordDiscussion, strings.Repeat("x", 500))
+			first.Call, first.More = "call-1", true
+			if ack, err := store.Append(first); err != nil || ack != 1 {
+				t.Fatalf("first fragment: ack=%d error=%v", ack, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openAttemptFixture(t, root)
+			store.eventLimit = capBytes
+			last := attemptRecordFixture(2, attemptRecordDiscussion, strings.Repeat("y", test.finalBytes))
+			last.Call = first.Call
+			ack, err := store.Append(last)
+			if test.wantFull {
+				if ack != 0 || !errors.Is(err, errAttemptRecordsFull) {
+					t.Fatalf("over-cap fragment: ack=%d error=%v", ack, err)
+				}
+			} else if ack != 2 || err != nil {
+				t.Fatalf("exact-cap fragment: ack=%d error=%v", ack, err)
+			}
+			path := filepath.Join(root, "attempt-records", "attempt.jsonl")
+			wantLines := 2
+			if test.wantFull {
+				wantLines = 1
+			}
+			if saved, err := os.ReadFile(path); err != nil || bytes.Count(saved, []byte{'\n'}) != wantLines {
+				t.Fatalf("durable highwater after cap check: lines=%d error=%v", bytes.Count(saved, []byte{'\n'}), err)
+			}
+		})
+	}
+}

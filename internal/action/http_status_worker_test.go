@@ -208,33 +208,24 @@ func TestWorkerStatusSplitsRedactedUTF8BeforeTransit(t *testing.T) {
 	}
 }
 
-func TestWorkerStatusOpenContinuationDoesNotClaimCoverage(t *testing.T) {
+func TestWorkerStatusRejectsProducerContinuation(t *testing.T) {
 	job := testJob(command.Comment)
-	var records []attemptRecord
-	client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-		var observation httpObservation
-		if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
-			return nil, err
-		}
-		records = append(records, observation.Logs...)
-		ack, err := httpEncode(httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status",
-			Sequence: observation.Status.Sequence, LogSequence: observation.Logs[0].Sequence}, httpControlBytes)
-		if err != nil {
-			return nil, err
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
+	requests := 0
+	client := &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected Status request")
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
 	status := newWorkerStatus(job)
-	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "partial", More: true}); err != nil {
-		t.Fatal(err)
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "partial", More: true}); err == nil {
+		t.Fatal("producer fragment was sent before assembly")
 	}
 	if err := status.drain(t.Context(), transport); err == nil {
 		t.Fatal("open continuation produced coverage")
 	}
-	if len(records) != 1 || records[0].Kind != attemptRecordDiscussion {
-		t.Fatalf("open continuation records = %+v", records)
+	if requests != 0 {
+		t.Fatalf("producer fragment sent %d Status requests", requests)
 	}
 }
 
