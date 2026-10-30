@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -21,6 +22,7 @@ const (
 	maxAttemptRecordTextBytes       = 16 << 10
 	maxAttemptMarkerTextBytes       = 256
 	maxAttemptRecordLineBytes       = maxAttemptRecordTextBytes*6 + 4096
+	maxAttemptEventBytes            = aicli.MaxEventBytes
 )
 
 const (
@@ -58,20 +60,21 @@ type attemptRecordLine struct {
 }
 
 type attemptRecordStore struct {
-	file       *os.File
-	identity   Identity
-	sourceRef  string
-	limit      int64
-	size       int64
-	lines      []attemptRecordLine
-	stop       bool
-	coverage   bool
-	fragment   attemptRecord
-	stopSpace  int64
-	coverSpace int64
-	uncertain  bool
-	writeAt    func([]byte, int64) (int, error)
-	syncFile   func() error
+	file         *os.File
+	identity     Identity
+	sourceRef    string
+	limit        int64
+	size         int64
+	lines        []attemptRecordLine
+	stop         bool
+	coverage     bool
+	fragment     attemptRecord
+	fragmentText string
+	stopSpace    int64
+	coverSpace   int64
+	uncertain    bool
+	writeAt      func([]byte, int64) (int, error)
+	syncFile     func() error
 }
 
 func openAttemptRecordStore(workRoot string, identity Identity, sourceRef string) (*attemptRecordStore, error) {
@@ -188,6 +191,10 @@ func (r attemptRecord) validateShape() error {
 }
 
 func (s *attemptRecordStore) validateFragment(record attemptRecord) error {
+	if record.Kind != attemptRecordStop && record.Kind != attemptRecordCoverage &&
+		(record.More || s.fragment.More) && len(s.fragmentText)+len(record.Text) > maxAttemptEventBytes {
+		return errAttemptRecordsFull
+	}
 	if !s.fragment.More {
 		return nil
 	}
@@ -204,6 +211,11 @@ func (s *attemptRecordStore) validateFragment(record attemptRecord) error {
 func (s *attemptRecordStore) noteFragment(record attemptRecord) {
 	if record.Kind == attemptRecordStop || record.Kind == attemptRecordCoverage {
 		return
+	}
+	if record.More {
+		s.fragmentText += record.Text
+	} else {
+		s.fragmentText = ""
 	}
 	s.fragment = record
 	s.fragment.Text = ""
@@ -333,8 +345,23 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 		}
 		return highest, nil
 	}
-	if record.Sequence != highest+1 || s.coverage || record.Kind == attemptRecordStop && s.stop || s.validateFragment(record) != nil {
+	if record.Sequence != highest+1 || s.coverage || record.Kind == attemptRecordStop && s.stop {
 		return 0, errAttemptRecordConflict
+	}
+	if err := s.validateFragment(record); err != nil {
+		return 0, err
+	}
+	if s.fragment.More && record.Kind != attemptRecordStop {
+		joinedText := s.fragmentText + record.Text
+		joinedJSON, err := json.Marshal(joinedText)
+		if err != nil {
+			return 0, err
+		}
+		for _, secret := range secrets {
+			if secret != "" && (containsConfiguredKey([]byte(joinedText), secret) || containsConfiguredKey(joinedJSON, secret)) {
+				return 0, errors.New("attempt record continuation retains a configured credential")
+			}
+		}
 	}
 	reserve := int64(0)
 	if !s.stop && record.Kind != attemptRecordStop {

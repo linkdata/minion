@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -572,5 +573,79 @@ func TestAttemptRecordsCoverageRequiresFinishedContinuation(t *testing.T) {
 	}
 	if ack, err := store.Append(attemptRecordFixture(3, attemptRecordCoverage, "")); err != nil || ack != 3 {
 		t.Fatalf("complete fragments lacked coverage: ack=%d error=%v", ack, err)
+	}
+}
+
+func TestAttemptRecordsRejectCredentialJoinedAcrossFragments(t *testing.T) {
+	for _, test := range []struct {
+		name, secret, first, second string
+	}{
+		{"literal", "fixture-secret-123", "fixture-", "secret-123"},
+		{"HTML encoded", "alpha&beta", "alpha&am", "p;beta"},
+		{"JSON escaped", "u003cx", "<", "x"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := openAttemptFixture(t, root)
+			first := attemptRecordFixture(1, attemptRecordDiscussion, test.first)
+			first.Call, first.More = "call-1", true
+			if ack, err := store.Append(first, test.secret); err != nil || ack != 1 {
+				t.Fatalf("first fragment: ack=%d error=%v", ack, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openAttemptFixture(t, root) // Recover the fragment tail from saved JSONL.
+			second := attemptRecordFixture(2, attemptRecordDiscussion, test.second)
+			second.Call = first.Call
+			if ack, err := store.Append(second, test.secret); ack != 0 || err == nil {
+				t.Fatalf("joined credential was acknowledged: ack=%d error=%v", ack, err)
+			}
+			path := filepath.Join(root, "attempt-records", "attempt.jsonl")
+			if saved, err := os.ReadFile(path); err != nil || bytes.Count(saved, []byte{'\n'}) != 1 || bytes.Contains(saved, []byte(test.secret)) {
+				t.Fatalf("rejected fragment was retained: data=%q error=%v", saved, err)
+			}
+			second.Text = "safe continuation"
+			if ack, err := store.Append(second, test.secret); err != nil || ack != 2 {
+				t.Fatalf("safe continuation after rejection: ack=%d error=%v", ack, err)
+			}
+		})
+	}
+}
+
+func TestAttemptRecordsRejectLongEncodedCredentialAcrossFragments(t *testing.T) {
+	encoded := "&#x" + strings.Repeat("0", 150000) + "41;&#x42;"
+	if got := html.UnescapeString(encoded); got != "AB" {
+		t.Fatalf("fixture does not decode to configured key: %q", got)
+	}
+	root := t.TempDir()
+	store := openAttemptFixture(t, root)
+	var sequence uint64 = 1
+	for len(encoded) != 0 {
+		part := encoded[:min(len(encoded), maxAttemptRecordTextBytes)]
+		encoded = encoded[len(part):]
+		record := attemptRecordFixture(sequence, attemptRecordDiscussion, part)
+		record.Call, record.More = "call-1", len(encoded) != 0
+		ack, err := store.Append(record, "AB")
+		if len(encoded) == 0 {
+			if ack != 0 || err == nil {
+				t.Fatalf("completed encoded credential was acknowledged: ack=%d error=%v", ack, err)
+			}
+			break
+		}
+		if ack != sequence || err != nil {
+			t.Fatalf("prefix fragment %d: ack=%d error=%v", sequence, ack, err)
+		}
+		if sequence == 3 {
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openAttemptFixture(t, root)
+		}
+		sequence++
+	}
+	path := filepath.Join(root, "attempt-records", "attempt.jsonl")
+	if saved, err := os.ReadFile(path); err != nil || bytes.Count(saved, []byte{'\n'}) != int(sequence-1) {
+		t.Fatalf("rejected fragment changed durable highwater: bytes=%d error=%v", len(saved), err)
 	}
 }

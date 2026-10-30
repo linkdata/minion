@@ -71,7 +71,10 @@ func (s *workerStatus) snapshot() Status {
 func (s *workerStatus) send(ctx context.Context, transport *httpExecutionClient) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	if s.closed && s.pending != nil {
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed && s.pending != nil {
 		return nil // Result admission has begun; no record may arrive later.
 	}
 	return s.sendLocked(ctx, transport)
@@ -116,13 +119,21 @@ func (s *workerStatus) sendLocked(ctx context.Context, transport *httpExecutionC
 func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient, event attemptRecord, secrets ...string) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	if s.closed || s.incomplete {
+	s.mu.Lock()
+	closed := s.closed
+	if !closed && !s.incomplete {
+		s.supplied = true
+	}
+	s.mu.Unlock()
+	if closed || s.incomplete {
 		return errors.New("HTTP status log stream is closed or incomplete")
 	}
-	s.supplied = true
 	fail := func(err error) error { s.incomplete = true; return err }
 	if event.Kind == attemptRecordStop || event.Kind == attemptRecordCoverage {
 		return fail(errors.New("HTTP status log event cannot be a marker"))
+	}
+	if !utf8.ValidString(event.Text) {
+		return fail(errors.New("HTTP status log event is not valid UTF-8"))
 	}
 	raw := event
 	event.Identity, event.SourceRef, event.Sequence = s.value.Identity, s.value.SourceRef, 0
@@ -135,6 +146,9 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 		raw.Agent != "" && event.Agent == "" || raw.Role != "" && event.Role == "" ||
 		raw.EventSource != "" && event.EventSource == "" {
 		return fail(errors.New("HTTP status log cannot be safely redacted"))
+	}
+	if len(event.Text) > maxAttemptEventBytes {
+		return fail(errAttemptRecordsFull)
 	}
 	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent, Role: event.Role, EventSource: event.EventSource}).validateShape(); err != nil {
 		return fail(err)
@@ -167,15 +181,12 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 			return fail(err)
 		}
 		s.pending = &record
-		requestCtx, cancel := context.WithTimeout(ctx, statusSendTimeout)
-		if err := s.sendLocked(requestCtx, transport); err != nil {
+		if err := s.sendLocked(ctx, transport); err != nil {
 			// Retry a lost ACK with fresh Status.Sequence and unchanged record.
-			if retryErr := s.sendLocked(requestCtx, transport); retryErr != nil {
-				cancel()
+			if retryErr := s.sendLocked(ctx, transport); retryErr != nil {
 				return fail(retryErr)
 			}
 		}
-		cancel()
 		if len(remaining) == 0 {
 			s.continued = event.More
 			return nil
@@ -186,14 +197,18 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 // drain closes the live stream before Result and marks coverage only when all
 // supplied records reached the parent's durable highwater.
 func (s *workerStatus) drain(ctx context.Context, transport *httpExecutionClient) error {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	s.closed = true
+	s.mu.Lock()
 	if !s.supplied {
+		s.closed = true
+		s.mu.Unlock()
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, statusSendTimeout)
-	defer cancel()
+	s.mu.Unlock()
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	if s.pending != nil {
 		if err := s.sendLocked(ctx, transport); err != nil {
 			return err

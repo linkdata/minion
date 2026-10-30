@@ -293,6 +293,7 @@ Key contract and execution limits:
 | Model/effort; skills | Model and effort: 128 UTF-8 bytes each, no space, tab, CR, LF or NUL. Skills: 64 required+always-on sources per role, 4096 bytes per source |
 | Job runtime; critic budget | Greater than zero, at most 24 hours (configuration: 1–1440 minutes); 1–20 proposals with a critic, nonblocking threshold 0 through `critic_stopping.max_rounds`, no-blocker streak 0–20 |
 | Diagnostics | 100 per Result; 8 KiB per UTF-8 message, no NUL |
+| Status log | One 16 KiB text fragment per 128 KiB Status body; 4 MiB per logical event across fragments; 64 MiB per-attempt store |
 | Complete audit | Seven named regular files; 5 MiB per non-summary file; `REPORT.md` has a 58 KiB raw UTF-8 limit |
 | Transferred head / merge-base regular files | 10,000 per list; 64 MiB of contents across both |
 | Changed paths; omissions | 10,000 changed paths; 10,000 total distinct omissions across head and merge base |

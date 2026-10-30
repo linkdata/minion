@@ -237,3 +237,104 @@ func TestWorkerStatusOpenContinuationDoesNotClaimCoverage(t *testing.T) {
 		t.Fatalf("open continuation records = %+v", records)
 	}
 }
+
+func TestWorkerStatusRejectsOversizedEventBeforeSending(t *testing.T) {
+	job := testJob(command.Comment)
+	client := &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+		t.Error("oversized event reached Status transport")
+		return nil, errors.New("unexpected Status request")
+	})}
+	base, _ := url.Parse("http://worker.test")
+	transport := &httpExecutionClient{client: client, base: base}
+	status := newWorkerStatus(job)
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion,
+		Text: strings.Repeat("x", maxAttemptEventBytes+1)}); !errors.Is(err, errAttemptRecordsFull) {
+		t.Fatalf("oversized event error = %v", err)
+	}
+	if err := status.drain(t.Context(), transport); err == nil {
+		t.Fatal("oversized event claimed complete coverage")
+	}
+}
+
+func TestWorkerStatusZeroEventDrainDoesNotWaitForBlockedHeartbeat(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		entered := make(chan struct{})
+		client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			close(entered)
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		})}
+		base, _ := url.Parse("http://worker.test")
+		status := newWorkerStatus(job)
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan error, 1)
+		go func() { done <- status.send(ctx, &httpExecutionClient{client: client, base: base}) }()
+		<-entered
+		started := time.Now()
+		if err := status.drain(t.Context(), nil); err != nil || time.Since(started) != 0 {
+			t.Fatalf("zero-event drain waited for blocked Status: error=%v elapsed=%s", err, time.Since(started))
+		}
+		cancel()
+		<-done
+	})
+}
+
+func TestWorkerStatusTimeoutAfterDurableWriteRetriesWithFreshContext(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		var received []httpObservation
+		client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			var observation httpObservation
+			if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+				return nil, err
+			}
+			received = append(received, observation)
+			if len(received) == 1 || len(received) == 3 {
+				<-r.Context().Done() // Parent saved the record; its ACK never arrived.
+				return nil, r.Context().Err()
+			}
+			ack, err := httpEncode(httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status",
+				Sequence: observation.Status.Sequence, LogSequence: observation.Logs[0].Sequence}, httpControlBytes)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
+		})}
+		base, _ := url.Parse("http://worker.test")
+		transport := &httpExecutionClient{client: client, base: base}
+		status := newWorkerStatus(job)
+		if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "saved"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := status.drain(t.Context(), transport); err != nil {
+			t.Fatal(err)
+		}
+		if len(received) != 4 || received[0].Status.Sequence != 1 || received[1].Status.Sequence != 2 ||
+			received[2].Status.Sequence != 3 || received[3].Status.Sequence != 4 ||
+			received[0].Logs[0] != received[1].Logs[0] || received[2].Logs[0] != received[3].Logs[0] ||
+			received[0].Logs[0].Sequence != 1 || received[2].Logs[0].Sequence != 2 ||
+			received[2].Logs[0].Kind != attemptRecordCoverage {
+			t.Fatalf("timeout replay changed records or Status sequences: %+v", received)
+		}
+	})
+}
+
+func TestWorkerStatusRejectsInvalidUTF8BeforeSplitting(t *testing.T) {
+	job := testJob(command.Comment)
+	var requests int
+	client := &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected Status request")
+	})}
+	base, _ := url.Parse("http://worker.test")
+	transport := &httpExecutionClient{client: client, base: base}
+	status := newWorkerStatus(job)
+	invalid := strings.Repeat("\x80", maxAttemptRecordTextBytes+1)
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: invalid}); err == nil {
+		t.Fatal("accepted invalid UTF-8 event")
+	}
+	if err := status.drain(t.Context(), transport); err == nil || requests != 0 {
+		t.Fatalf("invalid event sent a Status or coverage: error=%v requests=%d", err, requests)
+	}
+}

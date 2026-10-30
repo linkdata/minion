@@ -617,9 +617,9 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx.mu.Unlock()
-	enteredSync := false
+	enteredStatus := false
 	defer func() {
-		if enteredSync {
+		if enteredStatus {
 			tx.handlers.Done()
 		}
 	}()
@@ -653,9 +653,10 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 			} else if !e.statusAt.IsZero() {
 				err = status.follows(e.status, tx.job.rounds())
 			}
-			if err == nil && (len(observation.Logs) != 0 || tx.records == nil && status.LogSequence != 0) {
+			if err == nil {
+				// Empty Status also updates e.status; Execute must drain it before clearing the transaction.
 				tx.handlers.Add(1)
-				enteredSync = true
+				enteredStatus = true
 			}
 			tx.mu.Unlock()
 			e.mu.Unlock()
@@ -669,9 +670,9 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			tx.recordSync.Unlock()
-			if enteredSync {
+			if enteredStatus {
 				tx.handlers.Done()
-				enteredSync = false
+				enteredStatus = false
 			}
 		}
 		if err != nil {
