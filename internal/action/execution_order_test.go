@@ -109,6 +109,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	defer server.Close()
 	var journal bytes.Buffer
 	zero, calls := 0, 0
+	criticStatuses := make(chan Status, 4)
 	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Usage: store, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0),
 		Main: "codex", Adversarial: "claude", CodexModel: mainModel, CodexEffort: "high", ClaudeModel: criticModel, ClaudeEffort: "medium",
 		CriticStopping: config.CriticStopping{MaxRounds: maxRounds, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
@@ -156,6 +157,18 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 			if review.Identity.JobID != request.ID || review.Identity.AttemptID != record.ID || review.SourceRef != sourceHead || review.CriticStopReason != "" || review.CriticMaxRounds != maxRounds || review.CriticNonblockingRounds != 0 || review.CriticConsecutiveNoBlockerRounds != 0 || !slices.Equal(review.Calls, expected[:index]) || !slices.Equal(review.Refutations, priorRefutations) {
 				return aicli.Result{}, fmt.Errorf("native call %d preceded its private review prefix: %+v", index, review)
 			}
+			if overHTTP && want.Role == roleCritic {
+				timer := time.NewTimer(5 * time.Second)
+				defer timer.Stop()
+				for observed := false; !observed; {
+					select {
+					case status := <-criticStatuses:
+						observed = status.WorkerState == "busy" && status.Phase == "critic" && status.Round == want.Round && status.ReviewPhase == want.ReviewPhase
+					case <-timer.C:
+						return aicli.Result{}, fmt.Errorf("no live critic Status for round %d phase %q", want.Round, want.ReviewPhase)
+					}
+				}
+			}
 			response := approvedCritiqueJSON
 			switch index {
 			case 0:
@@ -181,7 +194,17 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		transport := httptest.NewServer(remote)
+		transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			remote.ServeHTTP(w, r)
+			if r.URL.Path == "/status" {
+				if status, _, ok := remote.Status(); ok && status.Phase == "critic" {
+					select {
+					case criticStatuses <- status:
+					default:
+					}
+				}
+			}
+		}))
 		t.Cleanup(transport.Close)
 		workerCtx, cancelWorker := context.WithCancel(t.Context())
 		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -147,11 +148,14 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	owned := []string{source}
 	cleanupFailed := false
 	var cleanupDetail string
-	// Remove owned paths after sessions, report collection, and review snapshots close.
-	defer func() {
+	markCleanup := sync.OnceFunc(func() {
 		if r.statusUpdate != nil {
 			r.statusUpdate("cleanup", 0, "")
 		}
+	})
+	// Remove owned paths after sessions, report collection, and review snapshots close.
+	defer func() {
+		markCleanup()
 		failed := cleanupFailed
 		var retained []string
 		for _, dir := range owned {
@@ -376,6 +380,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 		}
 	}()
+	// Report cleanup before closing sessions; the outer defer covers preparation failures.
+	defer markCleanup()
 	var answer string
 	var runErr error
 	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)

@@ -285,17 +285,25 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)
 		statuses := make(chan Status, 16)
+		watchEntered := make(chan struct{}, 1)
+		releaseWatch := make(chan struct{})
 		outcomeEntered := make(chan struct{}, 1)
 		releaseModel := make(chan struct{})
 		releaseOutcome := make(chan struct{})
+		releaseWatchOnce := sync.OnceFunc(func() { close(releaseWatch) })
 		releaseModelOnce := sync.OnceFunc(func() { close(releaseModel) })
 		releaseOutcomeOnce := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer releaseWatchOnce()
 		defer releaseModelOnce()
 		defer releaseOutcomeOnce()
 		var parent *httpServerTest
 		parent = newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
 			func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/cancel" {
+						watchEntered <- struct{}{}
+						<-releaseWatch
+					}
 					if r.URL.Path == "/outcome" {
 						outcomeEntered <- struct{}{}
 						<-releaseOutcome
@@ -325,6 +333,18 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 		}}
 		workerDone := make(chan error, 1)
 		go func() { workerDone <- RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, runner) }()
+		select {
+		case <-watchEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before cancellation-watch admission: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not open cancellation watch")
+		}
+		synctest.Wait()
+		if status, _, ok := parent.executor.Status(); ok || len(statuses) != 0 {
+			t.Fatalf("Status arrived before cancellation-watch headers: status=%+v present=%t queued=%d", status, ok, len(statuses))
+		}
+		releaseWatchOnce()
 		select {
 		case <-modelEntered:
 		case err := <-workerDone:
@@ -449,7 +469,11 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
 		ctx, cancel := context.WithCancelCause(t.Context())
 		defer cancel(context.Canceled)
 		modelEntered := make(chan struct{}, 1)
+		statuses := make(chan Status, 16)
 		outcomes := make(chan httpOutcome, 1)
+		releaseOutcome := make(chan struct{})
+		releaseOutcomeOnce := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer releaseOutcomeOnce()
 		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			kind := strings.TrimPrefix(r.URL.Path, "/")
 			switch kind {
@@ -472,6 +496,7 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
 				if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
 					t.Error(err)
 				}
+				statuses <- observation.Status
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: observation.Status.Sequence})
 			case "outcome":
 				var outcome httpOutcome
@@ -479,6 +504,7 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
 					t.Error(err)
 				}
 				outcomes <- outcome
+				<-releaseOutcome
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: outcome.Sequence})
 			default:
 				t.Errorf("unexpected route %s", r.URL.Path)
@@ -507,9 +533,25 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("worker did not upload canceled result")
 		}
+		waitStopping := time.NewTimer(5 * time.Second)
+		defer waitStopping.Stop()
+		for stopping := false; !stopping; {
+			select {
+			case status := <-statuses:
+				if status.WorkerState == "stopping" {
+					if err := status.Validate(job); err != nil {
+						t.Fatalf("invalid live stopping Status: %+v error=%v", status, err)
+					}
+					stopping = true
+				}
+			case <-waitStopping.C:
+				t.Fatal("worker did not report stopping Status during canceled outcome upload")
+			}
+		}
 		if outcome.Failure == nil || strings.Contains(outcome.Failure.Message, key) {
 			t.Fatalf("assigned key in outcome failure: %+v", outcome.Failure)
 		}
+		releaseOutcomeOnce()
 		if err := <-workerDone; !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), key) {
 			t.Fatalf("assigned key in worker return: %v", err)
 		}
