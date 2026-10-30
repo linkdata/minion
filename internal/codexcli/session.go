@@ -19,7 +19,7 @@ import (
 type Session struct {
 	// OnEvent receives selected native events and identity status while Run is active.
 	OnEvent func(aicli.StreamEvent)
-	// OnInput receives the exact invocation prepared before process start.
+	// OnInput receives selected prepared input fields before process start.
 	OnInput func(aicli.PreparedInput)
 
 	bound, used, reset, skillsReady   bool

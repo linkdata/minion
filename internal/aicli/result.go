@@ -25,8 +25,8 @@ type StreamEvent struct {
 	Text     string
 }
 
-// PreparedInput is the exact direct invocation Minion constructed before Start.
-// It does not prove the CLI consumed the input or started successfully.
+// PreparedInput holds selected direct CLI input fields Minion constructed before Start.
+// It omits environment variables and does not prove the CLI consumed the input.
 type PreparedInput struct {
 	NativeID string
 	Mode     string

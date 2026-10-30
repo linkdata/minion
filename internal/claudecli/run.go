@@ -155,6 +155,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	s.started = true
 	ceiling.Finish()
 	output.stream.Finish()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		output.markFatalGap("pipe_drain_incomplete")
+	}
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
 	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {

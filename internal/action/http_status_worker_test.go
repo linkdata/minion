@@ -166,6 +166,48 @@ func TestWorkerStatusCoverageRequiresSuppliedAndDeliveredEvents(t *testing.T) {
 	}
 }
 
+func TestPreparedInputWithStreamGapWithholdsStatusCoverage(t *testing.T) {
+	job := testJob(command.Comment)
+	var saved []attemptRecord
+	client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+		var observation httpObservation
+		if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+			return nil, err
+		}
+		if len(observation.Logs) != 1 {
+			return nil, errors.New("missing private log")
+		}
+		saved = append(saved, observation.Logs[0])
+		ack, err := httpEncode(httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status",
+			Sequence: observation.Status.Sequence, LogSequence: observation.Logs[0].Sequence}, httpControlBytes)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
+	})}
+	base, _ := url.Parse("http://worker.test")
+	transport := &httpExecutionClient{client: client, base: base}
+	status := newWorkerStatus(job)
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		return status.emit(t.Context(), transport, event)
+	})
+	queue.add(attemptRecord{Kind: attemptRecordInput, Call: "1", EventSource: "codex.input.prepared", Text: `{"stage":"prepared"}`})
+	queue.add(attemptRecord{Kind: attemptRecordInput, Call: "1", Agent: "root", EventSource: "codex.identity"})
+	queue.add(attemptRecord{Kind: attemptRecordDiscussion, Call: "1", EventSource: "codex.pipe_drain_incomplete"})
+	if queue.finish() {
+		t.Fatal("unbound provider gap falsely completed capture")
+	}
+	status.markIncomplete()
+	if err := status.drain(t.Context(), transport); err == nil {
+		t.Fatal("incomplete provider stream received a coverage marker")
+	}
+	if len(saved) != 2 || saved[0].Kind != attemptRecordInput || saved[0].Agent != "" ||
+		saved[1].Kind != attemptRecordInput || saved[1].Agent != "root" {
+		t.Fatalf("prepared input and identity were not retained before the gap: %+v", saved)
+	}
+}
+
 func TestWorkerStatusSplitsRedactedUTF8BeforeTransit(t *testing.T) {
 	job := testJob(command.Comment)
 	var records []attemptRecord

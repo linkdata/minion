@@ -31,9 +31,13 @@ exit 0
 	}
 	done := make(chan outcome, 1)
 	workspace := t.TempDir()
+	var session Session
+	var events []aicli.StreamEvent
+	session.OnEvent = func(event aicli.StreamEvent) { events = append(events, event) }
 	go func() {
 		defer close(done)
-		result, err := Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
+		result, err := session.Run(ctx, workspace, "task", false, "", config.ClaudeConfig{})
+		err = errors.Join(err, session.Close())
 		done <- outcome{result, err}
 	}()
 	defer func() {
@@ -62,6 +66,9 @@ exit 0
 	case got := <-done:
 		if !errors.Is(got.err, exec.ErrWaitDelay) || ctx.Err() != nil || got.result.Answer != "" || got.result.UsageComplete || got.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 			t.Fatalf("pipe overrun accepted completed answer or lost usage: result=%+v error=%v parent=%v", got.result, got.err, ctx.Err())
+		}
+		if len(events) == 0 || events[len(events)-1] != (aicli.StreamEvent{Kind: "pipe_drain_incomplete"}) {
+			t.Fatalf("forced pipe close did not mark private stream incomplete: %+v", events)
 		}
 	case <-ctx.Done():
 		t.Fatal("pipe drain did not finish within parent budget")

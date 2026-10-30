@@ -204,17 +204,28 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 			if (err == nil) != test.wantFinal {
 				t.Fatalf("completion error = %v", err)
 			}
-			finals := 0
+			finals, gaps := 0, 0
 			for _, event := range got {
 				if event.Kind == "final" {
 					finals++
+				}
+				if event.Kind == "invalid_json" {
+					gaps++
+					if test.name != "malformed tail" || event.NativeID != "" || event.Text != "" {
+						t.Fatalf("unexpected malformed-stream gap: %+v", event)
+					}
+					continue
 				}
 				if event.NativeID != "root" || strings.Contains(event.Text, "secret-key") ||
 					event.Kind != "identity" && !strings.Contains(event.Text, "[redacted]") {
 					t.Fatalf("stream credential escaped or content lost: %+v", event)
 				}
 			}
-			if (finals == 1) != test.wantFinal || len(got) != 3+finals {
+			wantGaps := 0
+			if test.name == "malformed tail" {
+				wantGaps = 1
+			}
+			if (finals == 1) != test.wantFinal || gaps != wantGaps || len(got) != 3+finals+gaps {
 				t.Fatalf("false final event or missing completed item: %+v", got)
 			}
 		})

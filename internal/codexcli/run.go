@@ -223,6 +223,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	s.used = true
 	output.stream.Finish()
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		output.gap("pipe_drain_incomplete")
+	}
 	if s.threadID == "" && output.stopErr == nil {
 		s.threadID = output.threadID
 	}

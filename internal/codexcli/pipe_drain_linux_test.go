@@ -47,9 +47,13 @@ exit 0
 	}
 	done := make(chan outcome, 1)
 	workspace := t.TempDir()
+	var session Session
+	var events []aicli.StreamEvent
+	session.OnEvent = func(event aicli.StreamEvent) { events = append(events, event) }
 	go func() {
 		defer close(done)
-		result, err := Run(ctx, workspace, "task", false, "", config.CodexConfig{})
+		result, err := session.Run(ctx, workspace, "task", false, "", config.CodexConfig{})
+		err = errors.Join(err, session.Close())
 		done <- outcome{result, err}
 	}()
 	defer func() {
@@ -84,6 +88,10 @@ exit 0
 		}
 		if data, err := os.ReadFile(rolloutPath); err != nil || !bytes.Equal(data, rollout) {
 			t.Fatalf("live writer rollout was removed or changed: %q, %v", data, err)
+		}
+		if len(events) < 2 || events[0] != (aicli.StreamEvent{NativeID: "root", Kind: "identity"}) ||
+			events[len(events)-1] != (aicli.StreamEvent{Kind: "pipe_drain_incomplete"}) {
+			t.Fatalf("forced pipe close did not mark private stream incomplete: %+v", events)
 		}
 	case <-ctx.Done():
 		t.Fatal("pipe drain did not finish within parent budget")
