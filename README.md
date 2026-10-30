@@ -40,7 +40,7 @@ Each request must come from an account with effective repository `write`, `maint
 
 Edited command sources are ignored. Post a new comment to request work after editing text.
 
-Before generating or pushing a new `fix`, Minion reads GitHub's rendered issue text and checks the issue's edit time against the request. If the issue changed at or after the request, it refuses new work; review the current issue and post a new `fix` comment. A previously pushed branch remains available if publication later fails. With a saved complete result, Minion can reconcile its recorded SHA and retry the reply without rerunning the model; otherwise operator reconciliation may be needed.
+Before generating or pushing a new `fix`, Minion reads GitHub's rendered issue text and checks the issue's edit time against the request. If the issue changed at or after the request, it refuses new work and sends one best-effort fixed reply through terminal cleanup; review the current issue and post a new `fix` comment. A previously pushed branch remains available if publication later fails. With a saved complete result, Minion can reconcile its recorded SHA and retry the reply without rerunning the model; otherwise operator reconciliation may be needed.
 
 After accepting an authorized command, the bot adds a 👀 reaction to the exact issue, pull request, comment, or review that contains it, before starting the main model. If the reaction fails, the service retains the original acceptance and retries after the recovery poll interval.
 

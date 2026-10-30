@@ -155,6 +155,78 @@ func TestSelectedFixedRefusalUsesOneTerminalReply(t *testing.T) {
 	}
 }
 
+func TestPostModelFixRefusalUsesTerminalReply(t *testing.T) {
+	for _, tc := range []struct {
+		name, outcome   string
+		expired, direct bool
+	}{
+		{name: "direct", outcome: "failed", direct: true},
+		{name: "restarted", outcome: "failed"},
+		{name: "expired", outcome: "expired", expired: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			acceptedAt := now
+			if tc.expired {
+				acceptedAt = now.Add(-8 * time.Minute)
+			}
+			accepted := selectedAcceptance(t, acceptedAt)
+			accepted.JobID = jobID(accepted.SourceKey, "fix")
+			accepted.CommandName, accepted.Action = "fix", "fix"
+			accepted.SubjectType = "Issue"
+			accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+			accepted.Assigned = true
+			job := jobFromAccepted(accepted)
+			source := selectedItem(acceptedAt)
+			source.Body, source.HTMLURL = "@linkdataminion fix", accepted.SourceURL
+			path := filepath.Join(t.TempDir(), "state.json")
+			store := openStateAt(t, path, now.Add(-time.Minute))
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, ModelCallStarted: true,
+				AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.WriteAcceptedResult([]byte(`{"result":"saved-before-refusal"}`)); err != nil {
+				t.Fatal(err)
+			}
+			store.Data.Accepted.ResultReady = true
+			store.Data.Accepted.FixedRefusal = "The issue changed after this `fix` request."
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, now)
+			gh := &fakeGitHub{items: []github.Item{source}, permission: github.Permission{Permission: "write"},
+				currentItem: func(github.Item) (github.Item, error) { return source, nil }}
+			handler := &recoveredResultHandler{}
+			m := selectedMonitor(t, now, gh, handler)
+			var err error
+			if tc.direct {
+				err = m.completeSelected(t.Context(), reopened, job, now, ErrTerminalJob)
+			} else {
+				err = m.recoverAccepted(t.Context(), reopened)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handler.executions != 0 || handler.publications != 0 || gh.commentCalls != 1 ||
+				len(gh.comments) != 1 || gh.comments[0].Body != accepted.FixedRefusal+"\n\n"+job.Marker() ||
+				reopened.Data.TerminalDecisions[job.ID].Outcome != tc.outcome ||
+				reopened.Data.Processed[job.ID].IsZero() || reopened.Data.Accepted != nil ||
+				reopened.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved {
+				t.Fatalf("post-model refusal: executions=%d publications=%d comments=%v state=%+v",
+					handler.executions, handler.publications, gh.comments, reopened.Data)
+			}
+			if present, err := reopened.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("terminal refusal kept result: present=%t err=%v", present, err)
+			}
+		})
+	}
+}
+
 func TestSelectedFixedRefusalDoesNotRetryRejectedPOST(t *testing.T) {
 	now := time.Now().UTC()
 	accepted := selectedAcceptance(t, now)
