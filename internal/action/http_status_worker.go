@@ -27,14 +27,11 @@ func newWorkerStatus(job Job) *workerStatus {
 	return status
 }
 
-func (s *workerStatus) progress(phase string, round int, reviewPhase string, err error) {
+func (s *workerStatus) progress(phase string, round int, reviewPhase string) {
 	s.mu.Lock()
 	s.value.Phase, s.value.Round, s.value.ReviewPhase = phase, round, reviewPhase
 	s.value.ProgressSequence++
 	s.progressAt = time.Now()
-	if err != nil {
-		s.value.Error = httpFailureDiagnostic(err.Error())
-	}
 	s.mu.Unlock()
 	s.signal()
 }

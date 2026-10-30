@@ -250,11 +250,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	statusFeed := newWorkerStatus(job)
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
-	jobRunner.statusUpdate = func(phase string, round int, reviewPhase string, err error) {
-		if err != nil {
-			err = redactActionError(err, assignedSecrets...)
-		}
-		statusFeed.progress(phase, round, reviewPhase, err)
+	jobRunner.statusUpdate = func(phase string, round int, reviewPhase string) {
+		statusFeed.progress(phase, round, reviewPhase)
 	}
 	stopStatusOnAction := context.AfterFunc(actionCtx, statusFeed.stopping)
 	defer stopStatusOnAction()
@@ -288,7 +285,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
 	if checkpoints.failure == nil && (job.Critic == nil && len(result.Calls) != 0 || job.Critic != nil && result.CriticStopReason != "") {
-		jobRunner.statusUpdate("upload", 0, "", runErr)
+		jobRunner.statusUpdate("upload", 0, "")
 	}
 	outcomeErr := checkpoints.outcome(result, runErr)
 	cancelStatus() // Optional observation never holds work after the final Result upload.

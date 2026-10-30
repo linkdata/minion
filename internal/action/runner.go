@@ -41,7 +41,7 @@ type Runner struct {
 	WorkRoot    string
 	// recordReview synchronously persists borrowed evidence without mutating it.
 	recordReview func([]CallUsage, []Refutation, string) error
-	statusUpdate func(string, int, string, error)
+	statusUpdate func(string, int, string)
 }
 
 func (r Runner) secretValues() []string {
@@ -150,7 +150,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
 		if r.statusUpdate != nil {
-			r.statusUpdate("cleanup", 0, "", resultErr)
+			r.statusUpdate("cleanup", 0, "")
 		}
 		failed := cleanupFailed
 		var retained []string
@@ -302,7 +302,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			if r.statusUpdate != nil {
-				r.statusUpdate(request.role, request.round, request.reviewPhase, nil)
+				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
 			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
@@ -321,7 +321,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			if r.statusUpdate != nil {
-				r.statusUpdate(request.role, request.round, request.reviewPhase, err)
+				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			return call, err
 		}

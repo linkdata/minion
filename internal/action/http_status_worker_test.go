@@ -54,7 +54,7 @@ func TestWorkerStatusHeartbeatsKeepProgressAgeAndSequenceIndependent(t *testing.
 		if second.Sequence != 2 || second.ProgressSequence != first.ProgressSequence || second.ProgressAge != statusHeartbeatInterval {
 			t.Fatalf("heartbeat advanced progress or missed interval: %+v", second)
 		}
-		status.progress("main", 1, "", nil)
+		status.progress("main", 1, "")
 		synctest.Wait()
 		third := <-observed
 		if third.Sequence != 3 || third.ProgressSequence != 2 || third.ProgressAge != 0 || third.Phase != "main" || third.Round != 1 {
@@ -66,11 +66,11 @@ func TestWorkerStatusHeartbeatsKeepProgressAgeAndSequenceIndependent(t *testing.
 		if fourth.Sequence != 4 || fourth.ProgressSequence != third.ProgressSequence || fourth.ProgressAge != statusHeartbeatInterval {
 			t.Fatalf("heartbeat reset progress age: %+v", fourth)
 		}
-		status.progress("cleanup", 0, "", errors.New("model failed"))
+		status.progress("cleanup", 0, "")
 		synctest.Wait()
 		last := <-observed
-		if last.Sequence != 5 || last.ProgressSequence != 3 || last.Phase != "cleanup" || last.Error != "model failed" {
-			t.Fatalf("error progress = %+v", last)
+		if last.Sequence != 5 || last.ProgressSequence != 3 || last.Phase != "cleanup" {
+			t.Fatalf("cleanup progress = %+v", last)
 		}
 		cancel()
 		<-done

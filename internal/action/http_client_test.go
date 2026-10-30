@@ -441,7 +441,7 @@ func TestRunHTTPFailedPreparationKeepsContactDuringOutcome(t *testing.T) {
 	})
 }
 
-func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T) {
+func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const key = "assigned-key-leak-canary"
 		job := testJob(command.Comment)
@@ -449,11 +449,7 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T)
 		ctx, cancel := context.WithCancelCause(t.Context())
 		defer cancel(context.Canceled)
 		modelEntered := make(chan struct{}, 1)
-		statusErrors := make(chan Status, 8)
 		outcomes := make(chan httpOutcome, 1)
-		releaseOutcome := make(chan struct{})
-		release := sync.OnceFunc(func() { close(releaseOutcome) })
-		defer release()
 		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			kind := strings.TrimPrefix(r.URL.Path, "/")
 			switch kind {
@@ -476,9 +472,6 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T)
 				if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
 					t.Error(err)
 				}
-				if observation.Status.Error != "" {
-					statusErrors <- observation.Status
-				}
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: observation.Status.Sequence})
 			case "outcome":
 				var outcome httpOutcome
@@ -486,7 +479,6 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T)
 					t.Error(err)
 				}
 				outcomes <- outcome
-				<-releaseOutcome
 				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: outcome.Sequence})
 			default:
 				t.Errorf("unexpected route %s", r.URL.Path)
@@ -509,21 +501,6 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T)
 			t.Fatal("worker did not start model")
 		}
 		cancel(fmt.Errorf("caller cause contains %s", key))
-		var upload Status
-		statusTimer := time.NewTimer(5 * time.Second)
-		defer statusTimer.Stop()
-		for upload.Phase != "upload" {
-			select {
-			case upload = <-statusErrors:
-			case err := <-workerDone:
-				t.Fatalf("worker ended before error Status: %v", err)
-			case <-statusTimer.C:
-				t.Fatal("worker did not report canceled upload")
-			}
-		}
-		if upload.Error == "" || strings.Contains(upload.Error, key) {
-			t.Fatalf("assigned key in Status error: %q", upload.Error)
-		}
 		var outcome httpOutcome
 		select {
 		case outcome = <-outcomes:
@@ -533,7 +510,6 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T)
 		if outcome.Failure == nil || strings.Contains(outcome.Failure.Message, key) {
 			t.Fatalf("assigned key in outcome failure: %+v", outcome.Failure)
 		}
-		release()
 		if err := <-workerDone; !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), key) {
 			t.Fatalf("assigned key in worker return: %v", err)
 		}
