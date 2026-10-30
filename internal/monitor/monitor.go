@@ -1189,6 +1189,37 @@ func (m *Monitor) retireMissingTerminalFailures(store *state.Store, key string, 
 	})
 }
 
+// A completed thread lookup identified this terminal job, but a later check
+// could not authorize a reply. Retire only that job, even if the scan was canceled.
+func retireIdentifiedTerminalFailure(store *state.Store, id, key string, observed state.JobFailure, at time.Time) (bool, error) {
+	var recheck bool
+	err := store.WithLock(func() error {
+		failure, exists := store.Data.JobFailures[id]
+		if !exists || !store.Data.Processed[id].IsZero() {
+			return nil
+		}
+		if failure != observed || failure.NotificationKey != key ||
+			store.Data.Accepted != nil && store.Data.Accepted.JobID == id {
+			recheck = true
+			return nil
+		}
+		processed, hadProcessed := store.Data.Processed[id]
+		store.Data.Processed[id] = at
+		delete(store.Data.JobFailures, id)
+		if err := store.Save(); err != nil {
+			store.Data.JobFailures[id] = failure
+			if hadProcessed {
+				store.Data.Processed[id] = processed
+			} else {
+				delete(store.Data.Processed, id)
+			}
+			return err
+		}
+		return nil
+	})
+	return recheck, err
+}
+
 func infrastructureFailure(err error) bool {
 	var status *github.StatusError
 	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden ||
@@ -2450,6 +2481,16 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			next = at
 		}
 	}
+	skipReply := func(id string, item github.Item, failure state.JobFailure, reason string) {
+		m.logf("skip terminal failure reply to %s: %s", itemLocation(item), reason)
+		recheck, err := retireIdentifiedTerminalFailure(store, id, entry.key, failure, m.now().UTC())
+		if err != nil {
+			m.logf("retire terminal failure in %s: %v", itemLocation(item), err)
+			wake(m.now().UTC().Add(time.Minute))
+		} else if recheck {
+			wake(m.now().UTC().Add(time.Minute))
+		}
+	}
 	linkedFailure := func(item github.Item) bool {
 		var linked bool
 		_ = store.WithLock(func() error {
@@ -2515,50 +2556,47 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 			continue
 		}
 		current, err := m.GitHub.CurrentItem(ctx, item)
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
-			uncertain = true
-			wake(m.now().UTC().Add(time.Minute))
+			skipReply(id, item, failure, fmt.Sprintf("verify current source: %v", err))
 			continue
 		}
 		if item.Key == "" || current.Key != item.Key || item.NodeID == "" || current.NodeID != item.NodeID ||
 			item.Author.ID <= 0 || current.Author.ID != item.Author.ID || current.Author.Login == "" ||
 			!strings.EqualFold(current.Author.Login, item.Author.Login) {
-			uncertain = true
-			wake(m.now().UTC().Add(time.Minute))
+			skipReply(id, item, failure, "current source identity changed")
 			continue
 		}
 		if current.Edited {
-			invalid = append(invalid, id)
+			skipReply(id, item, failure, "current source was edited")
 			continue
 		}
 		parsed, err = command.ParseForLoginCommands(current.Body, m.Config.BotLogin, commands)
 		if err != nil {
-			if errors.Is(err, command.ErrNoCommand) {
-				invalid = append(invalid, id)
-			} else {
-				uncertain = true
-				wake(m.now().UTC().Add(time.Minute))
-			}
+			skipReply(id, item, failure, fmt.Sprintf("current command is invalid: %v", err))
 			continue
 		}
 		if jobID(current.Key, parsed.Name) != id || !repo.AllowsAction(parsed.Name) ||
 			!repo.AllowsActor(current.Author.Login, current.Author.ID) {
-			invalid = append(invalid, id)
+			skipReply(id, item, failure, "current command or requester is no longer eligible")
 			continue
 		}
 		permission, err := m.GitHub.Permission(ctx, repo.Name, current.Author.Login)
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
-			uncertain = true
-			wake(m.now().UTC().Add(time.Minute))
+			skipReply(id, item, failure, fmt.Sprintf("verify requester permission: %v", err))
 			continue
 		}
 		if permission.User.ID != current.Author.ID || !strings.EqualFold(permission.User.Login, current.Author.Login) {
-			uncertain = true
-			wake(m.now().UTC().Add(time.Minute))
+			skipReply(id, item, failure, "requester permission identity changed")
 			continue
 		}
 		if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
-			invalid = append(invalid, id)
+			skipReply(id, item, failure, "requester no longer has write permission")
 			continue
 		}
 		job := Job{Repository: repo, SubjectType: subjectType, Number: number, Source: current, Command: parsed, ID: id}

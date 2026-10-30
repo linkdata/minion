@@ -695,7 +695,7 @@ func TestSelectedReviewWorkerRepliesToTerminalFixWithoutSkill(t *testing.T) {
 	})
 }
 
-func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.T) {
+func TestSelectedControlHandlesTerminalFailuresDuringReview(t *testing.T) {
 	for _, test := range []struct {
 		name                string
 		removedInFetch      bool
@@ -852,20 +852,21 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 						missingFetches.Load(), fixFetches.Load())
 				}
 				_, missingFailure := store.Data.JobFailures[missingID]
-				transient := test.transientCurrent || test.transientPermission
-				if transient {
+				retryMissing := test.ambiguousFetch && test.transientCurrent
+				if retryMissing {
 					if !store.Data.Processed[missingID].IsZero() || !missingFailure ||
 						store.Data.PendingNotifications[missingKey].Repository == "" {
-						t.Fatalf("transient lookup retired the failed job: processed=%v failures=%+v pending=%+v",
+						t.Fatalf("unidentified command was retired after an uncertain lookup: processed=%v failures=%+v pending=%+v",
 							store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications)
 					}
 				} else if store.Data.Processed[missingID].IsZero() || missingFailure {
 					t.Fatalf("missing source was not retired: processed=%v failures=%+v",
 						store.Data.Processed, store.Data.JobFailures)
 				}
-				if !store.Data.Processed[fixID].IsZero() || store.Data.JobFailures[fixID].Attempts != maxJobAttempts ||
-					store.Data.PendingNotifications[fixKey].Repository == "" || gh.commentCalls != 0 || held.executions.Load() != 1 {
-					t.Fatalf("valid fix was lost during review: processed=%v failures=%+v pending=%+v comments=%d executions=%d",
+				_, fixFailure := store.Data.JobFailures[fixID]
+				if store.Data.Processed[fixID].IsZero() || fixFailure ||
+					gh.commentCalls != 0 || held.executions.Load() != 1 {
+					t.Fatalf("identified fix with failed reply check was retried: processed=%v failures=%+v pending=%+v comments=%d executions=%d",
 						store.Data.Processed, store.Data.JobFailures, store.Data.PendingNotifications, gh.commentCalls, held.executions.Load())
 				}
 				close(held.release)
@@ -879,13 +880,14 @@ func TestSelectedControlRetiresMissingTerminalSourceWithoutLosingFix(t *testing.
 					(!test.transientPermission || !errors.Is(err, permissionLookupErr)) {
 					t.Fatalf("follow-up poll: %v", err)
 				}
-				if _, pending := store.Data.PendingNotifications[missingKey]; pending != transient {
+				if _, pending := store.Data.PendingNotifications[missingKey]; pending != retryMissing {
 					t.Fatalf("missing source pending state after follow-up poll: pending=%t want=%t entries=%+v",
-						pending, transient, store.Data.PendingNotifications)
+						pending, retryMissing, store.Data.PendingNotifications)
 				}
-				if store.Data.PendingNotifications[fixKey].Repository == "" || store.Data.JobFailures[fixID].Attempts != maxJobAttempts {
-					t.Fatalf("valid unsupported fix was lost after follow-up poll: failures=%+v pending=%+v",
-						store.Data.JobFailures, store.Data.PendingNotifications)
+				_, fixFailure = store.Data.JobFailures[fixID]
+				if store.Data.Processed[fixID].IsZero() || fixFailure || gh.commentCalls != 0 {
+					t.Fatalf("fixed reply check was repeated after follow-up poll: failures=%+v pending=%+v replies=%d",
+						store.Data.JobFailures, store.Data.PendingNotifications, gh.commentCalls)
 				}
 			})
 		})

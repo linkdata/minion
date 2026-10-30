@@ -557,9 +557,11 @@ func TestSelectedUncertainReplyDoesNotBlockOrRepeatAnotherAcceptance(t *testing.
 	var executions int
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
 		executions++
-		store.Data.Accepted.Assigned = true
-		if err := store.Save(); err != nil {
-			t.Fatal(err)
+		if err := store.WithLock(func() error {
+			store.Data.Accepted.Assigned = true
+			return store.Save()
+		}); err != nil {
+			return err
 		}
 		return errors.New("worker failed")
 	}))

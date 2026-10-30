@@ -52,6 +52,190 @@ func terminalReplyRecorded(gh *fakeGitHub, store *state.Store, id string) bool {
 		!store.Data.Processed[id].IsZero()
 }
 
+func TestProcessTerminalItemsSkipsReplyAfterIdentifiedCheckFails(t *testing.T) {
+	lookupErr := errors.New("source lookup unavailable")
+	for _, test := range []struct {
+		name      string
+		configure func(*fakeGitHub, github.Item, context.CancelFunc)
+		cancelled bool
+	}{
+		{name: "current item error", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(github.Item) (github.Item, error) { return github.Item{}, lookupErr }
+		}},
+		{name: "current item 404", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(github.Item) (github.Item, error) {
+				return github.Item{}, &github.StatusError{StatusCode: 404}
+			}
+		}},
+		{name: "current item canceled", cancelled: true, configure: func(gh *fakeGitHub, _ github.Item, cancel context.CancelFunc) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				cancel()
+				return item, nil
+			}
+		}},
+		{name: "current identity changed", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				item.NodeID = "different-node"
+				return item, nil
+			}
+		}},
+		{name: "current command malformed", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				item.Body = "@linkdataminion unknown-command"
+				return item, nil
+			}
+		}},
+		{name: "permission error", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.permissionErr = errors.New("permission lookup unavailable")
+		}},
+		{name: "permission identity changed", configure: func(gh *fakeGitHub, item github.Item, _ context.CancelFunc) {
+			gh.permission.User = github.User{Login: item.Author.Login, ID: item.Author.ID + 1}
+		}},
+		{name: "permission revoked", configure: func(gh *fakeGitHub, _ github.Item, _ context.CancelFunc) {
+			gh.permission.Permission = "read"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			path := filepath.Join(t.TempDir(), "state.json")
+			store := openStateAt(t, path, now.Add(-time.Minute))
+			item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+				state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+			sibling := item
+			sibling.Key, sibling.NodeID = "comment:sibling", "node:sibling"
+			siblingID := jobID(sibling.Key, "review")
+			siblingFailure := state.JobFailure{Attempts: 1, NotificationKey: store.Data.JobFailures[id].NotificationKey,
+				AcceptedAt: now, Deadline: now.Add(time.Hour)}
+			store.Data.JobFailures[siblingID] = siblingFailure
+			decision := state.TerminalDecision{AttemptID: "first-attempt", Outcome: "failed", DecidedAt: now}
+			store.Data.TerminalDecisions[id] = decision
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			checks, _ := terminalControlChecks(store, "")
+			failure := store.Data.JobFailures[id]
+			entry := checks[failure.NotificationKey].entry
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			items := []github.Item{item, sibling}
+			gh := &fakeGitHub{items: items, permission: github.Permission{Permission: "write"}}
+			test.configure(gh, item, cancel)
+			cfg := testConfig(t)
+			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+			next := m.processTerminalItems(ctx, store, "", entry, cfg.Repositories[0], "PullRequest", 8,
+				items, m.controlCommands(cfg.Repositories[0]))
+			wantNext := siblingFailure.Deadline
+			if test.cancelled {
+				wantNext = time.Time{}
+			}
+			if !next.Equal(wantNext) || (ctx.Err() != nil) != test.cancelled || gh.commentCalls != 0 ||
+				store.Data.Processed[id].IsZero() || len(store.Data.JobFailures) != 1 ||
+				store.Data.JobFailures[siblingID] != siblingFailure || len(store.Data.PublicationWrites) != 0 ||
+				len(store.Data.PendingNotifications) != 1 || store.Data.TerminalDecisions[id] != decision {
+				t.Fatalf("failed terminal check retried or changed the outcome: next=%s canceled=%v calls=%d state=%+v",
+					next, ctx.Err(), gh.commentCalls, store.Data)
+			}
+			currentChecks, permissionChecks := gh.currentChecks, gh.checks
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, now)
+			m.serviceTerminalControls(t.Context(), store)
+			if gh.commentCalls != 0 || gh.currentChecks != currentChecks || gh.checks != permissionChecks ||
+				store.Data.Processed[id].IsZero() || len(store.Data.JobFailures) != 1 ||
+				store.Data.JobFailures[siblingID] != siblingFailure ||
+				store.Data.TerminalDecisions[id] != decision {
+				t.Fatalf("restart repeated a skipped terminal reply: calls=%d current=%d permission=%d state=%+v",
+					gh.commentCalls, gh.currentChecks, gh.checks, store.Data)
+			}
+		})
+	}
+}
+
+func TestProcessTerminalItemsRetirementSaveFailureKeepsTerminalJob(t *testing.T) {
+	now := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "state.json")
+	backup := path + ".saved"
+	store := openStateAt(t, path, now.Add(-time.Minute))
+	item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+		state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+	failure := store.Data.JobFailures[id]
+	decision := state.TerminalDecision{AttemptID: "first-attempt", Outcome: "failed", DecidedAt: now}
+	store.Data.TerminalDecisions[id] = decision
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	checks, _ := terminalControlChecks(store, "")
+	entry := checks[failure.NotificationKey].entry
+	gh := &fakeGitHub{items: []github.Item{item}, currentItem: func(github.Item) (github.Item, error) {
+		return github.Item{}, errors.New("source lookup unavailable")
+	}}
+	cfg := testConfig(t)
+	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+	next := m.processTerminalItems(t.Context(), store, "", entry, cfg.Repositories[0], "PullRequest", 8,
+		[]github.Item{item}, m.controlCommands(cfg.Repositories[0]))
+	if !next.Equal(now.Add(time.Minute)) || gh.commentCalls != 0 || !store.Data.Processed[id].IsZero() ||
+		store.Data.JobFailures[id] != failure || store.Data.TerminalDecisions[id] != decision {
+		t.Fatalf("failed retirement save lost terminal job: next=%s calls=%d state=%+v", next, gh.commentCalls, store.Data)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, now)
+	m.serviceTerminalControls(t.Context(), store)
+	if gh.commentCalls != 0 || gh.currentChecks != 2 || store.Data.Processed[id].IsZero() ||
+		len(store.Data.JobFailures) != 0 || store.Data.TerminalDecisions[id] != decision {
+		t.Fatalf("retirement did not recover after save failure: calls=%d checks=%d state=%+v",
+			gh.commentCalls, gh.currentChecks, store.Data)
+	}
+}
+
+func TestProcessTerminalItemsWakesWhenFailureChangesDuringSourceLookup(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now.Add(-time.Minute))
+	item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+		state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	checks, _ := terminalControlChecks(store, "")
+	entry := checks[store.Data.JobFailures[id].NotificationKey].entry
+	changed := store.Data.JobFailures[id]
+	changed.Attempts, changed.AcceptedAt, changed.Deadline = 1, now, now.Add(2*time.Minute)
+	gh := &fakeGitHub{items: []github.Item{item}, currentItem: func(github.Item) (github.Item, error) {
+		if err := store.WithLock(func() error {
+			store.Data.JobFailures[id] = changed
+			return store.Save()
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return github.Item{}, errors.New("source lookup unavailable")
+	}}
+	cfg := testConfig(t)
+	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
+	next := m.processTerminalItems(t.Context(), store, "", entry, cfg.Repositories[0], "PullRequest", 8,
+		[]github.Item{item}, m.controlCommands(cfg.Repositories[0]))
+	if !next.Equal(now.Add(time.Minute)) || gh.commentCalls != 0 || !store.Data.Processed[id].IsZero() ||
+		store.Data.JobFailures[id] != changed {
+		t.Fatalf("changed failure lost its next check: next=%s calls=%d state=%+v", next, gh.commentCalls, store.Data)
+	}
+	if next := m.serviceTerminalControls(t.Context(), store); !next.Equal(changed.Deadline) {
+		t.Fatalf("changed failure was not scheduled for its new deadline: next=%s want=%s", next, changed.Deadline)
+	}
+}
+
 func TestRunOnceWithoutWorkerServicesTerminalReplyAndInvitationsOnly(t *testing.T) {
 	now := time.Now().UTC()
 	initial := now.Add(-time.Minute)
@@ -189,7 +373,7 @@ func TestRunOnceServicesTerminalDeadlineDuringHeldCapacity(t *testing.T) {
 	})
 }
 
-func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
+func TestSelectedExecuteSkipsTerminalReplyOnIdentityMismatch(t *testing.T) {
 	for _, identity := range []string{"current author", "permission user"} {
 		t.Run(identity, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -211,15 +395,12 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 				var terminalChecks atomic.Int32
 				base.currentItem = func(item github.Item) (github.Item, error) {
 					if item.Key == terminal.Key {
-						check := terminalChecks.Add(1)
-						if identity == "current author" && check == 1 {
+						terminalChecks.Add(1)
+						if identity == "current author" {
 							item.Author.ID++
 						}
 						if identity == "permission user" {
-							base.permission.User.ID = 7
-							if check == 1 {
-								base.permission.User.ID++
-							}
+							base.permission.User.ID = item.Author.ID + 1
 						}
 					}
 					return item, nil
@@ -240,9 +421,9 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 				time.Sleep(31 * time.Second)
 				synctest.Wait()
 				_, comments := gh.commentsSnapshot()
-				if terminalChecks.Load() != 1 || len(comments) != 0 || held.executions.Load() != 1 {
-					t.Errorf("first terminal identity check did not happen during Execute: checks=%d comments=%v executions=%d",
-						terminalChecks.Load(), comments, held.executions.Load())
+				if terminalChecks.Load() != 1 || len(comments) != 0 || store.Data.Processed[id].IsZero() || held.executions.Load() != 1 {
+					t.Errorf("terminal identity mismatch did not finish without a reply: checks=%d comments=%v processed=%v executions=%d",
+						terminalChecks.Load(), comments, store.Data.Processed[id], held.executions.Load())
 				}
 				time.Sleep(time.Minute + time.Second)
 				synctest.Wait()
@@ -256,10 +437,9 @@ func TestSelectedExecuteRetriesTerminalIdentityMismatch(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if terminalChecks.Load() < 2 || len(comments) != 1 ||
-					!strings.HasSuffix(comments[0].Body, "\n\n<!-- linkdataminion:"+id+" -->") || processed.IsZero() ||
+				if terminalChecks.Load() != 1 || len(comments) != 0 || processed.IsZero() ||
 					held.executions.Load() != 1 || !accepted || len(gh.reactions) != 1 {
-					t.Errorf("terminal identity was not retried during Execute: checks=%d comments=%v processed=%v executions=%d accepted=%+v",
+					t.Errorf("terminal identity mismatch caused another reply check: checks=%d comments=%v processed=%v executions=%d accepted=%+v",
 						terminalChecks.Load(), comments, processed, held.executions.Load(), accepted)
 				}
 				select {
