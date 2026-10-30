@@ -23,6 +23,12 @@ func preparedInputText(input aicli.PreparedInput, secrets ...string) (string, st
 		return "", "invalid_input"
 	}
 	size := int64(len(input.Path)) + int64(len(input.Dir)) + int64(len(input.Stdin)) + int64(len(input.Schema))
+	for _, arg := range input.Args {
+		size += int64(len(arg))
+	}
+	if size > maxAttemptEventBytes {
+		return "", "event_limit"
+	}
 	for _, value := range []string{input.NativeID, input.Mode, input.Path, input.Dir, input.Stdin, input.Schema} {
 		if !utf8.ValidString(value) {
 			return "", "invalid_utf8"
@@ -32,10 +38,6 @@ func preparedInputText(input aicli.PreparedInput, secrets ...string) (string, st
 		if !utf8.ValidString(arg) {
 			return "", "invalid_utf8"
 		}
-		size += int64(len(arg))
-	}
-	if size > maxAttemptEventBytes {
-		return "", "event_limit"
 	}
 	payload := preparedInputPayload{Representation: "redacted", Stage: "prepared", Mode: input.Mode,
 		Path: input.Path, Argv: input.Args, Dir: input.Dir, Stdin: input.Stdin, Schema: input.Schema}

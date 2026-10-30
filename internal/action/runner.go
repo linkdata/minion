@@ -21,6 +21,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
+	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -54,7 +55,8 @@ func NewRemoteRunner(workRoot string) *Runner {
 }
 
 func (r Runner) secretValues() []string {
-	secrets := []string{r.Codex.APIKey, r.Codex.NativeAPIKey, r.Codex.NativeAccessToken, r.Claude.APIKey}
+	codex := codexcli.CaptureAmbientNativeCredentials(r.Codex)
+	secrets := []string{codex.APIKey, codex.NativeAPIKey, codex.NativeAccessToken, r.Claude.APIKey}
 	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
 	return secrets
 }
