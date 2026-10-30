@@ -16,6 +16,8 @@ import (
 func TestWorkerStatusPersistsLogBeforeResult(t *testing.T) {
 	root := t.TempDir()
 	job := testJob(command.Comment)
+	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model"}
+	job.CriticMaxRounds = 2
 	f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
 	f.pull(t)
 	base, err := url.Parse(f.server.URL)
@@ -27,6 +29,7 @@ func TestWorkerStatusPersistsLogBeforeResult(t *testing.T) {
 	const secret = "example-provider-secret"
 	event := attemptRecord{Kind: attemptRecordDiscussion, Text: "saw " + secret,
 		Call: "call-1", Agent: "session-1", Role: "critic", Round: 2,
+		Provider: job.Critic.Provider, Model: job.Critic.Model, ObservedAt: "2026-10-31T12:34:56Z",
 		ReviewPhase: reviewVerification, EventSource: "claude"}
 	if err := status.emit(t.Context(), transport, event, secret); err != nil {
 		t.Fatal(err)
@@ -50,6 +53,7 @@ func TestWorkerStatusPersistsLogBeforeResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	if saved.Call != event.Call || saved.Agent != event.Agent || saved.Role != event.Role ||
+		saved.Provider != event.Provider || saved.Model != event.Model || saved.ObservedAt != event.ObservedAt ||
 		saved.Round != event.Round || saved.ReviewPhase != event.ReviewPhase || saved.EventSource != event.EventSource {
 		t.Fatalf("event metadata changed: %+v", saved)
 	}

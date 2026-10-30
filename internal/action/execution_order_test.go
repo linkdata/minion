@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -262,6 +263,13 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 			}
 			lastSequence = saved.Sequence
 			if saved.Call != "" {
+				ordinal, err := strconv.Atoi(saved.Call)
+				observedAt, timeErr := time.Parse(time.RFC3339Nano, saved.ObservedAt)
+				if err != nil || ordinal < 1 || ordinal > len(expected) ||
+					timeErr != nil || observedAt.IsZero() || !strings.HasSuffix(saved.ObservedAt, "Z") ||
+					saved.Provider != expected[ordinal-1].Provider || saved.Model != expected[ordinal-1].Model {
+					t.Fatalf("call record lost selected provider, model or worker observation time: %+v", saved)
+				}
 				if seen[saved.Call] == nil {
 					seen[saved.Call] = make(map[string]attemptRecord)
 				}

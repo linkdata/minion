@@ -466,6 +466,10 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 			if event.Item.Text != "" {
 				o.emit("assistant", event.Item.Text)
 			}
+		case event.Item.Type == "reasoning":
+			if event.Item.Text != "" {
+				o.emit("reasoning_summary", event.Item.Text)
+			}
 		case codexToolItem(event.Item.Type):
 			if o.onEvent == nil {
 				return
@@ -482,7 +486,7 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 				return
 			}
 			o.emit("tool", string(selected.Item))
-		case event.Item.Type != "reasoning" && event.Item.Type != "todo_list":
+		case event.Item.Type != "todo_list":
 			o.gap("unknown_item")
 		}
 	}

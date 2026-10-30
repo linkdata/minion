@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -22,7 +23,7 @@ const (
 	maxAttemptRecordBytes     int64 = 64 << 20
 	maxAttemptRecordTextBytes       = 16 << 10
 	maxAttemptMarkerTextBytes       = 256
-	maxAttemptRecordLineBytes       = maxAttemptRecordTextBytes*6 + 4096
+	maxAttemptRecordLineBytes       = maxAttemptRecordTextBytes*6 + 6144
 	maxAttemptEventBytes            = aicli.MaxEventBytes
 )
 
@@ -51,6 +52,9 @@ type attemptRecord struct {
 	Call        string   `json:"call,omitempty"`
 	Agent       string   `json:"agent,omitempty"`
 	Role        string   `json:"role,omitempty"`
+	Provider    string   `json:"provider,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	ObservedAt  string   `json:"observed_at,omitempty"`
 	Round       int      `json:"round,omitempty"`
 	ReviewPhase string   `json:"review_phase,omitempty"`
 	EventSource string   `json:"event_source,omitempty"`
@@ -186,13 +190,26 @@ func (r attemptRecord) validateShape() error {
 		r.ReviewPhase != "" && r.ReviewPhase != reviewFull && r.ReviewPhase != reviewVerification {
 		return errors.New("attempt record round or review phase is invalid")
 	}
-	for _, value := range []string{r.Call, r.Agent, r.Role, r.ReviewPhase, r.EventSource} {
+	for _, value := range []string{r.Call, r.Agent, r.Role, r.ReviewPhase, r.EventSource, r.Provider, r.Model} {
 		if len(value) > 128 || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
 			return errors.New("attempt record metadata is invalid or exceeds limit")
 		}
 	}
+	if strings.ContainsAny(r.Provider+r.Model, " \t\r\n") {
+		return errors.New("attempt record provider or model is invalid")
+	}
+	if r.ObservedAt != "" {
+		if len(r.ObservedAt) > len("2006-01-02T15:04:05.999999999Z") {
+			return errors.New("attempt record observed time is invalid")
+		}
+		observed, err := time.Parse(time.RFC3339Nano, r.ObservedAt)
+		if err != nil || r.ObservedAt != observed.UTC().Format(time.RFC3339Nano) {
+			return errors.New("attempt record observed time is invalid")
+		}
+	}
 	if (r.Kind == attemptRecordStop || r.Kind == attemptRecordCoverage) &&
-		(r.Call != "" || r.Agent != "" || r.Role != "" || r.Round != 0 || r.ReviewPhase != "" || r.EventSource != "" || r.More) {
+		(r.Call != "" || r.Agent != "" || r.Role != "" || r.Provider != "" || r.Model != "" || r.ObservedAt != "" ||
+			r.Round != 0 || r.ReviewPhase != "" || r.EventSource != "" || r.More) {
 		return errors.New("attempt record marker has metadata")
 	}
 	return nil
@@ -210,7 +227,8 @@ func (s *attemptRecordStore) validateFragment(record attemptRecord) error {
 		return nil
 	}
 	if record.Kind != s.fragment.Kind || record.Call != s.fragment.Call || record.Agent != s.fragment.Agent ||
-		record.Role != s.fragment.Role || record.Round != s.fragment.Round ||
+		record.Role != s.fragment.Role || record.Provider != s.fragment.Provider || record.Model != s.fragment.Model ||
+		record.ObservedAt != s.fragment.ObservedAt || record.Round != s.fragment.Round ||
 		record.ReviewPhase != s.fragment.ReviewPhase || record.EventSource != s.fragment.EventSource {
 		return errAttemptRecordConflict
 	}
