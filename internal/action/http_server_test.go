@@ -819,6 +819,7 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 	f.pull(t)
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
+	_, receivedAt, _ := f.executor.Status()
 	hold.Store(true)
 	late := status
 	late.Sequence = 2
@@ -842,8 +843,8 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 	if got := <-done; got.err != nil || got.status != http.StatusConflict || got.ack.Failure == nil {
 		t.Fatalf("late observation was admitted after outcome: %+v", got)
 	}
-	if got, _, ok := f.executor.Status(); !ok || got != status {
-		t.Fatalf("late observation replaced last accepted status: status=%+v present=%t", got, ok)
+	if got, gotAt, ok := f.executor.Status(); !ok || got != status || !gotAt.Equal(receivedAt) {
+		t.Fatalf("late observation replaced last accepted status or contact: status=%+v received=%v present=%t", got, gotAt, ok)
 	}
 }
 
@@ -1338,12 +1339,13 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	reject := func(name string, edit func(*Status)) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
+			_, receivedAt, _ := f.executor.Status()
 			candidate := status
 			candidate.Sequence++
 			edit(&candidate)
 			ack := f.ack(t, "/status", httpObservation{Status: candidate}, http.StatusConflict, candidate.Sequence)
-			if got, _, ok := f.executor.Status(); ack.Failure == nil || !ok || got != status || f.tx.ctx.Err() != nil {
-				t.Fatalf("rejected observation changed accepted status or action: ack=%+v status=%+v present=%t ctx=%v", ack, got, ok, f.tx.ctx.Err())
+			if got, gotAt, ok := f.executor.Status(); ack.Failure == nil || !ok || got != status || !gotAt.Equal(receivedAt) || f.tx.ctx.Err() != nil {
+				t.Fatalf("rejected observation changed accepted status, contact or action: ack=%+v status=%+v received=%v present=%t ctx=%v", ack, got, gotAt, ok, f.tx.ctx.Err())
 			}
 		})
 	}

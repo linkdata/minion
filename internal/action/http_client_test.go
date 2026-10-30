@@ -348,13 +348,19 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 			}
 		}
 		main := waitStatus("main", 0)
-		if main.Round != 1 || main.ProgressSequence < 2 {
+		if main.Round != 1 || main.ProgressSequence != 2 {
 			t.Fatalf("Runner main call did not reach Status: %+v", main)
 		}
 		releaseModelOnce()
-		<-outcomeEntered
+		select {
+		case <-outcomeEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before final upload: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not start final upload")
+		}
 		upload := waitStatus("upload", main.Sequence)
-		if upload.ProgressSequence <= main.ProgressSequence || upload.Round != 0 {
+		if upload.ProgressSequence != 5 || upload.Round != 0 {
 			t.Fatalf("cleanup did not precede upload: main=%+v upload=%+v", main, upload)
 		}
 		synctest.Wait()
@@ -380,6 +386,156 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 		}
 		if got := parent.result(t); got.err != nil || got.result.Answer != "Complete" {
 			t.Fatalf("final upload failed: %+v", got)
+		}
+	})
+}
+
+func TestRunHTTPFailedPreparationKeepsContactDuringOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		outcomeEntered := make(chan struct{}, 1)
+		releaseOutcome := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer release()
+		parent := newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						outcomeEntered <- struct{}{}
+						<-releaseOutcome
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) })
+		client := parent.server.Client()
+		client.Timeout = 0
+		workerDone := make(chan error, 1)
+		go func() {
+			workerDone <- RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, &Runner{})
+		}()
+		select {
+		case <-outcomeEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before failed outcome upload: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not start failed outcome upload")
+		}
+		synctest.Wait()
+		first, firstAt, ok := parent.executor.Status()
+		if !ok || first.Phase != "prepare" || firstAt.IsZero() {
+			t.Fatalf("failed preparation lost initial Status: status=%+v received=%v present=%t", first, firstAt, ok)
+		}
+		time.Sleep(statusHeartbeatInterval)
+		synctest.Wait()
+		second, secondAt, ok := parent.executor.Status()
+		if !ok || second.Phase != "prepare" || second.Sequence <= first.Sequence || !secondAt.After(firstAt) {
+			t.Fatalf("failed upload lost contact or claimed an unproved phase: first=%+v second=%+v received=%v present=%t", first, second, secondAt, ok)
+		}
+		release()
+		if err := <-workerDone; !errors.Is(err, monitor.ErrTerminalJob) {
+			t.Fatalf("failed preparation became successful: %v", err)
+		}
+		if got := parent.result(t); got.err == nil || !got.result.matchesJob(job) {
+			t.Fatalf("failed preparation result was not delivered: result=%+v error=%v", got.result, got.err)
+		}
+	})
+}
+
+func TestRunHTTPRedactsAssignedKeyFromCancellationStatusAndOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const key = "assigned-key-leak-canary"
+		job := testJob(command.Comment)
+		binding := httpJobBinding(job)
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(context.Canceled)
+		modelEntered := make(chan struct{}, 1)
+		statusErrors := make(chan Status, 8)
+		outcomes := make(chan httpOutcome, 1)
+		releaseOutcome := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer release()
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			kind := strings.TrimPrefix(r.URL.Path, "/")
+			switch kind {
+			case "next":
+				httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout,
+					Credentials: WorkerCredentials{CodexAPIKey: key}})
+			case "cancel":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case "before", "after":
+				var call httpCall
+				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+					t.Error(err)
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: call.Sequence})
+			case "status":
+				var observation httpObservation
+				if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+					t.Error(err)
+				}
+				if observation.Status.Error != "" {
+					statusErrors <- observation.Status
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: observation.Status.Sequence})
+			case "outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					t.Error(err)
+				}
+				outcomes <- outcome
+				<-releaseOutcome
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: outcome.Sequence})
+			default:
+				t.Errorf("unexpected route %s", r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(callCtx context.Context, _ modelRun) (aicli.Result, error) {
+			modelEntered <- struct{}{}
+			<-callCtx.Done()
+			return aicli.Result{Tokens: usage.Tokens{Input: 1}}, callCtx.Err()
+		}}
+		workerDone := make(chan error, 1)
+		go func() { workerDone <- RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, runner) }()
+		select {
+		case <-modelEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before cancellation: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not start model")
+		}
+		cancel(fmt.Errorf("caller cause contains %s", key))
+		var upload Status
+		statusTimer := time.NewTimer(5 * time.Second)
+		defer statusTimer.Stop()
+		for upload.Phase != "upload" {
+			select {
+			case upload = <-statusErrors:
+			case err := <-workerDone:
+				t.Fatalf("worker ended before error Status: %v", err)
+			case <-statusTimer.C:
+				t.Fatal("worker did not report canceled upload")
+			}
+		}
+		if upload.Error == "" || strings.Contains(upload.Error, key) {
+			t.Fatalf("assigned key in Status error: %q", upload.Error)
+		}
+		var outcome httpOutcome
+		select {
+		case outcome = <-outcomes:
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not upload canceled result")
+		}
+		if outcome.Failure == nil || strings.Contains(outcome.Failure.Message, key) {
+			t.Fatalf("assigned key in outcome failure: %+v", outcome.Failure)
+		}
+		release()
+		if err := <-workerDone; !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), key) {
+			t.Fatalf("assigned key in worker return: %v", err)
 		}
 	})
 }
