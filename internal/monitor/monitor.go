@@ -1204,6 +1204,35 @@ func githubResourceMovedOrGone(err error) bool {
 	return errors.As(err, &status) && (status.StatusCode == http.StatusMovedPermanently || status.StatusCode == http.StatusGone)
 }
 
+const unresolvedAccessOperatorAction = "Check the original request and marked reply, restore access if possible, then resolve manually without rerunning the action."
+
+func accessFailureCause(err error) error {
+	// For a failed source lookup followed by a failed full-thread lookup,
+	// the latter explains why the source could not be classified as absent.
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		parts := joined.Unwrap()
+		if len(parts) > 0 {
+			return parts[len(parts)-1]
+		}
+	}
+	return err
+}
+
+func accessFailureReason(stage string, err error) string {
+	err = accessFailureCause(err)
+	var status *github.StatusError
+	if errors.As(err, &status) {
+		return fmt.Sprintf("%s: HTTP %d", stage, status.StatusCode)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return stage + ": timed out"
+	}
+	if errors.Is(err, context.Canceled) {
+		return stage + ": canceled"
+	}
+	return stage + ": unavailable"
+}
+
 func (m *Monitor) actionRuntime() time.Duration {
 	runtime := time.Duration(m.Config.MaxRuntimeMinutes) * time.Minute
 	if runtime <= 0 {
@@ -2688,6 +2717,8 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 			if accepted == nil || accepted.JobID != job.ID || accepted.AttemptID != job.AttemptID {
 				return fmt.Errorf("%w: accepted action changed before failure reply", ErrAcceptanceState)
 			}
+			write.SourceURL = accepted.SourceURL
+			write.SourceKey = accepted.SourceKey
 		}
 		if _, exists := store.Data.PublicationWrites[job.ID]; exists {
 			return fmt.Errorf("%w: failure reply was already issued", ErrAcceptanceState)
@@ -2713,7 +2744,7 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 	if err != nil {
 		return err // The remote effect is uncertain; only the shared reconciler may inspect it.
 	}
-	if _, err := storePublicationWriteOutcome(store, job.ID, write, state.PublicationWriteObserved, m.now().UTC()); err != nil {
+	if _, err := storePublicationWriteOutcome(store, job.ID, write, state.PublicationWriteObserved, m.now().UTC(), ""); err != nil {
 		return fmt.Errorf("%w: save observed failure reply: %w", ErrAcceptanceState, err)
 	}
 	return nil
@@ -2767,6 +2798,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		return err
 	}
 	replied := issuedWrite
+	var unresolvedReason string
 	if !replied && replyCtx.Err() != nil {
 		m.logf("skip failure reply to %s: %v", itemLocation(job.Source), replyCtx.Err())
 		replied = true
@@ -2784,6 +2816,9 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		cancelLookup()
 		if err != nil {
 			m.logf("skip failure reply to %s: check existing bot replies: %v", itemLocation(job.Source), err)
+			if accepted != nil && !githubResourceMovedOrGone(accessFailureCause(err)) {
+				unresolvedReason = accessFailureReason("check existing bot replies", err)
+			}
 			replied = true
 		}
 	}
@@ -2812,6 +2847,9 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 			cancel()
 			if verifyErr != nil {
 				m.logf("skip failure reply to %s: revalidate source: %v", itemLocation(job.Source), verifyErr)
+				if !githubResourceMovedOrGone(accessFailureCause(verifyErr)) {
+					unresolvedReason = accessFailureReason("revalidate source", verifyErr)
+				}
 				replied = true
 			} else if !valid {
 				m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
@@ -2831,6 +2869,9 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		cancelRepo()
 		if err != nil {
 			m.logf("skip failure reply to %s: verify repository: %v", itemLocation(job.Source), err)
+			if accepted != nil && !githubResourceMovedOrGone(accessFailureCause(err)) {
+				unresolvedReason = accessFailureReason("verify repository", err)
+			}
 			replied = true
 		} else if !job.Repository.MatchesIdentity(repo.ID, repo.Owner.ID) {
 			m.logf("skip failure reply to %s: repository identity changed", itemLocation(job.Source))
@@ -2858,10 +2899,30 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 			m.logf("failure reply to %s has an uncertain or skipped POST: %v", itemLocation(job.Source), err)
 		}
 	}
+	var access state.AccessDisposition
+	var accessAttemptID string
 	err = store.WithLock(func() error {
 		processed, hadProcessed := store.Data.Processed[job.ID]
 		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
 		previousAccepted := store.Data.Accepted
+		previousDecision := store.Data.TerminalDecisions[job.ID]
+		accessChanged := false
+		if accepted != nil && unresolvedReason != "" {
+			if previousDecision.AttemptID != accepted.AttemptID || accepted.SourceKey == "" {
+				return fmt.Errorf("%w: accepted access failure has no matching decision or source key", ErrAcceptanceState)
+			}
+			if previousDecision.UnresolvedAccess == (state.AccessDisposition{}) {
+				decision := previousDecision
+				decision.UnresolvedAccess = state.AccessDisposition{
+					Repository: accepted.Repository, SourceURL: accepted.SourceURL, SourceKey: accepted.SourceKey, Reason: unresolvedReason,
+					ReplyState: "not_issued", OperatorAction: unresolvedAccessOperatorAction,
+				}
+				store.Data.TerminalDecisions[job.ID] = decision
+				accessChanged = true
+			}
+		}
+		access = store.Data.TerminalDecisions[job.ID].UnresolvedAccess
+		accessAttemptID = previousDecision.AttemptID
 		store.Data.Processed[job.ID] = at
 		delete(store.Data.JobFailures, job.ID)
 		if accepted != nil {
@@ -2879,11 +2940,19 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 				delete(store.Data.JobFailures, job.ID)
 			}
 			store.Data.Accepted = previousAccepted
+			if accessChanged {
+				store.Data.TerminalDecisions[job.ID] = previousDecision
+			}
 			return err
 		}
 		return nil
 	})
 	if err == nil {
+		if access != (state.AccessDisposition{}) {
+			m.logf("unresolved accepted GitHub access job=%s repository=%s source=%s source_key=%s attempt=%s reason=%s reply=%s operator_action=%s",
+				job.ID, access.Repository, access.SourceURL, access.SourceKey, accessAttemptID,
+				access.Reason, access.ReplyState, access.OperatorAction)
+		}
 		if accepted != nil {
 			if clearErr := store.ClearAcceptedResult(); clearErr != nil {
 				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
