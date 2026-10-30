@@ -294,7 +294,7 @@ func TestAttemptRecordsCapReservesStopAndCoverage(t *testing.T) {
 		t.Fatalf("reserved stop marker failed: ack=%d error=%v", ack, err)
 	}
 	sequence++
-	if ack, err := store.Append(attemptRecordFixture(sequence, attemptRecordCoverage, markerText)); err != nil || ack != sequence {
+	if ack, err := store.Append(attemptRecordFixture(sequence, attemptRecordCoverage, "")); err != nil || ack != sequence {
 		t.Fatalf("reserved coverage marker failed: ack=%d error=%v", ack, err)
 	}
 	sequence++
@@ -314,7 +314,7 @@ func TestAttemptRecordsCapReservesStopAndCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	if ack, err := reopened.Append(attemptRecordFixture(sequence-1, attemptRecordCoverage, markerText)); err != nil || ack != sequence-1 {
+	if ack, err := reopened.Append(attemptRecordFixture(sequence-1, attemptRecordCoverage, "")); err != nil || ack != sequence-1 {
 		t.Fatalf("coverage replay after cap failed: ack=%d error=%v", ack, err)
 	}
 }
@@ -353,18 +353,19 @@ func TestAttemptRecordsRedactFreeText(t *testing.T) {
 func TestAttemptRecordsKeepMarkersWhenRedactionExpands(t *testing.T) {
 	root := t.TempDir()
 	store := openAttemptFixture(t, root)
-	for sequence, kind := range []string{attemptRecordStop, attemptRecordCoverage} {
-		entry := attemptRecordFixture(uint64(sequence+1), kind, strings.Repeat("x", maxAttemptMarkerTextBytes))
-		if ack, err := store.Append(entry, "x"); err != nil || ack != entry.Sequence {
-			t.Fatalf("reserved %s marker lost after redaction: ack=%d error=%v", kind, ack, err)
-		}
+	entry := attemptRecordFixture(1, attemptRecordStop, strings.Repeat("zz", maxAttemptMarkerTextBytes/2))
+	if ack, err := store.Append(entry, "zz"); err != nil || ack != 1 {
+		t.Fatalf("reserved stop marker lost after redaction: ack=%d error=%v", ack, err)
+	}
+	if ack, err := store.Append(attemptRecordFixture(2, attemptRecordCoverage, "")); err != nil || ack != 2 {
+		t.Fatalf("empty coverage marker failed: ack=%d error=%v", ack, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	reopened := openAttemptFixture(t, root)
-	if ack, err := reopened.Append(attemptRecordFixture(2, attemptRecordCoverage, strings.Repeat("x", maxAttemptMarkerTextBytes)), "x"); err != nil || ack != 2 {
-		t.Fatalf("redacted coverage marker did not survive reopen: ack=%d error=%v", ack, err)
+	if ack, err := reopened.Append(attemptRecordFixture(2, attemptRecordCoverage, ""), "zz"); err != nil || ack != 2 {
+		t.Fatalf("coverage marker did not survive reopen: ack=%d error=%v", ack, err)
 	}
 }
 
@@ -477,5 +478,99 @@ func TestAttemptRecordsUncertainWriteAndSyncRequireReopen(t *testing.T) {
 	reopened := openAttemptFixture(t, root)
 	if ack, err := reopened.Append(entry); err != nil || ack != 2 {
 		t.Fatalf("replay after reopen: ack=%d error=%v", ack, err)
+	}
+}
+
+func TestAttemptRecordsMetadataAndTerminalCoverage(t *testing.T) {
+	root := t.TempDir()
+	store := openAttemptFixture(t, root)
+	entry := attemptRecordFixture(1, attemptRecordDiscussion, "part one")
+	entry.Call, entry.Agent, entry.Role, entry.EventSource = "call-1", "helper-2", "critic", "claude"
+	if ack, err := store.Append(entry); err != nil || ack != 1 {
+		t.Fatalf("metadata append: ack=%d error=%v", ack, err)
+	}
+	coverage := attemptRecordFixture(2, attemptRecordCoverage, "")
+	if ack, err := store.Append(coverage); err != nil || ack != 2 {
+		t.Fatalf("coverage append: ack=%d error=%v", ack, err)
+	}
+	if ack, err := store.Append(entry); err != nil || ack != 2 {
+		t.Fatalf("replay before coverage: ack=%d error=%v", ack, err)
+	}
+	if ack, err := store.Append(attemptRecordFixture(3, attemptRecordDiscussion, "late")); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
+		t.Fatalf("appended after terminal coverage: ack=%d error=%v", ack, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openAttemptFixture(t, root)
+	if ack, err := reopened.Append(coverage); err != nil || ack != 2 {
+		t.Fatalf("coverage replay after reopen: ack=%d error=%v", ack, err)
+	}
+	if ack, err := reopened.Append(attemptRecordFixture(3, attemptRecordDiscussion, "late")); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
+		t.Fatalf("reopened store appended after coverage: ack=%d error=%v", ack, err)
+	}
+}
+
+func TestAttemptRecordsRejectCredentialInMetadata(t *testing.T) {
+	store := openAttemptFixture(t, t.TempDir())
+	for _, value := range []string{"secret", "<"} {
+		entry := attemptRecordFixture(1, attemptRecordDiscussion, "safe")
+		entry.Call = value
+		key := "secret"
+		if value == "<" {
+			key = "u003c" // json.Marshal escapes '<' into this text.
+		}
+		if ack, err := store.Append(entry, key); ack != 0 || err == nil {
+			t.Fatalf("credential in metadata accepted: value=%q ack=%d error=%v", value, ack, err)
+		}
+	}
+	entry := attemptRecordFixture(1, attemptRecordDiscussion, "safe")
+	entry.Call = "safe"
+	if ack, err := store.Append(entry, "call"); ack != 0 || err == nil {
+		t.Fatalf("credential matching a metadata field name was retained: ack=%d error=%v", ack, err)
+	}
+	marker := attemptRecordFixture(1, attemptRecordCoverage, "")
+	marker.Agent = "helper"
+	if ack, err := store.Append(marker); ack != 0 || err == nil {
+		t.Fatalf("marker metadata accepted: ack=%d error=%v", ack, err)
+	}
+	marker.Agent = ""
+	marker.Text = "incomplete"
+	if ack, err := store.Append(marker, "incomplete"); ack != 0 || err == nil {
+		t.Fatalf("nonempty coverage was accepted or redacted to complete: ack=%d error=%v", ack, err)
+	}
+	reference := attemptRecordFixture(1, attemptRecordReviewReference, "")
+	reference.More = true
+	if ack, err := store.Append(reference); ack != 0 || err == nil {
+		t.Fatalf("empty reference claimed a continuation: ack=%d error=%v", ack, err)
+	}
+}
+
+func TestAttemptRecordsCoverageRequiresFinishedContinuation(t *testing.T) {
+	root := t.TempDir()
+	store := openAttemptFixture(t, root)
+	first := attemptRecordFixture(1, attemptRecordDiscussion, "first")
+	first.Call, first.Agent, first.More = "call-1", "helper-1", true
+	if ack, err := store.Append(first); err != nil || ack != 1 {
+		t.Fatalf("first fragment: ack=%d error=%v", ack, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openAttemptFixture(t, root)
+	if ack, err := store.Append(attemptRecordFixture(2, attemptRecordCoverage, "")); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
+		t.Fatalf("unfinished fragment marked complete after reopen: ack=%d error=%v", ack, err)
+	}
+	other := attemptRecordFixture(2, attemptRecordDiscussion, "unrelated")
+	if ack, err := store.Append(other); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
+		t.Fatalf("unrelated event ended continuation: ack=%d error=%v", ack, err)
+	}
+	last := attemptRecordFixture(2, attemptRecordDiscussion, "last")
+	last.Call, last.Agent = first.Call, first.Agent
+	if ack, err := store.Append(last); err != nil || ack != 2 {
+		t.Fatalf("last fragment: ack=%d error=%v", ack, err)
+	}
+	if ack, err := store.Append(attemptRecordFixture(3, attemptRecordCoverage, "")); err != nil || ack != 3 {
+		t.Fatalf("complete fragments lacked coverage: ack=%d error=%v", ack, err)
 	}
 }

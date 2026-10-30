@@ -53,7 +53,7 @@ const (
 // startLocalWorker owns the direct child's context and command. configure
 // prepares the child command; stderr is captured for a safe startup diagnostic.
 // Job cancellation is handled by Execute.
-func startLocalWorker(executorID, path string, args []string, readyTimeout time.Duration, credentials WorkerCredentials, configure func(*exec.Cmd, LocalEndpointAccess) error) (*localWorker, error) {
+func startLocalWorker(executorID, path string, args []string, readyTimeout time.Duration, credentials WorkerCredentials, configure func(*exec.Cmd, LocalEndpointAccess) error, workRoot ...string) (*localWorker, error) {
 	if path == "" {
 		return nil, errors.New("local worker command path is required")
 	}
@@ -63,6 +63,11 @@ func startLocalWorker(executorID, path string, args []string, readyTimeout time.
 	executor, err := NewHTTPExecutor(executorID)
 	if err != nil {
 		return nil, err
+	}
+	if len(workRoot) != 0 && workRoot[0] != "" {
+		if err := executor.SetWorkRoot(workRoot[0]); err != nil {
+			return nil, err
+		}
 	}
 	if err := executor.SetWorkerCredentials(credentials); err != nil {
 		return nil, err
@@ -144,7 +149,7 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 	}
 	w, err := startLocalWorker(LocalExecutorID, path, args, readyTimeout, credentials, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
 		return configure(cmd, access, selected, credentials)
-	})
+	}, e.WorkRoot)
 	if err != nil {
 		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.secretValues()...)
 	}
