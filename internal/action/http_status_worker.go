@@ -140,9 +140,9 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	if len(event.Text) > maxAttemptEventBytes {
 		return fail(errAttemptRecordsFull)
 	}
-	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent,
-		Role: event.Role, Provider: event.Provider, Model: event.Model, ObservedAt: event.ObservedAt,
-		Round: event.Round, ReviewPhase: event.ReviewPhase, EventSource: event.EventSource}).validateShape(); err != nil {
+	metadata := event
+	metadata.Text = ""
+	if err := metadata.validateShape(); err != nil {
 		return fail(err)
 	}
 	raw := event
@@ -167,9 +167,9 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	if len(event.Text) > maxAttemptEventBytes {
 		return fail(errAttemptRecordsFull)
 	}
-	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent, Role: event.Role,
-		Provider: event.Provider, Model: event.Model, ObservedAt: event.ObservedAt,
-		Round: event.Round, ReviewPhase: event.ReviewPhase, EventSource: event.EventSource}).validateShape(); err != nil {
+	metadata = event
+	metadata.Text = ""
+	if err := metadata.validateShape(); err != nil {
 		return fail(err)
 	}
 	for _, value := range []string{event.Text, event.Call, event.Agent, event.Role, event.Provider, event.Model,

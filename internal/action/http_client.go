@@ -250,7 +250,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	statusFeed := newWorkerStatus(job)
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
-	eventCtx, cancelEvents := context.WithCancel(actionCtx)
+	eventCtx, cancelEvents := context.WithCancel(controlCtx)
 	defer cancelEvents()
 	jobRunner.statusUpdate = statusFeed.progress
 	events := newProviderEventQueue(func(event attemptRecord) error {
