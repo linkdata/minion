@@ -125,6 +125,7 @@ type jsonlOutput struct {
 	cancel              context.CancelFunc
 	stream              aicli.JSONL
 	fatal               func()
+	fatalGap            bool
 	stopped             bool
 	err                 error
 	usageLimit          error
@@ -158,9 +159,17 @@ func (o *jsonlOutput) fail(err error) {
 		o.err = err
 		o.completed, o.result.Answer = false, ""
 		o.result.UsageComplete = false
+		o.markFatalGap("output_stop")
 		if o.cancel != nil {
 			o.cancel()
 		}
+	}
+}
+
+func (o *jsonlOutput) markFatalGap(kind string) {
+	if o.onEvent != nil && !o.fatalGap {
+		o.fatalGap = true
+		o.onEvent(aicli.StreamEvent{Kind: kind})
 	}
 }
 

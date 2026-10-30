@@ -21,7 +21,9 @@ import (
 // Minion never resumes this Session for another action or role.
 type Session struct {
 	// OnEvent receives redacted, fully emitted events; final follows validation.
-	OnEvent                      func(aicli.StreamEvent)
+	OnEvent func(aicli.StreamEvent)
+	// OnInput receives prepared stdin and command metadata before the CLI starts.
+	OnInput                      func(aicli.PreparedInput)
 	workspace, binary, outputDir string
 	writable                     bool
 	settings                     config.ClaudeConfig

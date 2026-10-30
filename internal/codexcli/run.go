@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -200,6 +201,21 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
+	if s.OnInput != nil {
+		mode := "fresh"
+		if s.threadID != "" {
+			mode = "resume"
+		}
+		s.OnInput(aicli.PreparedInput{
+			NativeID: s.threadID, Mode: mode, Path: cmd.Path, Args: slices.Clone(cmd.Args),
+			Dir: cmd.Dir, Stdin: prompt, Schema: settings.OutputSchema,
+		})
+	}
+	defer func() {
+		if output.threadID == "" && s.OnEvent != nil {
+			s.OnEvent(aicli.StreamEvent{Kind: "identity_unavailable"})
+		}
+	}()
 	runErr := executil.Run(cmd)
 	if cmd.Process == nil {
 		s.accounting.before = nil
@@ -207,6 +223,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	s.used = true
 	output.stream.Finish()
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		output.gap("pipe_drain_incomplete")
+	}
 	if s.threadID == "" && output.stopErr == nil {
 		s.threadID = output.threadID
 	}
@@ -414,6 +433,7 @@ func (o *jsonlOutput) stop(err error) {
 		return
 	}
 	o.stopErr, o.failed = err, true
+	o.gap("output_stop")
 	if o.cancel != nil {
 		o.cancel()
 	}
@@ -427,6 +447,7 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 	if err := json.Unmarshal(line, &event); err != nil {
 		if o.parseErr == nil {
 			o.parseErr = fmt.Errorf("invalid JSONL event: %w", err)
+			o.gap("invalid_json")
 			if o.cancel != nil {
 				o.cancel()
 			}
@@ -535,6 +556,10 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		} else if event.ThreadID != "" && event.ThreadID != o.threadID {
 			o.conflictingID = event.ThreadID
 			o.stop(errors.New("Codex thread identity changed within one call")) //nolint:staticcheck // -- Codex is a proper noun.
+			return
+		}
+		if event.ThreadID != "" {
+			o.emit("identity", "")
 		}
 	case "turn.started":
 		o.completed, o.finalMessage = false, ""

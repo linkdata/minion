@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -138,6 +139,14 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		ceilingMatched = ceilingMatched || isWaitCeilingStop(line)
 	}, Overflow: func() { ceilingOverflow = true }}
 	cmd.Stdout, cmd.Stderr = &output, io.MultiWriter(&diagnostics, &ceiling)
+	if s.OnInput != nil {
+		mode := "fresh"
+		if s.started {
+			mode = "resume"
+		}
+		s.OnInput(aicli.PreparedInput{NativeID: s.id, Mode: mode, Path: cmd.Path,
+			Args: slices.Clone(cmd.Args), Dir: cmd.Dir, Stdin: prompt, Schema: settings.OutputSchema})
+	}
 	err = executil.Run(cmd)
 	if cmd.Process == nil {
 		// No CLI started, so no provider usage or resumable turn exists.
@@ -146,6 +155,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	s.started = true
 	ceiling.Finish()
 	output.stream.Finish()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		output.markFatalGap("pipe_drain_incomplete")
+	}
 	// Preserve crash/startup stderr before finish adds a generic missing-result
 	// error; native structured failures retain their safer diagnostic instead.
 	if err != nil && output.err == nil && output.usageLimit == nil && output.taskFailure == nil && !ceilingMatched {

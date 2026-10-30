@@ -8,9 +8,11 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -150,6 +152,75 @@ func TestRunHTTPKeepsCredentialsPerJobAndCleansBeforeOutcome(t *testing.T) {
 	}
 	if modelCalls != len(secrets) {
 		t.Fatalf("model calls=%d, want %d", modelCalls, len(secrets))
+	}
+}
+
+func TestRunHTTPRedactsWorkerAmbientCredentialFromPreparedInput(t *testing.T) {
+	const secret = "worker-only-ambient-codex-key"
+	t.Setenv("CODEX_API_KEY", secret)
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	job := testJob(command.Comment)
+	job.Description = "Task text contains " + secret
+	root := t.TempDir()
+	preparedSaved := make(chan struct{}, 1)
+	f := newHTTPServerTestWithStopServerRoot(t, t.Context(), job, runnerExecutionCheckpoints{},
+		func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/status" {
+					next.ServeHTTP(w, r)
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				var observation httpObservation
+				prepared := json.Unmarshal(body, &observation) == nil && len(observation.Logs) == 1 &&
+					observation.Logs[0].EventSource == "codex.input.prepared"
+				next.ServeHTTP(w, r)
+				if prepared {
+					select {
+					case preparedSaved <- struct{}{}:
+					default:
+					}
+				}
+			})
+		}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, 0, root)
+	// The model stub isolates HTTP credential handling from CLI capability discovery.
+	runner := &Runner{WorkRoot: t.TempDir()}
+	runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
+		if request.onInput == nil || request.onEvent == nil || !strings.Contains(request.prompt, secret) {
+			return aicli.Result{}, errors.New("fixture did not reach the prepared Codex input")
+		}
+		request.onInput(aicli.PreparedInput{Mode: "fresh", Path: "/fixture/codex", Args: []string{"codex", "exec", "-"},
+			Dir: request.dir, Stdin: request.prompt})
+		wait, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+		defer cancel()
+		select {
+		case <-preparedSaved:
+		case <-wait.Done():
+			return aicli.Result{}, wait.Err()
+		}
+		request.onEvent(aicli.StreamEvent{NativeID: "root", Kind: "identity"})
+		return aicli.Result{Answer: "Done", UsageComplete: true}, nil
+	}
+	if err := RunHTTP(t.Context(), f.server.Client(), f.server.URL, job.Identity.ExecutorID, runner); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.result(t); got.err != nil || got.result.Answer != "Done" {
+		t.Fatalf("remote worker result = %+v", got)
+	}
+	data := httpTestRecords(t, root, job)
+	if bytes.Contains(data, []byte(secret)) {
+		t.Fatal("worker-only ambient credential reached the retained attempt records")
+	}
+	if !bytes.Contains(data, []byte("[redacted]")) || !bytes.Contains(data, []byte("codex.input.prepared")) {
+		t.Fatalf("prepared input was not retained in redacted form: %q", data)
+	}
+	if runner.Codex.APIKey != "" || runner.Codex.NativeAPIKey != "" || runner.Codex.NativeAccessToken != "" {
+		t.Fatal("remote worker retained an ambient credential after the action")
 	}
 }
 

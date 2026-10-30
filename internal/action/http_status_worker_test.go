@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 )
 
@@ -163,6 +164,59 @@ func TestWorkerStatusCoverageRequiresSuppliedAndDeliveredEvents(t *testing.T) {
 		if len(observation.Logs) != 1 || observation.Logs[0].Sequence != 1 || observation.Logs[0].Text != "first" {
 			t.Fatalf("more than one unacknowledged record or coverage sent: %+v", observation)
 		}
+	}
+}
+
+func TestRunnerUnavailablePreparedInputWithholdsStatusCoverage(t *testing.T) {
+	job := testJob(command.Comment)
+	var saved []attemptRecord
+	client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+		var observation httpObservation
+		if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+			return nil, err
+		}
+		if len(observation.Logs) != 1 {
+			return nil, errors.New("missing private log")
+		}
+		saved = append(saved, observation.Logs[0])
+		ack, err := httpEncode(httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status",
+			Sequence: observation.Status.Sequence, LogSequence: observation.Logs[0].Sequence}, httpControlBytes)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
+	})}
+	base, _ := url.Parse("http://worker.test")
+	transport := &httpExecutionClient{client: client, base: base}
+	status := newWorkerStatus(job)
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		return status.emit(t.Context(), transport, event)
+	})
+	runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			if request.onInput == nil {
+				t.Fatal("Runner did not connect prepared input capture")
+			}
+			request.onInput(aicli.PreparedInput{Mode: "fresh", Path: "/fixture/codex", Args: []string{"codex"},
+				Dir: "/fixture/runtime", Stdin: strings.Repeat("x", maxAttemptEventBytes)})
+			return aicli.Result{Answer: "Done"}, nil
+		}}
+	if _, err := runner.Run(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+	if queue.finish() {
+		t.Fatal("unavailable prepared input falsely completed capture")
+	}
+	status.markIncomplete()
+	if err := status.drain(t.Context(), transport); err == nil {
+		t.Fatal("unavailable prepared input received a coverage marker")
+	}
+	if len(saved) != 1 || saved[0].Kind != attemptRecordInput || saved[0].Agent != "" ||
+		saved[0].Call != "1" || saved[0].Role != roleMain || saved[0].EventSource != "codex.input.prepared" ||
+		!strings.Contains(saved[0].Text, `"reason":"event_limit"`) ||
+		!strings.Contains(saved[0].Text, `"available":false`) {
+		t.Fatalf("unavailable prepared input reason or call binding was lost: %+v", saved)
 	}
 }
 

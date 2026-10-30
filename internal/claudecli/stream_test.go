@@ -110,9 +110,27 @@ func TestSessionStreamFinalRequiresSuccessfulLifecycle(t *testing.T) {
 			want := []aicli.StreamEvent(nil)
 			if tc.wantFinal {
 				want = []aicli.StreamEvent{{NativeID: session.id, Kind: "final", Text: "final answer"}}
+			} else {
+				want = []aicli.StreamEvent{{Kind: "output_stop"}}
 			}
 			if !slices.Equal(got, want) {
 				t.Fatalf("events=%+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+func TestStreamParserFailureMarksUnboundGap(t *testing.T) {
+	for _, test := range []struct{ name, line string }{
+		{"malformed JSON", `{bad`},
+		{"foreign identity", `{"type":"system","subtype":"init","session_id":"foreign"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var got []aicli.StreamEvent
+			o := jsonlOutput{sessionID: "native-id", onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+			writeChunks(t, &o, test.line+"\n")
+			if o.err == nil || !slices.Equal(got, []aicli.StreamEvent{{Kind: "output_stop"}}) {
+				t.Fatalf("parser failure did not mark incomplete capture: events=%+v error=%v", got, o.err)
 			}
 		})
 	}

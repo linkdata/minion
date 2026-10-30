@@ -21,6 +21,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
+	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -54,7 +55,8 @@ func NewRemoteRunner(workRoot string) *Runner {
 }
 
 func (r Runner) secretValues() []string {
-	secrets := []string{r.Codex.APIKey, r.Codex.NativeAPIKey, r.Codex.NativeAccessToken, r.Claude.APIKey}
+	codex := codexcli.CaptureAmbientNativeCredentials(r.Codex)
+	secrets := []string{codex.APIKey, codex.NativeAPIKey, codex.NativeAccessToken, r.Claude.APIKey}
 	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
 	return secrets
 }
@@ -326,8 +328,27 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			if configured.eventSink != nil {
+				request.onInput = func(input aicli.PreparedInput) {
+					text, unavailable := preparedInputText(input, configured.secretValues()...)
+					if unavailable != "" {
+						text = unavailableInputText(unavailable)
+					}
+					configured.eventSink(attemptRecord{Kind: attemptRecordInput, Text: text,
+						Call: strconv.Itoa(checkpoint.Ordinal), Agent: input.NativeID, Role: request.role,
+						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + ".input.prepared"})
+					if unavailable != "" {
+						// Keep the call's prepared-input gap visible and withhold coverage.
+						configured.eventSink(attemptRecord{Kind: attemptRecordDiscussion,
+							Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role, Round: request.round,
+							ReviewPhase: request.reviewPhase, EventSource: request.provider + ".input.unavailable"})
+					}
+				}
 				request.onEvent = func(event aicli.StreamEvent) {
-					configured.eventSink(attemptRecord{Kind: attemptRecordDiscussion, Text: event.Text,
+					kind := attemptRecordDiscussion
+					if event.Kind == "identity" {
+						kind = attemptRecordInput
+					}
+					configured.eventSink(attemptRecord{Kind: kind, Text: event.Text,
 						Call: strconv.Itoa(checkpoint.Ordinal), Agent: event.NativeID, Role: request.role,
 						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + "." + event.Kind})
 				}

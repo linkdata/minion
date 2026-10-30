@@ -111,6 +111,8 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	var journal bytes.Buffer
 	zero, calls := 0, 0
 	responses := make([]string, len(expected))
+	prompts := make([]string, len(expected))
+	agents := []string{"session-main", "session-critic-1", "session-main", "session-critic-1", "session-critic-2"}
 	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Usage: store, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0),
 		Main: "codex", Adversarial: "claude", CodexModel: mainModel, CodexEffort: "high", ClaudeModel: criticModel, ClaudeEffort: "medium",
 		CriticStopping: config.CriticStopping{MaxRounds: maxRounds, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
@@ -173,10 +175,24 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 			}
 			responses[index] = response
 			if overHTTP {
-				if native.onEvent == nil {
-					return aicli.Result{}, fmt.Errorf("call %d has no provider event sink", index+1)
+				if native.onInput == nil || native.onEvent == nil {
+					return aicli.Result{}, fmt.Errorf("call %d has no provider input or event sink", index+1)
 				}
-				native.onEvent(aicli.StreamEvent{NativeID: fmt.Sprintf("session-%d", index+1), Kind: "final", Text: response})
+				prompts[index] = native.prompt
+				inputID := agents[index]
+				mode := "fresh"
+				if index == 0 { // A fresh Codex invocation has no native ID before launch.
+					inputID = ""
+				}
+				if index == 2 || index == 3 {
+					mode = "resume"
+				}
+				native.onInput(aicli.PreparedInput{NativeID: inputID, Mode: mode, Path: "/fixture/cli",
+					Args: []string{"cli", "exec", "-"}, Dir: native.dir, Stdin: native.prompt, Schema: native.outputSchema})
+				if native.provider == "codex" {
+					native.onEvent(aicli.StreamEvent{NativeID: agents[index], Kind: "identity"})
+				}
+				native.onEvent(aicli.StreamEvent{NativeID: agents[index], Kind: "final", Text: response})
 			}
 			return aicli.Result{Answer: response, Tokens: want.Tokens, UsageComplete: true}, nil
 		}},
@@ -234,19 +250,68 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 			t.Fatal(err)
 		}
 		lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
-		if len(lines) < len(expected) {
-			t.Fatalf("only %d of %d emitted events were saved", len(lines), len(expected))
-		}
-		for index, want := range expected {
+		seen := make(map[string]map[string]attemptRecord)
+		var lastSequence uint64
+		for _, line := range lines {
 			var saved attemptRecord
-			if err := json.Unmarshal(lines[index], &saved); err != nil {
+			if err := json.Unmarshal(line, &saved); err != nil {
 				t.Fatal(err)
 			}
-			if saved.Kind != attemptRecordDiscussion || saved.Sequence != uint64(index+1) ||
-				saved.Call != fmt.Sprint(index+1) || saved.Agent != fmt.Sprintf("session-%d", index+1) ||
+			if saved.Sequence != lastSequence+1 {
+				t.Fatalf("attempt record sequence %d after %d", saved.Sequence, lastSequence)
+			}
+			lastSequence = saved.Sequence
+			if saved.Call != "" {
+				if seen[saved.Call] == nil {
+					seen[saved.Call] = make(map[string]attemptRecord)
+				}
+				seen[saved.Call][saved.EventSource] = saved
+			}
+		}
+		for index, want := range expected {
+			call := fmt.Sprint(index + 1)
+			input, ok := seen[call][want.Provider+".input.prepared"]
+			if !ok || input.Kind != attemptRecordInput || input.Call != call ||
+				input.Role != want.Role || input.Round != want.Round || input.ReviewPhase != want.ReviewPhase {
+				t.Fatalf("call %s lost its prepared input binding: %+v", call, input)
+			}
+			var prepared preparedInputPayload
+			if err := json.Unmarshal([]byte(input.Text), &prepared); err != nil {
+				t.Fatal(err)
+			}
+			wantSchema := mainOutputSchema
+			if want.Role == roleCritic {
+				wantSchema = criticOutputSchema
+			}
+			wantMode := "fresh"
+			if index == 2 || index == 3 {
+				wantMode = "resume"
+			}
+			wantInputAgent := agents[index]
+			if index == 0 {
+				wantInputAgent = ""
+			}
+			if input.Agent != wantInputAgent || prepared.Mode != wantMode ||
+				prepared.Representation != "redacted" || prepared.Stage != "prepared" || prepared.Stdin != prompts[index] ||
+				prepared.Schema != wantSchema ||
+				!slices.Equal(prepared.Argv, []string{"cli", "exec", "-"}) {
+				t.Fatalf("call %s prepared input was not preserved: %+v", call, prepared)
+			}
+			saved, ok := seen[call][want.Provider+".final"]
+			if !ok {
+				t.Fatalf("call %s lost its final provider event", call)
+			}
+			if saved.Kind != attemptRecordDiscussion || saved.Sequence <= input.Sequence ||
+				saved.Call != fmt.Sprint(index+1) || saved.Agent != agents[index] ||
 				saved.Role != want.Role || saved.Round != want.Round || saved.ReviewPhase != want.ReviewPhase ||
 				saved.EventSource != want.Provider+".final" || saved.Text != responses[index] {
 				t.Fatalf("call %d event lost its private binding: %+v", index+1, saved)
+			}
+			if want.Provider == "codex" {
+				identity, ok := seen[call]["codex.identity"]
+				if !ok || identity.Kind != attemptRecordInput || identity.Agent != saved.Agent || identity.Sequence <= input.Sequence || identity.Sequence >= saved.Sequence {
+					t.Fatalf("call %s lost its later native identity: %+v", call, identity)
+				}
 			}
 		}
 	}

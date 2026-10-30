@@ -24,3 +24,15 @@ type StreamEvent struct {
 	Kind     string
 	Text     string
 }
+
+// PreparedInput holds selected direct CLI input fields Minion constructed before Start.
+// It omits environment variables and does not prove the CLI consumed the input.
+type PreparedInput struct {
+	NativeID string
+	Mode     string
+	Path     string
+	Args     []string
+	Dir      string
+	Stdin    string
+	Schema   string
+}
