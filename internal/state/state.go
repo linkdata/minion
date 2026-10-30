@@ -52,6 +52,8 @@ type PublicationWrite struct {
 	Repository string    `json:"repository"`
 	Number     int       `json:"number"`
 	Marker     string    `json:"marker"`
+	SourceURL  string    `json:"source_url,omitempty"`
+	SourceKey  string    `json:"source_key,omitempty"`
 	Branch     string    `json:"branch,omitempty"`
 	SHA        string    `json:"sha,omitempty"`
 	Since      time.Time `json:"since"`
@@ -109,9 +111,20 @@ func validPublicationWrite(jobID string, write PublicationWrite) bool {
 
 // TerminalDecision records the first outcome for one accepted attempt.
 type TerminalDecision struct {
-	AttemptID string    `json:"attempt_id"`
-	Outcome   string    `json:"outcome"`
-	DecidedAt time.Time `json:"decided_at"`
+	AttemptID        string            `json:"attempt_id"`
+	Outcome          string            `json:"outcome"`
+	DecidedAt        time.Time         `json:"decided_at"`
+	UnresolvedAccess AccessDisposition `json:"unresolved_access,omitzero"`
+}
+
+// AccessDisposition identifies an accepted request that needs operator action.
+type AccessDisposition struct {
+	Repository     string `json:"repository"`
+	SourceURL      string `json:"source_url,omitempty"`
+	SourceKey      string `json:"source_key"`
+	Reason         string `json:"reason"`
+	ReplyState     string `json:"reply_state"`
+	OperatorAction string `json:"operator_action"`
 }
 
 func validTerminalDecision(jobID string, decision TerminalDecision) bool {
@@ -120,8 +133,17 @@ func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 	default:
 		return false
 	}
-	return workspace.ValidIdentitySegment(jobID) && workspace.ValidIdentitySegment(decision.AttemptID) &&
-		!decision.DecidedAt.IsZero()
+	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(decision.AttemptID) ||
+		decision.DecidedAt.IsZero() {
+		return false
+	}
+	access := decision.UnresolvedAccess
+	if access == (AccessDisposition{}) {
+		return true
+	}
+	return decision.Outcome != "succeeded" && workspace.ValidRepository(access.Repository) &&
+		access.SourceKey != "" && access.Reason != "" && access.OperatorAction != "" &&
+		(access.ReplyState == "not_issued" || access.ReplyState == "unknown")
 }
 
 // AcceptedAction retains the one selected action across process restarts.

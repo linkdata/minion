@@ -696,7 +696,7 @@ func TestObservedActiveTaskWriteClearsRetryOnce(t *testing.T) {
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
-			if changed, err := storePublicationWriteOutcome(store, accepted.JobID, write, state.PublicationWriteObserved, now); err != nil || !changed {
+			if changed, err := storePublicationWriteOutcome(store, accepted.JobID, write, state.PublicationWriteObserved, now, ""); err != nil || !changed {
 				t.Fatalf("observe %s: changed=%t err=%v", tc.name, changed, err)
 			}
 			if err := store.Close(); err != nil {
@@ -709,7 +709,7 @@ func TestObservedActiveTaskWriteClearsRetryOnce(t *testing.T) {
 				t.Fatalf("observed %s did not retain correct retry: write=%+v retry=%s", tc.name, got, gotRetry)
 			}
 			store.Data.Accepted.RetryAt = retryAt
-			if changed, err := storePublicationWriteOutcome(store, accepted.JobID, write, state.PublicationWriteObserved, now); err != nil || changed ||
+			if changed, err := storePublicationWriteOutcome(store, accepted.JobID, write, state.PublicationWriteObserved, now, ""); err != nil || changed ||
 				!store.Data.Accepted.RetryAt.Equal(retryAt) {
 				t.Fatalf("observing %s twice changed retry again: changed=%t err=%v retry=%s",
 					tc.name, changed, err, store.Data.Accepted.RetryAt)

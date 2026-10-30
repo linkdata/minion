@@ -39,6 +39,9 @@ func TestTerminalReplyLookupErrorSkipsAcceptedSourceCheck(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "failed", accepted.AcceptedAt); err != nil {
+		t.Fatal(err)
+	}
 	synctest.Test(t, func(t *testing.T) {
 		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), time.Now()); err != nil ||
 			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 {
@@ -63,6 +66,9 @@ func TestTerminalReplyLookupPastDeadlineSkipsPost(t *testing.T) {
 		m := selectedMonitor(t, at, gh, nil)
 		store := openState(t, at)
 		store.Data.Accepted = &accepted
+		if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "failed", at); err != nil {
+			t.Fatal(err)
+		}
 		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), at); err != nil ||
 			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 ||
 			len(store.Data.PublicationWrites) != 0 || gh.repoChecks != 0 {

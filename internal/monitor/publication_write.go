@@ -137,7 +137,7 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 			found = false
 		}
 		if found {
-			changed, err := storePublicationWriteOutcome(store, jobID, write, state.PublicationWriteObserved, m.now().UTC())
+			changed, err := storePublicationWriteOutcome(store, jobID, write, state.PublicationWriteObserved, m.now().UTC(), "")
 			if err != nil {
 				if activeResultReady && write.AttemptID == activeAttemptID &&
 					(jobID == activePushID && write.Kind == "push" ||
@@ -152,12 +152,20 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 			continue
 		}
 		if expired {
-			changed, err := storePublicationWriteOutcome(store, jobID, write, state.PublicationWriteUncertain, m.now().UTC())
+			var unresolvedReason string
+			if err != nil && write.SourceKey != "" && !githubResourceMovedOrGone(accessFailureCause(err)) {
+				unresolvedReason = accessFailureReason("reconcile issued reply", err)
+			}
+			changed, err := storePublicationWriteOutcome(store, jobID, write, state.PublicationWriteUncertain, m.now().UTC(), unresolvedReason)
 			if err != nil {
 				return fmt.Errorf("%w: close issued publication %s: %w", ErrAcceptanceState, jobID, err)
 			}
 			if changed {
 				m.logf("publication write %s in %s reached its fixed reconciliation deadline; remote effect is uncertain", jobID, target)
+				if unresolvedReason != "" {
+					m.logf("unresolved accepted GitHub access job=%s repository=%s source=%s source_key=%s attempt=%s reason=%s reply=unknown operator_action=%s",
+						jobID, write.Repository, write.SourceURL, write.SourceKey, write.AttemptID, unresolvedReason, unresolvedAccessOperatorAction)
+				}
 			}
 		}
 	}
@@ -175,12 +183,28 @@ func (m *Monitor) reconcilePublicationWrites(ctx context.Context, store *state.S
 	return nil
 }
 
-func storePublicationWriteOutcome(store *state.Store, jobID string, original state.PublicationWrite, status string, at time.Time) (bool, error) {
+func storePublicationWriteOutcome(store *state.Store, jobID string, original state.PublicationWrite, status string, at time.Time, unresolvedReason string) (bool, error) {
 	changed := false
 	err := store.WithLock(func() error {
 		current, exists := store.Data.PublicationWrites[jobID]
 		if !exists || current != original || current.Status != state.PublicationWritePending {
 			return nil
+		}
+		previousDecision, hadDecision := store.Data.TerminalDecisions[jobID]
+		decisionChanged := false
+		if unresolvedReason != "" {
+			if !hadDecision || previousDecision.AttemptID != current.AttemptID || previousDecision.Outcome == "succeeded" || current.SourceKey == "" {
+				return fmt.Errorf("%w: issued reply has no matching terminal decision or source key", ErrAcceptanceState)
+			}
+			if previousDecision.UnresolvedAccess == (state.AccessDisposition{}) {
+				decision := previousDecision
+				decision.UnresolvedAccess = state.AccessDisposition{
+					Repository: current.Repository, SourceURL: current.SourceURL, SourceKey: current.SourceKey, Reason: unresolvedReason,
+					ReplyState: "unknown", OperatorAction: unresolvedAccessOperatorAction,
+				}
+				store.Data.TerminalDecisions[jobID] = decision
+				decisionChanged = true
+			}
 		}
 		current.Status = status
 		current.ResolvedAt = at
@@ -193,6 +217,10 @@ func storePublicationWriteOutcome(store *state.Store, jobID string, original sta
 			}
 		}
 		if err := store.Save(); err != nil {
+			store.Data.PublicationWrites[jobID] = original
+			if decisionChanged {
+				store.Data.TerminalDecisions[jobID] = previousDecision
+			}
 			return err
 		}
 		changed = true
