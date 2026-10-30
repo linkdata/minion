@@ -226,8 +226,7 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 		var statuses atomic.Int32
 		statusEntered := make(chan struct{}, 1)
 		releaseStatus := make(chan struct{})
-		var releaseOnce sync.Once
-		release := func() { releaseOnce.Do(func() { close(releaseStatus) }) }
+		release := sync.OnceFunc(func() { close(releaseStatus) })
 		outcomes := make(chan httpOutcome, 1)
 		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -634,7 +633,8 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "missing stop grace", "negative stop grace", "excessive stop grace", "negative pull wait", "inflated pull wait", "trailing JSON"} {
+	const key = "assigned-secret-key"
+	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "expired negative outcome ACK", "missing budget", "missing stop grace", "negative stop grace", "excessive stop grace", "negative pull wait", "inflated pull wait", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			assignment := httpAssignment{Job: job, StopGrace: httpControlTimeout}
@@ -648,7 +648,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			case "mixed credential":
 				assignment.Credentials.CodexAPIKey = "configured-key"
 				assignment.Credentials.CodexNativeAPIKey = "native-key"
-			case "expired", "expired outcome ACK lost":
+			case "expired", "expired outcome ACK lost", "expired negative outcome ACK":
 				assignment.Job.RuntimeBudget = time.Nanosecond
 			case "missing budget":
 				assignment.Job.RuntimeBudget = 0
@@ -663,13 +663,16 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			case "inflated pull wait":
 				assignment.HeldFor = config.MaxActionRuntime + time.Second
 			}
+			if name == "expired negative outcome ACK" {
+				assignment.Credentials.CodexAPIKey = key
+			}
 			var requests atomic.Int32
-			outcomes := make(chan httpOutcome, 1)
+			outcomes := make(chan httpOutcome, 2)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
-					if name == "expired" || name == "expired outcome ACK lost" {
+					if name == "expired" || name == "expired outcome ACK lost" || name == "expired negative outcome ACK" {
 						// A nanosecond budget can fit inside one Windows clock tick.
 						received := time.Now()
 						for time.Since(received) <= assignment.Job.RuntimeBudget {
@@ -693,7 +696,11 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					}
 					outcomes <- outcome
 					w.Header().Set("Content-Type", "application/json")
-					if name != "expired outcome ACK lost" {
+					if name == "expired negative outcome ACK" {
+						w.WriteHeader(http.StatusConflict)
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "outcome", Sequence: 1,
+							Failure: newHTTPFailure(errors.Join(syscall.ENOSPC, fmt.Errorf("outcome ACK contains %s", key)))})
+					} else if name != "expired outcome ACK lost" {
 						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "outcome", Sequence: outcome.Sequence})
 					}
 				default:
@@ -708,9 +715,12 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					t.Fatal("invalid assignment error exposed a credential")
 				}
 			}
-			if name == "expired" || name == "expired outcome ACK lost" {
+			if name == "expired" || name == "expired outcome ACK lost" || name == "expired negative outcome ACK" {
 				if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != (name == "expired outcome ACK lost") || requests.Load() != 2 || len(outcomes) != 1 {
 					t.Fatalf("expired known assignment lost its bound no-work outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
+				}
+				if name == "expired negative outcome ACK" && (!errors.Is(err, syscall.ENOSPC) || strings.Contains(err.Error(), key)) {
+					t.Fatalf("expired outcome ACK was lost or leaked assigned key: %v", err)
 				}
 				outcome := <-outcomes
 				if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Result.Answer != "" || len(outcome.Result.Calls) != 0 || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || outcome.Failure.OutcomeUnknown {
@@ -901,15 +911,22 @@ func TestRunHTTPBoundsAssignmentBodyAfterHeadersAndAllowsLongPoll(t *testing.T) 
 }
 
 func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
-	for _, name := range []string{"known negative ACK", "parent unknown failure", "invalid headers"} {
+	const key = "assigned-secret-key"
+	for _, name := range []string{"known negative ACK", "parent unknown failure", "invalid headers", "negative outcome ACK redacts key"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
-			outcomes := make(chan httpOutcome, 1)
+			var requests atomic.Int32
+			outcomes := make(chan httpOutcome, 2)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
-					httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout})
+					assignment := httpAssignment{Job: job, StopGrace: httpControlTimeout}
+					if name == "negative outcome ACK redacts key" {
+						assignment.Credentials.CodexAPIKey = key
+					}
+					httpClientTestJSON(t, w, assignment)
 				case "/cancel":
 					if name != "invalid headers" {
 						failure := workroot.ErrUnsafe
@@ -928,7 +945,14 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 						t.Error(err)
 					}
 					outcomes <- value
-					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Sequence, Kind: "outcome"})
+					if name == "negative outcome ACK redacts key" {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusConflict)
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: 1, Kind: "outcome",
+							Failure: newHTTPFailure(errors.Join(syscall.ENOSPC, fmt.Errorf("outcome ACK contains %s", key)))})
+					} else {
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Sequence, Kind: "outcome"})
+					}
 				default:
 					t.Errorf("worker advanced before watch admission: %s", r.URL.Path)
 					http.NotFound(w, r)
@@ -937,8 +961,11 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 			defer server.Close()
 			err := RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
 			unknown := name == "parent unknown failure"
-			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || name == "known negative ACK" && !errors.Is(err, workroot.ErrUnsafe) || len(outcomes) != 1 {
-				t.Fatalf("watch admission failure lost its cause or failed outcome: error=%v outcomes=%d", err, len(outcomes))
+			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || name == "known negative ACK" && !errors.Is(err, workroot.ErrUnsafe) || requests.Load() != 3 || len(outcomes) != 1 {
+				t.Fatalf("watch admission failure lost its cause or failed outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
+			}
+			if name == "negative outcome ACK redacts key" && (!errors.Is(err, syscall.ENOSPC) || !errors.Is(err, workroot.ErrUnsafe) || strings.Contains(err.Error(), key)) {
+				t.Fatalf("watch admission outcome ACK was lost or leaked assigned key: %v", err)
 			}
 			outcome := <-outcomes
 			if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Failure == nil || outcome.Failure.OutcomeUnknown != unknown || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {

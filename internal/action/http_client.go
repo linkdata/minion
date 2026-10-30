@@ -179,7 +179,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		err := redactActionError(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded), assignedSecrets...)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
-		return errors.Join(err, checkpoints.outcome(result, err))
+		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
 	deadlineCtx, stopDeadline := context.WithDeadline(ctx, expires)
 	defer stopDeadline()
@@ -225,7 +225,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		return errors.Join(err, checkpoints.outcome(result, err))
+		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
 	go func() {
@@ -250,9 +250,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	statusFeed := newWorkerStatus(job)
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
-	jobRunner.statusUpdate = func(phase string, round int, reviewPhase string) {
-		statusFeed.progress(phase, round, reviewPhase)
-	}
+	jobRunner.statusUpdate = statusFeed.progress
 	stopStatusOnAction := context.AfterFunc(actionCtx, statusFeed.stopping)
 	defer stopStatusOnAction()
 	go statusFeed.run(statusCtx, transport)
