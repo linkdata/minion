@@ -306,6 +306,8 @@ func TestLocalWorkerDirectStopAndCrashAreDistinct(t *testing.T) {
 	})
 }
 
+const fixtureCleanupRecovery = "Owned workspace recovery paths under the configured work root: minion-fixture-retained"
+
 func TestLocalWorkerCrashAndCleanupFailureRetireCapacity(t *testing.T) {
 	for _, mode := range []string{"crash-after-job", "cleanup-failed"} {
 		t.Run(mode, func(t *testing.T) {
@@ -327,8 +329,16 @@ func TestLocalWorkerCrashAndCleanupFailureRetireCapacity(t *testing.T) {
 			if mode == "crash-after-job" && (!errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(err, errLocalWorkerCleanupUnverified) || !strings.Contains(err.Error(), "exited")) {
 				t.Fatalf("missing outcome became known: %v", err)
 			}
-			if mode == "cleanup-failed" && (err != nil || !w.unclean.Load() || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "cleanup_failed") {
+			if mode == "cleanup-failed" && (err != nil || !w.unclean.Load() || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "cleanup_failed" || result.Diagnostics[1] != (Diagnostic{Code: "cleanup_recovery", Message: fixtureCleanupRecovery})) {
 				t.Fatalf("known cleanup failure was lost: result=%+v error=%v unclean=%v", result, err, w.unclean.Load())
+			}
+			if err := w.WaitCapacity(ctx); !errors.Is(err, ErrLocalWorkerUnavailable) {
+				t.Fatalf("retired worker regained capacity: %v", err)
+			}
+			next := testJob(command.Comment)
+			next.Identity.JobID, next.Identity.AttemptID = "next-job", "next-attempt"
+			if nextResult, nextErr := w.Execute(ctx, next, runnerExecutionCheckpoints{}); !errors.Is(nextErr, monitor.ErrRequestTransport) || !nextResult.matchesJob(next) {
+				t.Fatalf("retired worker accepted a second assignment: result=%+v error=%v", nextResult, nextErr)
 			}
 		})
 	}
@@ -504,6 +514,11 @@ func TestLocalWorkerDrainsPaidCallbackBeforeChildStop(t *testing.T) {
 			case <-tx.budget.Done():
 			case <-ctx.Done():
 				t.Fatal("stop did not reach the transaction")
+			}
+			next := testJob(command.Comment)
+			next.Identity.JobID, next.Identity.AttemptID = "next-job", "next-attempt"
+			if nextResult, nextErr := w.Execute(ctx, next, runnerExecutionCheckpoints{}); !errors.Is(nextErr, monitor.ErrRequestTransport) || !nextResult.matchesJob(next) {
+				t.Fatalf("stopping worker accepted a second assignment before the paid callback drained: result=%+v error=%v", nextResult, nextErr)
 			}
 			select {
 			case err := <-closed:
@@ -978,7 +993,7 @@ func TestLocalWorkerHTTPSHelper(t *testing.T) {
 		sequence, failure = 3, newHTTPFailure(context.Canceled)
 	}
 	if mode == "cleanup-failed" {
-		result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "fixture cleanup failed"}}
+		result.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "fixture cleanup failed"}, {Code: "cleanup_recovery", Message: fixtureCleanupRecovery}}
 	}
 	outcome, err := httpEncode(httpOutcome{Sequence: sequence, Result: result, Failure: failure}, httpOutcomeBytes)
 	if err != nil {
