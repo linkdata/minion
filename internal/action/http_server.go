@@ -307,14 +307,8 @@ func (e *HTTPExecutor) Close() error {
 	return nil
 }
 
-func (e *HTTPExecutor) Status() (Status, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.status, e.hasStatus
-}
-
-// StatusWithReceipt returns the worker's last observation and the parent's receipt time.
-func (e *HTTPExecutor) StatusWithReceipt() (Status, time.Time, bool) {
+// Status returns the worker's last observation and the parent's receipt time.
+func (e *HTTPExecutor) Status() (Status, time.Time, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.status, e.statusAt, e.hasStatus
