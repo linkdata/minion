@@ -205,11 +205,6 @@ func storePublicationWriteOutcome(store *state.Store, jobID string, original sta
 				store.Data.TerminalDecisions[jobID] = decision
 				decisionChanged = true
 			}
-		} else if hadDecision && previousDecision.AttemptID == current.AttemptID && previousDecision.UnresolvedAccess.ReplyState == "unknown" {
-			decision := previousDecision
-			decision.UnresolvedAccess = state.AccessDisposition{}
-			store.Data.TerminalDecisions[jobID] = decision
-			decisionChanged = true
 		}
 		current.Status = status
 		current.ResolvedAt = at
