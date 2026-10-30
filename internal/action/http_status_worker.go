@@ -70,12 +70,6 @@ func (s *workerStatus) snapshot() Status {
 func (s *workerStatus) send(ctx context.Context, transport *httpExecutionClient) error {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	s.mu.Lock()
-	closed := s.closed
-	s.mu.Unlock()
-	if closed && s.pending != nil {
-		return nil // Result admission has begun; no record may arrive later.
-	}
 	return s.sendLocked(ctx, transport)
 }
 
@@ -136,6 +130,13 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	}
 	if !utf8.ValidString(event.Text) {
 		return fail(errors.New("HTTP status log event is not valid UTF-8"))
+	}
+	if len(event.Text) > maxAttemptEventBytes {
+		return fail(errAttemptRecordsFull)
+	}
+	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent,
+		Role: event.Role, EventSource: event.EventSource}).validateShape(); err != nil {
+		return fail(err)
 	}
 	raw := event
 	event.Identity, event.SourceRef, event.Sequence = s.value.Identity, s.value.SourceRef, 0
@@ -225,6 +226,21 @@ func (s *workerStatus) drain(ctx context.Context, transport *httpExecutionClient
 		return s.sendLocked(ctx, transport)
 	}
 	return nil
+}
+
+// finish lets optional coverage race the required outcome without holding it
+// behind a lost Status acknowledgement.
+func (s *workerStatus) finish(ctx context.Context, transport *httpExecutionClient, outcome func() error) error {
+	drainCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = s.drain(drainCtx, transport)
+	}()
+	err := outcome()
+	cancel()
+	<-done
+	return err
 }
 
 func (s *workerStatus) run(ctx context.Context, transport *httpExecutionClient) {

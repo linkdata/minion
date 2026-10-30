@@ -245,6 +245,72 @@ func TestWorkerStatusRejectsOversizedEventBeforeSending(t *testing.T) {
 	if err := status.drain(t.Context(), transport); err == nil {
 		t.Fatal("oversized event claimed complete coverage")
 	}
+	secret := strings.Repeat("s", 1024)
+	raw := strings.Repeat(secret, maxAttemptEventBytes/len(secret)+1)
+	if len(redactActionText(raw, secret)) >= maxAttemptEventBytes {
+		t.Fatal("test event did not shrink below the cap after redaction")
+	}
+	status = newWorkerStatus(job)
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: raw}, secret); !errors.Is(err, errAttemptRecordsFull) {
+		t.Fatalf("oversized raw event error = %v", err)
+	}
+	if err := status.drain(t.Context(), transport); err == nil {
+		t.Fatal("oversized raw event claimed complete coverage")
+	}
+	status = newWorkerStatus(job)
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion,
+		Text: "received", Call: strings.Repeat("s", 256)}, strings.Repeat("s", 256)); err == nil {
+		t.Fatal("oversized raw metadata was accepted after redaction")
+	}
+}
+
+func TestWorkerStatusCoverageDoesNotDelayOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		coverageEntered := make(chan struct{}, 1)
+		client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			var observation httpObservation
+			if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+				return nil, err
+			}
+			if len(observation.Logs) != 1 {
+				return nil, errors.New("missing log record")
+			}
+			if observation.Logs[0].Kind == attemptRecordCoverage {
+				select {
+				case coverageEntered <- struct{}{}:
+				default:
+				}
+				<-r.Context().Done() // A lost coverage ACK must not hold Result.
+				return nil, r.Context().Err()
+			}
+			ack, err := httpEncode(httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status",
+				Sequence: observation.Status.Sequence, LogSequence: observation.Logs[0].Sequence}, httpControlBytes)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
+		})}
+		base, _ := url.Parse("http://worker.test")
+		transport := &httpExecutionClient{client: client, base: base}
+		status := newWorkerStatus(job)
+		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+		defer cancel()
+		if err := status.emit(ctx, transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "received"}); err != nil {
+			t.Fatal(err)
+		}
+		started := time.Now()
+		if err := status.finish(ctx, transport, func() error {
+			select {
+			case <-coverageEntered:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}); err != nil || time.Since(started) != 0 {
+			t.Fatalf("coverage delayed outcome: error=%v elapsed=%s", err, time.Since(started))
+		}
+	})
 }
 
 func TestWorkerStatusZeroEventDrainDoesNotWaitForBlockedHeartbeat(t *testing.T) {
