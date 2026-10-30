@@ -38,24 +38,11 @@ func (g *synchronizedCommentsGitHub) commentsSnapshot() (int, []github.Comment) 
 	return g.commentCalls, append([]github.Comment(nil), g.comments...)
 }
 
-func (g *synchronizedCommentsGitHub) setCommentError(err error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.commentErr = err
-}
-
 type controlReplyLog struct {
-	failed    chan struct{}
 	completed chan struct{}
 }
 
 func (w controlReplyLog) Write(p []byte) (int, error) {
-	if strings.Contains(string(p), "terminal control in ") {
-		select {
-		case w.failed <- struct{}{}:
-		default:
-		}
-	}
 	if strings.Contains(string(p), "stop retrying failed ") {
 		select {
 		case w.completed <- struct{}{}:
@@ -503,7 +490,7 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)
 		cfg.MaxRuntimeMinutes = 7
-		signals := controlReplyLog{failed: make(chan struct{}, 1), completed: make(chan struct{}, 1)}
+		signals := controlReplyLog{completed: make(chan struct{}, 1)}
 		m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Handler: held, Logger: log.New(signals, "", 0),
 			SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}}
 		ctx, cancel := context.WithCancel(t.Context())
@@ -516,7 +503,6 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 			t.Fatalf("selected action did not start: %v", err)
 		}
 		synctest.Wait()
-		calls, comments := gh.commentsSnapshot()
 		time.Sleep(time.Minute)
 		select {
 		case <-signals.completed:
@@ -534,7 +520,7 @@ func TestSelectedActionDoesNotDeferOtherDueTerminalReply(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		calls, comments = gh.commentsSnapshot()
+		calls, comments := gh.commentsSnapshot()
 		if calls != 2 || len(comments) != 1 ||
 			!strings.HasSuffix(comments[0].Body, "\n\n<!-- linkdataminion:"+secondID+" -->") ||
 			firstFailure.Attempts != 0 || firstProcessed.IsZero() || secondProcessed.IsZero() {

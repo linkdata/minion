@@ -572,18 +572,16 @@ func TestSelectedNewerSameThreadCommandKeepsUncertainReplyOneShot(t *testing.T) 
 			Repository: notice.Repository.FullName, RepositoryID: 1, OwnerID: 2,
 			SubjectType: notice.Subject.Type, SubjectURL: notice.Subject.URL,
 			Since: now.Add(-time.Minute), UpdatedAt: older.UpdatedAt,
-			RetryAt: time.Time{}, Failures: 0,
 		}
 		store.Data.NextInviteCheckAt = now.Add(15 * time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
-		commentErr := errors.New("temporary comment failure")
 		gh := &fakeGitHub{
 			notifications: []github.Notification{notice},
 			items:         []github.Item{older, newer},
 			permission:    github.Permission{Permission: "write"},
-			commentErr:    commentErr,
+			commentErr:    errors.New("temporary comment failure"),
 		}
 		held := &heldSelectedAction{entered: make(chan Job, 1), release: make(chan struct{})}
 		cfg := testConfig(t)

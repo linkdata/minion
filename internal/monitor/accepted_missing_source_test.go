@@ -125,7 +125,7 @@ func TestSelectedRecoveryReleasesDeletedSource(t *testing.T) {
 	}
 }
 
-func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
+func TestSelectedDeletedIssueHTTPStatusReleasesAssigned404(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		assigned bool
@@ -190,14 +190,10 @@ func TestSelectedDeletedIssueHTTPStatusReleasesOnlyOnGone(t *testing.T) {
 				}
 			} else {
 				failure := store.Data.JobFailures[accepted.JobID]
-				wantAttempts := 1
-				if test.assigned {
-					wantAttempts = maxJobAttempts
-				}
 				if !errors.Is(err, statusErr) || store.Data.Accepted == nil ||
 					store.Data.Accepted.AttemptID != accepted.AttemptID || !store.Data.Accepted.Deadline.Equal(accepted.Deadline) ||
 					!store.Data.Accepted.RetryAt.Equal(next) || !next.After(time.Now()) ||
-					failure.Attempts != wantAttempts || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
+					failure.Attempts != 1 || len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
 					t.Fatalf("404 did not retain scheduled retry: next=%s err=%v state=%+v", next, err, store.Data)
 				}
 			}
