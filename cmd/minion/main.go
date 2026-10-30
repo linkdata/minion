@@ -45,9 +45,9 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 
 func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
-	mode := flag.String("mode", "orchestrate", "service mode: orchestrate or execute")
+	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, or remote-execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
-	check := flag.Bool("check", false, "verify Git readiness, AI settings, authentication, and repository access, then exit")
+	check := flag.Bool("check", false, "verify Git, GitHub, repositories, and the selected local AI tools or remote TLS files, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
@@ -70,8 +70,21 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			return 2
 		}
 		return runExecuteMode()
+	case "remote-execute":
+		incompatible := false
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "loop", "check", "install-skills":
+				incompatible = true
+			}
+		})
+		if incompatible {
+			logger.Print("-mode=remote-execute cannot be combined with -loop, -check, or -install-skills")
+			return 2
+		}
+		return runRemoteExecuteMode(*configPath, logger)
 	default:
-		logger.Printf("unsupported mode %q; use orchestrate or execute", *mode)
+		logger.Printf("unsupported mode %q; use orchestrate, execute, or remote-execute", *mode)
 		return 2
 	}
 	loadedPath, err := filepath.Abs(*configPath)
@@ -166,9 +179,16 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if err := checkModels(ctx, &cfg, logger); err != nil {
-			logger.Printf("AI preflight: %v", err)
-			return false
+		if remote := cfg.RemoteExecutor; remote != nil {
+			if _, err := loadRemoteCertificate(remote.TLSCertFile, remote.TLSKeyFile); err != nil {
+				logger.Printf("remote TLS preflight: %v", err)
+				return false
+			}
+		} else {
+			if err := checkModels(ctx, &cfg, logger); err != nil {
+				logger.Printf("AI preflight: %v", err)
+				return false
+			}
 		}
 		return true
 	}
@@ -229,10 +249,13 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	orchestrator.BotID = user.ID
 	bindPublicationValidation(orchestrator, watcher)
 	watcher.Config, watcher.Handler = cfg, orchestrator
-	path, err := os.Executable()
-	if err != nil {
-		logger.Printf("locate executable: %v", err)
-		return 1
+	path := ""
+	if cfg.RemoteExecutor == nil {
+		path, err = os.Executable()
+		if err != nil {
+			logger.Printf("locate executable: %v", err)
+			return 1
+		}
 	}
 	return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
 }
@@ -246,7 +269,7 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !loop || errors.Is(err, monitor.ErrAcceptanceState) || workerExited != nil && ctx.Err() == nil && errors.Is(err, action.ErrLocalWorkerUnavailable) {
+			if !loop || errors.Is(err, monitor.ErrAcceptanceState) || workerExited != nil && ctx.Err() == nil && (errors.Is(err, action.ErrLocalWorkerUnavailable) || errors.Is(err, action.ErrRemoteWorkerUnavailable)) {
 				return 1
 			}
 		}
@@ -254,7 +277,7 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			select {
 			case <-workerExited:
 				if ctx.Err() == nil {
-					logger.Print("selected local worker exited")
+					logger.Print("selected worker exited")
 					return 1
 				}
 			default:
@@ -302,7 +325,7 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			if ctx.Err() != nil {
 				return 0
 			}
-			logger.Print("selected local worker exited")
+			logger.Print("selected worker exited")
 			return 1
 		case <-timer.C:
 		}
@@ -366,6 +389,9 @@ func logCommandSkills(cfg config.Config, logger *log.Logger) {
 		if !cfg.Commands[command].SupportsProvider(cfg.Main) {
 			logger.Printf("command %s disabled: action %s is unsupported with %s as main", command, cfg.Commands[command].Action, cfg.Main)
 			continue
+		}
+		if cfg.RemoteExecutor != nil {
+			continue // The worker checks its own skill installation after assignment.
 		}
 		var missing []string
 		for _, source := range cfg.Commands[command].Skills {

@@ -43,7 +43,7 @@ func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
 	request.Repository.Actions = []string{"fix"}
 	const attemptID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	accepted := acceptedForJob(Job{Identity: Identity{
-		JobID: request.ID, AttemptID: attemptID, ExecutorID: LocalExecutorID,
+		JobID: request.ID, AttemptID: attemptID, ExecutorID: "remote",
 		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 		SubjectType: request.SubjectType, Number: request.Number,
 		Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
@@ -61,12 +61,15 @@ func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
 	var got FixDestination
 	called := false
 	stop := errors.New("executor stopped after assignment")
-	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Store: store,
+	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Store: store, ExecutorID: "remote",
 		Main: "codex", Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		assignmentRequired: true,
 		ValidateAssignment: func(context.Context, monitor.Job) error { return nil },
 		Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
 			called = true
+			if job.Identity.ExecutorID != "remote" {
+				t.Fatalf("selected executor identity = %q; want remote", job.Identity.ExecutorID)
+			}
 			sink, ok := checkpoints.(*executionCheckpoints)
 			if !ok || !sink.AssignmentRequired() {
 				t.Fatalf("selected executor did not receive assignment checkpoints: %T", checkpoints)

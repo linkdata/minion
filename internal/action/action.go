@@ -29,6 +29,9 @@ var errGitHubContextTooLarge = errors.New("GitHub context exceeds configured byt
 // ErrLocalWorkerUnavailable means the selected direct worker cannot accept another Job.
 var ErrLocalWorkerUnavailable = errors.New("selected local worker unavailable")
 
+// ErrRemoteWorkerUnavailable means the selected remote endpoint cannot accept another Job.
+var ErrRemoteWorkerUnavailable = errors.New("selected remote worker unavailable")
+
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
 	"\x1c", "\n", "\x1d", "\n", "\x1e", "\n",
@@ -40,8 +43,10 @@ type Orchestrator struct {
 	attemptID          string
 	usageCheckpoint    *usageCheckpoint
 	assignmentRequired bool
+	remoteSelected     bool
 
 	Executor                  Executor
+	ExecutorID                string
 	Runner                    Runner
 	WorkRoot                  string
 	Main, Adversarial         string
@@ -266,6 +271,10 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	}
 	if !mapping.SupportsProvider(e.mainProvider()) {
 		return fmt.Errorf("%w: action %q is not supported with %s as main", monitor.ErrTerminalJob, mapping.Action, e.mainProvider())
+	}
+	if e.remoteSelected {
+		// The remote runner resolves source skill URLs on its own host after assignment.
+		return nil
 	}
 	configured := e.Runner
 	configured.Logger = nil // Execution logs optional skill skips once after validation.

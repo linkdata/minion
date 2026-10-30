@@ -150,14 +150,14 @@ func TestLocalEndpointBoundsPreAuthenticationConnections(t *testing.T) {
 			}
 		}
 	}
-	for range localExecutionConnectionLimit {
+	for range executionConnectionLimit {
 		connection, err := net.DialTimeout("tcp4", u.Host, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
 		stalled = append(stalled, connection) // No TLS handshake; these occupy pre-authentication slots.
 	}
-	waitSlots(localExecutionConnectionLimit)
+	waitSlots(executionConnectionLimit)
 	overflow, err := net.DialTimeout("tcp4", u.Host, 5*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -172,12 +172,12 @@ func TestLocalEndpointBoundsPreAuthenticationConnections(t *testing.T) {
 	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 		t.Fatalf("overflow connection was not promptly closed: %v", err)
 	}
-	waitSlots(localExecutionConnectionLimit)
+	waitSlots(executionConnectionLimit)
 	if err := stalled[0].Close(); err != nil {
 		t.Fatal(err)
 	}
 	stalled[0] = nil
-	waitSlots(localExecutionConnectionLimit - 1)
+	waitSlots(executionConnectionLimit - 1)
 	client, err := NewLocalExecutionClient(access)
 	if err != nil {
 		t.Fatal(err)

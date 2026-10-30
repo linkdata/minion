@@ -377,6 +377,18 @@ func TestAvailableCommandsRequireInstalledSkills(t *testing.T) {
 	}
 }
 
+func TestRemoteCommandsUseWorkerSkills(t *testing.T) {
+	cfg := testConfig(t)
+	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "fix", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	cfg.RemoteExecutor = &config.RemoteExecutorConfig{}
+	m := &Monitor{Config: cfg, SelectedCommands: map[string]bool{"fix": true}}
+	if got := m.availableCommands(cfg.Repositories[0]); len(got) != 1 || got["fix"] != "fix" {
+		t.Fatalf("remote worker command depends on orchestrator-local skill: %v", got)
+	}
+}
+
 func TestRunOnceIgnoresCommandWithoutInstalledSkill(t *testing.T) {
 	cfg := testConfig(t)
 	if err := os.Remove(filepath.Join(os.Getenv("HOME"), ".agents", "skills", "review", "SKILL.md")); err != nil {

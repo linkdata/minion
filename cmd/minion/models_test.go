@@ -51,13 +51,18 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 }
 
 func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
-	var output bytes.Buffer
 	cfg := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
 		"security": {Action: "security-audit", Skills: []string{"unused"}},
 	}}
-	logCommandSkills(cfg, log.New(&output, "", 0))
-	if !strings.Contains(output.String(), "command security disabled: action security-audit is unsupported with claude as main") {
-		t.Fatalf("missing disabled action diagnostic: %s", output.String())
+	for _, remote := range []bool{false, true} {
+		if remote {
+			cfg.RemoteExecutor = &config.RemoteExecutorConfig{}
+		}
+		var output bytes.Buffer
+		logCommandSkills(cfg, log.New(&output, "", 0))
+		if !strings.Contains(output.String(), "command security disabled: action security-audit is unsupported with claude as main") {
+			t.Fatalf("remote=%t missing disabled action diagnostic: %s", remote, output.String())
+		}
 	}
 }
 

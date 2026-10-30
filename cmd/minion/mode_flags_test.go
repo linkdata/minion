@@ -40,7 +40,7 @@ func TestInProcessModeRejectedBeforeStartup(t *testing.T) {
 			return nil
 		})
 	}, "-mode=in-process")
-	if code != 2 || !strings.Contains(output, `unsupported mode "in-process"; use orchestrate or execute`) {
+	if code != 2 || !strings.Contains(output, `unsupported mode "in-process"; use orchestrate, execute, or remote-execute`) {
 		t.Fatalf("retired mode: exit=%d log=%q", code, output)
 	}
 }
