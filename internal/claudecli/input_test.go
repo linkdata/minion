@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -21,6 +22,10 @@ printf '%s\n' "$@" > "$0.$n.args"
 cat > "$0.$n.stdin"
 printf '%s\n' '`+strings.TrimSuffix(successfulResult, "}")+`,"structured_output":{"answer":"final answer"}}`+`'
 `)
+	canonicalBinary, err := filepath.EvalSymlinks(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
 	workspace := t.TempDir()
 	const schema = `{"type":"object","properties":{"answer":{"type":"string"}}}`
 	settings := config.ClaudeConfig{Model: "fixture-model", Effort: "high", OutputSchema: schema, Skills: []string{skills.BuiltinAntiPromptInjection}}
@@ -50,7 +55,7 @@ printf '%s\n' '`+strings.TrimSuffix(successfulResult, "}")+`,"structured_output"
 		if call == 2 {
 			mode, selector = "resume", "--resume"
 		}
-		if input.Mode != mode || input.NativeID == "" || input.Path != binary || input.Dir != session.runtimeDir || input.Schema != schema {
+		if input.Mode != mode || input.NativeID == "" || input.Path != canonicalBinary || input.Dir != session.runtimeDir || input.Schema != schema {
 			t.Fatalf("call %d prepared metadata = %+v", call, input)
 		}
 		if call == 2 && input.NativeID != inputs[0].NativeID {
