@@ -88,6 +88,19 @@ func TestJSONLOutputUnknownCompletedItemLeavesCoverageUnproved(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputMissingCompletedItemLeavesCoverageUnproved(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" +
+		`{"type":"item.completed"}` + "\n" +
+		`{"type":"item.completed","item":null}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"known"}}` + "\n" +
+		`{"type":"turn.completed"}` + "\n"))
+	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "missing_item"}, {NativeID: "root", Kind: "assistant", Text: "known"}}) || !output.completed {
+		t.Fatalf("missing item falsely treated as covered: events=%+v complete=%t", got, output.completed)
+	}
+}
+
 func TestSessionStreamUsesLiveNativeIdentityAcrossResume(t *testing.T) {
 	binary := installFakeCodex(t, `#!/bin/sh
 cat >/dev/null

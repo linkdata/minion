@@ -433,7 +433,11 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 		}
 	} else {
 		o.accept(event)
-		if o.stopErr != nil || event.Type != "item.completed" || event.Item == nil {
+		if o.stopErr != nil || event.Type != "item.completed" {
+			return
+		}
+		if event.Item == nil {
+			o.gap("missing_item")
 			return
 		}
 		switch {
