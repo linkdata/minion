@@ -58,9 +58,6 @@ func bindPublicationValidation(owner *action.Orchestrator, watcher *monitor.Moni
 	owner.ValidatePublication = func(ctx context.Context, job monitor.Job, requireAssigned bool) error {
 		return validator.RevalidatePublication(ctx, owner.Store, job, requireAssigned)
 	}
-	owner.ValidateFixedRefusal = func(ctx context.Context, job monitor.Job) error {
-		return validator.RevalidateFixedRefusal(ctx, owner.Store, job)
-	}
 }
 
 // runSelectedLocalService owns the selected child across the monitor loop.

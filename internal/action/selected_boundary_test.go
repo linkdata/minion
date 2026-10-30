@@ -118,14 +118,12 @@ func TestIssuedWriteNeverMatchesMissingAttempt(t *testing.T) {
 }
 
 func TestSelectedFixedReplyNeedsNoWorker(t *testing.T) {
-	writes := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case serveIssueFixture(t, w, r):
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-			writes++
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"id":1}`))
+			t.Error("fixed reply posted before terminal cleanup")
+			http.Error(w, "unexpected write", http.StatusInternalServerError)
 		default:
 			t.Errorf("unexpected GitHub request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -134,20 +132,19 @@ func TestSelectedFixedReplyNeedsNoWorker(t *testing.T) {
 	t.Cleanup(server.Close)
 	store := openState(t, time.Now())
 	e := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8,
-		Commands:            map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-		assignmentRequired:  true,
-		ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },
-		Runner:              Runner{runModel: forbidModel(t)},
+		Commands:           map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		assignmentRequired: true,
+		Runner:             Runner{runModel: forbidModel(t)},
 	}
 	job := usageJob()
 	job.Command = command.Command{Name: "review", Action: command.Review}
 	job.Repository.Actions = []string{"review"}
 	reserveActionRequest(t, store, &job, false)
-	if err := e.Execute(t.Context(), job); err != nil || writes != 1 {
-		t.Fatalf("selected fixed reply required a worker: error=%v writes=%d", err, writes)
+	if err := e.Execute(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("selected fixed reply required a worker or missed terminal cleanup: %v", err)
 	}
-	if decision := store.Data.TerminalDecisions[job.ID]; decision.AttemptID != job.AttemptID || decision.Outcome != "succeeded" {
-		t.Fatalf("selected fixed reply did not record success: %+v", decision)
+	if got := store.Data.Accepted.FixedRefusal; got != "`review` applies to pull requests." || len(store.Data.TerminalDecisions) != 0 {
+		t.Fatalf("selected fixed reply checkpoint was not saved for terminal cleanup: %q", got)
 	}
 }
 

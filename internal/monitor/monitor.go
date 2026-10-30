@@ -1696,47 +1696,6 @@ func (m *Monitor) RevalidatePublication(ctx context.Context, store *state.Store,
 	})
 }
 
-// RevalidateFixedRefusal checks live authority for the bounded fixed reply.
-// This reply has its own budget, so the original action deadline is not checked.
-func (m *Monitor) RevalidateFixedRefusal(ctx context.Context, store *state.Store, job Job) error {
-	if m == nil || m.GitHub == nil {
-		return fmt.Errorf("%w: fixed refusal validator is unavailable", ErrAcceptanceState)
-	}
-	if job.AttemptID == "" || store == nil {
-		return fmt.Errorf("%w: selected action state is missing before fixed refusal", ErrAcceptanceState)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := store.WithLock(func() error { return validateFixedRefusalReservation(store, job) }); err != nil {
-		return err
-	}
-	if err := m.revalidateJobSource(ctx, job); err != nil {
-		return err
-	}
-	return store.WithLock(func() error {
-		if err := validateFixedRefusalReservation(store, job); err != nil {
-			return err
-		}
-		return ctx.Err()
-	})
-}
-
-func validateFixedRefusalReservation(store *state.Store, job Job) error {
-	if accepted := store.Data.Accepted; accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
-		return fmt.Errorf("%w: selected action changed before fixed refusal", ErrAcceptanceState)
-	}
-	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
-		if decision.AttemptID != job.AttemptID {
-			return fmt.Errorf("%w: fixed refusal decision belongs to another attempt", ErrAcceptanceState)
-		}
-		if decision.Outcome == "succeeded" {
-			return fmt.Errorf("%w: selected action already published", ErrTerminalJob)
-		}
-	}
-	return nil
-}
-
 func (m *Monitor) revalidateJobSource(ctx context.Context, job Job) error {
 	if job.Source.Key == "" || job.Source.NodeID == "" || job.Source.Author.ID <= 0 {
 		return fmt.Errorf("%w: publication source identity is incomplete", ErrTerminalJob)
@@ -1796,7 +1755,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if stored && accepted.ResultReady {
 		return m.recoverStoredResult(ctx, store, job)
 	}
-	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
+	if accepted.Assigned || accepted.Terminal || accepted.FixedRefusal != "" || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
@@ -2698,7 +2657,7 @@ func (m *Monitor) finishFailedJob(ctx context.Context, store *state.Store, job J
 }
 
 // The checkpoint makes a lost POST response read-only to recover.
-func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job Job) error {
+func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job Job, reply string) error {
 	started := m.now().UTC()
 	grace := m.Config.PublicationGraceSeconds
 	if grace <= 0 {
@@ -2745,7 +2704,7 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 		return err
 	}
 	postCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	_, err := m.GitHub.CreateIssueComment(postCtx, job.Repository.Name, job.Number, failureReply+"\n\n"+job.Marker())
+	_, err := m.GitHub.CreateIssueComment(postCtx, job.Repository.Name, job.Number, reply+"\n\n"+job.Marker())
 	cancel()
 	if err != nil {
 		return err // The remote effect is uncertain; only the shared reconciler may inspect it.
@@ -2884,7 +2843,11 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		}
 	}
 	if !replied {
-		if err := m.postFailureReply(replyCtx, store, job); err != nil {
+		reply := failureReply
+		if accepted != nil && accepted.FixedRefusal != "" {
+			reply = accepted.FixedRefusal
+		}
+		if err := m.postFailureReply(replyCtx, store, job, reply); err != nil {
 			if errors.Is(err, ErrAcceptanceState) {
 				return err
 			}

@@ -36,7 +36,7 @@ type preparedAction struct {
 	reply       string
 }
 
-// needsExecution distinguishes supplied work from fixed replies.
+// needsExecution distinguishes model work from recovery-only fix publication.
 func (p *preparedAction) needsExecution() bool { return p.job.Version != 0 }
 
 func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (resultErr error) {
@@ -49,6 +49,9 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 			e.logf("close prepared action: %v", err)
 		}
 	}()
+	if prepared.reply != "" {
+		return e.recordFixedRefusal(ctx, request, prepared.reply)
+	}
 	var result Result
 	if prepared.needsExecution() {
 		if e.Executor == nil {
@@ -201,12 +204,6 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 
 // publish validates a worker result before applying data or issuing GitHub writes.
 func (e *Orchestrator) publish(ctx context.Context, p *preparedAction, result Result) error {
-	if p.reply != "" {
-		if err := e.publicationAllowed(ctx, p.request, false); err != nil {
-			return err
-		}
-		return e.acknowledge(ctx, p.request, p.reply)
-	}
 	if !p.needsExecution() {
 		if err := ctx.Err(); err != nil {
 			return err

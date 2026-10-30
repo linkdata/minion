@@ -77,7 +77,7 @@ If the service context is canceled before a selected assignment is delivered, ex
 
 A complete selected-worker result received after cancellation is refused, even if the original deadline has not passed. The worker receives no success acknowledgment; the selected worker is quarantined and the service exits for its supervisor to restart it. A saved result can replay publication only after its acceptance is committed, while the original deadline remains open and no terminal decision has been recorded.
 
-After identifying a terminal job, Minion attempts one best-effort fixed reply. During that reply attempt, it checks the live source, requester, repository identity, and verified bot marker. A failed or canceled reply check skips the reply and finishes the original terminal outcome. A verified existing marker also skips the reply. Minion saves an issued-write checkpoint before the one POST; an uncertain response is reconciled by marker without another POST. Post a new command after fixing the cause.
+After identifying a terminal job, Minion attempts one best-effort fixed reply. Pre-model refusals use the same path and retain the failed or expired action outcome even when the reply succeeds. During that reply attempt, Minion checks the live source, requester, repository identity, and verified bot marker. A failed or canceled reply check skips the reply and finishes the original terminal outcome. A verified existing marker also skips the reply. Minion saves an issued-write checkpoint before the one POST; an uncertain response is reconciled by marker without another POST. Post a new command after fixing the cause.
 
 ## Setup
 

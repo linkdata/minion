@@ -147,6 +147,7 @@ type AcceptedAction struct {
 	RetryAt         time.Time `json:"retry_at,omitzero"`
 	Assigned        bool      `json:"assigned"`
 	ResultReady     bool      `json:"result_ready,omitempty"`
+	FixedRefusal    string    `json:"fixed_refusal,omitempty"`
 	Terminal        bool      `json:"terminal,omitempty"`
 }
 

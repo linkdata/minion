@@ -3,7 +3,6 @@ package action
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -19,7 +18,6 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -459,47 +457,20 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 	}
 }
 
-func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
+func TestExecuteRecordsNoModelForFixedRefusal(t *testing.T) {
 	for _, failInitialSave := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fail initial save %t", failInitialSave), func(t *testing.T) {
 			job := usageJob()
 			job.Command.Name = "review"
 			job.Repository.Actions = []string{"review"}
 			installActionTestSkills(t, testReviewSkillURL)
-			var comments []github.Comment
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					_, _ = fmt.Fprint(w, `{"id":1,"full_name":"o/r","owner":{"id":2,"login":"o"}}`)
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7":
-					if _, err := fmt.Fprint(w, `{"title":"Request"}`); err != nil {
-						t.Error(err)
-					}
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-					if err := json.NewEncoder(w).Encode(comments); err != nil {
-						t.Error(err)
-					}
-				case r.Method == http.MethodPost && r.URL.Path == "/graphql":
-					if len(comments) != 1 {
-						t.Errorf("provenance requested before completion reply: %+v", comments)
-						http.Error(w, "early provenance", http.StatusInternalServerError)
-						return
-					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"node": map[string]any{"body": comments[0].Body, "author": map[string]any{"login": "bot", "id": 8}}}})
-				case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-					var payload struct{ Body string }
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						t.Error(err)
-					}
-					comments = append(comments, github.Comment{NodeID: "completion-reply-1", Body: payload.Body, User: github.User{Login: "bot", ID: 8}})
-					w.WriteHeader(http.StatusCreated)
-					if _, err := fmt.Fprint(w, `{"id":1}`); err != nil {
-						t.Error(err)
-					}
-				default:
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-					http.NotFound(w, r)
+				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments" {
+					_, _ = w.Write([]byte("[]"))
+					return
 				}
+				t.Errorf("fixed refusal made an unexpected GitHub request: %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
 			}))
 			defer server.Close()
 			client := testGitHub(server, "test-token")
@@ -522,23 +493,20 @@ func TestExecuteRecordsNoModelAndSkipsAcknowledged(t *testing.T) {
 			selectFixtureRunner(t, e, &job)
 			err := e.Execute(t.Context(), job)
 			if failInitialSave {
-				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "action usage") || len(comments) != 0 {
-					t.Fatalf("action ran without initial usage record: err=%v comments=%+v", err, comments)
+				if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || !strings.Contains(err.Error(), "action usage") {
+					t.Fatalf("action ran without initial usage record: %v", err)
 				}
 				return
 			}
-			if err != nil || len(comments) != 1 {
-				t.Fatalf("execute error=%v comments=%+v", err, comments)
-			}
-			if err := e.Execute(t.Context(), job); err != nil || len(comments) != 1 {
-				t.Fatalf("dedupe error=%v comments=%+v", err, comments)
+			if !errors.Is(err, monitor.ErrTerminalJob) || e.Store.Data.Accepted.FixedRefusal == "" {
+				t.Fatalf("fixed refusal was not recorded before terminal cleanup: error=%v accepted=%+v", err, e.Store.Data.Accepted)
 			}
 			records, err := usage.ReadAll(dir)
 			if err != nil || len(records) != 1 {
 				t.Fatalf("records=%+v err=%v", records, err)
 			}
 			record := records[0]
-			if record.Status != "succeeded" || record.CodexCalls != 0 || record.Tokens.Total() != 0 || !record.UsageComplete || record.FinishedAt == nil {
+			if record.Status != "failed" || record.CodexCalls != 0 || record.Tokens.Total() != 0 || !record.UsageComplete || record.FinishedAt == nil {
 				t.Fatalf("incorrect no-Codex record: %+v", record)
 			}
 		})

@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -75,10 +73,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 		{name: "security audit pull request", commandName: "security-audit", subject: "PullRequest", skill: testAuditSkillURL, action: command.SecurityAudit},
 		{name: "fix", commandName: "fix", subject: "Issue", skill: testFixSkillURL, action: command.Fix},
 	} {
-		for _, mode := range []string{"exact", "combined over", "description over", "notes over", "reply retry", "refusal authority lost"} {
-			if (mode == "reply retry" || mode == "refusal authority lost") && tt.name != "comment issue" {
-				continue
-			}
+		for _, mode := range []string{"exact", "combined over", "description over", "notes over"} {
 			t.Run(tt.name+"/"+mode, func(t *testing.T) {
 				if tt.action == command.SecurityAudit {
 					fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
@@ -90,7 +85,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				}
 				description, requestNotes := exactDescription, notes
 				switch mode {
-				case "combined over", "reply retry", "refusal authority lost":
+				case "combined over":
 					description += "x"
 				case "description over":
 					description = strings.Repeat("x", limit+1)
@@ -110,9 +105,6 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					},
 					Command: command.Command{Name: tt.commandName, Action: tt.action},
 				}
-				var replies []github.Comment
-				var postAttempts int
-				var mu sync.Mutex
 				respond := func(w http.ResponseWriter, value any) {
 					t.Helper()
 					if err := json.NewEncoder(w).Encode(value); err != nil {
@@ -122,33 +114,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r/issues/7/comments":
-						mu.Lock()
-						respond(w, replies)
-						mu.Unlock()
-					case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
-						mu.Lock()
-						postAttempts++
-						fail := mode == "reply retry" && postAttempts == 1
-						mu.Unlock()
-						if fail {
-							http.Error(w, "temporary publication failure", http.StatusServiceUnavailable)
-							return
-						}
-						var input struct {
-							Body string `json:"body"`
-						}
-						if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-							t.Error(err)
-						}
-						comment := github.Comment{
-							ID: 1, NodeID: "reply-node", Body: input.Body,
-							User: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC),
-						}
-						mu.Lock()
-						replies = append(replies, comment)
-						mu.Unlock()
-						w.WriteHeader(http.StatusCreated)
-						respond(w, comment)
+						respond(w, []github.Comment{})
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
 						respond(w, github.Repository{ID: 1, FullName: "o/r", DefaultBranch: "main", Private: true, Visibility: "private", Owner: github.User{ID: 2, Login: "o"}})
 					case r.Method == http.MethodGet && r.URL.Path == "/repos/linkdataminion/r":
@@ -189,15 +155,8 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 								"title": title, "bodyText": description, "lastEditedAt": nil,
 							}}})
 						default:
-							mu.Lock()
-							body := ""
-							if len(replies) != 0 {
-								body = replies[0].Body
-							}
-							mu.Unlock()
-							respond(w, map[string]any{"data": map[string]any{"node": map[string]any{
-								"body": body, "author": map[string]any{"login": "linkdataminion", "id": 8},
-							}}})
+							t.Error("unexpected GraphQL query")
+							http.Error(w, "unexpected GraphQL query", http.StatusInternalServerError)
 						}
 					default:
 						t.Errorf("unexpected API call: %s %s", r.Method, r.URL.Path)
@@ -213,13 +172,7 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 					BotLogin:              "linkdataminion",
 					Store:                 store,
 					MaxGitHubContextBytes: limit,
-					ValidateFixedRefusal: func(context.Context, monitor.Job) error {
-						if mode == "refusal authority lost" {
-							return fmt.Errorf("%w: requester permission changed", monitor.ErrTerminalJob)
-						}
-						return nil
-					},
-					Commands: map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
+					Commands:              map[string]config.CommandMapping{job.Command.Name: {Action: string(tt.action), Skills: []string{tt.skill}}},
 					Runner: Runner{
 						runModel: func(_ context.Context, modelRequest modelRun) (aicli.Result, error) {
 							prompt := modelRequest.prompt
@@ -232,53 +185,23 @@ func TestGitHubContextLimitAcrossActions(t *testing.T) {
 						},
 					},
 				}
-				fixedRefusal := orchestrator.ValidateFixedRefusal
 				selectFixtureRunner(t, orchestrator, &job)
-				orchestrator.ValidateFixedRefusal = fixedRefusal
 				err := orchestrator.Execute(t.Context(), job)
-				if mode == "refusal authority lost" {
-					mu.Lock()
-					replyCount := len(replies)
-					mu.Unlock()
-					if !errors.Is(err, monitor.ErrTerminalJob) || modelCalls != 0 || replyCount != 0 {
-						t.Fatalf("refusal wrote after authority loss: err=%v model_calls=%d replies=%d", err, modelCalls, replyCount)
-					}
-					return
-				}
 				if mode == "exact" {
 					if !errors.Is(err, modelErr) || modelCalls != 1 {
 						t.Fatalf("exact-limit execution = %v, model calls = %d; want model error and one call", err, modelCalls)
 					}
 					return
 				}
-				if mode == "reply retry" {
-					if err == nil || errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, monitor.ErrPostModelPublication) || modelCalls != 0 {
-						t.Fatalf("failed refusal publication = %v, model calls = %d; want retryable error and zero calls", err, modelCalls)
-					}
-					err = orchestrator.Execute(t.Context(), job)
+				if !errors.Is(err, monitor.ErrTerminalJob) || modelCalls != 0 {
+					t.Fatalf("oversized execution = %v, model calls = %d; want terminal refusal and zero calls", err, modelCalls)
 				}
-				if err != nil || modelCalls != 0 {
-					t.Fatalf("oversized execution = %v, model calls = %d; want fixed refusal and zero calls", err, modelCalls)
-				}
-				mu.Lock()
-				got := append([]github.Comment(nil), replies...)
-				mu.Unlock()
 				want := "Request exceeds the GitHub context limits: 6 UTF-8 bytes combined and 1024 bytes per title. Shorten the title, thread text or requester notes included in this action, then post a new command."
 				if tt.action == command.Fix {
 					want = "Request exceeds the GitHub context limits: 5 UTF-8 bytes combined. Shorten the thread text or requester notes included in this action, then post a new command."
 				}
-				want += "\n\n" + job.Marker()
-				if len(got) != 1 || got[0].Body != want {
-					t.Fatalf("refusal replies = %+v; want %q", got, want)
-				}
-				if err := orchestrator.Execute(t.Context(), job); err != nil || modelCalls != 0 {
-					t.Fatalf("repeated rejected request = %v, model calls = %d", err, modelCalls)
-				}
-				mu.Lock()
-				replyCount := len(replies)
-				mu.Unlock()
-				if replyCount != 1 {
-					t.Fatalf("rejected request posted %d replies", replyCount)
+				if got := store.Data.Accepted.FixedRefusal; got != want || len(store.Data.PublicationWrites) != 0 {
+					t.Fatalf("fixed refusal checkpoint = %q; want %q, without an action POST", got, want)
 				}
 			})
 		}

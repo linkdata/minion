@@ -298,9 +298,6 @@ func bindSelectedRunner(m *monitor.Monitor, store *state.Store, owner *Orchestra
 	owner.ValidatePublication = func(ctx context.Context, job monitor.Job, requireAssigned bool) error {
 		return m.RevalidatePublication(ctx, store, job, requireAssigned)
 	}
-	owner.ValidateFixedRefusal = func(ctx context.Context, job monitor.Job) error {
-		return m.RevalidateFixedRefusal(ctx, store, job)
-	}
 	attachSelectedRunner(owner)
 }
 
@@ -308,7 +305,6 @@ func fixtureSelectedValidators(owner *Orchestrator) {
 	owner.assignmentRequired = true
 	owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	owner.ValidatePublication = func(context.Context, monitor.Job, bool) error { return nil }
-	owner.ValidateFixedRefusal = func(context.Context, monitor.Job) error { return nil }
 }
 
 func selectFixtureRequest(t *testing.T, owner *Orchestrator, request *monitor.Job, assigned bool) {
@@ -491,8 +487,6 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		Command: command.Command{Name: "fix", Action: command.Fix},
 	}
 	store := openState(t, requestAt)
-	var comments int
-	var refusal string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
@@ -508,8 +502,9 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 			_, _ = fmt.Fprint(w, `{"node_id":"issue-node","title":"Original title","body":"Visible <!--hidden request-->"}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Edited title","bodyText":"Edited body","lastEditedAt":"2026-10-09T08:00:01Z"}}}`)
-		case captureComment(t, w, r, &refusal):
-			comments++
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/o/r/issues/7/comments":
+			t.Error("fixed reply posted before terminal cleanup")
+			http.Error(w, "unexpected write", http.StatusInternalServerError)
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -524,11 +519,11 @@ func TestFixRefusesIssueEditedAfterRequest(t *testing.T) {
 		Runner:   Runner{runModel: forbidModel(t)},
 	}
 	selectFixtureRunner(t, orchestrator, &job)
-	if err := orchestrator.perform(testActionContext(t), job); err != nil {
-		t.Fatal(err)
+	if err := orchestrator.perform(testActionContext(t), job); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("edited issue did not finish as a fixed refusal: %v", err)
 	}
-	if comments != 1 || len(store.Data.PendingFixes) != 0 || !strings.Contains(refusal, "changed after this `fix` request") {
-		t.Fatalf("edited issue created fix state or missed refusal: comments=%d pending=%v refusal=%q", comments, store.Data.PendingFixes, refusal)
+	if len(store.Data.PendingFixes) != 0 || store.Data.Accepted.FixedRefusal != fixIssueChangedReply {
+		t.Fatalf("edited issue created fix state or lost refusal: pending=%v checkpoint=%q", store.Data.PendingFixes, store.Data.Accepted.FixedRefusal)
 	}
 }
 

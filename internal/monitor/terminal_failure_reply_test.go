@@ -76,6 +76,164 @@ func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 	}
 }
 
+func TestSelectedFixedRefusalUsesOneTerminalReply(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		change  func(*fakeGitHub, Job)
+		posted  bool
+		expired bool
+	}{
+		{name: "valid", posted: true},
+		{name: "expired action", posted: true, expired: true},
+		{name: "edited command", change: func(gh *fakeGitHub, _ Job) {
+			gh.currentItem = func(item github.Item) (github.Item, error) {
+				item.Edited = true
+				return item, nil
+			}
+		}},
+		{name: "revoked permission", change: func(gh *fakeGitHub, _ Job) { gh.permission.Permission = "read" }},
+		{name: "permission lookup failed", change: func(gh *fakeGitHub, _ Job) { gh.permissionErr = errors.New("lookup failed") }},
+		{name: "permission not found", change: func(gh *fakeGitHub, _ Job) {
+			gh.permissionErr = &github.StatusError{StatusCode: 404}
+		}},
+		{name: "marker check canceled", change: func(gh *fakeGitHub, _ Job) {
+			gh.beforeVerify = func(context.Context, bool) error { return context.Canceled }
+		}},
+		{name: "marker already present", change: func(gh *fakeGitHub, job Job) {
+			gh.items = append(gh.items, github.Item{Body: "Earlier reply.\n\n" + job.Marker(),
+				Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: job.Source.UpdatedAt})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			acceptedAt := now
+			if tc.expired {
+				acceptedAt = now.Add(-8 * time.Minute)
+			}
+			accepted := selectedAcceptance(t, acceptedAt)
+			accepted.FixedRefusal = "`review` applies to pull requests."
+			job := jobFromAccepted(accepted)
+			store := openState(t, now.Add(-time.Minute))
+			store.Data.Accepted = &accepted
+			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{items: []github.Item{selectedItem(acceptedAt)}, permission: github.Permission{Permission: "write"},
+				currentItem: func(item github.Item) (github.Item, error) {
+					if item.Key == job.Source.Key {
+						return selectedItem(acceptedAt), nil
+					}
+					return item, nil
+				}}
+			if tc.change != nil {
+				tc.change(gh, job)
+			}
+			m := selectedMonitor(t, now, gh, nil)
+			if _, ok := m.acceptedRepository(accepted); !ok {
+				t.Fatal("fixture selected repository is ineligible")
+			}
+			outcome := "failed"
+			if tc.expired {
+				outcome = "expired"
+			}
+			if err := m.completeSelected(t.Context(), store, job, now, ErrTerminalJob); err != nil ||
+				store.Data.Processed[job.ID].IsZero() || store.Data.Accepted != nil ||
+				store.Data.TerminalDecisions[job.ID].Outcome != outcome ||
+				(len(gh.comments) == 1) != tc.posted || gh.commentCalls > 1 {
+				t.Fatalf("fixed refusal terminal cleanup: err=%v comments=%v state=%+v", err, gh.comments, store.Data)
+			}
+			if tc.posted {
+				want := accepted.FixedRefusal + "\n\n" + job.Marker()
+				if gh.comments[0].Body != want || store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved {
+					t.Fatalf("wrong fixed reply or checkpoint: comments=%v state=%+v", gh.comments, store.Data)
+				}
+			} else if len(store.Data.PublicationWrites) != 0 {
+				t.Fatalf("precheck failure issued a POST: %+v", store.Data.PublicationWrites)
+			}
+		})
+	}
+}
+
+func TestSelectedFixedRefusalDoesNotRetryRejectedPOST(t *testing.T) {
+	now := time.Now().UTC()
+	accepted := selectedAcceptance(t, now)
+	accepted.FixedRefusal = "Fixed refusal."
+	job := jobFromAccepted(accepted)
+	store := openState(t, now.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{selectedItem(now)}, permission: github.Permission{Permission: "write"},
+		commentErr: errors.New("rejected POST"), currentItem: func(item github.Item) (github.Item, error) {
+			if item.Key == job.Source.Key {
+				return selectedItem(now), nil
+			}
+			return item, nil
+		}}
+	m := selectedMonitor(t, now, gh, nil)
+	if err := m.completeSelected(t.Context(), store, job, now, ErrTerminalJob); err != nil ||
+		gh.commentCalls != 1 || store.Data.Processed[job.ID].IsZero() ||
+		store.Data.TerminalDecisions[job.ID].Outcome != "failed" ||
+		store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
+		t.Fatalf("rejected fixed reply was retried or lost its checkpoint: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+	}
+	if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil || gh.commentCalls != 1 {
+		t.Fatalf("reconciliation reposted fixed reply: err=%v calls=%d", err, gh.commentCalls)
+	}
+}
+
+func TestSelectedFixedRefusalRecoversBeforeAndAfterUncertainPOST(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		accepted := selectedAcceptance(t, now)
+		accepted.FixedRefusal = "Fixed refusal."
+		job := jobFromAccepted(accepted)
+		path := filepath.Join(t.TempDir(), "state.json")
+		store := openStateAt(t, path, now.Add(-time.Minute))
+		store.Data.Accepted = &accepted
+		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store = openStateAt(t, path, now)
+		var gh *fakeGitHub
+		gh = &fakeGitHub{items: []github.Item{selectedItem(now)}, permission: github.Permission{Permission: "write"},
+			currentItem: func(item github.Item) (github.Item, error) {
+				if item.Key == job.Source.Key {
+					return selectedItem(now), nil
+				}
+				return item, nil
+			},
+			commentErr: errors.New("response lost"), beforeComment: func() {
+				gh.items = append(gh.items, github.Item{Body: accepted.FixedRefusal + "\n\n" + job.Marker(),
+					Author: github.User{Login: "linkdataminion", ID: 8}, UpdatedAt: now})
+			}}
+		m := selectedMonitor(t, now, gh, nil)
+		m.Now = time.Now
+		if err := m.recoverAccepted(t.Context(), store); err != nil || gh.commentCalls != 1 ||
+			store.Data.TerminalDecisions[job.ID].Outcome != "failed" ||
+			store.Data.PublicationWrites[job.ID].Status != state.PublicationWritePending {
+			t.Fatalf("restart failed to finish one fixed reply: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		store = openStateAt(t, path, now)
+		gh.commentErr = nil
+		if err := m.ReconcilePublicationWrites(t.Context(), store); err != nil || gh.commentCalls != 1 ||
+			store.Data.PublicationWrites[job.ID].Status != state.PublicationWriteObserved ||
+			store.Data.TerminalDecisions[job.ID].Outcome != "failed" {
+			t.Fatalf("lost response was reposted or changed the original outcome: err=%v calls=%d state=%+v", err, gh.commentCalls, store.Data)
+		}
+	})
+}
+
 func TestFailureReplySkipsIncompleteSourceIdentity(t *testing.T) {
 	for _, test := range []struct {
 		name   string
