@@ -19,7 +19,6 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
-	"github.com/linkdata/minion/internal/state"
 )
 
 func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
@@ -34,7 +33,7 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 		{name: "final query fails", change: "fixed\n", queryFailure: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			gitFixtureRemote(t)
+			_, _, remote := gitFixtureRemote(t)
 			requestAt := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			request := monitor.Job{
 				Repository:  config.Repository{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"fix"}},
@@ -106,16 +105,19 @@ func TestFixRefusesIssueEditedDuringModel(t *testing.T) {
 				if !errors.Is(err, monitor.ErrPostModelPublication) || reply != "" {
 					t.Fatalf("query failure published or lost retry classification: reply=%q err=%v", reply, err)
 				}
-			} else if err != nil || !strings.Contains(reply, "issue changed after this `fix` request") || strings.Contains(reply, "stale model answer") {
-				t.Fatalf("stale issue was published: reply=%q err=%v", reply, err)
+			} else if !errors.Is(err, monitor.ErrTerminalJob) || reply != "" ||
+				store.Data.Accepted == nil || store.Data.Accepted.FixedRefusal != fixIssueChangedReply ||
+				!store.Data.Accepted.ResultReady {
+				t.Fatalf("changed issue did not save a terminal refusal: reply=%q err=%v accepted=%+v", reply, err, store.Data.Accepted)
 			}
-			if !tc.queryFailure {
-				if write := store.Data.PublicationWrites[request.ID]; write.Kind != "comment" || write.Status != state.PublicationWriteObserved {
-					t.Fatalf("issue-changed reply bypassed publication ledger: %+v", write)
-				}
+			if len(store.Data.PublicationWrites) != 0 {
+				t.Fatalf("issue changed before terminal cleanup but issued a write: %+v", store.Data.PublicationWrites)
 			}
 			if !modelRan.Load() || queries.Load() != 2 || len(store.Data.PendingFixes) != 0 {
 				t.Fatalf("freshness checks or checkpoint wrong: model=%t queries=%d pending=%v", modelRan.Load(), queries.Load(), store.Data.PendingFixes)
+			}
+			if _, err := os.Stat(filepath.Join(remote, "refs", "heads", "minion", "fix-7-aaaaaaaaaaaa")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("changed issue published a fix branch: %v", err)
 			}
 		})
 	}

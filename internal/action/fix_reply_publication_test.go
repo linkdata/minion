@@ -21,11 +21,10 @@ import (
 
 func TestModeledFixRepliesRecoverLostPostWithoutDuplicate(t *testing.T) {
 	for _, tc := range []struct {
-		name, wantReply           string
-		issueChanged, branchReady bool
+		name, wantReply string
+		branchReady     bool
 	}{
 		{name: "no changes", wantReply: "AI returned a response without changing files."},
-		{name: "issue changed after model", issueChanged: true, wantReply: fixIssueChangedReply},
 		{name: "changed result branch reply", branchReady: true, wantReply: "Fix branch `minion/fix-7-reviewed` is ready"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,11 +65,7 @@ func TestModeledFixRepliesRecoverLostPostWithoutDuplicate(t *testing.T) {
 						return
 					}
 					if strings.Contains(input.Query, "bodyText") {
-						edited := "null"
-						if tc.issueChanged {
-							edited = fmt.Sprintf("%q", request.Source.UpdatedAt.Add(time.Second).Format(time.RFC3339Nano))
-						}
-						_, _ = fmt.Fprintf(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":%s}}}`, edited)
+						_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Task","bodyText":"Inspect source","lastEditedAt":null}}}`)
 					} else if body := posted.Load(); body != nil && strings.Contains(input.Query, "node(id:") {
 						provenance.Add(1)
 						_, _ = fmt.Fprintf(w, `{"data":{"node":{"body":%q,"author":{"id":8,"login":"linkdataminion"}}}}`, *body)

@@ -629,10 +629,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 	request := p.request
 	if len(result.Changes) == 0 {
 		if _, err := e.currentFixIssue(ctx, p); errors.Is(err, errFixIssueChanged) {
-			if err := e.publicationAllowed(ctx, request, true); err != nil {
-				return err
-			}
-			return e.publishTaskComment(ctx, request, fixIssueChangedReply)
+			return e.recordFixedRefusal(ctx, request, fixIssueChangedReply)
 		} else if err != nil {
 			return err
 		}
@@ -668,10 +665,7 @@ func (e *Orchestrator) publishFix(ctx context.Context, p *preparedAction, result
 		return e.beginFixPush(ctx, request, fork.FullName, p.branch, sha, published.cap)
 	}); err != nil {
 		if errors.Is(err, errFixIssueChanged) {
-			if gateErr := e.publicationAllowed(ctx, request, true); gateErr != nil {
-				return gateErr
-			}
-			return e.publishTaskComment(ctx, request, fixIssueChangedReply)
+			return e.recordFixedRefusal(ctx, request, fixIssueChangedReply)
 		}
 		if errors.Is(err, gitwork.ErrNoChanges) {
 			return fmt.Errorf("%w: reviewed changes produced no commit: %w", monitor.ErrTerminalJob, err)

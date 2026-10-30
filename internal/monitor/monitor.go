@@ -1367,7 +1367,8 @@ func (m *Monitor) terminalAccepted(ctx context.Context, store *state.Store, job 
 	outcome := "failed"
 	if !at.Before(job.Deadline) {
 		outcome = "expired"
-	} else if accepted := store.Data.Accepted; (accepted != nil && accepted.Assigned) || failure.ModelCallStarted {
+	} else if accepted := store.Data.Accepted; accepted != nil && accepted.FixedRefusal == "" &&
+		(accepted.Assigned || failure.ModelCallStarted) {
 		outcome = "lost"
 	}
 	decision, err := decideAccepted(store, job, outcome, at)
@@ -1748,6 +1749,9 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
+	if accepted.FixedRefusal != "" {
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
 	stored, err := store.HasAcceptedResult()
 	if err != nil {
 		return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
@@ -1755,7 +1759,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if stored && accepted.ResultReady {
 		return m.recoverStoredResult(ctx, store, job)
 	}
-	if accepted.Assigned || accepted.Terminal || accepted.FixedRefusal != "" || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
+	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
@@ -2325,7 +2329,7 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		}
 		assigned = accepted.Assigned
 		modelCallStarted = failure.ModelCallStarted
-		if result != nil && accepted.ResultReady {
+		if result != nil && accepted.ResultReady && accepted.FixedRefusal == "" {
 			var err error
 			stored, err = store.HasAcceptedResult()
 			return err
@@ -2549,7 +2553,7 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
 	stored := false
-	if accepted.ResultReady {
+	if accepted.ResultReady && accepted.FixedRefusal == "" {
 		var receiptErr error
 		stored, receiptErr = store.HasAcceptedResult()
 		if receiptErr != nil {

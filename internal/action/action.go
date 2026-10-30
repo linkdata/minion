@@ -204,7 +204,7 @@ func (e *Orchestrator) recordFixedRefusal(ctx context.Context, job monitor.Job, 
 			return err
 		}
 		accepted := e.Store.Data.Accepted
-		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || accepted.ResultReady {
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) {
 			return fmt.Errorf("%w: selected action changed before fixed refusal", monitor.ErrAcceptanceState)
 		}
 		if accepted.FixedRefusal != "" && accepted.FixedRefusal != reply {
