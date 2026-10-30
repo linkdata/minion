@@ -15,15 +15,15 @@ func TestStreamEventsCaptureCompleteBlocks(t *testing.T) {
 	var got []aicli.StreamEvent
 	o := jsonlOutput{sessionID: "native-id", apiKey: "private-key", onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
 	stream := strings.Join([]string{
-		`{"type":"assistant","parent_tool_use_id":null,"message":{"id":"early","content":[{"type":"text","text":"early"}]}}`,
+		`{"type":"assistant","parent_tool_use_id":null,"session_id":"native-id","message":{"id":"early","content":[{"type":"text","text":"early"}]}}`,
 		`{"type":"system","subtype":"init","session_id":"native-id"}`,
 		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}`,
 		`{"type":"assistant","parent_tool_use_id":"delegate","agent_id":"agent-7","session_id":"native-id","message":{"id":"helper","content":[{"type":"text","text":"helper text"},` + request + `]}}`,
-		`{"type":"assistant","parent_tool_use_id":null,"message":{"id":"message","content":[{"type":"thinking","thinking":"private thought"},{"type":"text","text":"hello private-key"},` + request + `,{"type":"redacted_thinking","data":"hidden"}]}}`,
+		`{"type":"assistant","parent_tool_use_id":null,"session_id":"native-id","message":{"id":"message","content":[{"type":"thinking","thinking":"private thought"},{"type":"text","text":"hello private-key"},` + request + `,{"type":"redacted_thinking","data":"hidden"}]}}`,
 		`{"type":"user","isSynthetic":true,"message":{"content":[` + response + `]}}`,
 		`{"type":"user","parent_tool_use_id":"delegate","agent_id":"agent-7","session_id":"native-id","message":{"content":[` + response + `]}}`,
-		`{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"ordinary user text"},` + response + `]}}`,
-		`{"type":"user","parent_tool_use_id":null,"message":{"content":"direct user text"}}`,
+		`{"type":"user","parent_tool_use_id":null,"session_id":"native-id","message":{"content":[{"type":"text","text":"ordinary user text"},` + response + `]}}`,
+		`{"type":"user","parent_tool_use_id":null,"session_id":"native-id","message":{"content":"direct user text"}}`,
 	}, "\n") + "\n"
 	writeChunks(t, &o, stream)
 	want := []aicli.StreamEvent{
@@ -46,13 +46,26 @@ func TestStreamEventsUnknownParentageMarksGapOnlyForContent(t *testing.T) {
 	var got []aicli.StreamEvent
 	o := jsonlOutput{sessionID: "native-id", identitySeen: true, onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
 	writeChunks(t, &o, strings.Join([]string{
-		`{"type":"assistant","message":{"id":"usage-only"}}`,
-		`{"type":"assistant","message":{"id":"thinking-only","content":[{"type":"thinking","thinking":"hidden"}]}}`,
-		`{"type":"assistant","message":{"id":"unknown","content":[{"type":"text","text":"unbound"}]}}`,
-		`{"type":"assistant","parent_tool_use_id":"delegate","message":{"id":"unknown-helper","content":[{"type":"text","text":"unbound helper"}]}}`,
+		`{"type":"assistant","session_id":"native-id","message":{"id":"usage-only"}}`,
+		`{"type":"assistant","session_id":"native-id","message":{"id":"thinking-only","content":[{"type":"thinking","thinking":"hidden"}]}}`,
+		`{"type":"assistant","session_id":"native-id","message":{"id":"unknown","content":[{"type":"text","text":"unbound"}]}}`,
+		`{"type":"assistant","parent_tool_use_id":"delegate","session_id":"native-id","message":{"id":"unknown-helper","content":[{"type":"text","text":"unbound helper"}]}}`,
 	}, "\n")+"\n")
 	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "assistant"}, {Kind: "assistant"}}) {
 		t.Fatalf("unknown parentage was attributed to root or content-free events made gaps: %+v", got)
+	}
+}
+
+func TestStreamEventsRejectForeignSessionAndUnknownContentBlocks(t *testing.T) {
+	var got []aicli.StreamEvent
+	o := jsonlOutput{sessionID: "native-id", identitySeen: true, onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
+	writeChunks(t, &o, strings.Join([]string{
+		`{"type":"assistant","session_id":"foreign","parent_tool_use_id":null,"message":{"id":"foreign","content":[{"type":"text","text":"misbound"}]}}`,
+		`{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"mixed","content":[{"type":"text","text":"known"},{"type":"server_tool_use","name":"server"},{"type":"thinking","thinking":"private"}]}}`,
+	}, "\n")+"\n")
+	want := []aicli.StreamEvent{{Kind: "assistant"}, {NativeID: "native-id", Kind: "assistant", Text: "known"}, {Kind: "assistant"}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("foreign or unknown content received false coverage: got=%+v want=%+v", got, want)
 	}
 }
 

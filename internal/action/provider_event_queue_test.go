@@ -63,3 +63,16 @@ func TestProviderEventQueueReportsGapsAndBoundedBacklog(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderEventQueueKeepsLaterValidEventsAfterGap(t *testing.T) {
+	var sent []string
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		sent = append(sent, event.Text)
+		return nil
+	})
+	queue.add(attemptRecord{Text: "unbound"})
+	queue.add(attemptRecord{Agent: "native", Text: "later"})
+	if queue.finish() || !slices.Equal(sent, []string{"later"}) {
+		t.Fatalf("capture gap lost later known content or claimed coverage: %v", sent)
+	}
+}

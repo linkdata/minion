@@ -438,11 +438,18 @@ func (o *jsonlOutput) captureMessage(e event) {
 			o.emitContent(e, "tool_result", string(raw))
 		case e.Type == "user" && block.Type == "text" && block.Text != "":
 			o.emitContent(e, "user", block.Text)
+		case block.Type == "thinking" || block.Type == "redacted_thinking":
+		default:
+			o.emitContent(e, kind, "")
 		}
 	}
 }
 
 func (o *jsonlOutput) emitContent(e event, kind, text string) {
+	if e.SessionID == "" || e.SessionID != o.sessionID {
+		o.onEvent(aicli.StreamEvent{Kind: kind})
+		return
+	}
 	parent := bytes.TrimSpace(e.ParentToolUseID)
 	if bytes.Equal(parent, []byte("null")) {
 		o.emitEventWithID(o.sessionID, kind, text)

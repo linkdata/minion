@@ -6,11 +6,12 @@ import (
 
 // providerEventQueue keeps Status latency out of the CLI stdout pipe drain.
 type providerEventQueue struct {
-	events chan attemptRecord
-	done   chan struct{}
-	bytes  atomic.Int64
-	failed atomic.Bool
-	limit  int64
+	events  chan attemptRecord
+	done    chan struct{}
+	bytes   atomic.Int64
+	failed  atomic.Bool
+	stopped atomic.Bool
+	limit   int64
 }
 
 func newProviderEventQueue(send func(attemptRecord) error) *providerEventQueue {
@@ -19,11 +20,12 @@ func newProviderEventQueue(send func(attemptRecord) error) *providerEventQueue {
 		defer close(queue.done)
 		for event := range queue.events {
 			queue.bytes.Add(-int64(len(event.Text)))
-			if queue.failed.Load() {
+			if queue.stopped.Load() {
 				continue
 			}
 			if err := send(event); err != nil {
 				queue.failed.Store(true)
+				queue.stopped.Store(true)
 			}
 		}
 	}()
@@ -31,7 +33,7 @@ func newProviderEventQueue(send func(attemptRecord) error) *providerEventQueue {
 }
 
 func (q *providerEventQueue) add(event attemptRecord) {
-	if q.failed.Load() {
+	if q.stopped.Load() {
 		return
 	}
 	if event.Agent == "" {
@@ -52,7 +54,7 @@ func (q *providerEventQueue) add(event attemptRecord) {
 	}
 }
 
-// finish drains emitted events before Result; a gap forbids a coverage marker.
+// finish drains emitted events; a gap forbids a coverage marker.
 func (q *providerEventQueue) finish() bool {
 	close(q.events)
 	<-q.done
