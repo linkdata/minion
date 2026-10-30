@@ -1153,6 +1153,7 @@ func TestSelectedReservedThirdAttemptResumesAfterRestart(t *testing.T) {
 func TestSelectedThirdAttemptExpiryKeepsOutcomeAfterUncertainReply(t *testing.T) {
 	at := time.Now().UTC().Add(-9 * time.Minute)
 	accepted := selectedAcceptance(t, at)
+	now := accepted.Deadline.Add(time.Second)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
@@ -1165,14 +1166,14 @@ func TestSelectedThirdAttemptExpiryKeepsOutcomeAfterUncertainReply(t *testing.T)
 	replyErr := errors.New("failure reply unavailable")
 	gh := &fakeGitHub{permission: github.Permission{Permission: "write"}, commentErr: replyErr,
 		currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil }}
-	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+	m := selectedMonitor(t, now, gh, selectedHandler(func(Job) error {
 		t.Fatal("expired reservation dispatched work")
 		return nil
 	}))
 	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
 		store.Data.Processed[accepted.JobID].IsZero() ||
 		store.Data.PublicationWrites[accepted.JobID].Status != state.PublicationWritePending ||
-		store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" {
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
 		t.Fatalf("terminal outcome or uncertain reply was lost: err=%v state=%+v", err, store.Data)
 	}
 	if err := store.Close(); err != nil {
@@ -1180,7 +1181,7 @@ func TestSelectedThirdAttemptExpiryKeepsOutcomeAfterUncertainReply(t *testing.T)
 	}
 	reopened := openStateAt(t, path, at.Add(-time.Minute))
 	if reopened.Data.Accepted != nil || reopened.Data.Processed[accepted.JobID].IsZero() ||
-		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" {
+		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "expired" {
 		t.Fatalf("terminal outcome was lost after restart: %+v", reopened.Data)
 	}
 	gh.commentErr = nil
