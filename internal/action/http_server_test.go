@@ -1274,8 +1274,8 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	if got := f.request("/status", httpObservation{Status: status}); got.err == nil {
 		t.Fatal("injected observation ACK failure unexpectedly succeeded")
 	}
-	if got, _, ok := f.executor.Status(); !ok || got != status || f.tx.ctx.Err() != nil {
-		t.Fatalf("lost observation 1 or ACK changed action admission: status=%+v present=%t ctx=%v", got, ok, f.tx.ctx.Err())
+	if got, receivedAt, ok := f.executor.Status(); !ok || got != status || receivedAt.IsZero() || f.tx.ctx.Err() != nil {
+		t.Fatalf("lost observation 1 or ACK changed action admission: status=%+v received=%v present=%t ctx=%v", got, receivedAt, ok, f.tx.ctx.Err())
 	}
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	f.ack(t, "/outcome", f.outcome(2, nil), http.StatusOK, 2)
