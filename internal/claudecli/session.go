@@ -20,6 +20,8 @@ import (
 // Stored-login transcripts follow the CLI's normal private retention policy.
 // Minion never resumes this Session for another action or role.
 type Session struct {
+	// OnEvent receives redacted, fully emitted events; final follows validation.
+	OnEvent                      func(aicli.StreamEvent)
 	workspace, binary, outputDir string
 	writable                     bool
 	settings                     config.ClaudeConfig

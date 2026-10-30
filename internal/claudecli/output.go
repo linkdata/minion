@@ -45,6 +45,7 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 type event struct {
 	Type              string            `json:"type"`
 	SessionID         string            `json:"session_id"`
+	AgentID           string            `json:"agent_id"`
 	Subtype           string            `json:"subtype"`
 	ResultIndex       *int64            `json:"result_index"`
 	TerminalReason    json.RawMessage   `json:"terminal_reason"`
@@ -115,6 +116,7 @@ type messageUsage struct {
 type jsonlOutput struct {
 	sessionID           string
 	apiKey              string
+	onEvent             func(aicli.StreamEvent)
 	identitySeen        bool
 	baseline            usage.Tokens
 	baselineUnknown     bool
@@ -285,6 +287,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			}
 		}
 	}
+	o.captureMessage(e)
 	if e.Type != "result" {
 		return
 	}
@@ -382,6 +385,95 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.result.Answer = e.Result
 	}
 	o.completed = true
+}
+
+func (o *jsonlOutput) captureMessage(e event) {
+	if o.onEvent == nil || len(e.Message) == 0 || e.Type != "assistant" && (e.Type != "user" || e.IsSynthetic) {
+		return
+	}
+	kind := "assistant"
+	if e.Type == "user" {
+		kind = "user"
+	}
+	var message struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(e.Message, &message) != nil {
+		o.emitContent(e, kind, "")
+		return
+	}
+	content := bytes.TrimSpace(message.Content)
+	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
+		return
+	}
+	if content[0] == '"' {
+		var text string
+		if json.Unmarshal(content, &text) != nil {
+			o.emitContent(e, kind, "")
+		} else if text != "" {
+			o.emitContent(e, kind, text)
+		}
+		return
+	}
+	var blocks []json.RawMessage
+	if json.Unmarshal(content, &blocks) != nil {
+		o.emitContent(e, kind, "")
+		return
+	}
+	for _, raw := range blocks {
+		var block struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(raw, &block) != nil {
+			o.emitContent(e, kind, "")
+			continue
+		}
+		switch {
+		case e.Type == "assistant" && block.Type == "text" && block.Text != "":
+			o.emitContent(e, "assistant", block.Text)
+		case e.Type == "assistant" && block.Type == "tool_use":
+			o.emitContent(e, "tool_request", string(raw))
+		case e.Type == "user" && block.Type == "tool_result":
+			o.emitContent(e, "tool_result", string(raw))
+		case e.Type == "user" && block.Type == "text" && block.Text != "":
+			o.emitContent(e, "user", block.Text)
+		}
+	}
+}
+
+func (o *jsonlOutput) emitContent(e event, kind, text string) {
+	parent := bytes.TrimSpace(e.ParentToolUseID)
+	if bytes.Equal(parent, []byte("null")) {
+		o.emitEventWithID(o.sessionID, kind, text)
+		return
+	}
+	var helper string
+	if json.Unmarshal(parent, &helper) == nil && helper != "" {
+		o.emitEventWithID(e.AgentID, kind, text)
+		return
+	}
+	o.emitEvent(kind, "") // Unknown parentage cannot prove root coverage.
+}
+
+func (o *jsonlOutput) emitEvent(kind, text string) {
+	o.emitEventWithID(o.sessionID, kind, text)
+}
+
+func (o *jsonlOutput) emitEventWithID(id, kind, text string) {
+	if o.onEvent == nil {
+		return
+	}
+	if !o.identitySeen || id == "" {
+		o.onEvent(aicli.StreamEvent{Kind: kind})
+		return
+	}
+	redacted := aicli.RedactText(text, o.apiKey)
+	if redacted == "" {
+		o.onEvent(aicli.StreamEvent{Kind: kind})
+		return
+	}
+	o.onEvent(aicli.StreamEvent{NativeID: id, Kind: kind, Text: redacted})
 }
 
 func (o *jsonlOutput) recordTaskStop(summary string) {

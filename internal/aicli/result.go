@@ -16,3 +16,11 @@ type Result struct {
 	Tokens        usage.Tokens
 	UsageComplete bool
 }
+
+// StreamEvent is one fully emitted provider event. NativeID is a root session
+// or helper agent ID. An empty ID marks a gap that prevents coverage proof.
+type StreamEvent struct {
+	NativeID string
+	Kind     string
+	Text     string
+}

@@ -307,7 +307,7 @@ func TestWorkerStatusCoverageDoesNotDelayOutcome(t *testing.T) {
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-		}); err != nil || time.Since(started) != 0 {
+		}, nil); err != nil || time.Since(started) != 0 {
 			t.Fatalf("coverage delayed outcome: error=%v elapsed=%s", err, time.Since(started))
 		}
 	})

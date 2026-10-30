@@ -108,6 +108,12 @@ func (s *workerStatus) sendLocked(ctx context.Context, transport *httpExecutionC
 	return nil
 }
 
+func (s *workerStatus) markIncomplete() {
+	s.sendMu.Lock()
+	s.incomplete = true
+	s.sendMu.Unlock()
+}
+
 // emit accepts one source event at a time; a failed record blocks later events.
 func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient, event attemptRecord, secrets ...string) error {
 	s.sendMu.Lock()
@@ -135,7 +141,7 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 		return fail(errAttemptRecordsFull)
 	}
 	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent,
-		Role: event.Role, EventSource: event.EventSource}).validateShape(); err != nil {
+		Role: event.Role, Round: event.Round, ReviewPhase: event.ReviewPhase, EventSource: event.EventSource}).validateShape(); err != nil {
 		return fail(err)
 	}
 	raw := event
@@ -144,19 +150,22 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	event.Call = redactActionText(event.Call, secrets...)
 	event.Agent = redactActionText(event.Agent, secrets...)
 	event.Role = redactActionText(event.Role, secrets...)
+	event.ReviewPhase = redactActionText(event.ReviewPhase, secrets...)
 	event.EventSource = redactActionText(event.EventSource, secrets...)
 	if raw.Text != "" && event.Text == "" || raw.Call != "" && event.Call == "" ||
 		raw.Agent != "" && event.Agent == "" || raw.Role != "" && event.Role == "" ||
+		raw.ReviewPhase != "" && event.ReviewPhase == "" ||
 		raw.EventSource != "" && event.EventSource == "" {
 		return fail(errors.New("HTTP status log cannot be safely redacted"))
 	}
 	if len(event.Text) > maxAttemptEventBytes {
 		return fail(errAttemptRecordsFull)
 	}
-	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent, Role: event.Role, EventSource: event.EventSource}).validateShape(); err != nil {
+	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent, Role: event.Role,
+		Round: event.Round, ReviewPhase: event.ReviewPhase, EventSource: event.EventSource}).validateShape(); err != nil {
 		return fail(err)
 	}
-	for _, value := range []string{event.Text, event.Call, event.Agent, event.Role, event.EventSource} {
+	for _, value := range []string{event.Text, event.Call, event.Agent, event.Role, event.ReviewPhase, event.EventSource} {
 		data, err := json.Marshal(value)
 		if err != nil {
 			return fail(err)
@@ -230,11 +239,14 @@ func (s *workerStatus) drain(ctx context.Context, transport *httpExecutionClient
 
 // finish lets optional coverage race the required outcome without holding it
 // behind a lost Status acknowledgement.
-func (s *workerStatus) finish(ctx context.Context, transport *httpExecutionClient, outcome func() error) error {
+func (s *workerStatus) finish(ctx context.Context, transport *httpExecutionClient, outcome func() error, beforeDrain func()) error {
 	drainCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		if beforeDrain != nil {
+			beforeDrain()
+		}
 		_ = s.drain(drainCtx, transport)
 	}()
 	err := outcome()

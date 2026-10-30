@@ -17,6 +17,8 @@ import (
 // Its zero value is ready to use. Calls must be serialized, followed by Close.
 // Close removes verified rollouts created by this session from the native home.
 type Session struct {
+	// OnEvent receives selected completed native events while Run is active.
+	OnEvent                           func(aicli.StreamEvent)
 	bound, used, reset, skillsReady   bool
 	workspace, binary, home, output   string
 	homeEnv, overrideEnv              string
