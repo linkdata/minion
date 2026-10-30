@@ -80,6 +80,31 @@ func TestJSONLOutputStreamGapOnceAndStopsAfterIdentityConflict(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputIdentityConflictAfterValidStartMarksGap(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" +
+		`{"type":"thread.started","thread_id":"foreign"}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"discarded"}}` + "\n"))
+	if output.stopErr == nil || !slices.Equal(got, []aicli.StreamEvent{
+		{NativeID: "root", Kind: "identity"}, {Kind: "output_stop"},
+	}) {
+		t.Fatalf("identity conflict did not mark incomplete capture: events=%+v error=%v", got, output.stopErr)
+	}
+}
+
+func TestJSONLOutputMalformedEventAfterValidStartMarksGap(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" +
+		`{malformed}` + "\n"))
+	if output.parseErr == nil || !slices.Equal(got, []aicli.StreamEvent{
+		{NativeID: "root", Kind: "identity"}, {Kind: "invalid_json"},
+	}) {
+		t.Fatalf("malformed event did not mark incomplete capture: events=%+v error=%v", got, output.parseErr)
+	}
+}
+
 func TestJSONLOutputUnknownCompletedItemLeavesCoverageUnproved(t *testing.T) {
 	var got []aicli.StreamEvent
 	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}

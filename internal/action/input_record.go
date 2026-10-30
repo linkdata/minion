@@ -23,12 +23,15 @@ func preparedInputText(input aicli.PreparedInput, secrets ...string) (string, st
 		return "", "invalid_input"
 	}
 	size := int64(len(input.Path)) + int64(len(input.Dir)) + int64(len(input.Stdin)) + int64(len(input.Schema))
-	for _, value := range append([]string{input.NativeID, input.Mode, input.Path, input.Dir, input.Stdin, input.Schema}, input.Args...) {
+	for _, value := range []string{input.NativeID, input.Mode, input.Path, input.Dir, input.Stdin, input.Schema} {
 		if !utf8.ValidString(value) {
 			return "", "invalid_utf8"
 		}
 	}
 	for _, arg := range input.Args {
+		if !utf8.ValidString(arg) {
+			return "", "invalid_utf8"
+		}
 		size += int64(len(arg))
 	}
 	if size > maxAttemptEventBytes {
@@ -41,7 +44,25 @@ func preparedInputText(input aicli.PreparedInput, secrets ...string) (string, st
 		return "", "event_limit"
 	}
 	text := redactActionText(string(data), secrets...)
-	if text == "" || len(text) > maxAttemptEventBytes || !json.Valid([]byte(text)) {
+	if text == "" || len(text) > maxAttemptEventBytes {
+		return "", "redaction_unavailable"
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &fields); err != nil || len(fields) != 8 {
+		return "", "redaction_unavailable"
+	}
+	for _, name := range []string{"representation", "stage", "mode", "path", "dir", "stdin", "schema"} {
+		value, ok := fields[name]
+		if !ok || len(value) == 0 || value[0] != '"' {
+			return "", "redaction_unavailable"
+		}
+	}
+	if value, ok := fields["argv"]; !ok || len(value) == 0 || value[0] != '[' {
+		return "", "redaction_unavailable"
+	}
+	var represented preparedInputPayload
+	if err := json.Unmarshal([]byte(text), &represented); err != nil || represented.Representation != "redacted" ||
+		represented.Stage != "prepared" || represented.Mode != input.Mode || len(represented.Argv) != len(input.Args) {
 		return "", "redaction_unavailable"
 	}
 	for _, secret := range secrets {

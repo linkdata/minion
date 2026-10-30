@@ -430,6 +430,7 @@ func (o *jsonlOutput) stop(err error) {
 		return
 	}
 	o.stopErr, o.failed = err, true
+	o.gap("output_stop")
 	if o.cancel != nil {
 		o.cancel()
 	}
@@ -443,6 +444,7 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 	if err := json.Unmarshal(line, &event); err != nil {
 		if o.parseErr == nil {
 			o.parseErr = fmt.Errorf("invalid JSONL event: %w", err)
+			o.gap("invalid_json")
 			if o.cancel != nil {
 				o.cancel()
 			}

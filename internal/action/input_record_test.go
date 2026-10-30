@@ -52,6 +52,19 @@ func TestPreparedInputTextRedactsConfiguredKey(t *testing.T) {
 	}
 }
 
+func TestPreparedInputTextRejectsRedactionOfRecordShape(t *testing.T) {
+	input := aicli.PreparedInput{Mode: "fresh", Path: "/bin/codex", Dir: "/work",
+		Args: []string{"codex", "exec"}, Stdin: "ordinary task"}
+	for _, key := range []string{"stdin", "schema", "redacted", "fresh"} {
+		t.Run(key, func(t *testing.T) {
+			text, reason := preparedInputText(input, key)
+			if text != "" || reason != "redaction_unavailable" {
+				t.Fatalf("redaction changed the input record shape without a gap: text=%q reason=%q", text, reason)
+			}
+		})
+	}
+}
+
 func TestPreparedInputTextMarksUnrepresentableInvocationsUnavailable(t *testing.T) {
 	base := aicli.PreparedInput{Mode: "fresh", Path: "/bin/codex", Args: []string{"codex"}, Dir: "/work", Stdin: "prompt"}
 	for _, test := range []struct {
