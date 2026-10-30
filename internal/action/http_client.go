@@ -250,7 +250,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	statusFeed := newWorkerStatus(job)
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
+	eventCtx, cancelEvents := context.WithCancel(actionCtx)
+	defer cancelEvents()
 	jobRunner.statusUpdate = statusFeed.progress
+	events := newProviderEventQueue(func(event attemptRecord) error {
+		return statusFeed.emit(eventCtx, transport, event, assignedSecrets...)
+	})
+	jobRunner.eventSink = events.add
 	stopStatusOnAction := context.AfterFunc(actionCtx, statusFeed.stopping)
 	defer stopStatusOnAction()
 	go statusFeed.run(statusCtx, transport)
@@ -263,6 +269,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
+	eventsDone := make(chan bool, 1)
+	go func() { eventsDone <- events.finish() }()
 	// A normal Runner return can still have a large Result to upload. Keep its
 	// accepted runtime and transfer bound; only a stopped action or failed
 	// required control exchange starts the short stop budget.
@@ -293,7 +301,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	outcomeErr := statusFeed.finish(actionCtx, transport, func() error {
 		err := checkpoints.outcome(result, runErr)
 		cancelStatus() // Keep heartbeats available throughout the final Result upload.
+		cancelEvents() // Optional logs cannot hold the worker after the required outcome.
 		return err
+	}, func() {
+		if !<-eventsDone {
+			statusFeed.markIncomplete()
+			jobRunner.logf("provider event capture incomplete job=%s attempt=%s", job.Identity.JobID, job.Identity.AttemptID)
+		}
 	})
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone

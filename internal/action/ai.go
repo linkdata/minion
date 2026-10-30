@@ -58,6 +58,7 @@ type modelRun struct {
 	criticPrompt      func(mapping, outputDir string) string
 	proposedAnswer    string
 	model, effort     string
+	onEvent           func(aicli.StreamEvent)
 }
 
 func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, error) {
@@ -89,6 +90,8 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 		if request.freshConversation {
 			request.session.codex.NewConversation()
 		}
+		request.session.codex.OnEvent = request.onEvent
+		defer func() { request.session.codex.OnEvent = nil }()
 		return request.session.codex.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":
 		settings := r.Claude
@@ -98,6 +101,8 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 		if request.freshConversation {
 			request.session.claude.NewConversation()
 		}
+		request.session.claude.OnEvent = request.onEvent
+		defer func() { request.session.claude.OnEvent = nil }()
 		return request.session.claude.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	default:
 		return aicli.Result{}, fmt.Errorf("unsupported AI provider %q", request.provider)

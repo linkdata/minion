@@ -552,7 +552,7 @@ func TestAttemptRecordsCoverageRequiresFinishedContinuation(t *testing.T) {
 	root := t.TempDir()
 	store := openAttemptFixture(t, root)
 	first := attemptRecordFixture(1, attemptRecordDiscussion, "first")
-	first.Call, first.Agent, first.More = "call-1", "helper-1", true
+	first.Call, first.Agent, first.Round, first.ReviewPhase, first.More = "call-1", "session-1", 1, reviewFull, true
 	if ack, err := store.Append(first); err != nil || ack != 1 {
 		t.Fatalf("first fragment: ack=%d error=%v", ack, err)
 	}
@@ -568,7 +568,30 @@ func TestAttemptRecordsCoverageRequiresFinishedContinuation(t *testing.T) {
 		t.Fatalf("unrelated event ended continuation: ack=%d error=%v", ack, err)
 	}
 	last := attemptRecordFixture(2, attemptRecordDiscussion, "last")
-	last.Call, last.Agent = first.Call, first.Agent
+	last.Call, last.Agent, last.Round, last.ReviewPhase = first.Call, first.Agent, first.Round, first.ReviewPhase
+	path := filepath.Join(root, "attempt-records", "attempt.jsonl")
+	prefix, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name, reviewPhase string
+		round             int
+	}{
+		{"changed round", reviewFull, 2},
+		{"changed review phase", reviewVerification, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := last
+			changed.Round, changed.ReviewPhase = test.round, test.reviewPhase
+			if ack, err := store.Append(changed); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
+				t.Fatalf("changed continuation metadata accepted: ack=%d error=%v", ack, err)
+			}
+			if saved, err := os.ReadFile(path); err != nil || !bytes.Equal(saved, prefix) {
+				t.Fatalf("rejected continuation changed accepted prefix: error=%v", err)
+			}
+		})
+	}
 	if ack, err := store.Append(last); err != nil || ack != 2 {
 		t.Fatalf("last fragment: ack=%d error=%v", ack, err)
 	}

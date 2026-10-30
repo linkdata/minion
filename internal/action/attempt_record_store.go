@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -50,6 +51,8 @@ type attemptRecord struct {
 	Call        string   `json:"call,omitempty"`
 	Agent       string   `json:"agent,omitempty"`
 	Role        string   `json:"role,omitempty"`
+	Round       int      `json:"round,omitempty"`
+	ReviewPhase string   `json:"review_phase,omitempty"`
 	EventSource string   `json:"event_source,omitempty"`
 	More        bool     `json:"more,omitempty"`
 }
@@ -179,13 +182,17 @@ func (r attemptRecord) validateShape() error {
 	if (r.Kind == attemptRecordReviewReference || r.Kind == attemptRecordWorkerReference) && r.More {
 		return errors.New("attempt record reference cannot have a continuation")
 	}
-	for _, value := range []string{r.Call, r.Agent, r.Role, r.EventSource} {
+	if r.Round < 0 || r.Round > config.MaxCriticMaxRounds ||
+		r.ReviewPhase != "" && r.ReviewPhase != reviewFull && r.ReviewPhase != reviewVerification {
+		return errors.New("attempt record round or review phase is invalid")
+	}
+	for _, value := range []string{r.Call, r.Agent, r.Role, r.ReviewPhase, r.EventSource} {
 		if len(value) > 128 || !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
 			return errors.New("attempt record metadata is invalid or exceeds limit")
 		}
 	}
 	if (r.Kind == attemptRecordStop || r.Kind == attemptRecordCoverage) &&
-		(r.Call != "" || r.Agent != "" || r.Role != "" || r.EventSource != "" || r.More) {
+		(r.Call != "" || r.Agent != "" || r.Role != "" || r.Round != 0 || r.ReviewPhase != "" || r.EventSource != "" || r.More) {
 		return errors.New("attempt record marker has metadata")
 	}
 	return nil
@@ -203,7 +210,8 @@ func (s *attemptRecordStore) validateFragment(record attemptRecord) error {
 		return nil
 	}
 	if record.Kind != s.fragment.Kind || record.Call != s.fragment.Call || record.Agent != s.fragment.Agent ||
-		record.Role != s.fragment.Role || record.EventSource != s.fragment.EventSource {
+		record.Role != s.fragment.Role || record.Round != s.fragment.Round ||
+		record.ReviewPhase != s.fragment.ReviewPhase || record.EventSource != s.fragment.EventSource {
 		return errAttemptRecordConflict
 	}
 	return nil

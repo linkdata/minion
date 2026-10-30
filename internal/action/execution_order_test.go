@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -109,6 +110,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	defer server.Close()
 	var journal bytes.Buffer
 	zero, calls := 0, 0
+	responses := make([]string, len(expected))
 	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Usage: store, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0),
 		Main: "codex", Adversarial: "claude", CodexModel: mainModel, CodexEffort: "high", ClaudeModel: criticModel, ClaudeEffort: "medium",
 		CriticStopping: config.CriticStopping{MaxRounds: maxRounds, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
@@ -169,6 +171,13 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 					response = criticFeedbackJSON(true, finding)
 				}
 			}
+			responses[index] = response
+			if overHTTP {
+				if native.onEvent == nil {
+					return aicli.Result{}, fmt.Errorf("call %d has no provider event sink", index+1)
+				}
+				native.onEvent(aicli.StreamEvent{NativeID: fmt.Sprintf("session-%d", index+1), Kind: "final", Text: response})
+			}
 			return aicli.Result{Answer: response, Tokens: want.Tokens, UsageComplete: true}, nil
 		}},
 	}
@@ -179,6 +188,9 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		var err error
 		remote, err = NewHTTPExecutor("local")
 		if err != nil {
+			t.Fatal(err)
+		}
+		if err := remote.SetWorkRoot(work); err != nil {
 			t.Fatal(err)
 		}
 		transport := httptest.NewServer(remote)
@@ -215,6 +227,28 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	}
 	if calls != len(expected) {
 		t.Fatalf("native calls=%d want=%d", calls, len(expected))
+	}
+	if overHTTP {
+		data, err := os.ReadFile(filepath.Join(work, "attempt-records", request.AttemptID+".jsonl"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+		if len(lines) < len(expected) {
+			t.Fatalf("only %d of %d emitted events were saved", len(lines), len(expected))
+		}
+		for index, want := range expected {
+			var saved attemptRecord
+			if err := json.Unmarshal(lines[index], &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Kind != attemptRecordDiscussion || saved.Sequence != uint64(index+1) ||
+				saved.Call != fmt.Sprint(index+1) || saved.Agent != fmt.Sprintf("session-%d", index+1) ||
+				saved.Role != want.Role || saved.Round != want.Round || saved.ReviewPhase != want.ReviewPhase ||
+				saved.EventSource != want.Provider+".final" || saved.Text != responses[index] {
+				t.Fatalf("call %d event lost its private binding: %+v", index+1, saved)
+			}
+		}
 	}
 	select {
 	case <-published:

@@ -127,7 +127,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var failureTimer *time.Timer
-	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
@@ -179,6 +179,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		result.UsageComplete = false
 		return result, fmt.Errorf("claude: %w", err)
 	}
+	output.emitEvent("final", result.Answer)
 	return result, nil
 }
 

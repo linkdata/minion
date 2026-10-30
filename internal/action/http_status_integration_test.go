@@ -26,7 +26,8 @@ func TestWorkerStatusPersistsLogBeforeResult(t *testing.T) {
 	status := newWorkerStatus(job)
 	const secret = "example-provider-secret"
 	event := attemptRecord{Kind: attemptRecordDiscussion, Text: "saw " + secret,
-		Call: "call-1", Agent: "helper-1", Role: "critic", EventSource: "claude"}
+		Call: "call-1", Agent: "session-1", Role: "critic", Round: 2,
+		ReviewPhase: reviewVerification, EventSource: "claude"}
 	if err := status.emit(t.Context(), transport, event, secret); err != nil {
 		t.Fatal(err)
 	}
@@ -48,12 +49,44 @@ func TestWorkerStatusPersistsLogBeforeResult(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Call != event.Call || saved.Agent != event.Agent || saved.Role != event.Role || saved.EventSource != event.EventSource {
+	if saved.Call != event.Call || saved.Agent != event.Agent || saved.Role != event.Role ||
+		saved.Round != event.Round || saved.ReviewPhase != event.ReviewPhase || saved.EventSource != event.EventSource {
 		t.Fatalf("event metadata changed: %+v", saved)
 	}
 	saved = attemptRecord{}
 	if err := json.Unmarshal([]byte(lines[1]), &saved); err != nil || saved.Kind != attemptRecordCoverage || saved.Text != "" {
 		t.Fatalf("terminal coverage was not persisted: %+v error=%v", saved, err)
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
+func TestWorkerStatusIncompleteKeepsDeliveredLogWithoutCoverage(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
+	f.pull(t)
+	base, err := url.Parse(f.server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &httpExecutionClient{client: f.server.Client(), base: base}
+	status := newWorkerStatus(job)
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "delivered"}); err != nil {
+		t.Fatal(err)
+	}
+	before := httpTestRecords(t, root, job)
+	if bytes.Count(before, []byte{'\n'}) != 1 || !bytes.Contains(before, []byte(`"text":"delivered"`)) {
+		t.Fatalf("delivered event was not saved: %q", before)
+	}
+	status.markIncomplete()
+	if err := status.drain(t.Context(), transport); err == nil {
+		t.Fatal("incomplete stream received terminal coverage")
+	}
+	if after := httpTestRecords(t, root, job); !bytes.Equal(after, before) {
+		t.Fatalf("incomplete stream changed saved event: before=%q after=%q", before, after)
 	}
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if got := f.result(t); got.err != nil {

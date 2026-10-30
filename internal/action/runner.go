@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,6 +45,7 @@ type Runner struct {
 	// recordReview synchronously persists borrowed evidence without mutating it.
 	recordReview func([]CallUsage, []Refutation, string) error
 	statusUpdate func(string, int, string)
+	eventSink    func(attemptRecord)
 }
 
 // NewRemoteRunner validates each assignment's CLI after its credentials arrive.
@@ -321,6 +323,13 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			if checkpoints != nil {
 				if err := checkpoints.BeforeCall(checkpoint); err != nil {
 					return aicli.Result{}, err
+				}
+			}
+			if configured.eventSink != nil {
+				request.onEvent = func(event aicli.StreamEvent) {
+					configured.eventSink(attemptRecord{Kind: attemptRecordDiscussion, Text: event.Text,
+						Call: strconv.Itoa(checkpoint.Ordinal), Agent: event.NativeID, Role: request.role,
+						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + "." + event.Kind})
 				}
 			}
 			if r.statusUpdate != nil {

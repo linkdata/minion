@@ -177,7 +177,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID}
+	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent, redact: func(text string) string {
+		return redactCodexText(text, settings)
+	}}
 	stderr := bounded.Tail{}
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
@@ -266,6 +268,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		return result, errors.New("codex exec completed without a final agent message")
 	}
 	result.Answer = output.finalMessage
+	if childError == nil {
+		output.emit("final", result.Answer)
+	}
 	return result, nil
 }
 
@@ -375,6 +380,9 @@ type codexEvent struct {
 
 type jsonlOutput struct {
 	cancel          context.CancelFunc
+	onEvent         func(aicli.StreamEvent)
+	redact          func(string) string
+	gapSent         bool
 	threadID        string
 	expectedID      string
 	conflictingID   string
@@ -425,7 +433,72 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 		}
 	} else {
 		o.accept(event)
+		if o.stopErr != nil || event.Type != "item.completed" {
+			return
+		}
+		if event.Item == nil {
+			o.gap("missing_item")
+			return
+		}
+		switch {
+		case event.Item.Type == "agent_message":
+			if event.Item.Text != "" {
+				o.emit("assistant", event.Item.Text)
+			}
+		case codexToolItem(event.Item.Type):
+			if o.onEvent == nil {
+				return
+			}
+			if o.threadID == "" {
+				o.gap("tool")
+				return
+			}
+			var selected struct {
+				Item json.RawMessage `json:"item"`
+			}
+			if err := json.Unmarshal(line, &selected); err != nil || len(selected.Item) == 0 {
+				o.gap("tool")
+				return
+			}
+			o.emit("tool", string(selected.Item))
+		case event.Item.Type != "reasoning" && event.Item.Type != "todo_list":
+			o.gap("unknown_item")
+		}
 	}
+}
+
+func codexToolItem(kind string) bool {
+	switch kind {
+	case "command_execution", "file_change", "mcp_tool_call", "dynamic_tool_call", "web_search", "collab_tool_call", "error":
+		return true
+	}
+	return false
+}
+
+func (o *jsonlOutput) gap(kind string) {
+	if o.onEvent != nil && !o.gapSent {
+		o.gapSent = true
+		o.onEvent(aicli.StreamEvent{Kind: kind})
+	}
+}
+
+func (o *jsonlOutput) emit(kind, text string) {
+	if o.onEvent == nil {
+		return
+	}
+	if o.threadID == "" {
+		o.gap(kind)
+		return
+	}
+	if o.redact != nil {
+		redacted := o.redact(text)
+		if text != "" && redacted == "" || len(redacted) > aicli.MaxEventBytes || kind == "tool" && !json.Valid([]byte(redacted)) {
+			o.gap(kind)
+			return
+		}
+		text = redacted
+	}
+	o.onEvent(aicli.StreamEvent{NativeID: o.threadID, Kind: kind, Text: text})
 }
 
 func (o *jsonlOutput) accept(event codexEvent) {
