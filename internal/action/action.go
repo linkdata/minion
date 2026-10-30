@@ -63,8 +63,6 @@ type Orchestrator struct {
 	ValidateAssignment func(context.Context, monitor.Job) error
 	// ValidatePublication rechecks an accepted action before a new external write.
 	ValidatePublication func(context.Context, monitor.Job, bool) error
-	// ValidateFixedRefusal checks live authority without the action runtime deadline.
-	ValidateFixedRefusal func(context.Context, monitor.Job) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
 	// PublicationGrace bounds reconciliation of an already-issued GitHub write.
@@ -174,25 +172,13 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	resultErr = e.perform(ctx, job)
 	if errors.Is(resultErr, errGitHubContextTooLarge) {
-		// Give the fixed refusal its own deadline even when the action timed out.
-		replyCtx, replyCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		limits := fmt.Sprintf("%d UTF-8 bytes combined", e.githubContextLimit())
 		shorten := "the thread text or requester notes"
 		if job.Command.Action != command.Fix {
 			limits += fmt.Sprintf(" and %d bytes per title", maxActionTitleBytes)
 			shorten = "the title, thread text or requester notes"
 		}
-		if e.ValidateFixedRefusal == nil {
-			resultErr = fmt.Errorf("%w: fixed refusal validator is unavailable", monitor.ErrAcceptanceState)
-		} else if err := e.ValidateFixedRefusal(replyCtx, job); err != nil {
-			resultErr = err
-		} else {
-			resultErr = e.acknowledge(replyCtx, job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
-		}
-		replyCancel()
-		if resultErr == nil {
-			resultErr = e.recordPublishedOutcome(job)
-		}
+		resultErr = e.recordFixedRefusal(context.WithoutCancel(ctx), job, fmt.Sprintf("Request exceeds the GitHub context limits: %s. Shorten %s included in this action, then post a new command.", limits, shorten))
 		returned = true
 		return resultErr
 	}
@@ -206,6 +192,33 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	returned = true
 	return resultErr
+}
+
+// recordFixedRefusal lets terminal cleanup send one fixed reply after the original terminal decision.
+func (e *Orchestrator) recordFixedRefusal(ctx context.Context, job monitor.Job, reply string) error {
+	if e.Store == nil || job.AttemptID == "" || reply == "" {
+		return fmt.Errorf("%w: fixed refusal has no selected action or reply", monitor.ErrAcceptanceState)
+	}
+	if err := e.Store.WithLock(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		accepted := e.Store.Data.Accepted
+		if accepted == nil || !monitor.AssignmentMatchesAccepted(job, *accepted) || accepted.ResultReady {
+			return fmt.Errorf("%w: selected action changed before fixed refusal", monitor.ErrAcceptanceState)
+		}
+		if accepted.FixedRefusal != "" && accepted.FixedRefusal != reply {
+			return fmt.Errorf("%w: selected action has another fixed refusal", monitor.ErrAcceptanceState)
+		}
+		accepted.FixedRefusal = reply
+		if err := e.Store.Save(); err != nil {
+			return fmt.Errorf("%w: save fixed refusal: %w", monitor.ErrAcceptanceState, err)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: fixed refusal", monitor.ErrTerminalJob)
 }
 
 // recordPublishedOutcome records publication before local cleanup can observe a later stop.

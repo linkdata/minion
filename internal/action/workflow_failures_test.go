@@ -105,7 +105,7 @@ func TestPerformRetainsWorkerRecoveryAfterWorkRootBecomesReadOnly(t *testing.T) 
 }
 
 func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
-	for _, kind := range []string{"model result", "recovery", "fixed reply"} {
+	for _, kind := range []string{"model result", "recovery"} {
 		t.Run(kind, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -134,9 +134,6 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 			orchestrator := Orchestrator{GitHub: client, Store: store, BotLogin: "bot", BotID: 8, ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil }}
 			var err error
 			switch kind {
-			case "fixed reply":
-				prepared.reply = "Review needs a pull request."
-				err = orchestrator.publish(t.Context(), prepared, Result{})
 			case "recovery":
 				prepared.branch = "minion/fix-recorded"
 				store.Data.PendingFixes[request.ID] = state.PendingFix{SHA: strings.Repeat("b", 40)}
@@ -145,7 +142,7 @@ func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 				err = orchestrator.publishFix(t.Context(), prepared, Result{Answer: "No changes."}, publication{answer: "No changes."})
 			}
 			var status *github.StatusError
-			if errors.Is(err, monitor.ErrPostModelPublication) != (kind != "fixed reply") || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
+			if !errors.Is(err, monitor.ErrPostModelPublication) || errors.Is(err, monitor.ErrTerminalJob) || !errors.As(err, &status) || status.StatusCode != http.StatusBadGateway {
 				t.Fatalf("reply lost publication classification or cause: %v", err)
 			}
 		})
@@ -161,41 +158,105 @@ func TestFixedRepliesSkipWorkspaceAndModel(t *testing.T) {
 		{"fix on pull request", "PullRequest", "`fix` currently applies to issue threads. It pushes a branch for the requester to open a pull request.", command.Fix},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var body string
-			lookups, comments := 0, 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
-					lookups++
-					_, _ = fmt.Fprint(w, publicRepositoryJSON)
-				case captureComment(t, w, r, &body):
-					comments++
-				default:
-					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-					http.NotFound(w, r)
-				}
-			}))
-			defer server.Close()
 			request := usageJob()
 			request.SubjectType = tc.subject
 			request.Command = command.Command{Name: string(tc.action), Action: tc.action}
 			root := filepath.Join(t.TempDir(), "uncreated")
 			orchestrator := &Orchestrator{
-				GitHub: testGitHub(server, "fixture-token"), WorkRoot: root, Store: openState(t, time.Now()),
-				ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },
-				Runner:              Runner{runModel: forbidModel(t)},
+				GitHub: &github.Client{}, WorkRoot: root, Store: openState(t, time.Now()),
+				Runner: Runner{runModel: forbidModel(t)},
 			}
 			reserveActionRequest(t, orchestrator.Store, &request, false)
-			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); err != nil {
-				t.Fatal(err)
+			if err := attemptFixture(orchestrator).perform(testActionContext(t), request); !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("fixed reply must finish as a failed action: %v", err)
 			}
-			if lookups != 1 || comments != 1 || body != tc.reply+"\n\n"+request.Marker() {
-				t.Fatalf("fixed reply: lookups=%d comments=%d body=%q", lookups, comments, body)
+			if got := orchestrator.Store.Data.Accepted.FixedRefusal; got != tc.reply {
+				t.Fatalf("fixed reply checkpoint = %q, want %q", got, tc.reply)
 			}
 			if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("fixed reply touched work root: %v", err)
 			}
 		})
+	}
+}
+
+func TestCanceledFixedReplyLeavesUnusedReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name, subject string
+		action        command.Action
+	}{
+		{"review on issue", "Issue", command.Review},
+		{"fix on pull request", "PullRequest", command.Fix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := usageJob()
+			request.SubjectType = tc.subject
+			request.Command = command.Command{Name: string(tc.action), Action: tc.action}
+			store := openState(t, time.Now())
+			reserveActionRequest(t, store, &request, false)
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			err := attemptFixture(&Orchestrator{Store: store}).perform(ctx, request)
+			if !errors.Is(err, context.Canceled) || store.Data.Accepted.FixedRefusal != "" || len(store.Data.PublicationWrites) != 0 {
+				t.Fatalf("canceled preparation became a terminal refusal: err=%v state=%+v", err, store.Data)
+			}
+		})
+	}
+}
+
+func TestFixedRefusalCheckpointSurvivesRestart(t *testing.T) {
+	now := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	request := usageJob()
+	request.SubjectType = "Issue"
+	request.Command = command.Command{Name: "review", Action: command.Review}
+	reserveActionRequest(t, store, &request, false)
+	if err := attemptFixture(&Orchestrator{Store: store}).perform(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("fixed refusal was not selected: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(path, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if accepted := reopened.Data.Accepted; accepted == nil || accepted.FixedRefusal != "`review` applies to pull requests." ||
+		len(reopened.Data.PublicationWrites) != 0 || len(reopened.Data.TerminalDecisions) != 0 {
+		t.Fatalf("restarted state lost the action-written refusal: %+v", reopened.Data)
+	}
+}
+
+func TestCanceledFixedRefusalWaitingForStateLockDoesNotSave(t *testing.T) {
+	store := openState(t, time.Now().UTC())
+	request := usageJob()
+	request.SubjectType = "Issue"
+	request.Command = command.Command{Name: "review", Action: command.Review}
+	reserveActionRequest(t, store, &request, false)
+	held, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = store.WithLock(func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	ctx, cancel := context.WithCancel(t.Context())
+	result := make(chan error, 1)
+	go func() {
+		result <- (&Orchestrator{Store: store}).recordFixedRefusal(ctx, request, "Fixed refusal.")
+	}()
+	cancel()
+	close(release)
+	if err := <-result; !errors.Is(err, context.Canceled) || store.Data.Accepted.FixedRefusal != "" {
+		t.Fatalf("canceled refusal was saved after the lock released: err=%v accepted=%+v", err, store.Data.Accepted)
 	}
 }
 

@@ -74,7 +74,7 @@ func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
 		default:
 			t.Fatalf("unhandled accepted-action field %s", field.Name)
 		}
-		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "ResultReady" || field.Name == "Terminal"
+		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "ResultReady" || field.Name == "FixedRefusal" || field.Name == "Terminal"
 		if got := record.MatchesAccepted(changed); got != want {
 			t.Errorf("changed %s matched=%t, want %t", field.Name, got, want)
 		}

@@ -188,9 +188,6 @@ func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	if err := owner.ValidatePublication(t.Context(), job, true); err != nil {
 		t.Fatalf("publication lost the repository from its bound snapshot: %v", err)
 	}
-	if err := owner.ValidateFixedRefusal(t.Context(), job); err != nil {
-		t.Fatalf("fixed refusal lost the repository from its bound snapshot: %v", err)
-	}
 }
 
 func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
