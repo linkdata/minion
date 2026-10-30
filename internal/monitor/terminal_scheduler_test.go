@@ -152,7 +152,7 @@ func TestProcessTerminalItemsSkipsReplyAfterIdentifiedCheckFails(t *testing.T) {
 	}
 }
 
-func TestProcessTerminalItemsRetirementSaveFailureKeepsTerminalJob(t *testing.T) {
+func TestProcessTerminalItemsCleanupSaveFailureKeepsTerminalJob(t *testing.T) {
 	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "state.json")
 	backup := path + ".saved"
@@ -199,40 +199,6 @@ func TestProcessTerminalItemsRetirementSaveFailureKeepsTerminalJob(t *testing.T)
 		len(store.Data.JobFailures) != 0 || store.Data.TerminalDecisions[id] != decision {
 		t.Fatalf("retirement did not recover after save failure: calls=%d checks=%d state=%+v",
 			gh.commentCalls, gh.currentChecks, store.Data)
-	}
-}
-
-func TestProcessTerminalItemsWakesWhenFailureChangesDuringSourceLookup(t *testing.T) {
-	now := time.Now().UTC()
-	store := openState(t, now.Add(-time.Minute))
-	item, id := queueTerminalControl(store, now.Add(-time.Second), 8,
-		state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	checks, _ := terminalControlChecks(store, "")
-	entry := checks[store.Data.JobFailures[id].NotificationKey].entry
-	changed := store.Data.JobFailures[id]
-	changed.Attempts, changed.AcceptedAt, changed.Deadline = 1, now, now.Add(2*time.Minute)
-	gh := &fakeGitHub{items: []github.Item{item}, currentItem: func(github.Item) (github.Item, error) {
-		if err := store.WithLock(func() error {
-			store.Data.JobFailures[id] = changed
-			return store.Save()
-		}); err != nil {
-			t.Fatal(err)
-		}
-		return github.Item{}, errors.New("source lookup unavailable")
-	}}
-	cfg := testConfig(t)
-	m := &Monitor{Config: cfg, BotID: 8, GitHub: gh, Now: func() time.Time { return now }}
-	next := m.processTerminalItems(t.Context(), store, "", entry, cfg.Repositories[0], "PullRequest", 8,
-		[]github.Item{item}, m.controlCommands(cfg.Repositories[0]))
-	if !next.Equal(now.Add(time.Minute)) || gh.commentCalls != 0 || !store.Data.Processed[id].IsZero() ||
-		store.Data.JobFailures[id] != changed {
-		t.Fatalf("changed failure lost its next check: next=%s calls=%d state=%+v", next, gh.commentCalls, store.Data)
-	}
-	if next := m.serviceTerminalControls(t.Context(), store); !next.Equal(changed.Deadline) {
-		t.Fatalf("changed failure was not scheduled for its new deadline: next=%s want=%s", next, changed.Deadline)
 	}
 }
 

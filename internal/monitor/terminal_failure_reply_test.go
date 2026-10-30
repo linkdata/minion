@@ -76,6 +76,36 @@ func TestTerminalControlFailureReplyRechecksLiveAuthority(t *testing.T) {
 	}
 }
 
+func TestFailureReplySkipsIncompleteSourceIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*github.Item)
+	}{
+		{name: "missing key", change: func(item *github.Item) { item.Key = "" }},
+		{name: "missing node ID", change: func(item *github.Item) { item.NodeID = "" }},
+		{name: "missing author ID", change: func(item *github.Item) { item.Author.ID = 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			item := selectedItem(now)
+			test.change(&item)
+			cfg := testConfig(t)
+			job := Job{Repository: cfg.Repositories[0], SubjectType: "PullRequest", Number: 7, Source: item,
+				Command: command.Command{Name: "review", Action: command.Review}, ID: jobID(item.Key, "review")}
+			store := openState(t, now.Add(-time.Minute))
+			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: maxJobAttempts}
+			gh := &fakeGitHub{items: []github.Item{item}, permission: github.Permission{Permission: "write"}}
+			m := &Monitor{Config: cfg, BotID: 8, GitHub: gh}
+			if err := m.finishFailedJobWithNotification(t.Context(), store, job, now, true); err != nil ||
+				gh.commentCalls != 0 || store.Data.Processed[job.ID].IsZero() || len(store.Data.JobFailures) != 0 ||
+				len(store.Data.PublicationWrites) != 0 {
+				t.Fatalf("incomplete source identity allowed a fixed reply: err=%v comments=%d state=%+v",
+					err, gh.commentCalls, store.Data)
+			}
+		})
+	}
+}
+
 func TestTerminalFailureReplyLostResponseReconcilesMarkerAfterRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
