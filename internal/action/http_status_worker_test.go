@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 )
 
@@ -166,7 +167,7 @@ func TestWorkerStatusCoverageRequiresSuppliedAndDeliveredEvents(t *testing.T) {
 	}
 }
 
-func TestPreparedInputWithStreamGapWithholdsStatusCoverage(t *testing.T) {
+func TestRunnerUnavailablePreparedInputWithholdsStatusCoverage(t *testing.T) {
 	job := testJob(command.Comment)
 	var saved []attemptRecord
 	client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
@@ -192,19 +193,30 @@ func TestPreparedInputWithStreamGapWithholdsStatusCoverage(t *testing.T) {
 	queue := newProviderEventQueue(func(event attemptRecord) error {
 		return status.emit(t.Context(), transport, event)
 	})
-	queue.add(attemptRecord{Kind: attemptRecordInput, Call: "1", EventSource: "codex.input.prepared", Text: `{"stage":"prepared"}`})
-	queue.add(attemptRecord{Kind: attemptRecordInput, Call: "1", Agent: "root", EventSource: "codex.identity"})
-	queue.add(attemptRecord{Kind: attemptRecordDiscussion, Call: "1", EventSource: "codex.pipe_drain_incomplete"})
+	runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			if request.onInput == nil {
+				t.Fatal("Runner did not connect prepared input capture")
+			}
+			request.onInput(aicli.PreparedInput{Mode: "fresh", Path: "/fixture/codex", Args: []string{"codex"},
+				Dir: "/fixture/runtime", Stdin: strings.Repeat("x", maxAttemptEventBytes)})
+			return aicli.Result{Answer: "Done"}, nil
+		}}
+	if _, err := runner.Run(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
 	if queue.finish() {
-		t.Fatal("unbound provider gap falsely completed capture")
+		t.Fatal("unavailable prepared input falsely completed capture")
 	}
 	status.markIncomplete()
 	if err := status.drain(t.Context(), transport); err == nil {
-		t.Fatal("incomplete provider stream received a coverage marker")
+		t.Fatal("unavailable prepared input received a coverage marker")
 	}
-	if len(saved) != 2 || saved[0].Kind != attemptRecordInput || saved[0].Agent != "" ||
-		saved[1].Kind != attemptRecordInput || saved[1].Agent != "root" {
-		t.Fatalf("prepared input and identity were not retained before the gap: %+v", saved)
+	if len(saved) != 1 || saved[0].Kind != attemptRecordInput || saved[0].Agent != "" ||
+		saved[0].Call != "1" || saved[0].Role != roleMain || saved[0].EventSource != "codex.input.prepared" ||
+		!strings.Contains(saved[0].Text, `"reason":"event_limit"`) ||
+		!strings.Contains(saved[0].Text, `"available":false`) {
+		t.Fatalf("unavailable prepared input reason or call binding was lost: %+v", saved)
 	}
 }
 
