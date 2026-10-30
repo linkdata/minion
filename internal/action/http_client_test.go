@@ -262,8 +262,14 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 		defer release()
 		client := *server.Client()
 		client.Timeout = 0
-		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-			<-statusEntered
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+			select {
+			case <-statusEntered:
+			case <-ctx.Done():
+				return aicli.Result{}, ctx.Err()
+			case <-time.After(2 * statusSendTimeout):
+				return aicli.Result{}, errors.New("worker did not send initial Status")
+			}
 			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
 		}}
 		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {

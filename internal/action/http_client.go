@@ -176,7 +176,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job)}
 	if !time.Now().Before(expires) {
-		err := redactActionError(errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded), assignedSecrets...)
+		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
