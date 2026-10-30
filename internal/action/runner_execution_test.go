@@ -83,6 +83,28 @@ func TestRunnerWaitDelayKeepsReceiptWithoutAutomaticRetry(t *testing.T) {
 	}
 }
 
+func TestRunnerFailedStartKeepsOrdinalWithoutRetry(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	var before, after []CallCheckpoint
+	nativeCalls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		nativeCalls++
+		return aicli.Result{}, exec.ErrNotFound
+	}}
+	checkpoints := runnerExecutionCheckpoints{
+		before: func(value CallCheckpoint) error { before = append(before, value); return nil },
+		after:  func(value CallCheckpoint) error { after = append(after, value); return nil },
+	}
+	result, err := runner.Execute(t.Context(), job, checkpoints)
+	if !errors.Is(err, exec.ErrNotFound) || nativeCalls != 1 || len(before) != 1 || len(after) != 1 ||
+		before[0].Ordinal != 1 || after[0].Ordinal != 1 ||
+		before[0].Call != callMetadata(after[0].Call) ||
+		len(result.Calls) != 1 || result.Calls[0] != after[0].Call ||
+		result.Calls[0].Complete || result.Calls[0].Tokens != (usage.Tokens{}) || result.Answer != "" {
+		t.Fatalf("failed start lost or retried ordinal: result=%+v before=%+v after=%+v calls=%d error=%v", result, before, after, nativeCalls, err)
+	}
+}
+
 func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	tokens := usage.Tokens{Input: 11, CachedInput: 3, Output: 2}

@@ -465,6 +465,62 @@ func TestExecutionBeforeCallRejectsForeignOrUnpinnedFacts(t *testing.T) {
 	}
 }
 
+func TestExecutionCallRejectsOrdinalAfterAcceptedPrefix(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		ordinal int
+		after   bool
+	}{{"stale before", 1, false}, {"skipped before", 3, false}, {"stale after", 1, true}, {"skipped after", 3, true}} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+			main := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
+			critic := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull}
+			f.saveReview(nil, nil, "")
+			f.ack(main)
+			f.saveReview([]CallUsage{main}, nil, "")
+
+			fact := f.call(critic)
+			if test.after {
+				if err := f.sink.BeforeCall(fact); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fact.Ordinal = test.ordinal
+			var err error
+			if test.after {
+				err = f.sink.AfterCall(fact)
+			} else {
+				err = f.sink.BeforeCall(fact)
+			}
+			if !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("critic call with ordinal %d was admitted: %v", test.ordinal, err)
+			}
+			if len(f.sink.calls) != 1 || f.sink.calls[0] != main || (f.sink.pending != nil) != test.after || !slices.Equal(f.sink.review.Calls, []CallUsage{main}) {
+				t.Fatalf("rejected ordinal changed accepted prefix: calls=%+v review=%+v pending=%+v", f.sink.calls, f.sink.review, f.sink.pending)
+			}
+			if saved := readPrivateReview(t, f.owner.WorkRoot); !slices.Equal(saved.Calls, []CallUsage{main}) {
+				t.Fatalf("rejected ordinal changed saved review prefix: %+v", saved.Calls)
+			}
+			if err := f.sink.BeforeCall(f.call(critic)); !errors.Is(err, monitor.ErrTerminalJob) || (f.sink.pending != nil) != test.after || len(f.sink.calls) != 1 {
+				t.Fatalf("later critic call was admitted after rejected ordinal: calls=%+v pending=%+v error=%v", f.sink.calls, f.sink.pending, err)
+			}
+		})
+	}
+}
+
+func TestExecutionBeforeOnlyCallCannotStartLaterOrdinal(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	main := CallUsage{Provider: "codex", Role: roleMain, Round: 1}
+	if err := f.sink.BeforeCall(f.call(main)); err != nil {
+		t.Fatal(err)
+	}
+	later := f.call(main)
+	later.Ordinal = 2
+	if err := f.sink.BeforeCall(later); !errors.Is(err, monitor.ErrTerminalJob) || f.sink.pending == nil || *f.sink.pending != main || len(f.sink.calls) != 0 {
+		t.Fatalf("later ordinal was admitted before first AfterCall: calls=%+v pending=%+v error=%v", f.sink.calls, f.sink.pending, err)
+	}
+}
+
 func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
 	for _, scenario := range []string{"missing callbacks", "missing Before", "duplicate Before", "missing After", "duplicate After", "changed After metadata", "changed After ordinal", "changed Result", "complete"} {
 		t.Run(scenario, func(t *testing.T) {
