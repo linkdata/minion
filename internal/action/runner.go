@@ -317,7 +317,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				return aicli.Result{}, err
 			}
 			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort}
-			checkpoint := CallCheckpoint{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef, Call: entry}
+			checkpoint := CallCheckpoint{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef, Ordinal: len(result.Calls) + 1, Call: entry}
 			if checkpoints != nil {
 				if err := checkpoints.BeforeCall(checkpoint); err != nil {
 					return aicli.Result{}, err

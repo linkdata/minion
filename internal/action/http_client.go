@@ -482,7 +482,7 @@ func (c *httpClientCheckpoints) checkpoint(kind string, value CallCheckpoint) er
 		c.failure = httpClientUnknown(kind, errors.New("checkpoint binding differs from assignment"))
 		return c.failure
 	}
-	if err := httpCallShape(value.Call); err != nil {
+	if err := httpCallCheckpointShape(value); err != nil {
 		c.failure = httpClientUnknown(kind, err)
 		return c.failure
 	}

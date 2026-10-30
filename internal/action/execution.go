@@ -38,6 +38,7 @@ type CallCheckpoint struct {
 	Version   int       `json:"version"`
 	Identity  Identity  `json:"identity"`
 	SourceRef string    `json:"source_ref"`
+	Ordinal   int       `json:"ordinal"`
 	Call      CallUsage `json:"call"`
 }
 
@@ -205,7 +206,7 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	if c.failure != nil {
 		return c.failure
 	}
-	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending != nil || fact.Call != callMetadata(fact.Call) {
+	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending != nil || fact.Ordinal != len(c.calls)+1 || fact.Call != callMetadata(fact.Call) {
 		return c.fail(checkpointContractError())
 	}
 	if c.job.Critic != nil && (!c.reviewed || !slices.Equal(c.review.Calls, c.calls)) {
@@ -302,7 +303,7 @@ func (c *executionCheckpoints) AfterCall(fact CallCheckpoint) error {
 	if c.failure != nil {
 		return c.failure
 	}
-	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending == nil || callMetadata(fact.Call) != *c.pending {
+	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending == nil || fact.Ordinal != len(c.calls)+1 || callMetadata(fact.Call) != *c.pending {
 		return c.fail(checkpointContractError())
 	}
 	if err := (Result{Calls: append(slices.Clone(c.calls), fact.Call)}).validateCalls(c.job, false); err != nil {

@@ -37,7 +37,8 @@ func newExecutionAdapterFixture(t *testing.T, job Job) *executionAdapterFixture 
 }
 
 func (f *executionAdapterFixture) call(call CallUsage) CallCheckpoint {
-	return CallCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Call: call}
+	return CallCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
+		Ordinal: len(f.sink.calls) + 1, Call: call}
 }
 
 func (f *executionAdapterFixture) review(calls []CallUsage, refs []Refutation, reason string) ReviewCheckpoint {
@@ -436,6 +437,8 @@ func TestExecutionBeforeCallRejectsForeignOrUnpinnedFacts(t *testing.T) {
 		{"version", func(f *CallCheckpoint) { f.Version++ }},
 		{"identity", func(f *CallCheckpoint) { f.Identity.AttemptID = "foreign" }},
 		{"source", func(f *CallCheckpoint) { f.SourceRef = strings.Repeat("b", 40) }},
+		{"zero ordinal", func(f *CallCheckpoint) { f.Ordinal = 0 }},
+		{"skipped ordinal", func(f *CallCheckpoint) { f.Ordinal++ }},
 		{"provider", func(f *CallCheckpoint) { f.Call.Provider = "claude" }},
 		{"role", func(f *CallCheckpoint) { f.Call.Role = roleCritic }},
 		{"round", func(f *CallCheckpoint) { f.Call.Round = 2 }},
@@ -463,7 +466,7 @@ func TestExecutionBeforeCallRejectsForeignOrUnpinnedFacts(t *testing.T) {
 }
 
 func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
-	for _, scenario := range []string{"missing callbacks", "missing Before", "duplicate Before", "missing After", "duplicate After", "changed After metadata", "changed Result", "complete"} {
+	for _, scenario := range []string{"missing callbacks", "missing Before", "duplicate Before", "missing After", "duplicate After", "changed After metadata", "changed After ordinal", "changed Result", "complete"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, testJob(command.Comment))
 			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
@@ -485,6 +488,9 @@ func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
 				fact := f.call(call)
 				if scenario == "changed After metadata" {
 					fact.Call.Model = "other"
+				}
+				if scenario == "changed After ordinal" {
+					fact.Ordinal++
 				}
 				runErr = f.sink.AfterCall(fact)
 				if scenario == "duplicate After" {

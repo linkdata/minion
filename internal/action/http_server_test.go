@@ -249,7 +249,7 @@ func (f *httpServerTest) result(t *testing.T) httpServerTestResult {
 
 func (f *httpServerTest) call(sequence uint64) httpCall {
 	return httpCall{Sequence: sequence, Checkpoint: CallCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
-		Call: CallUsage{Provider: f.job.Main.Provider, Model: f.job.Main.Model, Effort: f.job.Main.Effort, Role: roleMain, Round: 1}}}
+		Ordinal: 1, Call: CallUsage{Provider: f.job.Main.Provider, Model: f.job.Main.Model, Effort: f.job.Main.Effort, Role: roleMain, Round: 1}}}
 }
 
 func (f *httpServerTest) outcome(sequence uint64, runErr error) httpOutcome {
@@ -613,6 +613,11 @@ func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
 				t.Fatal("foreign binding was acknowledged")
 			}
 		})
+	}
+	missingOrdinal := f.call(1)
+	missingOrdinal.Checkpoint.Ordinal = 0
+	if ack := f.ack(t, "/before", missingOrdinal, http.StatusBadRequest, 1); ack.Failure == nil {
+		t.Fatal("missing ordinal was acknowledged")
 	}
 	for _, sequence := range []uint64{0, 2} {
 		f.ack(t, "/before", f.call(sequence), http.StatusConflict, sequence)
@@ -1384,6 +1389,7 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 		t.Helper()
 		paidSequence++
 		call := f.call(paidSequence)
+		call.Checkpoint.Ordinal = len(paidCalls) + 1
 		call.Checkpoint.Call.Role, call.Checkpoint.Call.Round, call.Checkpoint.Call.ReviewPhase = role, round, phase
 		if role == roleCritic {
 			call.Checkpoint.Call.Provider = f.job.Critic.Provider
@@ -1460,6 +1466,7 @@ func TestHTTPExecutorEarlyCriticDecisionDoesNotUnlockLaterStatusPhases(t *testin
 	main.Sequence = 2
 	f.ack(t, "/after", main, http.StatusOK, 2)
 	critic := f.call(3)
+	critic.Checkpoint.Ordinal = 2
 	critic.Checkpoint.Call.Provider, critic.Checkpoint.Call.Role, critic.Checkpoint.Call.ReviewPhase = job.Critic.Provider, roleCritic, reviewFull
 	f.ack(t, "/before", critic, http.StatusOK, 3)
 	critic.Sequence = 4
@@ -1672,6 +1679,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 				f.ack(t, "/after", main, http.StatusOK, 3)
 				f.ack(t, "/review", httpReview{Sequence: 4, Checkpoint: owner.review([]CallUsage{main.Checkpoint.Call}, nil, "")}, http.StatusOK, 4)
 				critic := f.call(5)
+				critic.Checkpoint.Ordinal = 2
 				critic.Checkpoint.Call = CallUsage{Provider: owner.job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull}
 				f.ack(t, "/before", critic, http.StatusOK, 5)
 				critic.Sequence = 6
@@ -1917,6 +1925,7 @@ func TestHTTPExecutorRejectedBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 			f.tx.stopExecution(io.ErrClosedPipe, true)
 			<-f.tx.ctx.Done()
 			before := f.call(3)
+			before.Checkpoint.Ordinal = 2
 			if foreign {
 				before.Checkpoint.Identity.AttemptID += "-other"
 			}
@@ -1991,7 +2000,9 @@ func TestHTTPExecutorConcurrentBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 	f.tx.stopExecution(io.ErrClosedPipe, true)
 	<-f.tx.ctx.Done()
 	beforeReply := make(chan httpServerTestExchange, 1)
-	go func() { beforeReply <- f.request("/before", f.call(3)) }()
+	next := f.call(3)
+	next.Checkpoint.Ordinal = 2
+	go func() { beforeReply <- f.request("/before", next) }()
 	select {
 	case <-arrived:
 	case <-time.After(5 * time.Second):

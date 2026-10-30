@@ -179,7 +179,7 @@ func TestSelectedExecutorCannotSkipAssignmentDelivery(t *testing.T) {
 				Executor: executorFunc(func(_ context.Context, prepared Job, sink Checkpoints) (Result, error) {
 					result := completedRecoveryResult(prepared)
 					if tryCheckpoint {
-						fact := CallCheckpoint{Version: prepared.Version, Identity: prepared.Identity, SourceRef: prepared.Source.Head,
+						fact := CallCheckpoint{Version: prepared.Version, Identity: prepared.Identity, SourceRef: prepared.Source.Head, Ordinal: 1,
 							Call: callMetadata(result.Calls[0])}
 						if err := sink.BeforeCall(fact); !errors.Is(err, monitor.ErrAcceptanceState) {
 							t.Fatalf("model checkpoint bypassed delivery: %v", err)

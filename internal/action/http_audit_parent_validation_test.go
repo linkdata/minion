@@ -53,7 +53,7 @@ if (findings.some(finding => finding.unexpected === true)) process.exit(17);
 		f.ack(t, "/before", before, http.StatusOK, 1)
 		call := before.Checkpoint.Call
 		call.Tokens, call.Complete = usage.Tokens{Input: 9, Output: 2}, true
-		f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Call: call}}, http.StatusOK, 2)
+		f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}}, http.StatusOK, 2)
 		outcome := f.outcome(3, nil)
 		outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Hostile audit report: Unverified boundary", Calls: []CallUsage{call},
 			Artifacts: auditArtifactsFixture(job, sourceIdentity(job), "Hostile audit report: Unverified boundary")}

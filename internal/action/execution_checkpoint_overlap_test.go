@@ -116,7 +116,7 @@ func TestExecutionBeforeCallOverlapsSelectedInvitationSave(t *testing.T) {
 		job := testJob(command.Review)
 		job.Identity.JobID, job.Identity.AttemptID = selected.ID, selected.AttemptID
 		sink := newExecutionCheckpoints(&Orchestrator{Store: store}, job)
-		call := CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		call := CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1,
 			Call: CallUsage{Provider: "codex", Role: roleMain, Round: 1}}
 		callReady := make(chan struct{})
 		callResult := make(chan error, 1)
