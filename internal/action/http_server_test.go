@@ -623,7 +623,7 @@ func TestHTTPExecutorBindingSequenceAndRawCheckpointFacts(t *testing.T) {
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
 	status.Sequence, status.Phase = 2, "upload"
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
-	if got, ok := f.executor.Status(); !ok || got != status {
+	if got, _, ok := f.executor.Status(); !ok || got != status {
 		t.Fatalf("Status did not preserve its independent observation sequence: %+v %v", got, ok)
 	}
 	outcome := f.outcome(4, errors.New("known failed result"))
@@ -819,6 +819,7 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 	f.pull(t)
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
 	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
+	_, receivedAt, _ := f.executor.Status()
 	hold.Store(true)
 	late := status
 	late.Sequence = 2
@@ -842,8 +843,8 @@ func TestHTTPExecutorRejectsStatusWhoseBodyFinishesAfterOutcome(t *testing.T) {
 	if got := <-done; got.err != nil || got.status != http.StatusConflict || got.ack.Failure == nil {
 		t.Fatalf("late observation was admitted after outcome: %+v", got)
 	}
-	if got, ok := f.executor.Status(); !ok || got != status {
-		t.Fatalf("late observation replaced last accepted status: status=%+v present=%t", got, ok)
+	if got, gotAt, ok := f.executor.Status(); !ok || got != status || !gotAt.Equal(receivedAt) {
+		t.Fatalf("late observation replaced last accepted status or contact: status=%+v received=%v present=%t", got, gotAt, ok)
 	}
 }
 
@@ -1273,8 +1274,8 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	if got := f.request("/status", httpObservation{Status: status}); got.err == nil {
 		t.Fatal("injected observation ACK failure unexpectedly succeeded")
 	}
-	if got, ok := f.executor.Status(); !ok || got != status || f.tx.ctx.Err() != nil {
-		t.Fatalf("lost observation 1 or ACK changed action admission: status=%+v present=%t ctx=%v", got, ok, f.tx.ctx.Err())
+	if got, receivedAt, ok := f.executor.Status(); !ok || got != status || receivedAt.IsZero() || f.tx.ctx.Err() != nil {
+		t.Fatalf("lost observation 1 or ACK changed action admission: status=%+v received=%v present=%t ctx=%v", got, receivedAt, ok, f.tx.ctx.Err())
 	}
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	f.ack(t, "/outcome", f.outcome(2, nil), http.StatusOK, 2)
@@ -1287,6 +1288,37 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	if unavailable {
 		t.Fatal("observation ACK failure quarantined a conclusive transaction")
 	}
+}
+
+func TestHTTPExecutorStatusReceiptRevivesWithoutInventingProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		f := newHTTPServerTestInMemory(t, t.Context(), job, runnerExecutionCheckpoints{})
+		f.pull(t)
+		first := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+			Sequence: 1, ProgressSequence: 1, WorkerState: "busy", Phase: "prepare"}
+		f.ack(t, "/status", httpObservation{Status: first}, http.StatusOK, 1)
+		got, receivedAt, ok := f.executor.Status()
+		if !ok || got != first || receivedAt.IsZero() {
+			t.Fatalf("first receipt: status=%+v received=%v present=%t", got, receivedAt, ok)
+		}
+		time.Sleep(20 * time.Second)
+		if age := time.Since(receivedAt); age != 20*time.Second {
+			t.Fatalf("stale contact age = %s", age)
+		}
+		second := first
+		second.Sequence = 2
+		second.ProgressAge = 20 * time.Second
+		f.ack(t, "/status", httpObservation{Status: second}, http.StatusOK, 2)
+		got, revivedAt, ok := f.executor.Status()
+		if !ok || got != second || !revivedAt.After(receivedAt) || time.Since(revivedAt) != 0 || got.ProgressSequence != first.ProgressSequence {
+			t.Fatalf("heartbeat contact and progress conflated: status=%+v received=%v present=%t", got, revivedAt, ok)
+		}
+		f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+		if got := f.result(t); got.err != nil {
+			t.Fatal(got.err)
+		}
+	})
 }
 
 func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(t *testing.T) {
@@ -1307,12 +1339,13 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	reject := func(name string, edit func(*Status)) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
+			_, receivedAt, _ := f.executor.Status()
 			candidate := status
 			candidate.Sequence++
 			edit(&candidate)
 			ack := f.ack(t, "/status", httpObservation{Status: candidate}, http.StatusConflict, candidate.Sequence)
-			if got, ok := f.executor.Status(); ack.Failure == nil || !ok || got != status || f.tx.ctx.Err() != nil {
-				t.Fatalf("rejected observation changed accepted status or action: ack=%+v status=%+v present=%t ctx=%v", ack, got, ok, f.tx.ctx.Err())
+			if got, gotAt, ok := f.executor.Status(); ack.Failure == nil || !ok || got != status || !gotAt.Equal(receivedAt) || f.tx.ctx.Err() != nil {
+				t.Fatalf("rejected observation changed accepted status, contact or action: ack=%+v status=%+v received=%v present=%t ctx=%v", ack, got, gotAt, ok, f.tx.ctx.Err())
 			}
 		})
 	}
@@ -1370,14 +1403,12 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 		Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Calls: paidCalls, CriticStopReason: "round_cap",
 	}}, http.StatusOK, paidSequence)
-	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "upload", 0, ""
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 10)
-	status.Sequence, status.Phase = 11, "cleanup"
+	status.Sequence, status.Phase, status.Round, status.ReviewPhase = 10, "cleanup", 0, ""
 	status.WorkerState = "stopping"
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 11)
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 10)
 	reject("worker state rollback", func(s *Status) { s.WorkerState = "busy" })
-	status.Sequence, status.WorkerState = 12, "ready"
-	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 12)
+	status.Sequence, status.WorkerState = 11, "ready"
+	f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 11)
 	reject("terminal state rollback", func(s *Status) { s.WorkerState = "stopping" })
 	reject("terminal state changes", func(s *Status) { s.WorkerState = "unclean" })
 	if got, ok := f.tx.ctx.Deadline(); !ok || !got.Equal(deadline) {
@@ -1390,7 +1421,7 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	f.executor.mu.Lock()
 	active, unavailable := f.executor.active, f.executor.unavailable
 	f.executor.mu.Unlock()
-	if got, ok := f.executor.Status(); active != nil || unavailable || !ok || got != status {
+	if got, _, ok := f.executor.Status(); active != nil || unavailable || !ok || got != status {
 		t.Fatalf("observations changed capacity or recoverable status: active=%v unavailable=%t status=%+v present=%t", active, unavailable, got, ok)
 	}
 }
@@ -1454,7 +1485,7 @@ func TestHTTPExecutorBoundsRejectedStatusBinding(t *testing.T) {
 			if got.err != nil || got.status != http.StatusBadRequest || got.ack.Kind != "status" || got.ack.Sequence != status.Sequence || got.ack.Failure == nil || got.ack.httpBinding != (httpBinding{}) {
 				t.Fatalf("malformed Status caused an unbounded or successful reply: status=%d ack=%+v error=%v", got.status, got.ack, got.err)
 			}
-			if _, ok := f.executor.Status(); ok {
+			if _, _, ok := f.executor.Status(); ok {
 				t.Fatal("rejected Status became an accepted observation")
 			}
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
@@ -2335,7 +2366,7 @@ func TestHTTPExecutorMissingOutcomeClosesRealGraceAndQuarantines(t *testing.T) {
 		if _, err := f.executor.Execute(t.Context(), f.job, runnerExecutionCheckpoints{}); err == nil {
 			t.Fatal("missing outcome released unproved worker capacity")
 		}
-		if got, ok := f.executor.Status(); !ok || got != ready {
+		if got, _, ok := f.executor.Status(); !ok || got != ready {
 			t.Fatalf("forged ready observation was not retained as an untrusted label: status=%+v present=%t", got, ok)
 		}
 	})

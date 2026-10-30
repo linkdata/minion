@@ -127,6 +127,15 @@ func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 						after <- value.Checkpoint.Call
 					}
 					events <- kind
+				case "status":
+					var value httpObservation
+					decodeErr := httpDecode(r.Body, httpControlBytes, &value)
+					validationErr := value.Status.Validate(job)
+					if decodeErr != nil || validationErr != nil {
+						t.Errorf("invalid worker status: %+v decode=%v validation=%v", value, decodeErr, validationErr)
+					}
+					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Status.Sequence, Kind: kind})
+					return
 				case "outcome":
 					var value httpOutcome
 					if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
@@ -215,6 +224,9 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 		job := testJob(command.Comment)
 		binding := httpJobBinding(job)
 		var statuses atomic.Int32
+		statusEntered := make(chan struct{}, 1)
+		releaseStatus := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseStatus) })
 		outcomes := make(chan httpOutcome, 1)
 		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -227,7 +239,8 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 				<-r.Context().Done()
 			case "/status":
 				statuses.Add(1)
-				<-r.Context().Done()
+				statusEntered <- struct{}{}
+				<-releaseStatus
 			case "/before", "/after":
 				var call httpCall
 				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
@@ -246,20 +259,306 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 			}
 		}))
 		defer server.CloseClientConnections()
+		defer release()
 		client := *server.Client()
 		client.Timeout = 0
-		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+			select {
+			case <-statusEntered:
+			case <-ctx.Done():
+				return aicli.Result{}, ctx.Err()
+			case <-time.After(2 * statusSendTimeout):
+				return aicli.Result{}, errors.New("worker did not send initial Status")
+			}
 			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
 		}}
 		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
 			t.Fatal(err)
 		}
-		if statuses.Load() != 0 || len(outcomes) != 1 {
+		release()
+		if statuses.Load() == 0 || len(outcomes) != 1 {
 			t.Fatalf("blocked status endpoint delayed final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
 		}
 		outcome := <-outcomes
 		if outcome.Failure != nil || outcome.Result.Answer != "Complete" || len(outcome.Result.Calls) != 1 {
 			t.Fatalf("successful result lost: %+v", outcome)
+		}
+	})
+}
+
+func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		statuses := make(chan Status, 16)
+		watchEntered := make(chan struct{}, 1)
+		releaseWatch := make(chan struct{})
+		outcomeEntered := make(chan struct{}, 1)
+		releaseModel := make(chan struct{})
+		releaseOutcome := make(chan struct{})
+		releaseWatchOnce := sync.OnceFunc(func() { close(releaseWatch) })
+		releaseModelOnce := sync.OnceFunc(func() { close(releaseModel) })
+		releaseOutcomeOnce := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer releaseWatchOnce()
+		defer releaseModelOnce()
+		defer releaseOutcomeOnce()
+		var parent *httpServerTest
+		parent = newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/cancel" {
+						watchEntered <- struct{}{}
+						<-releaseWatch
+					}
+					if r.URL.Path == "/outcome" {
+						outcomeEntered <- struct{}{}
+						<-releaseOutcome
+					}
+					next.ServeHTTP(w, r)
+					if r.URL.Path == "/status" {
+						if status, _, ok := parent.executor.Status(); ok {
+							statuses <- status
+						}
+					}
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) })
+		client := parent.server.Client()
+		client.Timeout = 0
+		modelEntered := make(chan struct{}, 1)
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			if request.role != roleMain || request.round != 1 {
+				t.Errorf("unexpected model call: %+v", request)
+			}
+			modelEntered <- struct{}{}
+			select {
+			case <-releaseModel:
+			case <-ctx.Done():
+				return aicli.Result{}, ctx.Err()
+			}
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+		}}
+		workerDone := make(chan error, 1)
+		go func() { workerDone <- RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, runner) }()
+		select {
+		case <-watchEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before cancellation-watch admission: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not open cancellation watch")
+		}
+		synctest.Wait()
+		if status, _, ok := parent.executor.Status(); ok || len(statuses) != 0 {
+			t.Fatalf("Status arrived before cancellation-watch headers: status=%+v present=%t queued=%d", status, ok, len(statuses))
+		}
+		releaseWatchOnce()
+		select {
+		case <-modelEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before model call: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not reach model call")
+		}
+		waitStatus := func(phase string, after uint64) Status {
+			t.Helper()
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			for {
+				select {
+				case status := <-statuses:
+					if status.Phase == phase && status.Sequence > after {
+						return status
+					}
+				case <-timer.C:
+					t.Fatalf("no %s Status after sequence %d", phase, after)
+				}
+			}
+		}
+		main := waitStatus("main", 0)
+		if main.Round != 1 || main.ProgressSequence <= 1 {
+			t.Fatalf("Runner main call did not reach Status: %+v", main)
+		}
+		releaseModelOnce()
+		select {
+		case <-outcomeEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before final upload: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not start final upload")
+		}
+		upload := waitStatus("upload", main.Sequence)
+		if upload.ProgressSequence <= main.ProgressSequence || upload.Round != 0 {
+			t.Fatalf("final upload did not advance progress: main=%+v upload=%+v", main, upload)
+		}
+		synctest.Wait()
+		for draining := true; draining; {
+			select {
+			case next := <-statuses:
+				if next.Phase == "upload" && next.Sequence > upload.Sequence {
+					upload = next
+				}
+			default:
+				draining = false
+			}
+		}
+		time.Sleep(statusHeartbeatInterval)
+		synctest.Wait()
+		heartbeat := waitStatus("upload", upload.Sequence)
+		if heartbeat.ProgressSequence != upload.ProgressSequence || heartbeat.ProgressAge <= upload.ProgressAge {
+			t.Fatalf("final upload lost its 15-second heartbeat: upload=%+v heartbeat=%+v", upload, heartbeat)
+		}
+		releaseOutcomeOnce()
+		if err := <-workerDone; err != nil {
+			t.Fatal(err)
+		}
+		if got := parent.result(t); got.err != nil || got.result.Answer != "Complete" {
+			t.Fatalf("final upload failed: %+v", got)
+		}
+	})
+}
+
+func TestRunHTTPFailedPreparationKeepsContactDuringOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		outcomeEntered := make(chan struct{}, 1)
+		releaseOutcome := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer release()
+		parent := newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
+			func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/outcome" {
+						outcomeEntered <- struct{}{}
+						<-releaseOutcome
+					}
+					next.ServeHTTP(w, r)
+				})
+			}, func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) })
+		client := parent.server.Client()
+		client.Timeout = 0
+		workerDone := make(chan error, 1)
+		go func() {
+			workerDone <- RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, &Runner{})
+		}()
+		select {
+		case <-outcomeEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before failed outcome upload: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not start failed outcome upload")
+		}
+		synctest.Wait()
+		first, firstAt, ok := parent.executor.Status()
+		if !ok || first.Phase != "prepare" || firstAt.IsZero() {
+			t.Fatalf("failed preparation lost initial Status: status=%+v received=%v present=%t", first, firstAt, ok)
+		}
+		time.Sleep(statusHeartbeatInterval)
+		synctest.Wait()
+		second, secondAt, ok := parent.executor.Status()
+		if !ok || second.Phase != "prepare" || second.Sequence <= first.Sequence || !secondAt.After(firstAt) {
+			t.Fatalf("failed upload lost contact or claimed an unproved phase: first=%+v second=%+v received=%v present=%t", first, second, secondAt, ok)
+		}
+		release()
+		if err := <-workerDone; !errors.Is(err, monitor.ErrTerminalJob) {
+			t.Fatalf("failed preparation became successful: %v", err)
+		}
+		if got := parent.result(t); got.err == nil || !got.result.matchesJob(job) {
+			t.Fatalf("failed preparation result was not delivered: result=%+v error=%v", got.result, got.err)
+		}
+	})
+}
+
+func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const key = "assigned-key-leak-canary"
+		job := testJob(command.Comment)
+		binding := httpJobBinding(job)
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(context.Canceled)
+		modelEntered := make(chan struct{}, 1)
+		statuses := make(chan Status, 16)
+		outcomes := make(chan httpOutcome, 1)
+		releaseOutcome := make(chan struct{})
+		releaseOutcomeOnce := sync.OnceFunc(func() { close(releaseOutcome) })
+		defer releaseOutcomeOnce()
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			kind := strings.TrimPrefix(r.URL.Path, "/")
+			switch kind {
+			case "next":
+				httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout,
+					Credentials: WorkerCredentials{CodexAPIKey: key}})
+			case "cancel":
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				<-r.Context().Done()
+			case "before", "after":
+				var call httpCall
+				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+					t.Error(err)
+				}
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: call.Sequence})
+			case "status":
+				var observation httpObservation
+				if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+					t.Error(err)
+				}
+				statuses <- observation.Status
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: observation.Status.Sequence})
+			case "outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					t.Error(err)
+				}
+				outcomes <- outcome
+				<-releaseOutcome
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: outcome.Sequence})
+			default:
+				t.Errorf("unexpected route %s", r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(callCtx context.Context, _ modelRun) (aicli.Result, error) {
+			modelEntered <- struct{}{}
+			<-callCtx.Done()
+			return aicli.Result{Tokens: usage.Tokens{Input: 1}}, callCtx.Err()
+		}}
+		workerDone := make(chan error, 1)
+		go func() { workerDone <- RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, runner) }()
+		select {
+		case <-modelEntered:
+		case err := <-workerDone:
+			t.Fatalf("worker ended before cancellation: %v", err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not start model")
+		}
+		cancel(fmt.Errorf("caller cause contains %s", key))
+		var outcome httpOutcome
+		select {
+		case outcome = <-outcomes:
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker did not upload canceled result")
+		}
+		waitStopping := time.NewTimer(5 * time.Second)
+		defer waitStopping.Stop()
+		for stopping := false; !stopping; {
+			select {
+			case status := <-statuses:
+				if status.WorkerState == "stopping" {
+					if err := status.Validate(job); err != nil {
+						t.Fatalf("invalid live stopping Status: %+v error=%v", status, err)
+					}
+					stopping = true
+				}
+			case <-waitStopping.C:
+				t.Fatal("worker did not report stopping Status during canceled outcome upload")
+			}
+		}
+		if outcome.Failure == nil || strings.Contains(outcome.Failure.Message, key) {
+			t.Fatalf("assigned key in outcome failure: %+v", outcome.Failure)
+		}
+		releaseOutcomeOnce()
+		if err := <-workerDone; !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), key) {
+			t.Fatalf("assigned key in worker return: %v", err)
 		}
 	})
 }
@@ -340,7 +639,8 @@ func TestHTTPClientRequiresExactAcknowledgementAndNeverRetries(t *testing.T) {
 }
 
 func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
-	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "missing budget", "missing stop grace", "negative stop grace", "excessive stop grace", "negative pull wait", "inflated pull wait", "trailing JSON"} {
+	const key = "assigned-secret-key"
+	for _, name := range []string{"version", "executor", "unselected credential", "mixed credential", "HTTP 202", "HTTP 206", "expired", "expired outcome ACK lost", "expired negative outcome ACK", "missing budget", "missing stop grace", "negative stop grace", "excessive stop grace", "negative pull wait", "inflated pull wait", "trailing JSON"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			assignment := httpAssignment{Job: job, StopGrace: httpControlTimeout}
@@ -354,7 +654,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			case "mixed credential":
 				assignment.Credentials.CodexAPIKey = "configured-key"
 				assignment.Credentials.CodexNativeAPIKey = "native-key"
-			case "expired", "expired outcome ACK lost":
+			case "expired", "expired outcome ACK lost", "expired negative outcome ACK":
 				assignment.Job.RuntimeBudget = time.Nanosecond
 			case "missing budget":
 				assignment.Job.RuntimeBudget = 0
@@ -369,13 +669,16 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 			case "inflated pull wait":
 				assignment.HeldFor = config.MaxActionRuntime + time.Second
 			}
+			if name == "expired negative outcome ACK" {
+				assignment.Credentials.CodexAPIKey = key
+			}
 			var requests atomic.Int32
-			outcomes := make(chan httpOutcome, 1)
+			outcomes := make(chan httpOutcome, 2)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
-					if name == "expired" || name == "expired outcome ACK lost" {
+					if name == "expired" || name == "expired outcome ACK lost" || name == "expired negative outcome ACK" {
 						// A nanosecond budget can fit inside one Windows clock tick.
 						received := time.Now()
 						for time.Since(received) <= assignment.Job.RuntimeBudget {
@@ -399,7 +702,11 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					}
 					outcomes <- outcome
 					w.Header().Set("Content-Type", "application/json")
-					if name != "expired outcome ACK lost" {
+					if name == "expired negative outcome ACK" {
+						w.WriteHeader(http.StatusConflict)
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "outcome", Sequence: 1,
+							Failure: newHTTPFailure(errors.Join(syscall.ENOSPC, fmt.Errorf("outcome ACK contains %s", key)))})
+					} else if name != "expired outcome ACK lost" {
 						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "outcome", Sequence: outcome.Sequence})
 					}
 				default:
@@ -414,9 +721,12 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					t.Fatal("invalid assignment error exposed a credential")
 				}
 			}
-			if name == "expired" || name == "expired outcome ACK lost" {
+			if name == "expired" || name == "expired outcome ACK lost" || name == "expired negative outcome ACK" {
 				if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != (name == "expired outcome ACK lost") || requests.Load() != 2 || len(outcomes) != 1 {
 					t.Fatalf("expired known assignment lost its bound no-work outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
+				}
+				if name == "expired negative outcome ACK" && (!errors.Is(err, syscall.ENOSPC) || strings.Contains(err.Error(), key)) {
+					t.Fatalf("expired outcome ACK was lost or leaked assigned key: %v", err)
 				}
 				outcome := <-outcomes
 				if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Result.Answer != "" || len(outcome.Result.Calls) != 0 || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || outcome.Failure.OutcomeUnknown {
@@ -470,6 +780,12 @@ func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
 							t.Error(err)
 						}
 						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: strings.TrimPrefix(r.URL.Path, "/"), Sequence: call.Sequence})
+					case "/status":
+						var status httpObservation
+						if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status", Sequence: status.Status.Sequence})
 					case "/outcome":
 						var outcome httpOutcome
 						if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
@@ -601,15 +917,22 @@ func TestRunHTTPBoundsAssignmentBodyAfterHeadersAndAllowsLongPoll(t *testing.T) 
 }
 
 func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
-	for _, name := range []string{"known negative ACK", "parent unknown failure", "invalid headers"} {
+	const key = "assigned-secret-key"
+	for _, name := range []string{"known negative ACK", "parent unknown failure", "invalid headers", "negative outcome ACK redacts key"} {
 		t.Run(name, func(t *testing.T) {
 			job := testJob(command.Comment)
 			binding := httpJobBinding(job)
-			outcomes := make(chan httpOutcome, 1)
+			var requests atomic.Int32
+			outcomes := make(chan httpOutcome, 2)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
 				switch r.URL.Path {
 				case "/next":
-					httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout})
+					assignment := httpAssignment{Job: job, StopGrace: httpControlTimeout}
+					if name == "negative outcome ACK redacts key" {
+						assignment.Credentials.CodexAPIKey = key
+					}
+					httpClientTestJSON(t, w, assignment)
 				case "/cancel":
 					if name != "invalid headers" {
 						failure := workroot.ErrUnsafe
@@ -628,7 +951,14 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 						t.Error(err)
 					}
 					outcomes <- value
-					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Sequence, Kind: "outcome"})
+					if name == "negative outcome ACK redacts key" {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusConflict)
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: 1, Kind: "outcome",
+							Failure: newHTTPFailure(errors.Join(syscall.ENOSPC, fmt.Errorf("outcome ACK contains %s", key)))})
+					} else {
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Sequence, Kind: "outcome"})
+					}
 				default:
 					t.Errorf("worker advanced before watch admission: %s", r.URL.Path)
 					http.NotFound(w, r)
@@ -637,8 +967,11 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 			defer server.Close()
 			err := RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
 			unknown := name == "parent unknown failure"
-			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || name == "known negative ACK" && !errors.Is(err, workroot.ErrUnsafe) || len(outcomes) != 1 {
-				t.Fatalf("watch admission failure lost its cause or failed outcome: error=%v outcomes=%d", err, len(outcomes))
+			if err == nil || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != unknown || name == "known negative ACK" && !errors.Is(err, workroot.ErrUnsafe) || requests.Load() != 3 || len(outcomes) != 1 {
+				t.Fatalf("watch admission failure lost its cause or failed outcome: error=%v requests=%d outcomes=%d", err, requests.Load(), len(outcomes))
+			}
+			if name == "negative outcome ACK redacts key" && (!errors.Is(err, syscall.ENOSPC) || !errors.Is(err, workroot.ErrUnsafe) || strings.Contains(err.Error(), key)) {
+				t.Fatalf("watch admission outcome ACK was lost or leaked assigned key: %v", err)
 			}
 			outcome := <-outcomes
 			if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Failure == nil || outcome.Failure.OutcomeUnknown != unknown || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
@@ -1208,6 +1541,13 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 						}
 						after <- value.Checkpoint.Call
 					}
+				case "status":
+					var value httpObservation
+					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
+						t.Error(err)
+					}
+					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Status.Sequence, Kind: kind})
+					return
 				case "outcome":
 					var value httpOutcome
 					if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
@@ -1414,6 +1754,12 @@ func TestRunHTTPStopGraceBoundsSerialAfterAndOutcome(t *testing.T) {
 							}
 						}
 						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: call.Sequence})
+					case "/status":
+						var status httpObservation
+						if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Status.Sequence})
 					case "/outcome":
 						outcomes.Add(1)
 						select {

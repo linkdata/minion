@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,6 +42,7 @@ type Runner struct {
 	WorkRoot    string
 	// recordReview synchronously persists borrowed evidence without mutating it.
 	recordReview func([]CallUsage, []Refutation, string) error
+	statusUpdate func(string, int, string)
 }
 
 func (r Runner) secretValues() []string {
@@ -146,8 +148,14 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	owned := []string{source}
 	cleanupFailed := false
 	var cleanupDetail string
+	markCleanup := sync.OnceFunc(func() {
+		if r.statusUpdate != nil {
+			r.statusUpdate("cleanup", 0, "")
+		}
+	})
 	// Remove owned paths after sessions, report collection, and review snapshots close.
 	defer func() {
+		markCleanup()
 		failed := cleanupFailed
 		var retained []string
 		for _, dir := range owned {
@@ -297,6 +305,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					return aicli.Result{}, err
 				}
 			}
+			if r.statusUpdate != nil {
+				r.statusUpdate(request.role, request.round, request.reviewPhase)
+			}
 			call, err := next(ctx, request)
 			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
 			if err == nil && request.role == roleCritic {
@@ -312,6 +323,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				if checkpointErr := checkpoints.AfterCall(checkpoint); checkpointErr != nil {
 					err = errors.Join(err, fmt.Errorf("%w: checkpoint model usage: %w", monitor.ErrTerminalJob, checkpointErr))
 				}
+			}
+			if r.statusUpdate != nil {
+				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			return call, err
 		}
@@ -366,6 +380,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 		}
 	}()
+	// Report cleanup before closing sessions; the outer defer covers preparation failures.
+	defer markCleanup()
 	var answer string
 	var runErr error
 	answer, result.CriticStopReason, runErr = configured.runAI(ctx, job, source, prompt, outputDir, checkpointReview, &sessions)

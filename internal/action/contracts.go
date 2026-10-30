@@ -313,9 +313,9 @@ func (s Status) order(rounds int) int {
 			return 3*s.Round - 1
 		}
 		return 3 * s.Round
-	case "upload":
+	case "cleanup":
 		return 3*rounds + 1
-	default: // cleanup; validate has already checked the phase.
+	default: // upload; validate has already checked the phase.
 		return 3*rounds + 2
 	}
 }

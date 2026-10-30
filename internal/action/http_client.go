@@ -146,6 +146,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	jobRunner.Codex.NativeAccessToken = assignment.Credentials.CodexAccessToken
 	jobRunner.Claude.APIKey = assignment.Credentials.ClaudeAPIKey
 	assignment.Credentials = WorkerCredentials{}
+	assignedSecrets := jobRunner.secretValues()
 	clearCredentials := func() {
 		jobRunner.Codex.APIKey = ""
 		jobRunner.Codex.NativeAPIKey = ""
@@ -178,7 +179,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
-		return errors.Join(err, checkpoints.outcome(result, err))
+		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
 	deadlineCtx, stopDeadline := context.WithDeadline(ctx, expires)
 	defer stopDeadline()
@@ -222,8 +223,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		stopWatch(errHTTPWatchStopped)
 		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		return errors.Join(err, checkpoints.outcome(result, err))
+		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
 	go func() {
@@ -245,6 +247,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 		watchDone <- err
 	}()
+	statusFeed := newWorkerStatus(job)
+	statusCtx, cancelStatus := context.WithCancel(controlCtx)
+	defer cancelStatus()
+	jobRunner.statusUpdate = statusFeed.progress
+	stopStatusOnAction := context.AfterFunc(actionCtx, statusFeed.stopping)
+	defer stopStatusOnAction()
+	go statusFeed.run(statusCtx, transport)
 	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 	var runErr error
 	// Preparation consumes the accepted runtime.
@@ -272,8 +281,12 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if errors.Is(cause, context.DeadlineExceeded) {
 		cause = errors.Join(cause, monitor.ErrTerminalJob)
 	}
-	runErr = errors.Join(runErr, cause)
+	runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
+	if checkpoints.failure == nil && (job.Critic == nil && len(result.Calls) != 0 || job.Critic != nil && result.CriticStopReason != "") {
+		jobRunner.statusUpdate("upload", 0, "")
+	}
 	outcomeErr := checkpoints.outcome(result, runErr)
+	cancelStatus() // Optional observation never holds work after the final Result upload.
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone
 	if watchErr != nil {
@@ -283,7 +296,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if status == nil && outcomeErr == nil && context.Cause(watchCtx) == errHTTPWatchStopped && httpWatchUncertainty(watchErr) {
 		// Parent receipt is known. A watch-only protocol failure cannot revoke it;
 		// errors already captured in runErr still propagate.
-		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(watchErr.Error()))
+		runner.logf("HTTP cancellation watch: %q", httpFailureDiagnostic(redactActionError(watchErr, assignedSecrets...).Error()))
 		watchErr = nil
 	}
 	callerErr := context.Cause(ctx)
@@ -293,7 +306,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if cleanupFailed {
 		runErr = errors.Join(runErr, errHTTPWorkerCleanup)
 	}
-	return errors.Join(runErr, outcomeErr, watchErr, callerErr)
+	return redactActionError(errors.Join(runErr, outcomeErr, watchErr, callerErr), assignedSecrets...)
 }
 
 func httpClientUnknown(kind string, err error) error {
