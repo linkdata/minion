@@ -245,6 +245,18 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 		watchDone <- err
 	}()
+	statusFeed := newWorkerStatus(job)
+	statusCtx, cancelStatus := context.WithCancel(controlCtx)
+	defer cancelStatus()
+	jobRunner.statusUpdate = func(phase string, round int, reviewPhase string, err error) {
+		if err != nil {
+			err = redactActionError(err, jobRunner.secretValues()...)
+		}
+		statusFeed.progress(phase, round, reviewPhase, err)
+	}
+	stopStatusOnAction := context.AfterFunc(actionCtx, statusFeed.stopping)
+	defer stopStatusOnAction()
+	go statusFeed.run(statusCtx, transport)
 	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 	var runErr error
 	// Preparation consumes the accepted runtime.
@@ -273,6 +285,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		cause = errors.Join(cause, monitor.ErrTerminalJob)
 	}
 	runErr = errors.Join(runErr, cause)
+	cancelStatus() // Optional observation never holds the final Result upload.
 	outcomeErr := checkpoints.outcome(result, runErr)
 	stopWatch(errHTTPWatchStopped)
 	watchErr := <-watchDone

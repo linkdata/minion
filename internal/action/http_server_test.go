@@ -1289,6 +1289,37 @@ func TestHTTPExecutorStatusIsIndependentAndAllowsObservationGaps(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutorStatusReceiptRevivesWithoutInventingProgress(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		f := newHTTPServerTestInMemory(t, t.Context(), job, runnerExecutionCheckpoints{})
+		f.pull(t)
+		first := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+			Sequence: 1, ProgressSequence: 1, WorkerState: "busy", Phase: "prepare"}
+		f.ack(t, "/status", httpObservation{Status: first}, http.StatusOK, 1)
+		got, receivedAt, ok := f.executor.StatusWithReceipt()
+		if !ok || got != first || receivedAt.IsZero() {
+			t.Fatalf("first receipt: status=%+v received=%v present=%t", got, receivedAt, ok)
+		}
+		time.Sleep(20 * time.Second)
+		if age := time.Since(receivedAt); age != 20*time.Second {
+			t.Fatalf("stale contact age = %s", age)
+		}
+		second := first
+		second.Sequence = 2
+		second.ProgressAge = 20 * time.Second
+		f.ack(t, "/status", httpObservation{Status: second}, http.StatusOK, 2)
+		got, revivedAt, ok := f.executor.StatusWithReceipt()
+		if !ok || got != second || !revivedAt.After(receivedAt) || time.Since(revivedAt) != 0 || got.ProgressSequence != first.ProgressSequence {
+			t.Fatalf("heartbeat contact and progress conflated: status=%+v received=%v present=%t", got, revivedAt, ok)
+		}
+		f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+		if got := f.result(t); got.err != nil {
+			t.Fatal(got.err)
+		}
+	})
+}
+
 func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(t *testing.T) {
 	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(30*time.Second))
 	defer cancel()

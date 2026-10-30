@@ -70,6 +70,7 @@ func TestStatusRejectsForeignAndMalformedObservations(t *testing.T) {
 		{"source", "version, identity or source", func(s *Status) { s.SourceRef = strings.Repeat("b", 40) }},
 		{"missing status sequence", "sequence or progress age", func(s *Status) { s.Sequence = 0 }},
 		{"negative progress age", "sequence or progress age", func(s *Status) { s.ProgressAge = -1 }},
+		{"oversized error", "status error", func(s *Status) { s.Error = strings.Repeat("x", httpFailureMessageLimit+1) }},
 		{"unknown worker state", "worker state", func(s *Status) { s.WorkerState = "idle" }},
 		{"ready before cleanup", "terminal worker state", func(s *Status) { s.WorkerState = "ready" }},
 		{"unknown phase", "status phase", func(s *Status) { s.Phase = "waiting" }},

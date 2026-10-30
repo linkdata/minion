@@ -127,6 +127,13 @@ func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 						after <- value.Checkpoint.Call
 					}
 					events <- kind
+				case "status":
+					var value httpObservation
+					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value.Status.Validate(job) != nil {
+						t.Errorf("invalid worker status: %+v error=%v", value, err)
+					}
+					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Status.Sequence, Kind: kind})
+					return
 				case "outcome":
 					var value httpOutcome
 					if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
@@ -215,6 +222,10 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 		job := testJob(command.Comment)
 		binding := httpJobBinding(job)
 		var statuses atomic.Int32
+		statusEntered := make(chan struct{}, 1)
+		releaseStatus := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseStatus) }) }
 		outcomes := make(chan httpOutcome, 1)
 		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
@@ -227,7 +238,8 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 				<-r.Context().Done()
 			case "/status":
 				statuses.Add(1)
-				<-r.Context().Done()
+				statusEntered <- struct{}{}
+				<-releaseStatus
 			case "/before", "/after":
 				var call httpCall
 				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
@@ -246,15 +258,18 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 			}
 		}))
 		defer server.CloseClientConnections()
+		defer release()
 		client := *server.Client()
 		client.Timeout = 0
 		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			<-statusEntered
 			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
 		}}
 		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
 			t.Fatal(err)
 		}
-		if statuses.Load() != 0 || len(outcomes) != 1 {
+		release()
+		if statuses.Load() == 0 || len(outcomes) != 1 {
 			t.Fatalf("blocked status endpoint delayed final result: statuses=%d outcomes=%d", statuses.Load(), len(outcomes))
 		}
 		outcome := <-outcomes
@@ -470,6 +485,12 @@ func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
 							t.Error(err)
 						}
 						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: strings.TrimPrefix(r.URL.Path, "/"), Sequence: call.Sequence})
+					case "/status":
+						var status httpObservation
+						if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status", Sequence: status.Status.Sequence})
 					case "/outcome":
 						var outcome httpOutcome
 						if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
@@ -1208,6 +1229,13 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 						}
 						after <- value.Checkpoint.Call
 					}
+				case "status":
+					var value httpObservation
+					if err := httpDecode(r.Body, httpControlBytes, &value); err != nil {
+						t.Error(err)
+					}
+					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Status.Sequence, Kind: kind})
+					return
 				case "outcome":
 					var value httpOutcome
 					if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
@@ -1414,6 +1442,12 @@ func TestRunHTTPStopGraceBoundsSerialAfterAndOutcome(t *testing.T) {
 							}
 						}
 						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: call.Sequence})
+					case "/status":
+						var status httpObservation
+						if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
+							t.Error(err)
+						}
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "status", Sequence: status.Status.Sequence})
 					case "/outcome":
 						outcomes.Add(1)
 						select {

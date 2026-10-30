@@ -209,8 +209,8 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("HTTP worker did not receive outcome acknowledgement")
 		}
-		if status, ok := remote.Status(); ok {
-			t.Fatalf("HTTP worker unexpectedly sent status: %+v", status)
+		if status, receivedAt, ok := remote.StatusWithReceipt(); ok && (status.Sequence == 0 || receivedAt.IsZero()) {
+			t.Fatalf("HTTP worker sent invalid status: %+v received=%v", status, receivedAt)
 		}
 	}
 	if calls != len(expected) {

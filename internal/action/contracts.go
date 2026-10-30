@@ -127,6 +127,7 @@ type Status struct {
 	Phase            string        `json:"phase"`
 	Round            int           `json:"round,omitempty"`
 	ReviewPhase      string        `json:"review_phase,omitempty"`
+	Error            string        `json:"error,omitempty"`
 }
 
 func (id Identity) validate() error {
@@ -273,6 +274,9 @@ func (s Status) validate(j Job) error {
 	}
 	if s.Sequence == 0 || s.ProgressAge < 0 {
 		return errors.New("invalid action status sequence or progress age")
+	}
+	if !boundedText(s.Error, httpFailureMessageLimit) {
+		return errors.New("invalid action status error")
 	}
 	switch s.WorkerState {
 	case "busy", "stopping":

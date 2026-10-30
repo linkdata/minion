@@ -32,6 +32,7 @@ type HTTPExecutor struct {
 	outcomeGrace   time.Duration
 	status         Status
 	hasStatus      bool
+	statusAt       time.Time
 }
 
 type httpTransaction struct {
@@ -156,7 +157,7 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		return result, errors.New("HTTP executor is closed, unavailable or busy")
 	}
 	tx.credentials = e.credentials
-	e.active, e.status, e.hasStatus = tx, Status{}, false
+	e.active, e.status, e.hasStatus, e.statusAt = tx, Status{}, false, time.Time{}
 	if state != nil {
 		state.admitted = true
 	}
@@ -310,6 +311,13 @@ func (e *HTTPExecutor) Status() (Status, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.status, e.hasStatus
+}
+
+// StatusWithReceipt returns the worker's last observation and the parent's receipt time.
+func (e *HTTPExecutor) StatusWithReceipt() (Status, time.Time, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.status, e.statusAt, e.hasStatus
 }
 
 func (e *HTTPExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -591,7 +599,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 				err = status.follows(e.status, tx.job.rounds())
 			}
 			if err == nil {
-				e.status, e.hasStatus = status, true
+				e.status, e.statusAt, e.hasStatus = status, time.Now(), true
 			}
 			tx.mu.Unlock()
 			e.mu.Unlock()
