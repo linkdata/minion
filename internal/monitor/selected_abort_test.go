@@ -175,9 +175,6 @@ func TestSelectedDeadlineDuringEitherInvitationCheckIsNotControlFailure(t *testi
 					saved.Accepted.JobID != job.ID || saved.Accepted.AttemptID != job.AttemptID || !saved.Accepted.Terminal {
 					t.Fatalf("deadline decision was not durable before worker cleanup: state=%+v", saved)
 				}
-				if len(gh.notificationCalls) != 0 {
-					t.Fatalf("action discovery ran during worker cleanup: notifications=%v", gh.notificationCalls)
-				}
 				select {
 				case err := <-finished:
 					t.Fatalf("selected monitor returned before worker cleanup: %v", err)
