@@ -50,6 +50,28 @@ func TestTerminalReplyLookupErrorSkipsAcceptedSourceCheck(t *testing.T) {
 	})
 }
 
+func TestTerminalReplyLookupPastDeadlineSkipsPost(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		at := time.Now().UTC()
+		accepted := selectedAcceptance(t, at)
+		accepted.SubjectType = "Issue"
+		accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+		gh := &fakeGitHub{beforeVerify: func(context.Context, bool) error {
+			time.Sleep(11 * time.Second)
+			return nil // The lookup ignores its expired context.
+		}}
+		m := selectedMonitor(t, at, gh, nil)
+		store := openState(t, at)
+		store.Data.Accepted = &accepted
+		if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), at); err != nil ||
+			store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 ||
+			len(store.Data.PublicationWrites) != 0 || gh.repoChecks != 0 {
+			t.Fatalf("late reply lookup allowed a POST or source check: err=%v state=%+v repo checks=%d",
+				err, store.Data, gh.repoChecks)
+		}
+	})
+}
+
 func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 	now := time.Now().UTC()
 	accepted := selectedAcceptance(t, now)
@@ -89,6 +111,37 @@ func TestTerminalAcceptedSourceChecksKeepBudgetAcrossCalls(t *testing.T) {
 	})
 	if len(gh.comments) != 1 || len(store.Data.Processed) != 1 || store.Data.Accepted != nil || repositoryCalls != 2 || issueCalls != 1 {
 		t.Fatalf("successful source checks did not finish the fixed reply: comments=%d repo=%d issue=%d state=%+v", len(gh.comments), repositoryCalls, issueCalls, store.Data)
+	}
+}
+
+func TestTerminalAcceptedSourceRechecksRepositoryIdentityBeforePost(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	accepted.SubjectType = "Issue"
+	accepted.SourceURL = "https://github.com/example-owner/example-repo/issues/7#issuecomment-1"
+	accepted.CommandName, accepted.Action = "audit", "comment"
+	accepted.JobID = jobID(accepted.SourceKey, accepted.CommandName)
+	current := selectedItem(at)
+	current.Body = "@linkdataminion audit"
+	current.HTMLURL = accepted.SourceURL
+	wrongRepo := fixtureRepository(github.Repository{FullName: accepted.Repository})
+	wrongRepo.ID = 9
+	checks := 0
+	gh := &fakeGitHub{permission: github.Permission{Permission: "write"},
+		currentItem: func(github.Item) (github.Item, error) { return current, nil }}
+	gh.beforeRepository = func() {
+		checks++
+		if checks == 2 {
+			gh.liveRepo = &wrongRepo
+		}
+	}
+	m := selectedMonitor(t, at, gh, nil)
+	store := openState(t, at)
+	store.Data.Accepted = &accepted
+	if err := m.finishFailedJob(t.Context(), store, jobFromAccepted(accepted), at); err != nil ||
+		checks != 2 || store.Data.Processed[accepted.JobID].IsZero() || len(gh.comments) != 0 ||
+		len(store.Data.PublicationWrites) != 0 {
+		t.Fatalf("changed final repository identity allowed POST: err=%v checks=%d state=%+v", err, checks, store.Data)
 	}
 }
 

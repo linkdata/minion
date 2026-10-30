@@ -576,9 +576,15 @@ func TestSelectedUncertainReplyDoesNotBlockOrRepeatAnotherAcceptance(t *testing.
 		t.Fatalf("uncertain reply blocked or repeated another acceptance: executions=%d reactions=%v state=%+v", executions, gh.reactions, store.Data)
 	}
 	gh.commentErr = nil
-	if _, err := m.RunOnce(t.Context(), store); err != nil || gh.commentCalls != 2 ||
+	nextPoll := store.Data.NextPollAt
+	if nextPoll.IsZero() {
+		t.Fatal("first pass did not schedule another notification poll")
+	}
+	m.Now = func() time.Time { return nextPoll.Add(time.Second) }
+	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 2 || gh.commentCalls != 2 ||
 		store.Data.TerminalDecisions[firstID].Outcome != "failed" || store.Data.TerminalDecisions[secondID].Outcome != "failed" {
-		t.Fatalf("later pass repeated or changed terminal outcomes: err=%v posts=%d state=%+v", err, gh.commentCalls, store.Data)
+		t.Fatalf("later poll repeated work or changed terminal outcomes: err=%v executions=%d posts=%d state=%+v",
+			err, executions, gh.commentCalls, store.Data)
 	}
 }
 

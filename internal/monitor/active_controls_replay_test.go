@@ -1303,7 +1303,7 @@ func TestTerminalReplyRemainsOneShotAfterRestart(t *testing.T) {
 	})
 }
 
-func TestSelectedControlClearsResolvedScanReplyError(t *testing.T) {
+func TestSelectedControlDoesNotReturnUncertainReplyAsScanError(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()
 		terminal := selectedItem(now.Add(-2 * time.Second))
