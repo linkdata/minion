@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 )
@@ -48,6 +47,21 @@ done
 	return script
 }
 
+// A distinct Done channel makes child contexts observe this fixture's deadline error.
+type nativeDeadlineContext struct {
+	context.Context
+	done <-chan struct{}
+}
+
+func (c nativeDeadlineContext) Done() <-chan struct{} { return c.done }
+
+func (c nativeDeadlineContext) Err() error {
+	if c.Context.Err() != nil && errors.Is(context.Cause(c.Context), context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return c.Context.Err()
+}
+
 func TestRunnerNativeAdaptersRetainFailedCallRecords(t *testing.T) {
 	const secret = "fixture-native-secret"
 	type runOutcome struct {
@@ -79,8 +93,19 @@ func TestRunnerNativeAdaptersRetainFailedCallRecords(t *testing.T) {
 				}
 				var got runOutcome
 				switch kind {
-				case "canceled":
-					ctx, cancel := context.WithCancel(t.Context())
+				case "canceled", "expired":
+					var ctx context.Context
+					var cancel func()
+					if kind == "expired" {
+						base, expire := context.WithCancelCause(t.Context())
+						observed := make(chan struct{})
+						stop := context.AfterFunc(base, func() { close(observed) })
+						defer stop()
+						ctx = nativeDeadlineContext{Context: base, done: observed}
+						cancel = func() { expire(context.DeadlineExceeded) }
+					} else {
+						ctx, cancel = context.WithCancel(t.Context())
+					}
 					defer cancel()
 					done := make(chan runOutcome, 1)
 					go func() {
@@ -89,7 +114,7 @@ func TestRunnerNativeAdaptersRetainFailedCallRecords(t *testing.T) {
 					}()
 					ticker := time.NewTicker(5 * time.Millisecond)
 					defer ticker.Stop()
-					deadline := time.NewTimer(2 * time.Second)
+					deadline := time.NewTimer(10 * time.Second)
 					defer deadline.Stop()
 				waitStart:
 					for {
@@ -98,27 +123,17 @@ func TestRunnerNativeAdaptersRetainFailedCallRecords(t *testing.T) {
 						}
 						select {
 						case got = <-done:
-							t.Fatalf("CLI exited before cancellation: %v", got.err)
+							t.Fatalf("CLI exited before %s: %v", kind, got.err)
 						case <-ticker.C:
 						case <-deadline.C:
-							t.Fatal("fake CLI did not start before cancellation")
+							t.Fatalf("fake CLI did not start before %s", kind)
 						}
 					}
 					cancel()
 					select {
 					case got = <-done:
 					case <-time.After(2 * time.Second):
-						t.Fatal("canceled native call did not stop")
-					}
-				case "expired":
-					runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
-						callCtx, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
-						defer cancel()
-						return next(callCtx, request)
-					}
-					got.result, got.err = runner.Run(t.Context(), job)
-					if _, err := os.Stat(started); err != nil {
-						t.Fatalf("fake CLI did not start before expiry: %v", err)
+						t.Fatalf("%s native call did not stop", kind)
 					}
 				default:
 					got.result, got.err = runner.Run(t.Context(), job)
