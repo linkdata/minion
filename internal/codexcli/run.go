@@ -602,7 +602,7 @@ func (o *jsonlOutput) completeItem(event codexEvent) (process, capture bool) {
 	}
 	if o.completedItems[item.ID] {
 		o.contentMissing()
-		return false, false
+		return true, false // Duplicate native events still affect the native result.
 	}
 	if len(o.completedItems) == maxCompletedIDs {
 		if pending, ok := o.pending[item.ID]; ok {

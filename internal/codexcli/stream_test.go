@@ -89,12 +89,39 @@ func TestJSONLOutputProgressSnapshotsAndCompletedItems(t *testing.T) {
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "item": map[string]any{"id": "message", "type": "agent_message", "text": "duplicate"}})
 	output.stream.Finish()
 	output.flushPending()
-	if len(output.pending) != 0 || output.pendingBytes != 0 || output.finalMessage != "complete" || len(got) != 4 ||
+	if len(output.pending) != 0 || output.pendingBytes != 0 || output.finalMessage != "duplicate" || len(got) != 4 ||
 		got[0] != (aicli.StreamEvent{NativeID: "root", Kind: "identity"}) ||
 		got[1] != (aicli.StreamEvent{NativeID: "root", Kind: "assistant", Text: "complete"}) ||
 		got[2].NativeID != "root" || got[2].Kind != "tool" || !strings.Contains(got[2].Text, `"aggregated_output":"complete"`) ||
 		got[3] != (aicli.StreamEvent{NativeID: "root", Kind: "content_missing"}) {
 		t.Fatalf("snapshot, completion, or duplicate handling: events=%+v pending=%+v", got, output.pending)
+	}
+}
+
+func TestJSONLOutputDuplicateCompletionKeepsNativeResultIndependentOfStatus(t *testing.T) {
+	for _, status := range []bool{false, true} {
+		t.Run(fmt.Sprintf("status=%t", status), func(t *testing.T) {
+			var got []aicli.StreamEvent
+			output := jsonlOutput{}
+			if status {
+				output.onEvent = func(event aicli.StreamEvent) { got = append(got, event) }
+			}
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+			for _, text := range []string{"first", "last"} {
+				writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "item": map[string]any{"id": "same", "type": "agent_message", "text": text}})
+			}
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "turn.completed"})
+			if output.finalMessage != "last" || !output.completed {
+				t.Fatalf("Status changed native result: final=%q complete=%t", output.finalMessage, output.completed)
+			}
+			if status && !slices.Equal(got, []aicli.StreamEvent{
+				{NativeID: "root", Kind: "identity"},
+				{NativeID: "root", Kind: "assistant", Text: "first"},
+				{NativeID: "root", Kind: "content_missing"},
+			}) {
+				t.Fatalf("duplicate discussion was emitted twice or gap lost: %+v", got)
+			}
+		})
 	}
 }
 
