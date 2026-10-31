@@ -252,9 +252,10 @@ func (a *rolloutActivity) poll() {
 		}
 	}
 	progressed := false
+	var lastProgressReport time.Time
 	selected := map[string]bool{rootID: true} // Stdout identifies the root even before its rollout appears.
 	if meta, ok := files[rootID]; ok && !ambiguous[rootID] && !meta.duplicate && meta.ParentID == "" && (meta.SessionID == "" || meta.SessionID == rootID) {
-		a.scan(meta, rootID, &progressed)
+		a.scan(meta, rootID, &progressed, &lastProgressReport)
 	}
 	for changed := true; changed; {
 		changed = false
@@ -277,12 +278,24 @@ func (a *rolloutActivity) poll() {
 				continue
 			}
 			selected[id], changed = true, true
-			a.scan(meta, rootID, &progressed)
+			a.scan(meta, rootID, &progressed, &lastProgressReport)
 		}
 	}
 	if progressed && a.progress != nil {
-		a.progress()
+		a.progress() // Credit fresh work even when the final scan took less than one second.
 	}
+}
+
+func (a *rolloutActivity) reportProgress(progressed *bool, lastReport *time.Time) {
+	if !*progressed || a.progress == nil {
+		return
+	}
+	now := time.Now()
+	if !lastReport.IsZero() && now.Sub(*lastReport) < time.Second {
+		return
+	}
+	*progressed, *lastReport = false, now
+	a.progress()
 }
 
 func (a *rolloutActivity) needsDiscovery(rootID string, announced, spawned map[string]bool) bool {
@@ -300,7 +313,7 @@ func (a *rolloutActivity) needsDiscovery(rootID string, announced, spawned map[s
 	return false
 }
 
-func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool) {
+func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool, lastProgressReport *time.Time) {
 	if a.prefixFailed[meta.ID] || meta.path == "" || a.excluded[meta.path] && a.known[meta.ID].path != meta.path {
 		return
 	}
@@ -415,6 +428,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 				a.contentMissing(meta.ID)
 			} else {
 				a.consume(meta, rootID, cursor, line, progressed)
+				a.reportProgress(progressed, lastProgressReport)
 			}
 		}
 		a.pendingBytes -= int64(len(cursor.pending))

@@ -96,12 +96,7 @@ func Validate(ctx context.Context, settings config.CodexConfig, onProgress ...fu
 }
 
 // Check selected config and both exec parsers without starting an inference turn.
-func validateExecCapabilities(ctx context.Context, settings config.CodexConfig, onProgress ...func()) (err error) {
-	progress := func() {
-		if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
-			onProgress[0]()
-		}
-	}
+func validateExecCapabilities(ctx context.Context, settings config.CodexConfig, progress func()) (err error) {
 	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return err

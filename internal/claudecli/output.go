@@ -135,12 +135,6 @@ type taskProgressState struct {
 	toolUses    int64
 }
 
-type openTaskRuns struct {
-	only     string
-	many     map[string]struct{}
-	finished bool
-}
-
 type jsonlOutput struct {
 	sessionID           string
 	apiKey              string
@@ -150,11 +144,11 @@ type jsonlOutput struct {
 	progressStreams     map[string]*progressStream
 	streamSeen          map[string]bool
 	streamSeenBytes     int
-	progressTasks       map[string]bool
-	runlessListRuns     map[string]string
-	ambiguousOpen       map[string]bool
 	taskProgress        map[string]taskProgressState
-	openTaskRuns        map[string]openTaskRuns
+	taskRuns            map[string]bool
+	runlessPending      map[string]int
+	runlessCount        int
+	anonymousPending    int
 	progressBytes       int64
 	progressEntries     int
 	progressByteLimit   int64 // Tests may lower the cumulative history limit.
@@ -253,6 +247,7 @@ func (o *jsonlOutput) safeDiagnosticText(detail string) string {
 
 func (o *jsonlOutput) finish() {
 	o.stream.Finish()
+	o.updateTaskPending()
 	lower, valid := o.assistantLowerBound()
 	if o.aggregateGeneration == 0 || o.uncovered || !valid || lower != o.result.Tokens {
 		if valid {
@@ -342,106 +337,27 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.fail(errors.New("invalid Claude background task list"))
 			return
 		}
-		o.pending = 0
-		active := make(map[string]bool)
-		seenRunless := make(map[string]bool)
-		staleFinishedIDs := make(map[string]bool)
+		o.runlessPending = make(map[string]int)
+		o.runlessCount = 0
+		o.anonymousPending = 0
 		for _, task := range tasks {
-			if !task.Ambient {
-				o.pending++
-				if task.TaskID != "" {
-					runID := task.RunID
-					if runID != "" && o.progressSeen["task_finish:"+taskRunKey(task.TaskID, runID)] {
-						staleFinishedIDs[task.TaskID] = true
-						o.pending-- // A replayed snapshot cannot reopen a finished native run.
-						continue
-					}
-					if runID != "" && o.onProgress != nil {
-						hadNative := o.progressSeen["task_native:"+task.TaskID]
-						if !o.bindRunLessTaskStart(task.TaskID, runID) {
-							o.bindRunLessTaskCompletion(task.TaskID, runID, hadNative)
-						}
-						if o.err != nil {
-							return
-						}
-					}
-					if runID == "" && o.onProgress != nil {
-						seenRunless[task.TaskID] = true
-						if o.progressSeen["task_ambiguous:"+task.TaskID] {
-							continue
-						}
-						o.openTaskRun(task.TaskID)
-						if o.openTaskRuns[task.TaskID].finished {
-							o.markAmbiguousRunless(task.TaskID)
-							continue
-						}
-						if alias := o.runlessListRuns[task.TaskID]; alias != "" {
-							open := o.openTaskRun(task.TaskID)
-							if (open != "" && open != alias) || o.openTaskRuns[task.TaskID].many != nil {
-								o.markAmbiguousRunless(task.TaskID)
-								continue
-							}
-							runID = alias
-						} else if !o.progressTasks[task.TaskID] {
-							runID = o.openTaskRun(task.TaskID)
-							if runID == "" && o.openTaskRuns[task.TaskID].many != nil {
-								o.markAmbiguousRunless(task.TaskID)
-								continue
-							}
-							if runID != "" {
-								o.rememberProgress("task_start:" + task.TaskID)
-								if o.err != nil {
-									return
-								}
-								if o.runlessListRuns == nil {
-									o.runlessListRuns = make(map[string]string)
-								}
-								o.runlessListRuns[task.TaskID] = runID
-							}
-						}
-					}
-					active[taskRunKey(task.TaskID, runID)] = true
-					if task.RunID != "" && o.onProgress != nil {
-						o.rememberProgress("task_native:" + task.TaskID)
-					}
-				}
-			}
-		}
-		for prior := range o.progressTasks {
-			id, _, _ := strings.Cut(prior, "\x00")
-			if o.progressSeen["task_ambiguous:"+id] && !o.progressSeen["task_finish:"+prior] && !active[prior] {
-				active[prior] = true // An ambiguous run-less list cannot finish an identified run.
+			if task.Ambient {
 				continue
 			}
-			if staleFinishedIDs[id] && (prior == id || !o.progressSeen["task_finish:"+prior]) && !active[prior] {
-				active[prior] = true // A stale entry cannot prove another run with this task ID finished.
-				o.pending++
-			}
-		}
-		if o.err != nil {
-			return
-		}
-		o.pending = max(o.pending, len(active))
-		o.recordTaskListProgress(active)
-		if o.err != nil {
-			return
-		}
-		for id := range o.runlessListRuns {
-			if !seenRunless[id] && !active[taskRunKey(id, o.runlessListRuns[id])] {
-				o.rememberProgress("task_finish:" + id)
+			switch {
+			case task.TaskID == "":
+				o.anonymousPending++
+			case task.RunID == "":
+				o.runlessPending[task.TaskID]++
+				o.runlessCount++
+			default:
+				o.observeTaskRun(task.TaskID, task.RunID, "task_seen:", false)
 				if o.err != nil {
 					return
 				}
-				delete(o.runlessListRuns, id)
 			}
 		}
-		if o.pending == 0 && o.hasAmbiguousOpenRun() {
-			o.pending = 1 // A stale run-less snapshot cannot clear an unidentified native run.
-		}
-		if o.pending != 0 {
-			o.completed = false
-			o.result.Answer = ""
-		}
+		o.updateTaskPending()
 	}
 	if e.Type == "user" && len(e.Message) != 0 {
 		var message struct {
@@ -601,6 +517,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 	}
 	// Print mode can emit provisional turn results while background work runs.
+	o.updateTaskPending()
 	if o.pending != 0 || o.stopped {
 		return
 	}
@@ -748,7 +665,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	if _, taskID, ok := strings.Cut(header, "<task-id>"); found && ok {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
 			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
-			if id != "" && o.onProgress != nil && !o.progressSeen["task_ambiguous:"+id] {
+			if id != "" {
 				o.recordTaskProgress(id, "", status)
 			}
 		}
@@ -773,6 +690,19 @@ func (o *jsonlOutput) recordProgress(e event) {
 	if e.Type == "stream_event" {
 		o.recordStreamProgress(e)
 		return
+	}
+	if e.Type == "system" {
+		switch e.Subtype {
+		case "task_started":
+			o.recordTaskProgress(e.TaskID, e.RunID, "started")
+			return
+		case "task_notification":
+			o.recordTaskProgress(e.TaskID, e.RunID, e.Status)
+			return
+		case "task_progress":
+			o.recordTaskUsageProgress(e)
+			return
+		}
 	}
 	if o.onProgress == nil {
 		return
@@ -823,12 +753,6 @@ func (o *jsonlOutput) recordProgress(e event) {
 		}
 	case "system":
 		switch e.Subtype {
-		case "task_started":
-			o.recordTaskProgress(e.TaskID, e.RunID, "started")
-		case "task_notification":
-			o.recordTaskProgress(e.TaskID, e.RunID, e.Status)
-		case "task_progress":
-			o.recordTaskUsageProgress(e)
 		case "thinking_tokens":
 			if o.sessionID != "" && e.SessionID == o.sessionID && e.UUID != "" && e.ThinkingDelta > 0 {
 				o.recordUniqueProgress("thinking_tokens:" + e.UUID)
@@ -979,17 +903,6 @@ func (o *jsonlOutput) rememberProgress(key string) bool {
 		o.progressSeen = make(map[string]bool)
 	}
 	o.progressSeen[key] = true
-	if o.openTaskRuns != nil {
-		if task, ok := strings.CutPrefix(key, "task_start:"); ok {
-			if id, runID, ok := strings.Cut(task, "\x00"); ok {
-				o.addOpenTaskRun(id, runID)
-			}
-		} else if task, ok := strings.CutPrefix(key, "task_finish:"); ok {
-			if id, runID, ok := strings.Cut(task, "\x00"); ok {
-				o.removeOpenTaskRun(id, runID)
-			}
-		}
-	}
 	return true
 }
 
@@ -1017,157 +930,72 @@ func taskRunKey(id, runID string) string {
 	return id + "\x00" + runID
 }
 
-func (o *jsonlOutput) openTaskRun(id string) string {
-	if o.openTaskRuns == nil {
-		// Build once from bounded history when the first run-less notice arrives.
-		o.openTaskRuns = make(map[string]openTaskRuns)
-		for key := range o.progressSeen {
-			if task, ok := strings.CutPrefix(key, "task_start:"); ok {
-				if taskID, runID, ok := strings.Cut(task, "\x00"); ok {
-					o.addOpenTaskRun(taskID, runID)
-				}
-			} else if task, ok := strings.CutPrefix(key, "task_finish:"); ok {
-				if taskID, _, ok := strings.Cut(task, "\x00"); ok {
-					runs := o.openTaskRuns[taskID]
-					runs.finished = true
-					o.openTaskRuns[taskID] = runs
-				}
-			}
-		}
-		for key := range o.taskProgress {
-			if taskID, runID, ok := strings.Cut(key, "\x00"); ok {
-				o.addOpenTaskRun(taskID, runID)
-			}
-		}
-	}
-	runs := o.openTaskRuns[id]
-	if runs.many != nil {
-		return "" // More than one unfinished run is ambiguous.
-	}
-	return runs.only
-}
-
-func (o *jsonlOutput) hasAmbiguousOpenRun() bool {
-	if o.ambiguousOpen == nil {
-		o.openTaskRun("") // Rebuild the bounded native-run index after resume.
-		o.ambiguousOpen = make(map[string]bool)
-		for id, runs := range o.openTaskRuns {
-			if o.progressSeen["task_ambiguous:"+id] && (runs.only != "" || len(runs.many) != 0) {
-				o.ambiguousOpen[id] = true
-			}
-		}
-	}
-	return len(o.ambiguousOpen) != 0
-}
-
-func (o *jsonlOutput) addOpenTaskRun(id, runID string) {
-	if runID == "" || o.progressSeen["task_finish:"+taskRunKey(id, runID)] {
+// The open set is rebuilt once from bounded progress history on a resumed call.
+func (o *jsonlOutput) ensureTaskRuns() {
+	if o.taskRuns != nil {
 		return
 	}
-	runs := o.openTaskRuns[id]
-	if runs.many != nil {
-		runs.many[runID] = struct{}{}
-	} else if runs.only == "" {
-		runs.only = runID
-		o.openTaskRuns[id] = runs
-	} else if runs.only != runID {
-		runs.many = map[string]struct{}{runs.only: {}, runID: {}}
-		runs.only = ""
-		o.openTaskRuns[id] = runs
-	}
-	if o.progressSeen["task_ambiguous:"+id] {
-		if o.ambiguousOpen == nil {
-			o.ambiguousOpen = make(map[string]bool)
+	o.taskRuns = make(map[string]bool)
+	for identity := range o.progressSeen {
+		task, ok := strings.CutPrefix(identity, "task_start:")
+		if !ok {
+			task, ok = strings.CutPrefix(identity, "task_seen:")
 		}
-		o.ambiguousOpen[id] = true
+		if _, runID, tagged := strings.Cut(task, "\x00"); !ok || !tagged || runID == "" ||
+			o.progressSeen["task_finish:"+task] {
+			continue
+		}
+		o.taskRuns[task] = true
 	}
 }
 
-func (o *jsonlOutput) removeOpenTaskRun(id, runID string) {
-	runs := o.openTaskRuns[id]
-	runs.finished = true
-	if runs.many != nil {
-		delete(runs.many, runID)
-		if len(runs.many) == 1 {
-			for remaining := range runs.many {
-				runs.only = remaining
-			}
-			runs.many = nil
-		} else if len(runs.many) == 0 {
-			runs.many = nil
-		}
-	} else if runs.only == runID {
-		runs.only = ""
-	}
-	o.openTaskRuns[id] = runs
-	if runs.only == "" && len(runs.many) == 0 {
-		delete(o.ambiguousOpen, id)
+func (o *jsonlOutput) updateTaskPending() {
+	o.ensureTaskRuns()
+	o.pending = len(o.taskRuns) + o.runlessCount + o.anonymousPending
+	if o.pending != 0 {
+		o.completed = false
+		o.result.Answer = ""
 	}
 }
 
-func (o *jsonlOutput) markAmbiguousRunless(id string) {
-	if !o.rememberProgress("task_ambiguous:" + id) {
-		return
-	}
-	o.openTaskRun(id)
-	runs := o.openTaskRuns[id]
-	if runs.only != "" || len(runs.many) != 0 {
-		if o.ambiguousOpen == nil {
-			o.ambiguousOpen = make(map[string]bool)
-		}
-		o.ambiguousOpen[id] = true
-	}
-}
-
-func (o *jsonlOutput) bindRunLessTaskStart(id, runID string) bool {
+func (o *jsonlOutput) observeTaskRun(id, runID, identity string, credit bool) {
 	key := taskRunKey(id, runID)
-	if !o.progressSeen["task_start:"+id] || o.progressSeen["task_finish:"+id] ||
-		o.progressSeen["task_ambiguous:"+id] || o.progressSeen["task_finish:"+key] {
-		return false
+	if o.progressSeen["task_finish:"+key] {
+		return
 	}
-	open := o.openTaskRun(id)
-	if (open != "" && open != runID) || o.openTaskRuns[id].many != nil {
-		o.markAmbiguousRunless(id)
-		return false
+	o.ensureTaskRuns()
+	if credit && o.onProgress != nil {
+		o.recordUniqueProgress(identity + key)
+	} else {
+		o.rememberProgress(identity + key)
 	}
-	o.rememberProgress("task_start:" + key)
 	if o.err != nil {
-		return true
+		return
 	}
-	delete(o.progressTasks, id)
-	if o.progressTasks == nil {
-		o.progressTasks = make(map[string]bool)
-	}
-	o.progressTasks[key] = true
-	if o.runlessListRuns == nil {
-		o.runlessListRuns = make(map[string]string)
-	}
-	o.runlessListRuns[id] = runID
-	return true
+	o.taskRuns[key] = true
+	o.updateTaskPending()
 }
 
-func (o *jsonlOutput) bindRunLessTaskCompletion(id, runID string, hadNative bool) bool {
+func (o *jsonlOutput) finishTaskRun(id, runID string) {
 	key := taskRunKey(id, runID)
-	start, finish := "task_start:"+key, "task_finish:"+key
-	match := "task_synthetic_match:" + id
-	// A previously identified run makes a later run-less finish ambiguous.
-	if hadNative || !o.progressSeen["task_finish:"+id] || o.progressSeen["task_ambiguous:"+id] ||
-		o.progressSeen[match] || o.progressSeen[start] || o.progressSeen[finish] {
-		return false
+	if o.progressSeen["task_finish:"+key] {
+		return
 	}
-	// A run-less completion can identify one native run; preserve both native
-	// lifecycle identities so either replay order stays silent.
-	if o.reserveProgress(3, len(start)+len(finish)+len(match)) {
-		o.progressSeen[start], o.progressSeen[finish], o.progressSeen[match] = true, true, true
-		if o.openTaskRuns != nil {
-			o.removeOpenTaskRun(id, runID)
-		}
+	o.ensureTaskRuns()
+	if o.onProgress != nil {
+		o.recordUniqueProgress("task_finish:" + key)
+	} else {
+		o.rememberProgress("task_finish:" + key)
 	}
-	return true
+	if o.err != nil {
+		return
+	}
+	delete(o.taskRuns, key)
+	o.updateTaskPending()
 }
 
 func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
-	if o.onProgress == nil || id == "" {
+	if id == "" {
 		return
 	}
 	switch status {
@@ -1175,138 +1003,78 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	default:
 		return
 	}
-	hadNative := o.progressSeen["task_native:"+id]
 	if runID == "" {
-		if o.progressSeen["task_ambiguous:"+id] {
-			return
-		}
-		o.openTaskRun(id)
-		if o.openTaskRuns[id].finished {
-			o.markAmbiguousRunless(id)
-			return
-		}
-		if status != "started" {
-			if alias := o.runlessListRuns[id]; alias != "" {
-				open := o.openTaskRun(id)
-				if (open != "" && open != alias) || o.openTaskRuns[id].many != nil {
-					o.markAmbiguousRunless(id)
-					return
-				}
-				runID = alias
-			} else if hadNative {
-				runID = o.openTaskRun(id)
-				if runID == "" {
-					return // A run-less notice cannot identify an open native run.
-				}
+		if status == "started" {
+			if o.runlessPending == nil {
+				o.runlessPending = make(map[string]int)
 			}
-		}
-	}
-	if runID != "" {
-		// Native identity lets later run-less replay notices be ignored after
-		// the run finishes.
-		o.rememberProgress("task_native:" + id)
-		if o.err != nil {
-			return
-		}
-	}
-	switch status {
-	case "started":
-		key := taskRunKey(id, runID)
-		if runID != "" && o.progressSeen["task_finish:"+key] {
-			return // A delayed start for an already finished native run is replay.
-		}
-		if runID != "" && o.runlessListRuns[id] != "" && o.runlessListRuns[id] != runID {
-			o.markAmbiguousRunless(id)
-		}
-		if runID != "" && (o.bindRunLessTaskStart(id, runID) || o.bindRunLessTaskCompletion(id, runID, hadNative)) {
-			return
-		}
-		if o.err != nil {
-			return
-		}
-		o.recordUniqueProgress("task_start:" + key)
-	case "completed", "failed", "stopped", "killed":
-		key := taskRunKey(id, runID)
-		finish := "task_finish:" + key
-		if runID != "" {
-			o.bindRunLessTaskStart(id, runID) // A native finish may be the first identified event for an active list entry.
-			if o.err != nil || o.bindRunLessTaskCompletion(id, runID, hadNative) {
-				return
+			if o.runlessPending[id] == 0 {
+				o.runlessPending[id] = 1
+				o.runlessCount++
 			}
+		} else if o.runlessPending[id] == 1 {
+			// An ID-only notice cannot distinguish concurrent same-ID tasks.
+			delete(o.runlessPending, id)
+			o.runlessCount--
 		}
-		o.recordUniqueProgress(finish)
-		if o.err == nil && runID != "" && o.runlessListRuns[id] == runID && !o.progressSeen["task_ambiguous:"+id] {
-			o.rememberProgress("task_finish:" + id)
-		}
+		o.updateTaskPending()
+		return
+	}
+	if status == "started" {
+		o.observeTaskRun(id, runID, "task_start:", true)
+	} else {
+		o.finishTaskRun(id, runID)
 	}
 }
 
 func (o *jsonlOutput) recordTaskUsageProgress(e event) {
-	if e.TaskID == "" {
+	if e.TaskID == "" || e.RunID == "" {
 		return
 	}
-	if e.RunID == "" && o.progressSeen["task_native:"+e.TaskID] {
-		o.markAmbiguousRunless(e.TaskID)
+	key := taskRunKey(e.TaskID, e.RunID)
+	if o.progressSeen["task_finish:"+key] {
+		return // Delayed cumulative usage is not fresh execution.
+	}
+	// Usage proves the run has started, even if this event has no counters.
+	// Keep that identity without crediting summaries or a later start replay.
+	o.observeTaskRun(e.TaskID, e.RunID, "task_start:", false)
+	if o.err != nil {
 		return
 	}
-	if e.RunID != "" {
-		o.rememberProgress("task_native:" + e.TaskID)
-		if o.err != nil {
-			return
-		}
-	}
-	var usage struct {
+	var counters struct {
 		TotalTokens *int64 `json:"total_tokens"`
 		ToolUses    *int64 `json:"tool_uses"`
 	}
-	if json.Unmarshal(e.Usage, &usage) != nil {
-		usage.TotalTokens, usage.ToolUses = nil, nil
-	}
-	key := taskRunKey(e.TaskID, e.RunID)
-	state, knownTask := o.taskProgress[key]
-	changed := false
-	if usage.TotalTokens != nil && *usage.TotalTokens > state.totalTokens {
-		state.totalTokens = *usage.TotalTokens
-		changed = true
-	}
-	if usage.ToolUses != nil && *usage.ToolUses > state.toolUses {
-		state.toolUses = *usage.ToolUses
-		changed = true
-	}
-	if changed {
-		entries, bytes := 0, 0
-		if !knownTask {
-			entries, bytes = 1, len(key)
-		}
-		if !o.reserveProgress(entries, bytes) {
-			return
-		}
-		if o.taskProgress == nil {
-			o.taskProgress = make(map[string]taskProgressState)
-		}
-		o.taskProgress[key] = state
-		if !knownTask && o.openTaskRuns != nil && e.RunID != "" {
-			o.addOpenTaskRun(e.TaskID, e.RunID)
-		}
-		o.onProgress()
-	}
-}
-
-func (o *jsonlOutput) recordTaskListProgress(active map[string]bool) {
-	if o.onProgress == nil {
+	if json.Unmarshal(e.Usage, &counters) != nil {
 		return
 	}
-	for id := range active {
-		if !o.progressTasks[id] {
-			o.recordUniqueProgress("task_start:" + id)
-		}
+	state, knownTask := o.taskProgress[key]
+	changed := false
+	if counters.TotalTokens != nil && *counters.TotalTokens > state.totalTokens {
+		state.totalTokens = *counters.TotalTokens
+		changed = true
 	}
-	for id := range o.progressTasks {
-		if !active[id] {
-			o.recordUniqueProgress("task_finish:" + id)
-		}
+	if counters.ToolUses != nil && *counters.ToolUses > state.toolUses {
+		state.toolUses = *counters.ToolUses
+		changed = true
 	}
-	o.progressTasks = active
+	if !changed {
+		return
+	}
+	entries, bytes := 0, 0
+	if !knownTask {
+		entries, bytes = 1, len(key)
+	}
+	if !o.reserveProgress(entries, bytes) {
+		return
+	}
+	if o.taskProgress == nil {
+		o.taskProgress = make(map[string]taskProgressState)
+	}
+	o.taskProgress[key] = state
+	if o.onProgress != nil {
+		o.onProgress()
+	}
 }
 
 func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {

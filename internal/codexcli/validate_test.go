@@ -376,7 +376,7 @@ func TestExecCapabilityProbeHonorsCallerDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	if err := validateExecCapabilities(ctx, config.CodexConfig{Model: "fixture"}); !errors.Is(err, context.DeadlineExceeded) {
+	if err := validateExecCapabilities(ctx, config.CodexConfig{Model: "fixture"}, func() {}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("capability probe lost deadline: %v", err)
 	}
 	if time.Since(started) > 3*time.Second {

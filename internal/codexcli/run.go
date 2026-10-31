@@ -492,9 +492,14 @@ type pendingCodexItem struct {
 }
 
 type progressCodexItem struct {
-	snapshot      [sha256.Size]byte
+	generation    uint64
 	completed     bool
 	spawnAdmitted bool
+}
+
+type progressCodexSnapshot struct {
+	generation uint64
+	snapshot   [sha256.Size]byte
 }
 
 type jsonlOutput struct {
@@ -527,7 +532,10 @@ type jsonlOutput struct {
 	completedItems    map[string]bool
 	progressItems     map[string]progressCodexItem
 	progressItemLimit int // Tests lower the cap; zero uses maxUsageRecords.
-	spawnFresh        bool
+	// Each snapshot comes from one aicli.JSONL event, which caps records per call.
+	progressSnapshots      map[progressCodexSnapshot]bool
+	nextProgressGeneration uint64
+	spawnFresh             bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -723,8 +731,13 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		// An identical ID-less completion could be a new command or a replay.
 		// Without a lifecycle event, it cannot prove fresh work.
 		freshCycle := item.ID == "" && prior.completed && event.Type == "item.started"
-		if !freshCycle && prior.snapshot == snapshot && (event.Type != "item.completed" || prior.completed) {
+		if !freshCycle && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
+			(event.Type != "item.completed" || prior.completed) {
 			return
+		}
+		if freshCycle {
+			prior.generation = 0
+			prior.spawnAdmitted = false
 		}
 	}
 	if o.progressItems == nil {
@@ -738,8 +751,20 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		o.stop(fmt.Errorf("%w: Codex progress identity limit reached", aicli.ErrOutputLimit))
 		return
 	}
-	o.progressItems[key] = progressCodexItem{snapshot: snapshot, completed: event.Type == "item.completed",
-		spawnAdmitted: spawnAdmitted || seen && !prior.completed && prior.spawnAdmitted}
+	admitted := spawnAdmitted || seen && !prior.completed && prior.spawnAdmitted
+	if prior.generation == 0 {
+		o.nextProgressGeneration++
+		prior.generation = o.nextProgressGeneration
+	}
+	identity := progressCodexSnapshot{prior.generation, snapshot}
+	if !o.progressSnapshots[identity] {
+		if o.progressSnapshots == nil {
+			o.progressSnapshots = make(map[progressCodexSnapshot]bool)
+		}
+		o.progressSnapshots[identity] = true
+	}
+	prior.completed, prior.spawnAdmitted = event.Type == "item.completed", admitted
+	o.progressItems[key] = prior
 	o.onProgress()
 }
 

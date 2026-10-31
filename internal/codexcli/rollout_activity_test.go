@@ -1177,6 +1177,46 @@ func TestRolloutActivityCancellationStopsCurrentMultilineScan(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityReportsProvenProgressBeforeScanEnds(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "first helper message"),
+		rolloutMessage(10, "second", "later helper message"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var events []aicli.StreamEvent
+	progress := 0
+	activity := newRolloutActivity(ctx, home, started, nil, nil, nil, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) },
+		func() { progress++; cancel() })
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "assistant", Text: "first helper message"},
+		{NativeID: "child", Kind: "content_missing"},
+	}
+	if progress != 1 || !slices.Equal(events, want) {
+		t.Fatalf("progress arrived after scan: count=%d events=%+v; want %+v", progress, events, want)
+	}
+}
+
+func TestRolloutActivityReportsFinalFreshProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "first helper message"),
+		rolloutMessage(10, "second", "later helper message"))
+	activity, events, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 2 || len(*events) != 2 {
+		t.Fatalf("latest fresh output lost its progress callback: callbacks=%d events=%+v", *progress, *events)
+	}
+}
+
 func TestRolloutActivityCancellationAfterCompleteAppendGapsAtFinish(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)

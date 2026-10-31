@@ -160,6 +160,47 @@ func TestJSONLOutputWebSearchResultsRenewProgress(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputNonAdjacentSnapshotReplayDoesNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"command","type":"command_execution","aggregated_output":"A"}}`, 1},
+		{`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"AB"}}`, 2},
+		{`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"A"}}`, 2},
+		{`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"AB"}}`, 2},
+		{`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"ABC"}}`, 3},
+		{`{"type":"item.completed","item":{"id":"command","type":"command_execution","aggregated_output":"ABC"}}`, 4},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
+func TestJSONLOutputOldSnapshotReplayDoesNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n"))
+	_, _ = output.Write([]byte(`{"type":"item.started","item":{"id":"command","type":"command_execution","aggregated_output":"A"}}` + "\n"))
+	for i := 0; i < 10; i++ {
+		line := fmt.Sprintf(`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"A%d"}}`, i)
+		_, _ = output.Write([]byte(line + "\n"))
+	}
+	if progress != 11 {
+		t.Fatalf("fresh updates progress=%d, want 11", progress)
+	}
+	_, _ = output.Write([]byte(`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"A"}}` + "\n"))
+	_, _ = output.Write([]byte(`{"type":"item.updated","item":{"id":"command","type":"command_execution","aggregated_output":"A0"}}` + "\n"))
+	if progress != 11 {
+		t.Fatalf("old snapshots renewed progress: %d", progress)
+	}
+}
+
 func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}
