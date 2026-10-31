@@ -65,6 +65,9 @@ func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 	start := func(id, fields string) string {
 		return fmt.Sprintf(`{"type":"stream_event"%s,"event":{"type":"message_start","message":{"id":%q}}}`, fields, id)
 	}
+	missingID := func(fields string) string {
+		return fmt.Sprintf(`{"type":"stream_event"%s,"event":{"type":"message_start","message":{}}}`, fields)
+	}
 	const delta = `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"new answer"}}}`
 	const stop = `{"type":"stream_event","event":{"type":"message_stop"}}`
 	const helperDelta = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"tool","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"helper answer"}}}`
@@ -77,6 +80,12 @@ func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 		{"empty fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + stop, "", false},
 		{"fresh untagged", "", start("new", "") + "\n" + delta + "\n" + stop, "", false},
 		{"unknown parent", "", start("new", `,"parent_tool_use_id":0`) + "\n" + delta + "\n" + stop, "", false},
+		{"missing ID root", "", missingID(`,"parent_tool_use_id":null`), "", false},
+		{"missing ID untagged", "", missingID(""), "", false},
+		{"missing ID unknown parent", "", missingID(`,"parent_tool_use_id":0`), "", false},
+		{"missing ID then fresh result", "", missingID(`,"parent_tool_use_id":null`) + "\n" + successfulResult, "", true},
+		{"missing ID agent helper", "", missingID(`,"agent_id":"worker"`), "", true},
+		{"missing ID parent-tagged helper", "", missingID(`,"parent_tool_use_id":"tool"`), "", true},
 		{"helper", "", start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`) + "\n" + helperDelta + "\n" + helperStop, "", true},
 		{"parent-tagged helper", "", start("helper", `,"parent_tool_use_id":"tool"`) + "\n" + strings.ReplaceAll(helperDelta, `"agent_id":"worker",`, "") + "\n" + strings.ReplaceAll(helperStop, `"agent_id":"worker",`, ""), "", true},
 		{"stream replay", start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", true},

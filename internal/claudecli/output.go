@@ -781,8 +781,13 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 	}
 	state := o.progressStreams[key]
 	if native.Type == "message_start" {
+		var parentID string
+		helper := e.AgentID != "" || json.Unmarshal(e.ParentToolUseID, &parentID) == nil && parentID != ""
 		if native.Message.ID == "" {
 			delete(o.progressStreams, key)
+			if o.results != 0 && !helper {
+				o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+			}
 			return
 		}
 		startKey := "stream_start:" + native.Message.ID
@@ -801,8 +806,6 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 				o.streamSeen[native.Message.ID] = true
 				o.streamSeenBytes += len(native.Message.ID)
 			}
-			var parentID string
-			helper := e.AgentID != "" || json.Unmarshal(e.ParentToolUseID, &parentID) == nil && parentID != ""
 			if o.results != 0 && !helper {
 				o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 			}

@@ -567,14 +567,14 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			"patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
 			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",
 			"exec_command_begin", "exec_command_end":
-			a.newProgress(meta.ID, event, 0, progressed)
+			a.newProgress(meta.ID, event, event.Ordinal, progressed)
 		case "user_message", "agent_message":
 			if payload.Message != "" {
-				a.newProgress(meta.ID, event, 0, progressed)
+				a.newProgress(meta.ID, event, event.Ordinal, progressed)
 			}
 		case "agent_reasoning", "agent_reasoning_raw_content":
 			if payload.Text != "" {
-				a.newProgress(meta.ID, event, 0, progressed)
+				a.newProgress(meta.ID, event, event.Ordinal, progressed)
 			}
 		}
 	}

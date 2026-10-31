@@ -303,6 +303,65 @@ func TestRolloutActivityProgressCountsDistinctIdenticalHelperMessages(t *testing
 	}
 }
 
+func TestRolloutActivityProvenNativeEventsCountDistinctOrdinals(t *testing.T) {
+	for _, test := range []struct{ eventType, content string }{
+		{"user_message", `,"message":"same work"`},
+		{"agent_message", `,"message":"same work"`},
+		{"agent_reasoning", `,"text":"same work"`},
+		{"agent_reasoning_raw_content", `,"text":"same work"`},
+		{"task_started", ""},
+	} {
+		t.Run(test.eventType, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			payload := fmt.Sprintf(`{"type":%q,"thread_id":"child","turn_id":"current"%s}`, test.eventType, test.content)
+			event := func(ordinal int) string {
+				return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":%s}`, ordinal, payload)
+			}
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, event(9))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("first native event progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, event(10))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("distinct native event progress=%d, want 2", *progress)
+			}
+			appendUsageEvents(t, child, event(10))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("replayed ordinal renewed progress: %d", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityNativeEventWithoutOrdinalDedupesPayload(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	payload := `{"type":"agent_message","thread_id":"child","turn_id":"current","message":"same work"}`
+	zero := fmt.Sprintf(`{"ordinal":0,"type":"event_msg","payload":%s}`, payload)
+	missing := fmt.Sprintf(`{"type":"event_msg","payload":%s}`, payload)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil, zero)
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first no-ordinal event progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, missing)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("replayed no-ordinal event renewed progress: %d", *progress)
+	}
+}
+
 func TestRolloutActivityFreshHelperCommunicationWithoutTurnRenewsProgress(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", rolloutSpawn(9, "child"))
