@@ -106,6 +106,69 @@ func validProviderDiagnosticCode(provider, code string) bool {
 	return false
 }
 
+// guardAttemptRecordText checks the ordered text retained by one Runner attempt.
+func guardAttemptRecordText(sink func(attemptRecord), secrets []string) func(attemptRecord) {
+	maxKeyBytes := 0
+	for _, secret := range secrets {
+		maxKeyBytes = max(maxKeyBytes, len(secret))
+	}
+	if maxKeyBytes == 0 {
+		return sink
+	}
+	// JSON and Go quoting need at most twelve source bytes per key byte.
+	// shortcut: Zero-padded HTML numeric entities can exceed this finite lookback; a streaming decoder would cover them.
+	lookback := int(maxAttemptRecordBytes)
+	if maxKeyBytes <= lookback/12 {
+		lookback = 12 * maxKeyBytes
+	}
+	var mu sync.Mutex
+	var prior string
+	return func(event attemptRecord) {
+		mu.Lock()
+		defer mu.Unlock()
+		if event.Text != "" {
+			unsafe := len(event.Text) > maxAttemptEventBytes
+			if !unsafe {
+				// Use the text Status will retain for this and later join checks.
+				event.Text = redactActionText(event.Text, secrets...)
+				unsafe = event.Text == "" || len(event.Text) > maxAttemptEventBytes
+			}
+			var joined string
+			if !unsafe {
+				joined = prior + event.Text
+				encoded, _ := json.Marshal(joined)
+				for _, secret := range secrets {
+					if secret != "" && (containsConfiguredKey([]byte(joined), secret) || containsConfiguredKey(encoded, secret)) {
+						unsafe = true
+						break
+					}
+				}
+			}
+			if unsafe {
+				event.Text = ""
+				sink(event)
+				gap := event
+				if event.Kind == attemptRecordDiagnostic {
+					if event.EventSource == event.Provider+".diagnostics_truncated" {
+						return
+					}
+					gap.EventSource = event.Provider + ".diagnostics_truncated"
+				} else {
+					gap.Kind, gap.EventSource = attemptRecordDiscussion, event.Provider+".content_missing"
+				}
+				sink(gap)
+				return
+			}
+			if len(joined) > lookback {
+				prior = joined[len(joined)-lookback:]
+			} else {
+				prior = joined
+			}
+		}
+		sink(event)
+	}
+}
+
 // Run uses supplied complete Git history without fetching or publication rights.
 // Fix exports use a separate private index. Failed calls still return accounted usage.
 func (r *Runner) Run(ctx context.Context, job Job) (Result, error) {
@@ -171,6 +234,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if err := configured.ConfigureRole(*job.Critic); err != nil {
 			return result, err
 		}
+	}
+	if configured.eventSink != nil {
+		configured.eventSink = guardAttemptRecordText(configured.eventSink, configured.secretValues())
 	}
 	auditSkill := configured.Codex.SecurityAuditSkill()
 	workRoot := r.WorkRoot
@@ -409,7 +475,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			call, err := next(ctx, request)
 			secrets := configured.secretValues()
 			if configured.eventSink != nil {
-				var sentDiagnosticText string
 				for _, diagnostic := range call.Diagnostics {
 					event := record
 					event.Kind, event.ObservedAt = attemptRecordDiagnostic, time.Now().UTC().Format(time.RFC3339Nano)
@@ -419,23 +484,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 						boundedText := aicli.DiagnosticText(redacted)
 						dropped := len(boundedText) < len(redacted)
 						event.Text = redactActionText(boundedText, secrets...)
-						if event.Text != "" {
-							if len(sentDiagnosticText)+len(event.Text) > 64*bounded.DiagnosticBytes {
-								event.Text = ""
-							} else {
-								joinedText := sentDiagnosticText + event.Text
-								encoded, _ := json.Marshal(joinedText)
-								for _, secret := range secrets {
-									if secret != "" && (containsConfiguredKey([]byte(joinedText), secret) || containsConfiguredKey(encoded, secret)) {
-										event.Text = ""
-										break
-									}
-								}
-								if event.Text != "" {
-									sentDiagnosticText = joinedText
-								}
-							}
-						}
 						if len(event.Text) > bounded.DiagnosticBytes || diagnostic.Message != "" && event.Text == "" {
 							event.Text = ""
 							dropped = true

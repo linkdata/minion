@@ -289,6 +289,206 @@ func TestRunnerWithholdsCrossRecordDiagnosticSecret(t *testing.T) {
 	}
 }
 
+func assertNoConfiguredKeyInOrderedText(t *testing.T, records []attemptRecord, secret string) {
+	t.Helper()
+	var joined strings.Builder
+	for _, record := range records {
+		joined.WriteString(record.Text)
+	}
+	encoded, err := json.Marshal(joined.String())
+	if err != nil || containsConfiguredKey([]byte(joined.String()), secret) || containsConfiguredKey(encoded, secret) {
+		t.Fatalf("ordered record text reconstructs configured key: %q, %v", joined.String(), err)
+	}
+}
+
+func TestRunnerWithholdsStreamFinalDiagnosticKeyAcrossProviders(t *testing.T) {
+	wantTokens := usage.Tokens{Input: 3, Output: 2}
+	for _, provider := range []struct{ name, code string }{{"codex", "native_error"}, {"claude", "result_detail"}} {
+		for _, test := range []struct {
+			name, secret string
+			pieces       [3]string
+		}{
+			{"plain", "fixture-secret", [3]string{"fixture-", "sec", "ret"}},
+			{"JSON escaped", "<tag>", [3]string{`\u003c`, "tag", `\u003e`}},
+			{"HTML numeric", "<tag>", [3]string{"&#x3c;", "tag", "&#x3e;"}},
+			{"long JSON escaped", strings.Repeat("a", 2048) + "Z", [3]string{
+				strings.Repeat(`\u0061`, 1024), strings.Repeat(`\u0061`, 1024), `\u005a`}},
+		} {
+			t.Run(provider.name+"/"+test.name, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.Main.Provider, job.Main.Model = provider.name, "fixture-"+provider.name
+				var saved []attemptRecord
+				queue := newProviderEventQueue(func(event attemptRecord) error {
+					saved = append(saved, event)
+					return nil
+				})
+				runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+					runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+						request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: test.pieces[0]})
+						request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "final", Text: test.pieces[1]})
+						return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageComplete: true,
+							Diagnostics: []aicli.ProviderDiagnostic{{Code: provider.code, Message: test.pieces[2]}, {Code: provider.code, Message: "safe later diagnostic"}}}, nil
+					}}
+				if provider.name == "codex" {
+					runner.Claude.APIKey = test.secret
+				} else {
+					runner.Codex.APIKey = test.secret
+				}
+				result, err := runner.Run(t.Context(), job)
+				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 ||
+					result.Calls[0].Tokens != wantTokens || !result.Calls[0].Complete {
+					t.Fatalf("diagnostic gap changed answer or usage: %+v, %v", result, err)
+				}
+				if queue.finish() || len(saved) != 5 || saved[0].EventSource != provider.name+".assistant" ||
+					saved[0].Text != test.pieces[0] || saved[1].EventSource != provider.name+".final" ||
+					saved[1].Text != test.pieces[1] || saved[2].Kind != attemptRecordDiagnostic ||
+					saved[2].EventSource != provider.name+"."+provider.code || saved[2].Text != "" ||
+					saved[3].EventSource != provider.name+".diagnostics_truncated" || saved[3].Text != "" ||
+					saved[4].EventSource != provider.name+"."+provider.code || saved[4].Text != "safe later diagnostic" {
+					t.Fatalf("native code, safe text, or coverage gap lost: %+v", saved)
+				}
+				assertNoConfiguredKeyInOrderedText(t, saved, test.secret)
+			})
+		}
+	}
+}
+
+func TestRunnerWithholdsDiagnosticStreamFeedbackKeyAcrossCalls(t *testing.T) {
+	const secret = "fixture-secret"
+	mainTokens, criticTokens := usage.Tokens{Input: 2}, usage.Tokens{Input: 3, Output: 1}
+	job := withClaudeCritic(testJob(command.Comment))
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: secret}, eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			if request.role == roleMain {
+				return aicli.Result{Answer: proposalJSON("Candidate.", ""), Tokens: mainTokens, UsageComplete: true,
+					Diagnostics: []aicli.ProviderDiagnostic{{Code: "native_error", Message: "fixture-"}}}, nil
+			}
+			request.onEvent(aicli.StreamEvent{NativeID: "critic-native", Kind: "assistant", Text: "sec"})
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"ret"}`,
+				Tokens: criticTokens, UsageComplete: true}, nil
+		}}
+	result, err := runner.Run(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "critic review incomplete") || result.Answer != "" ||
+		len(result.Calls) != 2 || result.Calls[0].Tokens != mainTokens || result.Calls[1].Tokens != criticTokens ||
+		!result.Calls[0].Complete || !result.Calls[1].Complete || !result.Calls[1].HasBlockers {
+		t.Fatalf("feedback gap changed answer or usage: %+v, %v", result, err)
+	}
+	if queue.finish() || len(saved) != 4 || saved[0].EventSource != "codex.native_error" || saved[0].Text != "fixture-" ||
+		saved[1].EventSource != "claude.assistant" || saved[1].Text != "sec" ||
+		saved[2].Kind != attemptRecordReport || saved[2].EventSource != "minion.critic.feedback" || saved[2].Text != "" ||
+		saved[3].Kind != attemptRecordDiscussion || saved[3].EventSource != "claude.content_missing" || saved[3].Text != "" {
+		t.Fatalf("cross-call feedback gap lost: %+v", saved)
+	}
+	assertNoConfiguredKeyInOrderedText(t, saved, secret)
+}
+
+func TestRunnerPreservesSafeDiscussionWithConfiguredKey(t *testing.T) {
+	const secret = "fixture-secret"
+	job := withClaudeCritic(testJob(command.Comment))
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: secret}, eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "ordinary work"})
+			if request.role == roleMain {
+				return aicli.Result{Answer: proposalJSON("Candidate.", ""),
+					Diagnostics: []aicli.ProviderDiagnostic{{Code: "native_error", Message: "native warning"}}}, nil
+			}
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"ordinary finding"}`}, nil
+		}}
+	_, err := runner.Run(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "critic review incomplete") || !queue.finish() || len(saved) != 4 ||
+		saved[0].Text != "ordinary work" || saved[1].EventSource != "codex.native_error" || saved[1].Text != "native warning" ||
+		saved[2].Text != "ordinary work" || saved[3].EventSource != "minion.critic.feedback" || saved[3].Text != "ordinary finding" {
+		t.Fatalf("safe discussion or native diagnostic was changed: %+v, %v", saved, err)
+	}
+}
+
+func TestRunnerRetainsRedactedStreamDiscussionAndCoverage(t *testing.T) {
+	const secret = "fixture-secret"
+	wantTokens := usage.Tokens{Input: 3, Output: 2}
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: secret}, eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "before " + secret + " after"})
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "final", Text: "ordinary later text"})
+			return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageComplete: true}, nil
+		}}
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
+	if err != nil || result.Answer != "Done." || len(result.Calls) != 1 ||
+		result.Calls[0].Tokens != wantTokens || !result.Calls[0].Complete || !queue.finish() || len(saved) != 2 ||
+		saved[0].EventSource != "codex.assistant" || saved[0].Text != "before [redacted] after" ||
+		saved[1].EventSource != "codex.final" || saved[1].Text != "ordinary later text" {
+		t.Fatalf("safe redacted stream text or coverage lost: result=%+v records=%+v error=%v", result, saved, err)
+	}
+	assertNoConfiguredKeyInOrderedText(t, saved, secret)
+}
+
+func TestRunnerWithholdsPreparedInputAndCallFailureJoins(t *testing.T) {
+	for _, test := range []struct {
+		name, secret, first, second, gap string
+		failed                           bool
+	}{
+		{"prepared input", "}secret", "se", "cret", "codex.content_missing", false},
+		{"call failure", "xprovider", "x", "", "codex.diagnostics_truncated", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: test.secret}, eventSink: queue.add,
+				runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+					if test.failed {
+						request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: test.first})
+						return aicli.Result{}, errors.New("network down")
+					}
+					request.onInput(aicli.PreparedInput{NativeID: "native", Mode: "fresh", Path: "/fixture/cli", Args: []string{"cli"}, Dir: request.dir, Stdin: "prompt"})
+					request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: test.first})
+					request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "final", Text: test.second})
+					request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "safe later event"})
+					return aicli.Result{Answer: "Done."}, nil
+				}}
+			result, err := runner.Run(t.Context(), testJob(command.Comment))
+			if (err != nil) != test.failed || (!test.failed && result.Answer != "Done.") {
+				t.Fatalf("record gap changed result: %+v, %v", result, err)
+			}
+			if queue.finish() {
+				t.Fatalf("cross-record key claimed coverage: %+v", saved)
+			}
+			foundGap, foundLater := false, false
+			for _, event := range saved {
+				if event.EventSource == test.gap && event.Text == "" {
+					foundGap = true
+				}
+				if event.Text == "safe later event" {
+					foundLater = true
+				}
+			}
+			if !foundGap || !test.failed && !foundLater {
+				t.Fatalf("gap or later safe event missing: %+v", saved)
+			}
+			if test.failed && (len(saved) != 3 || saved[1].EventSource != "codex.call.failed" || saved[1].Text != "") {
+				t.Fatalf("call failure code or earlier safe text lost: %+v", saved)
+			}
+			assertNoConfiguredKeyInOrderedText(t, saved, test.secret)
+		})
+	}
+}
+
 func TestRunnerRecordsValidIncompleteCriticFeedbackPrivately(t *testing.T) {
 	const feedback = "PRIVATE_UNRESOLVED_COVERAGE: delegated review did not finish."
 	job := withClaudeCritic(testJob(command.Comment))
