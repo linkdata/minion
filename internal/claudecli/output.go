@@ -18,6 +18,11 @@ import (
 
 const maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339 year.
 
+const (
+	maxProgressHistoryBytes   = 16 << 20
+	maxProgressHistoryEntries = 100000
+)
+
 type eventUsage struct {
 	Input   *int64 `json:"input_tokens"`
 	Created *int64 `json:"cache_creation_input_tokens"`
@@ -140,6 +145,10 @@ type jsonlOutput struct {
 	progressStreams     map[string]*progressStream
 	progressTasks       map[string]bool
 	taskProgress        map[string]taskProgressState
+	progressBytes       int64
+	progressEntries     int
+	progressByteLimit   int64 // Tests may lower the cumulative history limit.
+	progressEntryLimit  int   // Tests may lower the cumulative history limit.
 	identitySeen        bool
 	baseline            usage.Tokens
 	baselineUnknown     bool
@@ -813,15 +822,8 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 }
 
 func (o *jsonlOutput) markStreamProgress(state *progressStream) {
-	if o.progressSeen == nil {
-		o.progressSeen = make(map[string]bool)
-	}
-	o.progressSeen["assistant:"+state.messageID] = true
-	o.onProgress()
-}
-
-func (o *jsonlOutput) recordUniqueProgress(key string) {
-	if o.progressSeen[key] {
+	key := "assistant:" + state.messageID
+	if !o.progressSeen[key] && !o.reserveProgress(1, len(key)) {
 		return
 	}
 	if o.progressSeen == nil {
@@ -829,6 +831,37 @@ func (o *jsonlOutput) recordUniqueProgress(key string) {
 	}
 	o.progressSeen[key] = true
 	o.onProgress()
+}
+
+func (o *jsonlOutput) recordUniqueProgress(key string) {
+	if o.progressSeen[key] {
+		return
+	}
+	if !o.reserveProgress(1, len(key)) {
+		return
+	}
+	if o.progressSeen == nil {
+		o.progressSeen = make(map[string]bool)
+	}
+	o.progressSeen[key] = true
+	o.onProgress()
+}
+
+func (o *jsonlOutput) reserveProgress(entries, bytes int) bool {
+	entryLimit, byteLimit := maxProgressHistoryEntries, int64(maxProgressHistoryBytes)
+	if o.progressEntryLimit > 0 {
+		entryLimit = min(entryLimit, o.progressEntryLimit)
+	}
+	if o.progressByteLimit > 0 {
+		byteLimit = min(byteLimit, o.progressByteLimit)
+	}
+	if o.err != nil || entries > entryLimit-o.progressEntries || int64(bytes) > byteLimit-o.progressBytes {
+		o.fail(fmt.Errorf("%w: Claude progress history limit reached", aicli.ErrOutputLimit))
+		return false
+	}
+	o.progressEntries += entries
+	o.progressBytes += int64(bytes)
+	return true
 }
 
 func taskRunKey(id, runID string) string {
@@ -864,7 +897,7 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 		usage.TotalTokens, usage.ToolUses = nil, nil
 	}
 	key := taskRunKey(e.TaskID, e.RunID)
-	state := o.taskProgress[key]
+	state, knownTask := o.taskProgress[key]
 	changed := false
 	if usage.TotalTokens != nil && *usage.TotalTokens > state.totalTokens {
 		state.totalTokens = *usage.TotalTokens
@@ -874,14 +907,29 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 		state.toolUses = *usage.ToolUses
 		changed = true
 	}
-	if summary := strings.TrimSpace(e.Summary); summary != "" && !state.summaries[summary] {
-		if state.summaries == nil {
-			state.summaries = make(map[string]bool)
-		}
-		state.summaries[summary] = true
+	summary := strings.TrimSpace(e.Summary)
+	newSummary := summary != "" && !state.summaries[summary]
+	if newSummary {
 		changed = true
 	}
 	if changed {
+		entries, bytes := 0, 0
+		if !knownTask {
+			entries, bytes = 1, len(key)
+		}
+		if newSummary {
+			entries++
+			bytes += len(summary)
+		}
+		if !o.reserveProgress(entries, bytes) {
+			return
+		}
+		if newSummary {
+			if state.summaries == nil {
+				state.summaries = make(map[string]bool)
+			}
+			state.summaries[strings.Clone(summary)] = true
+		}
 		if o.taskProgress == nil {
 			o.taskProgress = make(map[string]taskProgressState)
 		}

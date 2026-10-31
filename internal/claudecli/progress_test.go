@@ -1,11 +1,59 @@
 package claudecli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 )
+
+func TestProgressHistoryIsBoundedAcrossResumedCalls(t *testing.T) {
+	progress := 0
+	const started = `{"type":"system","subtype":"task_started","session_id":"native-id","task_id":"helper","run_id":"run"}`
+	summary := func(text string) string {
+		return `{"type":"system","subtype":"task_progress","session_id":"native-id","task_id":"helper","run_id":"run","summary":"` + text + `"}`
+	}
+	first := jsonlOutput{sessionID: "native-id", onProgress: func() { progress++ }, progressEntryLimit: 4}
+	writeChunks(t, &first, started+"\n"+summary("read")+"\n")
+	if first.err != nil || progress != 2 || first.progressEntries != 3 {
+		t.Fatalf("initial progress: count=%d entries=%d err=%v", progress, first.progressEntries, first.err)
+	}
+	resumed := jsonlOutput{sessionID: "native-id", onProgress: first.onProgress,
+		progressSeen: first.progressSeen, taskProgress: first.taskProgress,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries, progressEntryLimit: 4}
+	writeChunks(t, &resumed, started+"\n"+summary("read")+"\n"+summary("write")+"\n")
+	if resumed.err != nil || progress != 3 || resumed.progressEntries != 4 {
+		t.Fatalf("resumed progress: count=%d entries=%d err=%v", progress, resumed.progressEntries, resumed.err)
+	}
+	writeChunks(t, &resumed, summary("review")+"\n")
+	if !errors.Is(resumed.err, aicli.ErrOutputLimit) || progress != 3 || resumed.progressEntries != 4 {
+		t.Fatalf("entry limit: count=%d entries=%d err=%v", progress, resumed.progressEntries, resumed.err)
+	}
+
+	progress = 0
+	limited := jsonlOutput{onProgress: func() { progress++ }, progressByteLimit: 20}
+	writeChunks(t, &limited, `{"type":"system","subtype":"task_started","task_id":"h"}`+"\n")
+	writeChunks(t, &limited, `{"type":"system","subtype":"task_progress","task_id":"h","summary":"short"}`+"\n")
+	if limited.err != nil || limited.progressBytes != 18 || progress != 2 {
+		t.Fatalf("initial byte budget: bytes=%d count=%d err=%v", limited.progressBytes, progress, limited.err)
+	}
+	resumedBytes := jsonlOutput{onProgress: limited.onProgress,
+		progressSeen: limited.progressSeen, taskProgress: limited.taskProgress,
+		progressBytes: limited.progressBytes, progressEntries: limited.progressEntries, progressByteLimit: 20}
+	writeChunks(t, &resumedBytes, `{"type":"system","subtype":"task_progress","task_id":"h","summary":"short"}`+"\n")
+	writeChunks(t, &resumedBytes, `{"type":"system","subtype":"task_progress","task_id":"h","summary":"more"}`+"\n")
+	if !errors.Is(resumedBytes.err, aicli.ErrOutputLimit) || progress != 2 || resumedBytes.progressBytes != 18 {
+		t.Fatalf("resumed byte limit: count=%d bytes=%d err=%v", progress, resumedBytes.progressBytes, resumedBytes.err)
+	}
+	session := Session{progressSeen: resumed.progressSeen, taskProgress: resumed.taskProgress,
+		progressBytes: resumed.progressBytes, progressEntries: resumed.progressEntries}
+	session.NewConversation()
+	if session.progressSeen != nil || session.taskProgress != nil || session.progressBytes != 0 || session.progressEntries != 0 {
+		t.Fatal("new conversation retained progress history")
+	}
+}
 
 func TestTaskStateIgnoresForeignSession(t *testing.T) {
 	const init = `{"type":"system","subtype":"init","session_id":"native-id"}`
