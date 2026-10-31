@@ -60,6 +60,7 @@ type modelRun struct {
 	model, effort     string
 	onEvent           func(aicli.StreamEvent)
 	onInput           func(aicli.PreparedInput)
+	onProgress        func()
 }
 
 func (r *Runner) runOnce(ctx context.Context, request modelRun) (aicli.Result, error) {
@@ -93,7 +94,10 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 		}
 		request.session.codex.OnEvent = request.onEvent
 		request.session.codex.OnInput = request.onInput
-		defer func() { request.session.codex.OnEvent, request.session.codex.OnInput = nil, nil }()
+		request.session.codex.OnProgress = request.onProgress
+		defer func() {
+			request.session.codex.OnEvent, request.session.codex.OnInput, request.session.codex.OnProgress = nil, nil, nil
+		}()
 		return request.session.codex.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":
 		settings := r.Claude

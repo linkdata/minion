@@ -21,6 +21,8 @@ type Session struct {
 	OnEvent func(aicli.StreamEvent)
 	// OnInput receives selected prepared input fields before process start.
 	OnInput func(aicli.PreparedInput)
+	// OnProgress receives new complete native activity while Run is active.
+	OnProgress func()
 
 	bound, used, reset, skillsReady   bool
 	workspace, binary, home, output   string

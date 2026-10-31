@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -15,6 +16,150 @@ import (
 // tool result names a canonical agent path; the activity event supplies its UUID.
 func nativeActivityEvent(ordinal int, thread, turn, kind, child string) string {
 	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"item_completed","thread_id":%q,"turn_id":%q,"item":{"type":"SubAgentActivity","id":"call_fixture","kind":%q,"agent_thread_id":%q,"agent_path":"/root/history_helper"}}}`, ordinal, thread, turn, kind, child)
+}
+
+// Legacy history persists SubAgentActivity directly, without a turn or thread ID.
+func legacyActivityEvent(ordinal int, kind, child string) string {
+	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"activity_fixture","occurred_at_ms":123,"kind":%q,"agent_thread_id":%q,"agent_path":"/root/history_helper"}}`, ordinal, kind, child)
+}
+
+func TestAnonymousHelperActivityRejectsFinalAnswer(t *testing.T) {
+	for _, test := range []struct{ name, event string }{
+		{"legacy activity", legacyActivityEvent(25, "started", "")},
+		{"native activity", nativeActivityEvent(25, "root", "root-turn", "started", "")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeUsageRollout(t, t.TempDir(), "root", "",
+				usageEvent("task_started", "root-turn"), test.event,
+				usageRecord("root", "root-turn", "root-response", 10, 0, 1),
+				usageEvent("task_complete", "root-turn"))
+			budget := int64(maxUsageScanBytes)
+			got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+			if got != (usage.Tokens{Input: 10, Output: 1}) || complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("anonymous helper activity: tokens=%+v complete=%t err=%v", got, complete, err)
+			}
+
+			binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed"}'
+`)
+			putRolloutTemplate(t, binary, "day", []byte(time.Now().Format("2006/01/02")))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			putRolloutTemplate(t, binary, "root", data)
+			var session Session
+			result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if !errors.Is(err, errUnverifiedChildren) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
+				t.Fatalf("anonymous helper answer accepted: result=%+v err=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestUsageSessionLegacyActivitySpawnProofAndMissingChild(t *testing.T) {
+	for _, present := range []bool{true, false} {
+		name := "child present"
+		if !present {
+			name = "child absent"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, home := t.Context(), t.TempDir()
+			writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"),
+				legacyActivityEvent(25, "started", "child"),
+				usageRecord("root", "root-turn", "r1", 20, 0, 0), usageEvent("task_complete", "root-turn"))
+			if present {
+				writeUsageRolloutBoundary(t, home, "child", "root", nil, completedUsageTurn("child", "child-turn", "c1", 5)...)
+			}
+			var session usageSession
+			session.begin(ctx, home, "", time.Now())
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 20}, nil, nil)
+			want := usage.Tokens{Input: 20}
+			if present {
+				want.Input = 25
+			}
+			if got != want || complete != present || present && err != nil || !present && !errors.Is(err, errUnverifiedChildren) || !session.provedSpawns["child"] {
+				t.Fatalf("legacy activity: tokens=%+v complete=%t error=%v proved=%v; want tokens=%+v complete=%t", got, complete, err, session.provedSpawns, want, present)
+			}
+		})
+	}
+}
+
+func TestUsageSessionLegacyActivityNoTurnOnResumeRemainsUnverified(t *testing.T) {
+	for _, present := range []bool{true, false} {
+		name := "child present"
+		if !present {
+			name = "child absent"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, home := t.Context(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root, usageEvent("task_started", "new-root"),
+				legacyActivityEvent(25, "started", "child"),
+				usageRecord("root", "new-root", "r2", 20, 0, 0), usageEvent("task_complete", "new-root"))
+			if present {
+				writeUsageRolloutBoundary(t, home, "child", "root", nil, completedUsageTurn("child", "child-turn", "c1", 5)...)
+			}
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
+			if got != (usage.Tokens{Input: 20}) || complete || !errors.Is(err, errUnverifiedChildren) || session.provedSpawns["child"] {
+				t.Fatalf("no-turn resumed legacy activity was certified: tokens=%+v complete=%t error=%v proved=%v", got, complete, err, session.provedSpawns)
+			}
+		})
+	}
+}
+
+func TestUsageSessionLegacyActivityInFreshHelperNeedsSpawnProof(t *testing.T) {
+	boundary := int64(9)
+	for _, test := range []struct {
+		name          string
+		boundary      *int64
+		activityAt    int
+		currentSpawns map[string]bool
+		want          int64
+		complete      bool
+	}{
+		{name: "inherited without boundary", activityAt: 4, want: 25},
+		{name: "current stdout spawn", activityAt: 12, currentSpawns: map[string]bool{"grandchild": true}, want: 32, complete: true},
+		{name: "bounded helper", boundary: &boundary, activityAt: 12, want: 32, complete: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := t.Context(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root,
+				usageEventAt(21, "task_started", "new-root"),
+				nativeActivityEvent(22, "root", "new-root", "started", "child"),
+				usageRecordAt(23, "root", "new-root", "r2", 20, 0, 0),
+				usageEventAt(24, "task_complete", "new-root"))
+			var childEvents []string
+			if test.activityAt < 10 {
+				childEvents = append(childEvents,
+					usageRecordAt(3, "root", "old-root", "r1", 100, 0, 0),
+					legacyActivityEvent(test.activityAt, "started", "grandchild"))
+			}
+			childEvents = append(childEvents, usageEventAt(10, "task_started", "child-turn"))
+			if test.activityAt >= 10 {
+				childEvents = append(childEvents, legacyActivityEvent(test.activityAt, "started", "grandchild"))
+			}
+			childEvents = append(childEvents,
+				usageRecordAt(13, "child", "child-turn", "c1", 5, 0, 0),
+				usageEventAt(14, "task_complete", "child-turn"))
+			writeUsageRolloutBoundary(t, home, "child", "root", test.boundary, childEvents...)
+			writeUsageRolloutBoundary(t, home, "grandchild", "child", nil, completedUsageTurn("grandchild", "grandchild-turn", "g1", 7)...)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil, test.currentSpawns)
+			if got != (usage.Tokens{Input: test.want}) || complete != test.complete || errors.Is(err, errUnverifiedChildren) == test.complete || test.complete && err != nil || session.provedSpawns["grandchild"] != test.complete || !session.provedSpawns["child"] {
+				t.Fatalf("legacy helper activity: tokens=%+v complete=%t error=%v proved=%v; want input=%d complete=%t", got, complete, err, session.provedSpawns, test.want, test.complete)
+			}
+		})
+	}
 }
 
 func TestUsageSessionNativeSubAgentActivityNewSpawnOnResume(t *testing.T) {

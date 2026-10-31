@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -205,6 +206,48 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
+	provedKnown := map[string]bool{}
+	for path, owned := range s.ownedRollouts {
+		if known, ok := s.accounting.known[owned.meta.ID]; ok && known.path == path && sameRolloutMeta(known, owned.meta) {
+			provedKnown[owned.meta.ID] = true
+		}
+	}
+	var activity *rolloutActivity
+	if s.OnEvent != nil || s.OnProgress != nil {
+		var eventMu sync.Mutex
+		emit := func(event aicli.StreamEvent) {
+			if s.OnEvent == nil {
+				return
+			}
+			eventMu.Lock()
+			s.OnEvent(event)
+			eventMu.Unlock()
+		}
+		emitRollout := func(event aicli.StreamEvent) {
+			original := event.Text
+			event.Text = redactCodexText(event.Text, settings)
+			if original != "" && event.Text == "" || len(event.Text) > aicli.MaxEventBytes ||
+				strings.HasPrefix(event.Kind, "tool") && !json.Valid([]byte(event.Text)) {
+				event.Kind, event.Text = "content_missing", ""
+			}
+			emit(event)
+		}
+		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
+		if s.threadID != "" {
+			activity.root(s.threadID)
+		}
+		output.onEvent = func(event aicli.StreamEvent) {
+			if event.Kind == "identity" {
+				activity.root(event.NativeID)
+			}
+			emit(event)
+		}
+		output.onChild = func(ids []string, spawned bool) {
+			for _, id := range ids {
+				activity.child(id, spawned)
+			}
+		}
+	}
 	if s.OnInput != nil {
 		mode := "fresh"
 		if s.threadID != "" {
@@ -220,14 +263,23 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			s.OnEvent(aicli.StreamEvent{Kind: "identity_unavailable"})
 		}
 	}()
+	if activity != nil {
+		activity.start()
+	}
 	runErr := executil.Run(cmd)
 	if cmd.Process == nil {
+		if activity != nil {
+			activity.finish()
+		}
 		s.accounting.before = nil
 		return result, fmt.Errorf("codex exec: %w", runErr)
 	}
 	s.used = true
 	output.stream.Finish()
 	output.flushPending()
+	if activity != nil {
+		activity.finish()
+	}
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		output.gap("pipe_drain_incomplete")
 	}
@@ -412,6 +464,7 @@ type pendingCodexItem struct {
 type jsonlOutput struct {
 	cancel          context.CancelFunc
 	onEvent         func(aicli.StreamEvent)
+	onChild         func([]string, bool)
 	redact          func(string) string
 	allowIncomplete bool
 	gapSent         bool
@@ -721,6 +774,15 @@ func (o *jsonlOutput) accept(event codexEvent) {
 			}
 			for _, id := range event.Item.ReceiverThreadIDs {
 				o.spawns[id] = true
+			}
+		}
+		if o.onChild != nil && o.threadID != "" {
+			if event.Item.Tool == "spawn_agent" {
+				// A started spawn can already have a live helper. This only permits
+				// discussion capture; rollout cleanup still needs completed proof.
+				o.onChild(event.Item.ReceiverThreadIDs, true)
+			} else if event.Type == "item.completed" || observation {
+				o.onChild(event.Item.ReceiverThreadIDs, false)
 			}
 		}
 	}

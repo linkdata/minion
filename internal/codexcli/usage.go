@@ -54,6 +54,7 @@ type rolloutMeta struct {
 	SessionID    string          `json:"session_id"`
 	ParentID     string          `json:"parent_thread_id"`
 	HistoryStart *int64          `json:"subagent_history_start_ordinal"`
+	HistoryMode  string          `json:"history_mode"`
 	Source       json.RawMessage `json:"source"`
 	path         string
 	duplicate    bool // Confirmed identity collisions remain unsafe after their files age out of discovery.
@@ -183,7 +184,7 @@ func usageFilesWithLimit(ctx context.Context, home, rootID string, started time.
 			before := known[expectedID]
 			meta.duplicate = before.duplicate
 			sameBoundary := before.HistoryStart == nil && meta.HistoryStart == nil || before.HistoryStart != nil && meta.HistoryStart != nil && *before.HistoryStart == *meta.HistoryStart
-			if meta.ID != expectedID || meta.SessionID != before.SessionID || meta.ParentID != before.ParentID || !sameBoundary {
+			if meta.ID != expectedID || meta.SessionID != before.SessionID || meta.ParentID != before.ParentID || meta.HistoryMode != before.HistoryMode || !sameBoundary {
 				complete = false
 				return
 			}
@@ -496,7 +497,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	var children []string
 	seenChildren := map[string]bool{}
 	tooManyChildren := false
-	unattributedSpawn := false
+	unverifiedChild := false
 	appendChildren := func(ids ...string) {
 		if !appendChildIDs(&children, seenChildren, ids...) {
 			tooManyChildren, complete = true, false
@@ -519,13 +520,13 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		}
 	}
 	appendSpawnProof := func(turnID string, ids ...string) {
-		if before != nil && turnID == "" {
-			// A late prior-turn event has no turn identity to exclude on resume.
+		if turnID == "" && (before != nil || meta.ID != rootID && meta.HistoryStart == nil) {
+			// A no-turn event can be from a prior call or copied helper history.
 			for _, id := range ids {
 				if mode.currentSpawns[id] {
 					appendSpawned(id)
 				} else {
-					unattributedSpawn = true
+					unverifiedChild = true
 					appendChildren(id)
 				}
 			}
@@ -672,6 +673,8 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				TurnID      string `json:"turn_id"`
 				ThreadID    string `json:"thread_id"`
 				NewThreadID string `json:"new_thread_id"`
+				AgentID     string `json:"agent_thread_id"`
+				Kind        string `json:"kind"`
 				Item        *struct {
 					Type       string   `json:"type"`
 					Kind       string   `json:"kind"`
@@ -702,10 +705,21 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
 					appendSpawnProof(payload.TurnID, payload.NewThreadID)
 				}
+				if payload.Type == "sub_agent_activity" {
+					if payload.AgentID == "" {
+						complete = false
+						unverifiedChild = true
+					} else if payload.Kind == "started" {
+						appendSpawnProof(payload.TurnID, payload.AgentID)
+					} else {
+						appendChildren(payload.AgentID)
+					}
+				}
 				if payload.Type == "item_completed" && payload.Item != nil {
 					if payload.Item.Type == "SubAgentActivity" {
 						if payload.Item.AgentID == "" {
 							complete = false
+							unverifiedChild = true
 						} else if payload.Item.Kind == "started" {
 							appendSpawnProof(payload.TurnID, payload.Item.AgentID)
 						} else {
@@ -819,7 +833,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && !lifecycleCapped && latestOwnTurn != "" && latestOwnDone && !unfinished {
 		childError = nil
 	}
-	if unattributedSpawn {
+	if unverifiedChild {
 		complete = false
 		childError = joinUsageErrors(childError, errUnverifiedChildren)
 	}
