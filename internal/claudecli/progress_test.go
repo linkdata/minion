@@ -1,6 +1,7 @@
 package claudecli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -101,12 +102,16 @@ func TestOpenTaskRunIndexTracksUniqueRunAcrossResume(t *testing.T) {
 		taskProgress: first.taskProgress, openTaskRuns: first.openTaskRuns,
 		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
 	writeChunks(t, &resumed, strings.Repeat(notice+"\n", 128))
-	if got := resumed.openTaskRun("helper"); resumed.err != nil || got != "" || progress != 6 {
-		t.Fatalf("resumed notices: open=%q progress=%d error=%v", got, progress, resumed.err)
+	if got := resumed.openTaskRun("helper"); resumed.err != nil || got != "run-1" || progress != 5 {
+		t.Fatalf("ambiguous resumed notices: open=%q progress=%d error=%v", got, progress, resumed.err)
 	}
 	writeChunks(t, &resumed, started+"\n"+usage+"\n"+finishSecond+"\n"+notice+"\n")
+	if got := resumed.openTaskRun("helper"); resumed.err != nil || got != "run-1" || progress != 5 {
+		t.Fatalf("ambiguous replay finished open run: open=%q progress=%d error=%v", got, progress, resumed.err)
+	}
+	writeChunks(t, &resumed, `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`+"\n")
 	if got := resumed.openTaskRun("helper"); resumed.err != nil || got != "" || progress != 6 {
-		t.Fatalf("finished run reopened: open=%q progress=%d error=%v", got, progress, resumed.err)
+		t.Fatalf("identified finish lost: open=%q progress=%d error=%v", got, progress, resumed.err)
 	}
 	session := Session{progressSeen: resumed.progressSeen, taskProgress: resumed.taskProgress,
 		openTaskRuns: resumed.openTaskRuns}
@@ -443,7 +448,7 @@ func TestProgressSyntheticCompletionAfterNativeStart(t *testing.T) {
 		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 2},
 		{notice, 2},
 		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`, 3},
-		{notice, 4},
+		{notice, 3},
 		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`, 4},
 	} {
 		writeChunks(t, &resumed, step.line+"\n")
@@ -536,12 +541,12 @@ func TestProgressNativeUsageBeforeSyntheticCompletion(t *testing.T) {
 		t.Fatalf("native completion repeated synthetic completion: count=%d error=%v", got, o.err)
 	}
 	writeChunks(t, &o, `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-2","usage":{"total_tokens":1}}`+"\n"+notice+"\n")
-	if o.err != nil || got != 4 {
-		t.Fatalf("reused task ID lost synthetic completion: count=%d error=%v", got, o.err)
+	if o.err != nil || got != 3 {
+		t.Fatalf("run-less completion finished reused task ID: count=%d error=%v", got, o.err)
 	}
 	writeChunks(t, &o, `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`+"\n")
 	if o.err != nil || got != 4 {
-		t.Fatalf("reused task ID repeated synthetic completion: count=%d error=%v", got, o.err)
+		t.Fatalf("identified reused task completion: count=%d error=%v", got, o.err)
 	}
 }
 
@@ -620,8 +625,8 @@ func TestProgressTaskListUsesRunIdentity(t *testing.T) {
 	}
 	const legacy = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
 	writeChunks(t, &replayed, legacy+"\n"+empty+"\n")
-	if replayed.err != nil || got != 8 {
-		t.Fatalf("legacy task-list fallback: count=%d error=%v", got, replayed.err)
+	if replayed.err != nil || got != 6 {
+		t.Fatalf("run-less replay renewed progress: count=%d error=%v", got, replayed.err)
 	}
 }
 
@@ -726,7 +731,7 @@ func TestProgressRunLessListDoesNotBindFinishedNativeRun(t *testing.T) {
 			for _, step := range []struct {
 				line string
 				want int
-			}{{started, 1}, {finished, 2}, {listed, 3}, {stale, 3}, {empty, 4}} {
+			}{{started, 1}, {finished, 2}, {listed, 2}, {stale, 2}, {empty, 2}} {
 				writeChunks(t, &o, step.line+"\n")
 				if o.err != nil || got != step.want {
 					t.Fatalf("after %s: progress=%d, want %d; error=%v", step.line, got, step.want, o.err)
@@ -874,6 +879,135 @@ func TestProgressRunLessListOverlapDoesNotRetargetNotice(t *testing.T) {
 		if output.err != nil || progress != step.want {
 			t.Fatalf("after %s: progress=%d, want %d; error=%v", step.line, progress, step.want, output.err)
 		}
+	}
+}
+
+func TestProgressDelayedRunLessSignalsDoNotFinishReusedTaskID(t *testing.T) {
+	const startedFirst = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const finishedFirst = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const startedSecond = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`
+	const listedSecond = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-2"}]}`
+	const delayedNotice = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const delayedSyntheticNotice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	const delayedList = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for _, tc := range []struct {
+		name, delayed string
+	}{
+		{"notice", delayedNotice},
+		{"synthetic notice", delayedSyntheticNotice},
+		{"list", delayedList + "\n" + empty},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			writeChunks(t, &o, startedFirst+"\n"+finishedFirst+"\n"+startedSecond+"\n"+listedSecond+"\n")
+			if o.err != nil || progress != 3 || o.pending != 1 {
+				t.Fatalf("setup: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+			}
+			writeChunks(t, &o, tc.delayed+"\n"+successfulResult+"\n")
+			if o.err != nil || progress != 3 || o.pending != 1 || o.completed ||
+				o.progressSeen["task_finish:"+taskRunKey("helper", "run-2")] {
+				t.Fatalf("delayed %s finished live run: progress=%d pending=%d completed=%t error=%v", tc.name, progress, o.pending, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestProgressRunLessReplayBeforeReusedTaskStartKeepsPending(t *testing.T) {
+	progress := 0
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	const startedFirst = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const finishedFirst = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const staleList = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const startedSecond = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`
+	const finishedSecond = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	writeChunks(t, &o, startedFirst+"\n"+finishedFirst+"\n"+staleList+"\n")
+	if o.err != nil || progress != 2 || o.pending != 1 {
+		t.Fatalf("stale list: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	}
+	writeChunks(t, &o, startedSecond+"\n"+empty+"\n"+successfulResult+"\n")
+	if o.err != nil || progress != 3 || o.pending != 1 || o.completed {
+		t.Fatalf("stale clear finished new run: progress=%d pending=%d completed=%t error=%v", progress, o.pending, o.completed, o.err)
+	}
+	writeChunks(t, &o, finishedSecond+"\n"+empty+"\n")
+	if o.err != nil || progress != 4 || o.pending != 0 {
+		t.Fatalf("identified finish did not clear pending: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	}
+}
+
+func TestProgressRunLessReplayAfterNativeSignalsDoesNotRenew(t *testing.T) {
+	const nativeUsage = `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":5}}`
+	const runlessUsage = `{"type":"system","subtype":"task_progress","task_id":"helper","usage":{"total_tokens":5}}`
+	const nativeFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const syntheticStart = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>started</status></task-notification>"}}`
+	progress := 0
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	writeChunks(t, &o, nativeUsage+"\n"+runlessUsage+"\n")
+	if o.err != nil || progress != 1 || o.taskProgress["helper"].totalTokens != 0 {
+		t.Fatalf("run-less usage replay: progress=%d error=%v", progress, o.err)
+	}
+	progress = 0
+	start := jsonlOutput{onProgress: func() { progress++ }}
+	writeChunks(t, &start, nativeUsage+"\n"+nativeFinish+"\n"+syntheticStart+"\n")
+	if start.err != nil || progress != 2 || start.progressSeen["task_start:helper"] {
+		t.Fatalf("synthetic start replay: progress=%d error=%v", progress, start.err)
+	}
+}
+
+func TestProgressAmbiguousOpenRunSurvivesResumeWithNewTask(t *testing.T) {
+	progress := 0
+	first := jsonlOutput{onProgress: func() { progress++ }}
+	for _, id := range []string{"helper", "other"} {
+		writeChunks(t, &first, fmt.Sprintf(`{"type":"system","subtype":"task_started","task_id":%q,"run_id":"run-1"}`, id)+"\n"+
+			fmt.Sprintf(`{"type":"system","subtype":"task_notification","task_id":%q,"run_id":"run-1","status":"completed"}`, id)+"\n")
+		writeChunks(t, &first, fmt.Sprintf(`{"type":"system","subtype":"task_started","task_id":%q,"run_id":"run-2"}`, id)+"\n"+
+			fmt.Sprintf(`{"type":"system","subtype":"task_notification","task_id":%q,"status":"completed"}`, id)+"\n")
+	}
+	writeChunks(t, &first, `{"type":"system","subtype":"task_notification","task_id":"other","run_id":"run-2","status":"completed"}`+"\n")
+	if first.err != nil || !first.ambiguousOpen["helper"] || first.ambiguousOpen["other"] {
+		t.Fatalf("initial ambiguous runs: index=%v error=%v", first.ambiguousOpen, first.err)
+	}
+	session := Session{progressSeen: first.progressSeen, openTaskRuns: first.openTaskRuns,
+		ambiguousOpen: first.ambiguousOpen, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	resumed := jsonlOutput{onProgress: first.onProgress, progressSeen: session.progressSeen,
+		openTaskRuns: session.openTaskRuns, ambiguousOpen: session.ambiguousOpen,
+		progressBytes: session.progressBytes, progressEntries: session.progressEntries}
+	writeChunks(t, &resumed, `{"type":"system","subtype":"task_started","task_id":"other","run_id":"run-3"}`+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"other","run_id":"run-3","status":"completed"}`+"\n"+
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`+"\n"+successfulResult+"\n")
+	if resumed.err != nil || resumed.pending != 1 || resumed.completed || !resumed.ambiguousOpen["helper"] {
+		t.Fatalf("resume forgot older open run: pending=%d completed=%t index=%v error=%v", resumed.pending, resumed.completed, resumed.ambiguousOpen, resumed.err)
+	}
+	session.NewConversation()
+	if session.ambiguousOpen != nil {
+		t.Fatal("new conversation retained ambiguous task index")
+	}
+}
+
+func TestProgressSyntheticSummaryMarkupCannotSupplyTaskFields(t *testing.T) {
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	for _, tc := range []struct {
+		name, notice, setup       string
+		wantProgress, wantPending int
+		wantCompleted             bool
+	}{
+		{"task ID", `<task-notification><status>completed</status><summary>See <task-id>helper</task-id> in output</summary></task-notification>`, started + "\n" + listed + "\n", 1, 1, false},
+		{"status", `<task-notification><task-id>helper</task-id><summary>See <status>stopped</status> in output</summary></task-notification>`, "", 0, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			writeChunks(t, &o, tc.setup)
+			notice, _ := json.Marshal(tc.notice)
+			writeChunks(t, &o, `{"type":"user","isSynthetic":true,"message":{"content":`+string(notice)+`}}`+"\n"+successfulResult+"\n")
+			if o.err != nil || progress != tc.wantProgress || o.pending != tc.wantPending || o.completed != tc.wantCompleted || o.stopped ||
+				o.progressSeen["task_finish:"+taskRunKey("helper", "run-1")] {
+				t.Fatalf("summary supplied %s: progress=%d pending=%d completed=%t stopped=%t error=%v", tc.name, progress, o.pending, o.completed, o.stopped, o.err)
+			}
+		})
 	}
 }
 

@@ -102,15 +102,17 @@ func (a *rolloutActivity) root(id string) {
 // A wait/close observation can reactivate an owned resumed helper. New helper
 // files require a current spawn, not merely an observed receiver ID. A started
 // stdout spawn permits live capture; cleanup still needs completed proof.
-func (a *rolloutActivity) child(id string, spawned bool) {
+func (a *rolloutActivity) child(id string, spawned bool) bool {
 	if id == "" || len(id) > maxItemIDBytes {
 		a.mu.Lock()
 		a.overflow = true
 		a.mu.Unlock()
-		return
+		return false
 	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	if len(a.announced) < maxCodexChildren || a.announced[id] {
+		newSpawn := spawned && !a.spawned[id]
 		if !a.announced[id] || spawned && !a.spawned[id] {
 			a.refresh = true
 		}
@@ -118,10 +120,11 @@ func (a *rolloutActivity) child(id string, spawned bool) {
 		if spawned {
 			a.spawned[id] = true
 		}
+		return newSpawn
 	} else {
 		a.overflow = true
 	}
-	a.mu.Unlock()
+	return false
 }
 
 func (a *rolloutActivity) start() {
@@ -582,7 +585,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	if payload.Type == "collab_agent_spawn_end" {
 		if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
-			a.rolloutSpawn(meta, payload.TurnID, payload.NewThreadID)
+			a.rolloutSpawn(meta, payload.TurnID, payload.NewThreadID, progressed)
 		}
 		return
 	}
@@ -590,7 +593,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		switch payload.Kind {
 		case "started":
 			if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
-				a.rolloutSpawn(meta, payload.TurnID, payload.AgentID)
+				a.rolloutSpawn(meta, payload.TurnID, payload.AgentID, progressed)
 			}
 		case "interacted", "interrupted", "completed":
 			if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
@@ -668,7 +671,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if meta.ID != rootID && payload.Type == "item_completed" && !uncertainOrdinal && proven {
 		switch item.Type {
 		case "Plan", "UserMessage", "AgentMessage":
-			if item.Text != "" || len(item.Content) != 0 {
+			if item.Text != "" || len(item.Content) != 0 || item.Type == "AgentMessage" && len(item.Questions) != 0 {
 				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 			}
 		case "Reasoning", "CommandExecution", "DynamicToolCall", "WebSearch",
@@ -687,7 +690,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if payload.Type == "item_completed" && item.Type == "SubAgentActivity" && a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 		switch item.Kind {
 		case "started":
-			a.rolloutSpawn(meta, payload.TurnID, item.AgentID)
+			a.rolloutSpawn(meta, payload.TurnID, item.AgentID, progressed)
 		case "interacted", "interrupted", "completed":
 			a.rolloutObserve(meta, payload.TurnID, item.AgentID)
 		default:
@@ -696,7 +699,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	if item.Type == "CollabAgentToolCall" && item.Tool == "spawn_agent" && item.Status == "completed" && a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 		for _, id := range item.ReceiverIDs {
-			a.rolloutSpawn(meta, payload.TurnID, id)
+			a.rolloutSpawn(meta, payload.TurnID, id, progressed)
 		}
 	}
 	if meta.ID == rootID {
@@ -1043,7 +1046,8 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 			TurnID string `json:"turn_id"`
 		} `json:"internal_chat_message_metadata_passthrough"`
 		Content []struct {
-			Type, Text string
+			Type, Text       string
+			EncryptedContent string `json:"encrypted_content"`
 		} `json:"content"`
 		Summary []struct {
 			Type, Text string
@@ -1059,6 +1063,7 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	}
 	uncertain := uncertainOrdinal || before != nil && item.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 	kind, text := "", ""
+	hiddenContent := false
 	switch item.Type {
 	case "message":
 		contentType := "output_text"
@@ -1102,6 +1107,7 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		for _, content := range item.Content {
 			if content.Type != "input_text" {
 				a.contentMissing(meta.ID) // Encrypted or unknown content is unavailable.
+				hiddenContent = hiddenContent || content.Type == "encrypted_content" && content.EncryptedContent != ""
 				continue
 			}
 			parts = append(parts, content.Text)
@@ -1126,7 +1132,8 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		kind += "_response_item"
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
-	return (before == nil || item.Metadata.TurnID != "") && (text != "" || item.Type == "reasoning"), item.Metadata.TurnID
+	return (before == nil || item.Metadata.TurnID != "") &&
+		(text != "" || item.Type == "reasoning" || hiddenContent && item.Author == meta.ID), item.Metadata.TurnID
 }
 
 func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {
@@ -1146,7 +1153,7 @@ func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {
 	}
 }
 
-func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string) {
+func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string, progressed *bool) {
 	if id == "" || len(id) > maxItemIDBytes {
 		a.contentMissing(meta.ID)
 		return
@@ -1161,7 +1168,9 @@ func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string) {
 			return
 		}
 	}
-	a.child(id, true)
+	if a.child(id, true) {
+		a.newProgress(meta.ID, rolloutEvent{Type: "child_spawn", Payload: []byte(id)}, 0, progressed)
+	}
 }
 
 func (a *rolloutActivity) rolloutObserve(meta rolloutMeta, turnID, id string) {

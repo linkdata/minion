@@ -260,10 +260,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			}
 			emit(event)
 		}
-		output.onChild = func(ids []string, spawned bool) {
+		output.onChild = func(ids []string, spawned bool) bool {
+			fresh := false
 			for _, id := range ids {
-				activity.child(id, spawned)
+				fresh = activity.child(id, spawned) || fresh
 			}
+			return fresh
 		}
 	}
 	if s.OnInput != nil {
@@ -490,14 +492,15 @@ type pendingCodexItem struct {
 }
 
 type progressCodexItem struct {
-	snapshot  [sha256.Size]byte
-	completed bool
+	snapshot      [sha256.Size]byte
+	completed     bool
+	spawnAdmitted bool
 }
 
 type jsonlOutput struct {
 	cancel            context.CancelFunc
 	onEvent           func(aicli.StreamEvent)
-	onChild           func([]string, bool)
+	onChild           func([]string, bool) bool
 	onProgress        func()
 	redact            func(string) string
 	allowIncomplete   bool
@@ -524,6 +527,7 @@ type jsonlOutput struct {
 	completedItems    map[string]bool
 	progressItems     map[string]progressCodexItem
 	progressItemLimit int // Tests lower the cap; zero uses maxUsageRecords.
+	spawnFresh        bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -702,6 +706,16 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	}
 	snapshot := sha256.Sum256(content)
 	prior, seen := o.progressItems[key]
+	spawnAdmitted := item.Type == "collab_tool_call" && item.Tool == "spawn_agent" &&
+		len(item.ReceiverThreadIDs) != 0 && o.spawnFresh
+	if seen && !prior.completed && spawnAdmitted {
+		prior.spawnAdmitted = true
+		o.progressItems[key] = prior
+	}
+	if item.Type == "collab_tool_call" && item.Tool == "spawn_agent" && len(item.ReceiverThreadIDs) != 0 &&
+		!o.spawnFresh && !(seen && !prior.completed && prior.spawnAdmitted) {
+		return // The rollout already credited this child; stdout did not admit it earlier.
+	}
 	if seen {
 		if item.ID != "" && prior.completed {
 			return
@@ -724,7 +738,8 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		o.stop(fmt.Errorf("%w: Codex progress identity limit reached", aicli.ErrOutputLimit))
 		return
 	}
-	o.progressItems[key] = progressCodexItem{snapshot: snapshot, completed: event.Type == "item.completed"}
+	o.progressItems[key] = progressCodexItem{snapshot: snapshot, completed: event.Type == "item.completed",
+		spawnAdmitted: spawnAdmitted || seen && !prior.completed && prior.spawnAdmitted}
 	o.onProgress()
 }
 
@@ -901,6 +916,7 @@ func (o *jsonlOutput) emit(kind, text string) {
 }
 
 func (o *jsonlOutput) accept(event codexEvent) {
+	o.spawnFresh = true
 	if event.Item != nil && event.Item.Type == "collab_tool_call" {
 		if o.observationOnly == nil {
 			o.observationOnly = make(map[string]bool)
@@ -925,7 +941,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 			if event.Item.Tool == "spawn_agent" {
 				// A started spawn can already have a live helper. This only permits
 				// discussion capture; rollout cleanup still needs completed proof.
-				o.onChild(event.Item.ReceiverThreadIDs, true)
+				o.spawnFresh = o.onChild(event.Item.ReceiverThreadIDs, true)
 			} else if event.Type == "item.completed" || observation {
 				o.onChild(event.Item.ReceiverThreadIDs, false)
 			}

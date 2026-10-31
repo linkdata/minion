@@ -128,7 +128,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var failureTimer *time.Timer
-	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, onProgress: s.OnProgress, progressSeen: s.progressSeen, taskProgress: s.taskProgress, openTaskRuns: s.openTaskRuns, progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, onProgress: s.OnProgress, progressSeen: s.progressSeen, taskProgress: s.taskProgress, openTaskRuns: s.openTaskRuns, ambiguousOpen: s.ambiguousOpen, progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
@@ -167,6 +167,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	s.progressSeen = output.progressSeen
 	s.taskProgress = output.taskProgress
 	s.openTaskRuns = output.openTaskRuns
+	s.ambiguousOpen = output.ambiguousOpen
 	s.progressBytes, s.progressEntries = output.progressBytes, output.progressEntries
 	if ceilingMatched {
 		output.observe("wait_ceiling", "background tasks stopped by Claude's wait ceiling")

@@ -41,6 +41,7 @@ type Session struct {
 	progressSeen    map[string]bool
 	taskProgress    map[string]taskProgressState
 	openTaskRuns    map[string]openTaskRuns
+	ambiguousOpen   map[string]bool
 	progressBytes   int64
 	progressEntries int
 	started, reset  bool
@@ -55,6 +56,7 @@ func (s *Session) NewConversation() {
 	s.progressSeen = nil
 	s.taskProgress = nil
 	s.openTaskRuns = nil
+	s.ambiguousOpen = nil
 	s.progressBytes, s.progressEntries = 0, 0
 	s.reset = s.runtimeDir != ""
 }

@@ -75,11 +75,12 @@ func writeCodexStreamEvent(t *testing.T, output *jsonlOutput, event any) {
 
 func TestJSONLOutputObservesOpenWaitAndCloseWithoutSpawning(t *testing.T) {
 	var observed []string
-	output := jsonlOutput{onChild: func(ids []string, spawned bool) {
+	output := jsonlOutput{onChild: func(ids []string, spawned bool) bool {
 		if spawned {
 			t.Fatalf("wait/close observation claimed spawn ownership: %v", ids)
 		}
 		observed = append(observed, ids...)
+		return false
 	}}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	for _, item := range []struct{ event, tool, id string }{

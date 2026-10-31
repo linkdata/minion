@@ -431,6 +431,51 @@ func TestRolloutActivityAgentMessageHiddenContentDoesNotRenewProgress(t *testing
 	}
 }
 
+func TestRolloutActivityCompletedQuestionsOnlyMessageRenewsProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	completion := func(ordinal, elapsed int) string {
+		item := fmt.Sprintf(`{"type":"AgentMessage","id":"question","content":[],"questions":[{"question":"Which target?"}],"elapsed_time_ms":%d}`, elapsed)
+		return rolloutCompletedItemTurn(ordinal, "child", "child-turn", item)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, completion(9, 100))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first structured question progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, completion(10, 200))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("replayed structured question renewed progress: %d", *progress)
+	}
+}
+
+func TestRolloutActivityEncryptedOnlyAgentMessageRenewsOnce(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	message := func(ordinal int, encrypted string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"encrypted_content","encrypted_content":%q}]}}`, ordinal, encrypted)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, message(9, "private one"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first encrypted helper message progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, message(10, "private two"))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("encrypted-only replay renewed progress: %d", *progress)
+	}
+}
+
 func TestRolloutActivityProgressCountsRepeatedOutputAtDistinctOrdinals(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
@@ -701,6 +746,39 @@ func TestRolloutActivityTaskLifecycleDedupesAcrossOrdinals(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityAttributableNestedSpawnRenewsOnce(t *testing.T) {
+	for _, test := range []struct {
+		name, payload string
+	}{
+		{"native spawn end", `{"type":"collab_agent_spawn_end","thread_id":"child","turn_id":"current","new_thread_id":"grandchild"}`},
+		{"native activity", `{"type":"sub_agent_activity","thread_id":"child","turn_id":"current","kind":"started","agent_thread_id":"grandchild"}`},
+		{"completed activity", `{"type":"item_completed","thread_id":"child","turn_id":"current","item":{"type":"SubAgentActivity","kind":"started","agent_thread_id":"grandchild"}}`},
+		{"completed spawn tool", `{"type":"item_completed","thread_id":"child","turn_id":"current","item":{"type":"CollabAgentToolCall","id":"spawn","tool":"spawn_agent","status":"completed","receiver_thread_ids":["grandchild"]}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			event := func(ordinal int) string {
+				return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":%s}`, ordinal, test.payload)
+			}
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, event(9))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("first nested spawn progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, event(10))
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("replayed nested spawn renewed progress: %d", *progress)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityNativeEventWithoutOrdinalDedupesPayload(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
@@ -729,9 +807,9 @@ func TestRolloutActivityFreshHelperCommunicationWithoutTurnRenewsProgress(t *tes
 		`{"ordinal":8,"type":"inter_agent_communication","payload":{"author":"root","recipient":"child","content":"copied parent history"}}`)
 	activity, _, progress := newActivityTestRecorder(t, home, started)
 	activity.root("root")
-	activity.poll() // The root admitted the helper, but copied history is not work.
-	if *progress != 0 {
-		t.Fatalf("copied parent history renewed progress: %d", *progress)
+	activity.poll() // The root spawn is work; copied helper history is not.
+	if *progress != 1 {
+		t.Fatalf("root spawn progress=%d, want 1", *progress)
 	}
 	message := func(ordinal int, author string) string {
 		return fmt.Sprintf(`{"ordinal":%d,"type":"inter_agent_communication","payload":{"author":%q,"recipient":"root","content":"still working"}}`, ordinal, author)
@@ -739,18 +817,115 @@ func TestRolloutActivityFreshHelperCommunicationWithoutTurnRenewsProgress(t *tes
 	first := message(10, "child")
 	appendUsageEvents(t, child, first)
 	activity.poll()
-	if *progress != 1 {
-		t.Fatalf("first child-authored message progress=%d, want 1", *progress)
+	if *progress != 2 {
+		t.Fatalf("first child-authored message progress=%d, want 2", *progress)
 	}
 	appendUsageEvents(t, child, message(11, "child"))
 	activity.poll()
-	if *progress != 2 {
-		t.Fatalf("second child-authored message progress=%d, want 2", *progress)
+	if *progress != 3 {
+		t.Fatalf("second child-authored message progress=%d, want 3", *progress)
 	}
 	appendUsageEvents(t, child, first, message(12, "other"))
 	activity.poll()
-	if *progress != 2 {
+	if *progress != 3 {
 		t.Fatalf("replayed or foreign-authored message renewed progress: %d", *progress)
+	}
+}
+
+func TestRolloutActivityRootSpawnAfterStdoutDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", rolloutSpawn(9, "child"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true) // Root stdout already reported this spawn.
+	activity.poll()
+	if *progress != 0 {
+		t.Fatalf("duplicate root rollout spawn renewed progress: %d", *progress)
+	}
+}
+
+func TestRootSpawnProgressDedupesRolloutAndStdout(t *testing.T) {
+	for _, test := range []struct {
+		name, first          string
+		lifecycle, delayedID bool
+		want                 int
+	}{
+		{"rollout first", "rollout", false, false, 1},
+		{"rollout first lifecycle", "rollout", true, false, 1},
+		{"stdout first", "stdout", false, false, 1},
+		{"stdout only", "", false, false, 1},
+		{"stdout lifecycle", "", true, false, 2},
+		{"stdout delayed child ID", "", true, true, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			rootEvents := []string{usageEventAt(8, "task_started", "root-turn")}
+			if test.first != "" {
+				rootEvents = append(rootEvents, rolloutSpawn(9, "child"))
+			}
+			writeUsageRollout(t, home, "root", "", rootEvents...)
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			output := jsonlOutput{onProgress: func() { *progress++ }, onChild: func(ids []string, spawned bool) bool {
+				fresh := false
+				for _, id := range ids {
+					fresh = activity.child(id, spawned) || fresh
+				}
+				return fresh
+			}}
+			_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n"))
+			stdout := func() {
+				if test.lifecycle {
+					start := `{"type":"item.started","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child"]}}`
+					if test.delayedID {
+						start = `{"type":"item.started","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent"}}`
+					}
+					_, _ = output.Write([]byte(start + "\n"))
+				}
+				_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child"]}}` + "\n"))
+			}
+			if test.first == "rollout" {
+				activity.poll()
+				stdout()
+			} else {
+				stdout()
+				activity.poll()
+			}
+			if *progress != test.want {
+				t.Fatalf("root spawn progress=%d, want %d", *progress, test.want)
+			}
+		})
+	}
+}
+
+func TestRootSpawnProgressDoesNotReplayAfterStdoutStartWithoutChildID(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", rolloutSpawn(9, "child"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	output := jsonlOutput{onProgress: func() { *progress++ }, onChild: func(ids []string, spawned bool) bool {
+		fresh := false
+		for _, id := range ids {
+			fresh = activity.child(id, spawned) || fresh
+		}
+		return fresh
+	}}
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"root"}`,
+		`{"type":"item.started","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent"}}`,
+	} {
+		_, _ = output.Write([]byte(line + "\n"))
+	}
+	if *progress != 1 {
+		t.Fatalf("stdout tool start progress=%d, want 1", *progress)
+	}
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("rollout child start progress=%d, want 2", *progress)
+	}
+	_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child"]}}` + "\n"))
+	if *progress != 2 {
+		t.Fatalf("stdout completion replayed rollout child start: %d", *progress)
 	}
 }
 
@@ -782,6 +957,39 @@ func TestRolloutActivityResumedHelperCommunicationRequiresTurn(t *testing.T) {
 	activity.poll()
 	if progress != 1 {
 		t.Fatalf("resumed message with current turn progress=%d, want 1", progress)
+	}
+}
+
+func TestRolloutActivityResumedHelperOldCommunicationTurnDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "root-response", 1)...)
+	boundary := int64(9)
+	message := func(ordinal int, turn string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"still working","internal_chat_message_metadata_passthrough":{"turn_id":%q}}}`, ordinal, turn)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		message(8, "inherited-child"),
+		`{"ordinal":9,"type":"inter_agent_communication","payload":{"author":"root","recipient":"child","content":"instructions","internal_chat_message_metadata_passthrough":{"turn_id":"foreign-root"}}}`,
+		message(10, "old-child"))
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	if before := session.before["child"]; before == nil || !before.turns["old-child"] || before.turns["inherited-child"] || before.turns["foreign-root"] {
+		t.Fatalf("baseline inter-agent turn ownership: %+v", before)
+	}
+	appendUsageEvents(t, child, message(11, "old-child"))
+	progress := 0
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil, nil,
+		func() { progress++ })
+	activity.root("root")
+	activity.child("child", false)
+	activity.poll()
+	if progress != 0 {
+		t.Fatalf("reappended old inter-agent turn renewed progress: %d", progress)
+	}
+	appendUsageEvents(t, child, message(12, "new-child"))
+	activity.poll()
+	if progress != 1 {
+		t.Fatalf("new inter-agent turn progress=%d, want 1", progress)
 	}
 }
 
