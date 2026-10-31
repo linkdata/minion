@@ -119,6 +119,40 @@ func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputIDLessCompletedOnlyCommandReplayIsAmbiguous(t *testing.T) {
+	const completed = `{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`
+	for _, replay := range []struct {
+		name string
+		line string
+	}{
+		{"identical", completed},
+		{"metadata only", `{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS","elapsed_time_ms":300}}`},
+	} {
+		t.Run(replay.name, func(t *testing.T) {
+			progress, cancellations := 0, 0
+			var events []aicli.StreamEvent
+			output := jsonlOutput{
+				cancel:     func() { cancellations++ },
+				onEvent:    func(event aicli.StreamEvent) { events = append(events, event) },
+				onProgress: func() { progress++ },
+			}
+			for _, line := range []string{
+				`{"type":"thread.started","thread_id":"root"}`,
+				completed,
+				replay.line,
+				`{"type":"item.started","item":{"type":"command_execution","command":"later command"}}`,
+			} {
+				_, _ = output.Write([]byte(line + "\n"))
+			}
+			if progress != 1 || cancellations != 1 || !output.failed || output.stopErr == nil ||
+				!strings.Contains(output.stopErr.Error(), "progress identity ambiguous") ||
+				len(events) != 3 || events[1].Kind != "tool" || events[2].Kind != "output_stop" {
+				t.Fatalf("ambiguous completion was accepted or replayed: progress=%d cancellations=%d stop=%v events=%+v", progress, cancellations, output.stopErr, events)
+			}
+		})
+	}
+}
+
 func TestJSONLOutputProgressIdentityCapStopsRun(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }, progressItemLimit: 1}

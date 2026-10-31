@@ -40,6 +40,7 @@ type Session struct {
 	usageGap        bool
 	progressSeen    map[string]bool
 	taskProgress    map[string]taskProgressState
+	openTaskRuns    map[string]openTaskRuns
 	progressBytes   int64
 	progressEntries int
 	started, reset  bool
@@ -53,6 +54,7 @@ func (s *Session) NewConversation() {
 	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
 	s.progressSeen = nil
 	s.taskProgress = nil
+	s.openTaskRuns = nil
 	s.progressBytes, s.progressEntries = 0, 0
 	s.reset = s.runtimeDir != ""
 }

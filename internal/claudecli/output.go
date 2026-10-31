@@ -135,6 +135,11 @@ type taskProgressState struct {
 	toolUses    int64
 }
 
+type openTaskRuns struct {
+	only string
+	many map[string]struct{}
+}
+
 type jsonlOutput struct {
 	sessionID           string
 	apiKey              string
@@ -146,6 +151,7 @@ type jsonlOutput struct {
 	streamSeenBytes     int
 	progressTasks       map[string]bool
 	taskProgress        map[string]taskProgressState
+	openTaskRuns        map[string]openTaskRuns
 	progressBytes       int64
 	progressEntries     int
 	progressByteLimit   int64 // Tests may lower the cumulative history limit.
@@ -892,6 +898,17 @@ func (o *jsonlOutput) rememberProgress(key string) bool {
 		o.progressSeen = make(map[string]bool)
 	}
 	o.progressSeen[key] = true
+	if o.openTaskRuns != nil {
+		if task, ok := strings.CutPrefix(key, "task_start:"); ok {
+			if id, runID, ok := strings.Cut(task, "\x00"); ok {
+				o.addOpenTaskRun(id, runID)
+			}
+		} else if task, ok := strings.CutPrefix(key, "task_finish:"); ok {
+			if id, runID, ok := strings.Cut(task, "\x00"); ok {
+				o.removeOpenTaskRun(id, runID)
+			}
+		}
+	}
 	return true
 }
 
@@ -920,30 +937,62 @@ func taskRunKey(id, runID string) string {
 }
 
 func (o *jsonlOutput) openTaskRun(id string) string {
-	// A run-less notice can only identify a run when exactly one is unfinished.
-	runPrefix := id + "\x00"
-	var found string
-	consider := func(runID string) bool {
-		if o.progressSeen["task_finish:"+runPrefix+runID] {
-			return true
+	if o.openTaskRuns == nil {
+		// Build once from bounded history when the first run-less notice arrives.
+		o.openTaskRuns = make(map[string]openTaskRuns)
+		for key := range o.progressSeen {
+			if task, ok := strings.CutPrefix(key, "task_start:"); ok {
+				if taskID, runID, ok := strings.Cut(task, "\x00"); ok {
+					o.addOpenTaskRun(taskID, runID)
+				}
+			}
 		}
-		if found != "" && found != runID {
-			return false
-		}
-		found = runID
-		return true
-	}
-	for key := range o.progressSeen {
-		if runID, ok := strings.CutPrefix(key, "task_start:"+runPrefix); ok && !consider(runID) {
-			return ""
+		for key := range o.taskProgress {
+			if taskID, runID, ok := strings.Cut(key, "\x00"); ok {
+				o.addOpenTaskRun(taskID, runID)
+			}
 		}
 	}
-	for key := range o.taskProgress {
-		if runID, ok := strings.CutPrefix(key, runPrefix); ok && !consider(runID) {
-			return ""
-		}
+	runs := o.openTaskRuns[id]
+	if runs.many != nil {
+		return "" // More than one unfinished run is ambiguous.
 	}
-	return found
+	return runs.only
+}
+
+func (o *jsonlOutput) addOpenTaskRun(id, runID string) {
+	if runID == "" || o.progressSeen["task_finish:"+taskRunKey(id, runID)] {
+		return
+	}
+	runs := o.openTaskRuns[id]
+	if runs.many != nil {
+		runs.many[runID] = struct{}{}
+	} else if runs.only == "" {
+		runs.only = runID
+		o.openTaskRuns[id] = runs
+	} else if runs.only != runID {
+		runs.many = map[string]struct{}{runs.only: {}, runID: {}}
+		runs.only = ""
+		o.openTaskRuns[id] = runs
+	}
+}
+
+func (o *jsonlOutput) removeOpenTaskRun(id, runID string) {
+	runs := o.openTaskRuns[id]
+	if runs.many != nil {
+		delete(runs.many, runID)
+		if len(runs.many) == 1 {
+			for remaining := range runs.many {
+				runs.only = remaining
+			}
+			runs.many = nil
+			o.openTaskRuns[id] = runs
+		} else if len(runs.many) == 0 {
+			delete(o.openTaskRuns, id)
+		}
+	} else if runs.only == runID {
+		delete(o.openTaskRuns, id)
+	}
 }
 
 func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
@@ -975,6 +1024,9 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 			// Bind one synthetic notice to its native run without renewing progress.
 			if o.reserveProgress(2, len(finish)+len(match)) {
 				o.progressSeen[finish], o.progressSeen[match] = true, true
+				if o.openTaskRuns != nil {
+					o.removeOpenTaskRun(id, runID)
+				}
 			}
 			return
 		}
@@ -1016,6 +1068,9 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 			o.taskProgress = make(map[string]taskProgressState)
 		}
 		o.taskProgress[key] = state
+		if !knownTask && o.openTaskRuns != nil && e.RunID != "" {
+			o.addOpenTaskRun(e.TaskID, e.RunID)
+		}
 		o.onProgress()
 	}
 }

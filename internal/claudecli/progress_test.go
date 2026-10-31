@@ -2,6 +2,7 @@ package claudecli
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -52,6 +53,66 @@ func TestProgressHistoryIsBoundedAcrossResumedCalls(t *testing.T) {
 	session.NewConversation()
 	if session.progressSeen != nil || session.taskProgress != nil || session.progressBytes != 0 || session.progressEntries != 0 {
 		t.Fatal("new conversation retained progress history")
+	}
+}
+
+func TestOpenTaskRunIndexTracksUniqueRunAcrossResume(t *testing.T) {
+	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const usage = `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-2","usage":{"total_tokens":1}}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-3"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const finishSecond = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`
+	var progress int
+	first := jsonlOutput{onProgress: func() { progress++ }}
+	writeChunks(t, &first, started+"\n")
+	if got := first.openTaskRun("helper"); got != "run-1" {
+		t.Fatalf("started run: got %q", got)
+	}
+	for i := range 1024 {
+		if !first.rememberProgress(fmt.Sprintf("assistant:unrelated-%d", i)) {
+			t.Fatalf("unrelated history entry %d was not recorded: %v", i, first.err)
+		}
+	}
+	if len(first.openTaskRuns) != 1 {
+		t.Fatalf("unrelated history entered run index: %d tasks", len(first.openTaskRuns))
+	}
+	writeChunks(t, &first, usage+"\n"+listed+"\n")
+	if got := len(first.openTaskRuns["helper"].many); got != 3 {
+		t.Fatalf("task list did not add third run: %d", got)
+	}
+	writeChunks(t, &first, empty+"\n")
+	if got := len(first.openTaskRuns["helper"].many); got != 2 {
+		t.Fatalf("task list did not finish third run: %d", got)
+	}
+	if got := first.openTaskRun("helper"); got != "" {
+		t.Fatalf("two unfinished runs matched as %q", got)
+	}
+	writeChunks(t, &first, strings.Repeat(notice+"\n", 128))
+	if progress != 4 || first.err != nil {
+		t.Fatalf("ambiguous notices renewed progress: %d, error=%v", progress, first.err)
+	}
+	writeChunks(t, &first, finishSecond+"\n")
+	if got := first.openTaskRun("helper"); got != "run-1" {
+		t.Fatalf("run after finish: got %q, index=%+v, progress=%d, err=%v", got, first.openTaskRuns, progress, first.err)
+	}
+
+	resumed := jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen,
+		taskProgress: first.taskProgress, openTaskRuns: first.openTaskRuns,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &resumed, strings.Repeat(notice+"\n", 128))
+	if got := resumed.openTaskRun("helper"); resumed.err != nil || got != "" || progress != 6 {
+		t.Fatalf("resumed notices: open=%q progress=%d error=%v", got, progress, resumed.err)
+	}
+	writeChunks(t, &resumed, started+"\n"+usage+"\n"+finishSecond+"\n"+notice+"\n")
+	if got := resumed.openTaskRun("helper"); resumed.err != nil || got != "" || progress != 6 {
+		t.Fatalf("finished run reopened: open=%q progress=%d error=%v", got, progress, resumed.err)
+	}
+	session := Session{progressSeen: resumed.progressSeen, taskProgress: resumed.taskProgress,
+		openTaskRuns: resumed.openTaskRuns}
+	session.NewConversation()
+	if session.openTaskRuns != nil || session.progressSeen != nil || session.taskProgress != nil {
+		t.Fatal("new conversation retained task run history")
 	}
 }
 
