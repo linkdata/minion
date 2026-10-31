@@ -75,7 +75,7 @@ func writeCodexStreamEvent(t *testing.T, output *jsonlOutput, event any) {
 
 func TestJSONLOutputProgressSnapshotsAndCompletedItems(t *testing.T) {
 	var got []aicli.StreamEvent
-	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, allowIncomplete: true}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "message", "type": "agent_message", "text": "old"}})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "message", "type": "agent_message", "text": "new snapshot"}})
@@ -98,48 +98,26 @@ func TestJSONLOutputProgressSnapshotsAndCompletedItems(t *testing.T) {
 	}
 }
 
-func TestJSONLOutputFailedProgressKeepsOnlySafeAssistantPrefix(t *testing.T) {
+func TestJSONLOutputKnownCredentialSuppressesOpenAssistant(t *testing.T) {
 	const key = "tail-secret"
-	settings := config.CodexConfig{APIKey: key}
 	var got []aicli.StreamEvent
-	output := jsonlOutput{
-		onEvent:    func(event aicli.StreamEvent) { got = append(got, event) },
-		redact:     func(text string) string { return redactCodexText(text, settings) },
-		incomplete: func(text string) string { return incompleteAssistantText(text, settings) },
-	}
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "message", "type": "agent_message", "text": "obsolete tail-se"}})
-	message := "Useful work: " + strings.Repeat("A", 200) + " credential=" + key + " " + strings.Repeat("B", 200) + " tail-se"
+	message := "Useful work: " + strings.Repeat("A", 200) + " credential=tail-se " + strings.Repeat("B", 200) + " " + key
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "message", "type": "agent_message", "text": message}})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "turn.failed", "message": "stopped"})
 	output.stream.Finish()
 	output.flushPending()
-	if len(got) != 2 || got[1].Kind != "assistant_incomplete" || got[1].NativeID != "root" ||
-		!strings.HasPrefix(got[1].Text, "Useful work:") || !strings.Contains(got[1].Text, "[redacted]") ||
-		strings.Contains(got[1].Text, key) || strings.Contains(got[1].Text, "tail-se") || strings.Contains(got[1].Text, "obsolete") {
-		t.Fatalf("unsafe or stale partial progress: %+v", got)
-	}
-}
-
-func TestIncompleteAssistantTextRedactsKeyBeforeCutoff(t *testing.T) {
-	const key = "ABCDEFGHIJ"
-	// Cutting this raw snapshot first would leave the initial A in the saved prefix.
-	text := "safe" + key + strings.Repeat("z", 110)
-	got := incompleteAssistantText(text, config.CodexConfig{APIKey: key})
-	if !strings.HasPrefix(got, "safe") || strings.Contains(got, "A") {
-		t.Fatalf("cutoff exposed a partial configured key: %q", got)
+	if !slices.Equal(got, []aicli.StreamEvent{{NativeID: "root", Kind: "identity"}, {NativeID: "root", Kind: "content_missing"}}) {
+		t.Fatalf("known key prefix in middle of open snapshot escaped: %+v", got)
 	}
 }
 
 func TestJSONLOutputUnsafeOpenItemsUseContentMissing(t *testing.T) {
 	const key = "split-secret"
-	settings := config.CodexConfig{APIKey: key}
 	var got []aicli.StreamEvent
-	output := jsonlOutput{
-		onEvent:    func(event aicli.StreamEvent) { got = append(got, event) },
-		redact:     func(text string) string { return redactCodexText(text, settings) },
-		incomplete: func(text string) string { return incompleteAssistantText(text, settings) },
-	}
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "message", "type": "agent_message", "text": "split-"}})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "message", "type": "agent_message", "text": "split-se"}})
@@ -155,7 +133,7 @@ func TestJSONLOutputUnsafeOpenItemsUseContentMissing(t *testing.T) {
 
 func TestJSONLOutputBoundsPendingProgress(t *testing.T) {
 	var got []aicli.StreamEvent
-	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, allowIncomplete: true}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	for i := range maxPendingItems + 1 {
 		writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": fmt.Sprintf("item-%d", i), "type": "agent_message", "text": "x"}})
@@ -239,7 +217,7 @@ func TestJSONLOutputOpenReasoningMarksGapWithoutHiddenText(t *testing.T) {
 
 func TestJSONLOutputFlushesPendingInFirstSeenOrder(t *testing.T) {
 	var got []aicli.StreamEvent
-	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, incomplete: func(text string) string { return text }}
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, allowIncomplete: true}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "z-first", "type": "agent_message", "text": "first"}})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "a-second", "type": "agent_message", "text": "second"}})
@@ -256,7 +234,7 @@ func TestJSONLOutputFlushesPendingInFirstSeenOrder(t *testing.T) {
 
 func TestJSONLOutputOpenToolUpdatesReplaceSnapshot(t *testing.T) {
 	var got []aicli.StreamEvent
-	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, incompleteTool: func(text string) string { return text }}
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, allowIncomplete: true}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "tool", "type": "command_execution", "aggregated_output": "old"}})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "tool", "type": "command_execution", "aggregated_output": "new"}})
@@ -300,29 +278,41 @@ exit 1
 	}
 }
 
-func TestSessionStreamRetainsSafeProgressAfterNativeFailure(t *testing.T) {
+func TestSessionStreamOpenAssistantRequiresNoKnownCredential(t *testing.T) {
 	const key = "native-secret"
-	message := "Useful work: " + strings.Repeat("A", 220) + " " + key + " " + strings.Repeat("B", 220) + " native-se"
+	message := "Useful work: " + strings.Repeat("A", 80) + " native-se " + strings.Repeat("B", 80) + " " + key
 	item, err := json.Marshal(map[string]any{"type": "item.updated", "item": map[string]any{"id": "message", "type": "agent_message", "text": message}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '"+string(item)+"' '{\"type\":\"turn.failed\",\"message\":\"stopped\"}'\nexit 1\n")
-	var session Session
-	t.Cleanup(func() {
-		if err := session.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	var got []aicli.StreamEvent
-	session.OnEvent = func(event aicli.StreamEvent) { got = append(got, event) }
-	result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
-	if err == nil || result.Answer != "" || len(got) != 2 ||
-		got[0] != (aicli.StreamEvent{NativeID: "root", Kind: "identity"}) ||
-		got[1].NativeID != "root" || got[1].Kind != "assistant_incomplete" ||
-		!strings.HasPrefix(got[1].Text, "Useful work:") || !strings.Contains(got[1].Text, "[redacted]") ||
-		strings.Contains(got[1].Text, key) || strings.Contains(got[1].Text, "native-se") {
-		t.Fatalf("native failed-progress capture: result=%+v error=%v events=%+v", result, err, got)
+	for _, test := range []struct {
+		name, key, ambient, wantKind string
+	}{
+		{name: "no credential", wantKind: "assistant_incomplete"},
+		{name: "configured credential", key: key, wantKind: "content_missing"},
+		{name: "ambient native access token", ambient: key, wantKind: "content_missing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CODEX_API_KEY", "")
+			t.Setenv("CODEX_ACCESS_TOKEN", test.ambient)
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '"+string(item)+"' '{\"type\":\"turn.failed\",\"message\":\"stopped\"}'\nexit 1\n")
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			var got []aicli.StreamEvent
+			session.OnEvent = func(event aicli.StreamEvent) { got = append(got, event) }
+			result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: test.key})
+			if err == nil || result.Answer != "" || len(got) != 2 ||
+				got[0] != (aicli.StreamEvent{NativeID: "root", Kind: "identity"}) ||
+				got[1].NativeID != "root" || got[1].Kind != test.wantKind ||
+				test.wantKind == "assistant_incomplete" && got[1].Text != message ||
+				test.wantKind == "content_missing" && got[1].Text != "" {
+				t.Fatalf("native open-assistant capture: result=%+v error=%v events=%+v", result, err, got)
+			}
+		})
 	}
 }
 

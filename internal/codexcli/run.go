@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
@@ -183,16 +182,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent,
-		redact:     func(text string) string { return redactCodexText(text, settings) },
-		incomplete: func(text string) string { return incompleteAssistantText(text, settings) },
-	}
-	if !slices.ContainsFunc(codexSecrets(settings), func(secret string) bool { return secret != "" }) {
-		output.incompleteTool = func(text string) string {
-			if len(text) <= aicli.MaxEventBytes && json.Valid([]byte(text)) {
-				return text
-			}
-			return ""
-		}
+		redact:          func(text string) string { return redactCodexText(text, settings) },
+		allowIncomplete: !slices.ContainsFunc(codexSecrets(settings), func(secret string) bool { return secret != "" }),
 	}
 	stderr := bounded.Tail{}
 	cmd.Stdout = &output
@@ -422,8 +413,7 @@ type jsonlOutput struct {
 	cancel          context.CancelFunc
 	onEvent         func(aicli.StreamEvent)
 	redact          func(string) string
-	incomplete      func(string) string
-	incompleteTool  func(string) string
+	allowIncomplete bool
 	gapSent         bool
 	missingSent     bool
 	threadID        string
@@ -564,9 +554,9 @@ func (o *jsonlOutput) recordProgress(event codexEvent, line []byte) {
 		return
 	}
 	text := ""
-	if item.Type == "agent_message" {
+	if o.allowIncomplete && item.Type == "agent_message" {
 		text = item.Text
-	} else if codexToolItem(item.Type) && o.incompleteTool != nil {
+	} else if o.allowIncomplete && codexToolItem(item.Type) {
 		var selected struct {
 			Item json.RawMessage `json:"item"`
 		}
@@ -647,17 +637,13 @@ func (o *jsonlOutput) flushPending() {
 	slices.SortFunc(ids, func(a, b string) int { return cmp.Compare(o.pending[a].order, o.pending[b].order) })
 	for _, id := range ids {
 		item := o.pending[id]
-		if item.kind == "agent_message" && item.text != "" && o.incomplete != nil {
-			if text := o.incomplete(item.text); text != "" && len(text) <= aicli.MaxEventBytes {
-				o.emit("assistant_incomplete", text)
-				continue
-			}
+		if o.allowIncomplete && item.kind == "agent_message" && item.text != "" {
+			o.emit("assistant_incomplete", item.text)
+			continue
 		}
-		if codexToolItem(item.kind) && item.text != "" && o.incompleteTool != nil {
-			if text := o.incompleteTool(item.text); text != "" {
-				o.emit("tool_incomplete", text)
-				continue
-			}
+		if o.allowIncomplete && codexToolItem(item.kind) && json.Valid([]byte(item.text)) {
+			o.emit("tool_incomplete", item.text)
+			continue
 		}
 		o.contentMissing()
 	}
@@ -670,34 +656,6 @@ func (o *jsonlOutput) contentMissing() {
 		o.missingSent, o.gapSent = true, true
 		o.onEvent(aicli.StreamEvent{NativeID: o.threadID, Kind: "content_missing"})
 	}
-}
-
-func incompleteAssistantText(text string, settings config.CodexConfig) string {
-	text = redactCodexText(text, settings)
-	if text == "" {
-		return ""
-	}
-	// A partial key may end at any byte of the current snapshot. Twelve bytes
-	// per rune covers JSON surrogate pairs and the other escaped key forms.
-	cut := len(text)
-	for _, secret := range codexSecrets(settings) {
-		if secret == "" {
-			continue
-		}
-		runes := utf8.RuneCountInString(secret)
-		if runes > len(text)/12 {
-			return ""
-		}
-		holdback := max(12*runes, len(secret)) - 1
-		if holdback >= len(text) {
-			return ""
-		}
-		cut = min(cut, len(text)-holdback)
-	}
-	for cut > 0 && cut < len(text) && !utf8.RuneStart(text[cut]) {
-		cut--
-	}
-	return redactCodexText(text[:cut], settings)
 }
 
 func codexToolItem(kind string) bool {

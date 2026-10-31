@@ -1,15 +1,18 @@
 package action
 
 import (
+	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 )
 
-func TestRunnerCodexRetainsSafePartialProgressAfterFailure(t *testing.T) {
+func TestRunnerCodexMarksConfiguredCredentialPartialContentMissing(t *testing.T) {
 	const secret = "fixture-very-private-key"
 	progress := strings.Repeat("ordinary progress ", 40)
 	lines := []string{
@@ -47,13 +50,9 @@ func TestRunnerCodexRetainsSafePartialProgressAfterFailure(t *testing.T) {
 			t.Fatalf("raw progress or credential reached a record: %+v", event)
 		}
 		switch event.EventSource {
-		case "codex.assistant_incomplete":
-			if event.Agent != "native" || !strings.Contains(event.Text, "ordinary progress") {
-				t.Fatalf("safe assistant prefix was lost: %+v", event)
-			}
 		case "codex.content_missing":
 			if event.Text != "" {
-				t.Fatalf("unsafe open tool content was retained: %+v", event)
+				t.Fatalf("unsafe open content was retained: %+v", event)
 			}
 		case "codex.tool":
 			if !strings.Contains(event.Text, "[redacted]") {
@@ -61,9 +60,48 @@ func TestRunnerCodexRetainsSafePartialProgressAfterFailure(t *testing.T) {
 			}
 		}
 	}
-	for _, source := range []string{"codex.tool", "codex.assistant_incomplete", "codex.content_missing", "codex.call.failed"} {
+	for _, source := range []string{"codex.tool", "codex.content_missing", "codex.call.failed"} {
 		if !seen[source] {
 			t.Fatalf("missing %s in records: %+v", source, saved)
 		}
+	}
+	if seen["codex.assistant_incomplete"] || seen["codex.tool_incomplete"] {
+		t.Fatalf("configured-key call retained open content: %+v", saved)
+	}
+}
+
+func TestRunnerSuppressesIncompleteContentForOtherProviderCredential(t *testing.T) {
+	const secret = "other-provider-private-key"
+	job := testJob(command.Comment)
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	failure := errors.New("provider stopped")
+	runner := Runner{WorkRoot: t.TempDir(), Claude: config.ClaudeConfig{APIKey: secret}, eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant_incomplete", Text: "ordinary work " + secret[:10] + " then more text"})
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "tool_incomplete", Text: `{"type":"command_execution","command":"echo ` + secret[:10] + ` then more"}`})
+			return aicli.Result{}, failure
+		}}
+	_, err := runner.Run(t.Context(), job)
+	if !errors.Is(err, failure) || queue.finish() {
+		t.Fatalf("failed call was accepted: %v", err)
+	}
+	missing := 0
+	for _, event := range saved {
+		if strings.Contains(event.Text, secret[:10]) || strings.HasSuffix(event.EventSource, "_incomplete") {
+			t.Fatalf("other provider credential fragment escaped: %+v", event)
+		}
+		if event.EventSource == "codex.content_missing" {
+			if event.Text != "" || event.Agent != "native" {
+				t.Fatalf("incomplete content was not converted to metadata: %+v", event)
+			}
+			missing++
+		}
+	}
+	if missing != 2 {
+		t.Fatalf("missing content records = %d, want 2: %+v", missing, saved)
 	}
 }
