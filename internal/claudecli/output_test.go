@@ -254,9 +254,9 @@ func TestOutputBackgroundTasks(t *testing.T) {
 		{name: "answer after late runless failure", after: runlessFailure + "\n" + successfulResult},
 		{name: "answer after late synthetic completion", after: syntheticFinish + "\n" + successfulResult},
 		{name: "tagged finish replay after answer", before: taggedFinish, after: taggedFinish},
-		{name: "runless failure replay after answer", before: runlessFailure, after: runlessFailure},
-		{name: "synthetic finish replay after answer", before: syntheticFinish, after: syntheticFinish},
-		{name: "synthetic replay of tagged finish", before: taggedFinish, after: syntheticFinish},
+		{name: "runless failure without replay ID needs new answer", before: runlessFailure, after: runlessFailure, fails: true},
+		{name: "synthetic finish without replay ID needs new answer", before: syntheticFinish, after: syntheticFinish, fails: true},
+		{name: "synthetic notice cannot prove tagged finish replay", before: taggedFinish, after: syntheticFinish, fails: true},
 		{name: "user text is not task state", after: `{"type":"user","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,6 +268,35 @@ func TestOutputBackgroundTasks(t *testing.T) {
 			o.finish()
 			if (o.err != nil || !o.completed) != tc.fails || cancelled != (o.err != nil) || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 				t.Fatalf("output = %+v, error %v, cancelled %v", o.result, o.err, cancelled)
+			}
+		})
+	}
+}
+
+func TestOutputTaskNoticeRequiresUniqueReplayIdentity(t *testing.T) {
+	const bare = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const uuidA = `{"type":"system","subtype":"task_notification","uuid":"notice-a","task_id":"helper","status":"completed"}`
+	const uuidB = `{"type":"system","subtype":"task_notification","uuid":"notice-b","task_id":"helper","status":"completed"}`
+	const tagged = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const taggedUUID = `{"type":"system","subtype":"task_notification","uuid":"tagged-notice","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const synthetic = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	const syntheticTaggedUUID = `{"type":"user","isSynthetic":true,"uuid":"tagged-notice","message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	for _, tc := range []struct {
+		name, before, after string
+		valid               bool
+	}{
+		{"same uuid replay", uuidA, uuidA, true},
+		{"new uuid same task", uuidA, uuidB, false},
+		{"missing uuid repeat", bare, bare, false},
+		{"synthetic without uuid repeat", synthetic, synthetic, false},
+		{"tagged run proves replay and records new uuid", tagged, taggedUUID + "\n" + syntheticTaggedUUID, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.before+"\n"+successfulResult+"\n"+tc.after+"\n")
+			o.finish()
+			if o.completed != tc.valid || (o.err == nil) != tc.valid {
+				t.Fatalf("notice replay: completed=%t error=%v, valid=%t", o.completed, o.err, tc.valid)
 			}
 		})
 	}

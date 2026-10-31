@@ -495,6 +495,182 @@ func TestRolloutActivityCompletedQuestionsOnlyMessageRenewsProgress(t *testing.T
 	}
 }
 
+func TestRolloutActivityCompletedItemHiddenReplayDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, changed string
+	}{
+		{
+			name:    "agent message",
+			first:   `{"type":"AgentMessage","id":"message","content":[{"type":"Text","text":"working","elapsed_time_ms":1},{"type":"Encrypted","encrypted_content":"cipher one"}]}`,
+			replay:  `{"type":"AgentMessage","id":"message","content":[{"type":"Text","text":"working","elapsed_time_ms":2},{"type":"Encrypted","encrypted_content":"cipher two"}]}`,
+			changed: `{"type":"AgentMessage","id":"message","content":[{"type":"Text","text":"more work","elapsed_time_ms":2},{"type":"Encrypted","encrypted_content":"cipher two"}]}`,
+		},
+		{
+			name:    "reasoning",
+			first:   `{"type":"Reasoning","id":"thought","content":[{"type":"Encrypted","encrypted_content":"cipher one"}],"summary_text":["summary"]}`,
+			replay:  `{"type":"Reasoning","id":"thought","content":[{"type":"Encrypted","encrypted_content":"cipher two"}],"summary_text":["summary"]}`,
+			changed: `{"type":"Reasoning","id":"thought","content":[{"type":"Encrypted","encrypted_content":"cipher two"}],"summary_text":["new summary"]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItemTurn(9, "child", "child-turn", tc.first))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("initial progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(10, "child", "child-turn", tc.replay))
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("hidden replay renewed progress: %d", *progress)
+			}
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(11, "child", "child-turn", tc.changed))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("changed visible content progress=%d, want 2", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityCompletedUserMessageMetadataReplayDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, changed string
+	}{
+		{
+			name:    "text elements",
+			first:   `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect this","text_elements":[{"start":0,"end":7,"kind":"plain"}]}]}`,
+			replay:  `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect this","text_elements":[{"start":0,"end":7,"kind":"styled"}],"elapsed_time_ms":2}]}`,
+			changed: `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect that","text_elements":[{"start":0,"end":7,"kind":"styled"}]}]}`,
+		},
+		{
+			name:    "attachment identity",
+			first:   `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","fileId":"image-one","detail":"high","display_name":"first"}]}`,
+			replay:  `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","fileId":"image-one","detail":"high","display_name":"second"}]}`,
+			changed: `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","fileId":"image-two","detail":"high","display_name":"second"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItemTurn(9, "child", "child-turn", tc.first))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("initial progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(10, "child", "child-turn", tc.replay))
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("metadata replay renewed progress: %d", *progress)
+			}
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(11, "child", "child-turn", tc.changed))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("changed content progress=%d, want 2", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityCompletedToolResultMetadataReplayDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, changed string
+	}{
+		{
+			name:    "function call encrypted output",
+			first:   `{"type":"FunctionCallOutput","id":"output","output":[{"type":"input_text","text":"working"},{"type":"encrypted_content","encrypted_content":"cipher one"}]}`,
+			replay:  `{"type":"FunctionCallOutput","id":"output","output":[{"type":"input_text","text":"working"},{"type":"encrypted_content","encrypted_content":"cipher two"}]}`,
+			changed: `{"type":"FunctionCallOutput","id":"output","output":[{"type":"input_text","text":"more work"},{"type":"encrypted_content","encrypted_content":"cipher two"}]}`,
+		},
+		{
+			name:    "MCP result metadata",
+			first:   `{"type":"McpToolCall","id":"tool","status":"completed","result":{"_meta":{"trace":"one"},"content":[{"type":"text","text":"working","annotations":{"priority":0.5},"_meta":{"trace":"one"}}],"structuredContent":{"status":"one"}}}`,
+			replay:  `{"type":"McpToolCall","id":"tool","status":"completed","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"working","annotations":{"priority":0.9},"_meta":{"trace":"two"}}],"structuredContent":{"status":"one"}}}`,
+			changed: `{"type":"McpToolCall","id":"tool","status":"completed","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"working","annotations":{"priority":0.9},"_meta":{"trace":"two"}}],"structuredContent":{"status":"two"}}}`,
+		},
+		{
+			name:    "MCP nested structured content",
+			first:   `{"type":"McpToolCall","id":"tool","status":"completed","result":{"content":[{"type":"text","text":"working"}],"structuredContent":{"_meta":{"meaning":"one"}}}}`,
+			replay:  `{"type":"McpToolCall","id":"tool","status":"completed","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"working"}],"structuredContent":{"_meta":{"meaning":"one"}}}}`,
+			changed: `{"type":"McpToolCall","id":"tool","status":"completed","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"working"}],"structuredContent":{"_meta":{"meaning":"two"}}}}`,
+		},
+		{
+			name:    "MCP arbitrary block content",
+			first:   `{"type":"McpToolCall","id":"tool","status":"completed","result":{"content":[{"type":"text","text":"working","custom":{"_meta":{"meaning":"one"}},"annotations":{"priority":0.5}}]}}`,
+			replay:  `{"type":"McpToolCall","id":"tool","status":"completed","result":{"content":[{"type":"text","text":"working","custom":{"_meta":{"meaning":"one"}},"annotations":{"priority":0.9}}]}}`,
+			changed: `{"type":"McpToolCall","id":"tool","status":"completed","result":{"content":[{"type":"text","text":"working","custom":{"_meta":{"meaning":"two"}},"annotations":{"priority":0.9}}]}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItemTurn(9, "child", "child-turn", tc.first))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("initial progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(10, "child", "child-turn", tc.replay))
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("metadata replay renewed progress: %d", *progress)
+			}
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(11, "child", "child-turn", tc.changed))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("changed output progress=%d, want 2", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityResponseFunctionOutputEncryptedReplayDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	response := func(ordinal int, text, cipher, summary string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":[{"type":"input_text","text":%q},{"type":"encrypted_content","encrypted_content":%q}],"summary":[{"type":"summary_text","text":%q}]}}`, ordinal, text, cipher, summary)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, response(9, "working", "cipher one", "summary one"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("initial progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, response(10, "working", "cipher two", "summary one"))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("ciphertext replay renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child, response(11, "working", "cipher two", "summary two"))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("summary replay renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child, response(12, "more work", "cipher two", "summary two"))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("changed output progress=%d, want 2", *progress)
+	}
+}
+
 func TestRolloutActivityEncryptedOnlyAgentMessageRenewsOnce(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))

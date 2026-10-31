@@ -384,7 +384,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		content := bytes.TrimSpace(message.Content)
 		var text string
 		if e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID) && json.Unmarshal(content, &text) == nil {
-			o.recordTaskNotice(text)
+			o.recordTaskNotice(text, e.UUID)
 		}
 		if len(content) != 0 && content[0] == '[' {
 			var blocks []struct {
@@ -397,7 +397,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			}
 			for _, content := range blocks {
 				if e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID) && content.Type == "text" {
-					o.recordTaskNotice(content.Text)
+					o.recordTaskNotice(content.Text, e.UUID)
 				}
 			}
 		}
@@ -664,7 +664,7 @@ func pressureStopSummary(summary string) bool {
 	return strings.HasPrefix(summary, `Background command "`) && strings.HasSuffix(summary, `" was stopped because the system is running low on memory`)
 }
 
-func (o *jsonlOutput) recordTaskNotice(text string) {
+func (o *jsonlOutput) recordTaskNotice(text, noticeUUID string) {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "<task-notification>") {
 		return
@@ -680,7 +680,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
 			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
 			if id != "" {
-				o.recordTaskProgress(id, "", status)
+				o.recordTaskProgress(id, "", status, noticeUUID)
 			}
 		}
 	}
@@ -708,10 +708,10 @@ func (o *jsonlOutput) recordProgress(e event) {
 	if e.Type == "system" {
 		switch e.Subtype {
 		case "task_started":
-			o.recordTaskProgress(e.TaskID, e.RunID, "started")
+			o.recordTaskProgress(e.TaskID, e.RunID, "started", "")
 			return
 		case "task_notification":
-			o.recordTaskProgress(e.TaskID, e.RunID, e.Status)
+			o.recordTaskProgress(e.TaskID, e.RunID, e.Status, e.UUID)
 			return
 		case "task_progress":
 			o.recordTaskUsageProgress(e)
@@ -1009,7 +1009,7 @@ func (o *jsonlOutput) finishTaskRun(id, runID string) {
 	o.updateTaskPending()
 }
 
-func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
+func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 	if id == "" {
 		return
 	}
@@ -1019,13 +1019,16 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 		return
 	}
 	if status == "completed" || status == "failed" {
-		// A first completion after a result makes that result provisional.
-		newNotice := o.rememberProgress("task_notice:" + id + "\x00" + status)
-		if o.err != nil {
-			return
+		// A task ID and status cannot distinguish a new notice from replay.
+		replay := runID != "" && o.progressSeen["task_finish:"+taskRunKey(id, runID)]
+		if noticeUUID != "" {
+			seenNotice := !o.rememberProgress("task_notice_uuid:" + noticeUUID)
+			if o.err != nil {
+				return
+			}
+			replay = replay || seenNotice
 		}
-		newRun := runID != "" && !o.progressSeen["task_finish:"+taskRunKey(id, runID)]
-		if o.completed && (newNotice || newRun) {
+		if o.completed && !replay {
 			o.completed, o.result.Answer = false, ""
 		}
 	}
@@ -1054,7 +1057,12 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 }
 
 func (o *jsonlOutput) recordTaskUsageProgress(e event) {
-	if e.TaskID == "" || e.RunID == "" {
+	if e.TaskID == "" {
+		return
+	}
+	if e.RunID == "" {
+		// ID-only usage proves pending work but cannot prove fresh work for the timer.
+		o.recordTaskProgress(e.TaskID, "", "started", "")
 		return
 	}
 	key := taskRunKey(e.TaskID, e.RunID)

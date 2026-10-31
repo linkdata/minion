@@ -568,6 +568,30 @@ func TestRunLessUsageDoesNotRenewTimer(t *testing.T) {
 	}
 }
 
+func TestRunLessUsageKeepsTaskPendingWithoutTimerCredit(t *testing.T) {
+	const usage = `{"type":"system","subtype":"task_progress","task_id":"helper","usage":{"total_tokens":5}}`
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for _, tc := range []struct {
+		name, events string
+		pending      int
+	}{
+		{"unfinished", usage + "\n" + successfulResult, 1},
+		{"completion", usage + "\n" + finished + "\n" + successfulResult, 0},
+		{"empty list", usage + "\n" + empty + "\n" + successfulResult, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			writeChunks(t, &o, tc.events+"\n")
+			o.finish()
+			if o.pending != tc.pending || o.completed != (tc.pending == 0) || (o.err != nil) != (tc.pending != 0) || progress != 0 {
+				t.Fatalf("runless usage: pending=%d completed=%t progress=%d error=%v", o.pending, o.completed, progress, o.err)
+			}
+		})
+	}
+}
+
 func TestTaggedFinishClearsPendingWithoutProgressCallback(t *testing.T) {
 	o := jsonlOutput{}
 	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`

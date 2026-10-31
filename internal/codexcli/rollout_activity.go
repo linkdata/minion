@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -807,6 +808,50 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 	if json.Unmarshal(raw, &item) != nil {
 		return
 	}
+	switch item.Type {
+	case "UserMessage":
+		// UserInput text_elements and other UI metadata do not change the prompt.
+		// Keep text and the attachment fields defined by the app-server schema.
+		if len(item.Content) != 0 {
+			var content []struct {
+				Type   string `json:"type"`
+				Text   string `json:"text"`
+				URL    string `json:"url"`
+				FileID string `json:"fileId"`
+				Path   string `json:"path"`
+				Name   string `json:"name"`
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal(item.Content, &content) != nil {
+				return
+			}
+			item.Content, _ = json.Marshal(content)
+		}
+	case "AgentMessage":
+		// Ciphertext and per-part timing can change when the same message reappears.
+		if len(item.Content) != 0 {
+			var content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(item.Content, &content) != nil {
+				return
+			}
+			item.Content, _ = json.Marshal(content)
+		}
+	case "Reasoning":
+		item.Content = nil // Raw reasoning is not stable visible progress.
+	case "FunctionCallOutput":
+		var ok bool
+		if item.Output, ok = stableFunctionCallOutput(item.Output); !ok {
+			return
+		}
+	case "McpToolCall":
+		var ok bool
+		if item.Result, ok = stableMCPResult(item.Result); !ok {
+			return
+		}
+	}
 	snapshot, err := json.Marshal(struct {
 		TurnID string       `json:"turn_id"`
 		Item   progressItem `json:"item"`
@@ -955,6 +1000,12 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 			}
 			response.Summary, _ = json.Marshal(summary)
 		}
+	case "function_call_output":
+		response.Summary = nil
+		var ok bool
+		if response.Output, ok = stableFunctionCallOutput(response.Output); !ok {
+			return
+		}
 	default:
 		response.Summary = nil
 	}
@@ -963,6 +1014,70 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		return
 	}
 	a.newProgress(id, rolloutEvent{Type: "response_item", Payload: snapshot}, 0, progressed)
+}
+
+func stableFunctionCallOutput(raw json.RawMessage) (json.RawMessage, bool) {
+	// Function output is a string or an array of known content items. The
+	// encrypted item carries no visible output and its ciphertext may change.
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return raw, true
+	}
+	var content []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL string `json:"image_url"`
+		FileID   string `json:"file_id"`
+		Detail   string `json:"detail"`
+		AudioURL string `json:"audio_url"`
+	}
+	if json.Unmarshal(raw, &content) != nil {
+		return nil, false
+	}
+	stable, err := json.Marshal(content)
+	return stable, err == nil
+}
+
+func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {
+	// Only result-level _meta and direct ContentBlock metadata are transport
+	// annotations. Preserve structuredContent and arbitrary nested tool data.
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return raw, true
+	}
+	var result map[string]json.RawMessage
+	if json.Unmarshal(raw, &result) != nil {
+		return nil, false
+	}
+	delete(result, "_meta")
+	if content := bytes.TrimSpace(result["content"]); len(content) != 0 && content[0] == '[' {
+		var blocks []json.RawMessage
+		if json.Unmarshal(content, &blocks) != nil {
+			return nil, false
+		}
+		for i, block := range blocks {
+			block = bytes.TrimSpace(block)
+			if len(block) == 0 || block[0] != '{' {
+				continue
+			}
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(block, &fields) != nil {
+				return nil, false
+			}
+			delete(fields, "_meta")
+			delete(fields, "annotations")
+			var err error
+			if blocks[i], err = json.Marshal(fields); err != nil {
+				return nil, false
+			}
+		}
+		var err error
+		if result["content"], err = json.Marshal(blocks); err != nil {
+			return nil, false
+		}
+	}
+	stable, err := json.Marshal(result)
+	return stable, err == nil
 }
 
 func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int64, progressed *bool) {
