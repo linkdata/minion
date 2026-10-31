@@ -361,6 +361,35 @@ func TestRolloutActivityPaginatedHelperUserPromptSources(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityPaginatedCompletedMessageTextWithoutContent(t *testing.T) {
+	for _, test := range []struct {
+		name, itemType, content, kind string
+	}{
+		{"agent missing content", "AgentMessage", "", "assistant"},
+		{"agent empty content", "AgentMessage", `,"content":[]`, "assistant"},
+		{"user missing content", "UserMessage", "", "user"},
+		{"user empty content", "UserMessage", `,"content":[]`, "user"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			item := fmt.Sprintf(`{"type":%q,"id":"message","text":"visible text"%s}`, test.itemType, test.content)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItem(9, "child", item))
+			setActivityHistoryMode(t, child, "paginated")
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := []aicli.StreamEvent{{NativeID: "child", Kind: test.kind, Text: "visible text"}}
+			if !slices.Equal(*events, want) {
+				t.Fatalf("completed %s text = %+v; want %+v", test.itemType, *events, want)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityPaginatedHelperUserPromptResumeSkipsOldTurn(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
@@ -513,6 +542,26 @@ func TestRolloutActivityNestedSpawnRequiresParentAnnouncement(t *testing.T) {
 	}
 	if len(*events) != 2 || got["child"] != "child discussion" || got["grandchild"] != "grandchild discussion" {
 		t.Fatalf("nested helper discussion = %+v", *events)
+	}
+}
+
+func TestRolloutActivityFreshModernHelperWithoutHistoryStartAnnouncesGrandchild(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		nativeActivityEvent(9, "child", "current-child", "started", "grandchild"))
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "grandchild", "child", &boundary,
+		rolloutMessage(9, "message", "grandchild discussion"))
+
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "grandchild", Kind: "assistant", Text: "grandchild discussion"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("modern helper spawn without history start = %+v; want %+v", *events, want)
 	}
 }
 
@@ -945,6 +994,31 @@ func TestRolloutActivityRejectsSameInodeHeaderRewriteBeforeSuffix(t *testing.T) 
 	}
 }
 
+func TestRolloutActivitySecondHelperHeaderWithHistoryStartStopsForeignSuffix(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "owned helper text"))
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	first := aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "owned helper text"}
+	if !slices.Equal(*events, []aicli.StreamEvent{first}) {
+		t.Fatalf("fixture did not capture first helper entry: %+v", *events)
+	}
+	appendUsageEvents(t, child,
+		`{"type":"session_meta","payload":{"id":"foreign","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}},"subagent_history_start_ordinal":9}}`,
+		rolloutMessage(10, "foreign", "private foreign suffix"))
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{first, {NativeID: "child", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("second helper header admitted foreign suffix: got %+v; want %+v", *events, want)
+	}
+}
+
 func TestRolloutActivityConcurrentAnnouncementAndPoll(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)
@@ -1203,7 +1277,7 @@ func TestRolloutActivityResumeWithoutForkBoundaryUsesVerifiedPrefix(t *testing.T
 	}
 }
 
-func TestRolloutActivityResumeWithoutForkBoundarySecondHeaderMarksUnknownTurn(t *testing.T) {
+func TestRolloutActivityResumeWithoutForkBoundarySecondHeaderStopsSuffix(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
 	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
@@ -1223,10 +1297,7 @@ func TestRolloutActivityResumeWithoutForkBoundarySecondHeaderMarksUnknownTurn(t 
 	activity.child("child", false)
 	activity.poll()
 	activity.finish()
-	want := []aicli.StreamEvent{
-		{NativeID: "child", Kind: "content_missing"},
-		{NativeID: "child", Kind: "assistant_possibly_duplicate", Text: "unknown turn after second header"},
-	}
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}
 	if !slices.Equal(events, want) {
 		t.Fatalf("second header after verified prefix = %+v; want %+v", events, want)
 	}
@@ -1322,6 +1393,32 @@ func TestRolloutActivityIgnoresKnownMetadata(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityUnknownResponseMessageRoleLeavesGap(t *testing.T) {
+	for _, test := range []struct {
+		role string
+		want []aicli.StreamEvent
+	}{
+		{"future_assistant", []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}},
+		{"developer", nil},
+		{"tool", nil},
+	} {
+		t.Run(test.role, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			line := fmt.Sprintf(`{"ordinal":9,"type":"response_item","payload":{"type":"message","role":%q,"content":[{"type":"output_text","text":"visible unknown role"}]}}`, test.role)
+			writeUsageRolloutBoundary(t, home, "child", "root", &boundary, line)
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			if !slices.Equal(*events, test.want) {
+				t.Fatalf("%s response message = %+v; want %+v", test.role, *events, test.want)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityUnknownRecordTypeGapsEligibleHelper(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)
@@ -1339,21 +1436,53 @@ func TestRolloutActivityUnknownRecordTypeGapsEligibleHelper(t *testing.T) {
 	}
 }
 
-func TestRolloutActivityDropsOversizedLineAndKeepsFollowingEntry(t *testing.T) {
-	home, started := t.TempDir(), time.Now()
-	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
-	boundary := int64(9)
-	tooLarge := `{"ordinal":9,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"` +
-		strings.Repeat("x", aicli.MaxEventBytes) + `"}]}}`
-	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
-		tooLarge, rolloutMessage(10, "after-large", "valid after large line"))
-	activity, events, _ := newActivityTestRecorder(t, home, started)
-	activity.root("root")
-	activity.child("child", true)
-	activity.poll()
-	if len(*events) != 2 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}) ||
-		(*events)[1] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "valid after large line"}) {
-		t.Fatalf("oversized line leaked or stopped later entry: %+v", *events)
+func TestRolloutActivityLineAtEventByteLimit(t *testing.T) {
+	const prefix = `{"ordinal":9,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"`
+	const suffix = `"}]}}`
+	for _, ending := range []string{"\n", "\r\n"} {
+		for _, extra := range []int{0, 1} {
+			name := fmt.Sprintf("ending_bytes=%d/extra=%d", len(ending), extra)
+			t.Run(name, func(t *testing.T) {
+				home, started := t.TempDir(), time.Now()
+				writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+				boundary := int64(9)
+				child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+					usageEventAt(8, "task_started", "inherited-turn"))
+				textBytes := aicli.MaxEventBytes - len(prefix) - len(suffix) - len(ending) + 1 + extra // LF is the delimiter, not part of the JSONL line.
+				f, err := os.OpenFile(child, os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var writeErr error
+				for _, part := range []string{prefix, strings.Repeat("x", textBytes), suffix, ending, rolloutMessage(10, "after-limit", "valid after limit") + "\n"} {
+					if _, writeErr = f.WriteString(part); writeErr != nil {
+						break
+					}
+				}
+				if err := joinClose(writeErr, f.Close()); err != nil {
+					t.Fatal(err)
+				}
+				activity, events, _ := newActivityTestRecorder(t, home, started)
+				activity.root("root")
+				activity.child("child", true)
+				activity.poll()
+				activity.finish()
+				if len(*events) != 2 {
+					t.Fatalf("line bytes=%d: got %d events; want two", aicli.MaxEventBytes+extra, len(*events))
+				}
+				first := (*events)[0]
+				if extra == 0 {
+					if first.NativeID != "child" || first.Kind != "assistant" || len(first.Text) != textBytes || strings.Trim(first.Text, "x") != "" {
+						t.Fatalf("exact line not captured: id=%q kind=%q text_bytes=%d", first.NativeID, first.Kind, len(first.Text))
+					}
+				} else if first != (aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}) {
+					t.Fatalf("oversized line not gapped: id=%q kind=%q text_bytes=%d", first.NativeID, first.Kind, len(first.Text))
+				}
+				if (*events)[1] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "valid after limit"}) {
+					t.Fatalf("following line lost: %+v", (*events)[1])
+				}
+			})
+		}
 	}
 }
 

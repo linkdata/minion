@@ -62,7 +62,7 @@ type rolloutActivityCursor struct {
 	pending    []byte
 	dropping   bool
 	seenHeader bool
-	inherited  bool
+	untrusted  bool
 }
 
 const maxActivityPendingBytes = 8 << 20
@@ -283,6 +283,9 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 		return
 	}
 	cursor := a.cursors[meta.ID]
+	if cursor != nil && cursor.untrusted {
+		return
+	}
 	if cursor == nil {
 		f, err := os.Open(meta.path)
 		if err != nil {
@@ -349,7 +352,8 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 		cursor.offset += int64(len(chunk))
 		a.scanned += int64(len(chunk))
 		if !cursor.dropping {
-			if len(cursor.pending)+len(chunk) <= aicli.MaxEventBytes && a.pendingBytes+int64(len(chunk)) <= maxActivityPendingBytes {
+			// The line limit excludes the newline, as the CLI JSONL reader does.
+			if len(cursor.pending)+len(chunk) <= aicli.MaxEventBytes+1 && a.pendingBytes+int64(len(chunk)) <= maxActivityPendingBytes {
 				cursor.pending = append(cursor.pending, chunk...)
 				a.pendingBytes += int64(len(chunk))
 			} else {
@@ -373,6 +377,9 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 		}
 		a.pendingBytes -= int64(len(cursor.pending))
 		cursor.pending, cursor.dropping = nil, false
+		if cursor.untrusted {
+			break
+		}
 		if readErr == io.EOF {
 			break
 		}
@@ -393,20 +400,23 @@ func matchingActivityHeader(f *os.File, meta rolloutMeta) bool {
 }
 
 func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, line []byte, progressed *bool) {
+	if cursor.untrusted {
+		return
+	}
 	var event rolloutEvent
 	if json.Unmarshal(line, &event) != nil {
 		a.contentMissing(meta.ID)
 		return
 	}
 	if event.Type == "session_meta" {
-		if meta.ID != rootID && meta.HistoryStart == nil && cursor.seenHeader {
-			cursor.inherited = true
-			a.contentMissing(meta.ID) // A second header can introduce inherited history.
+		if cursor.seenHeader {
+			cursor.untrusted = true
+			a.contentMissing(meta.ID) // A second header invalidates this rollout's ownership.
 		}
 		cursor.seenHeader = true
 		return
 	}
-	uncertainOrdinal := cursor.inherited
+	uncertainOrdinal := false
 	if meta.ID != rootID && meta.HistoryStart != nil {
 		if event.Ordinal <= 0 && *meta.HistoryStart > 0 {
 			uncertainOrdinal = true
@@ -494,7 +504,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		*progressed = true
 	}
 	if payload.Type == "collab_agent_spawn_end" {
-		if a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+		if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 			a.rolloutSpawn(meta, payload.TurnID, payload.NewThreadID)
 		}
 		return
@@ -502,11 +512,11 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if payload.Type == "sub_agent_activity" {
 		switch payload.Kind {
 		case "started":
-			if a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+			if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 				a.rolloutSpawn(meta, payload.TurnID, payload.AgentID)
 			}
 		case "interacted", "interrupted", "completed":
-			if a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+			if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 				a.rolloutObserve(meta, payload.TurnID, payload.AgentID)
 			}
 		default:
@@ -580,7 +590,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		a.contentMissing(meta.ID) // Native persistence does not include partial item events.
 		return
 	}
-	if payload.Type == "item_completed" && item.Type == "SubAgentActivity" && a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+	if payload.Type == "item_completed" && item.Type == "SubAgentActivity" && a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 		switch item.Kind {
 		case "started":
 			a.rolloutSpawn(meta, payload.TurnID, item.AgentID)
@@ -590,7 +600,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			a.contentMissing(meta.ID)
 		}
 	}
-	if item.Type == "CollabAgentToolCall" && item.Tool == "spawn_agent" && item.Status == "completed" && a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+	if item.Type == "CollabAgentToolCall" && item.Tool == "spawn_agent" && item.Status == "completed" && a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 		for _, id := range item.ReceiverIDs {
 			a.rolloutSpawn(meta, payload.TurnID, id)
 		}
@@ -635,6 +645,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			parts = append(parts, content.Text)
 		}
 		text = strings.Join(parts, "\n")
+		if text == "" {
+			text = item.Text // Some completed messages persist text without content parts.
+		}
 	case "Reasoning":
 		kind, text = "reasoning_summary", strings.Join(item.Summary, "\n")
 	case "CommandExecution", "DynamicToolCall", "CollabAgentToolCall", "WebSearch", "FileChange", "McpToolCall", "FunctionCallOutput", "ImageView", "ImageGeneration", "Extension":
@@ -646,11 +659,13 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	a.emitVisible(meta.ID, kind, text, uncertain)
 }
 
-func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, uncertainOrdinal bool) bool {
+func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, uncertainOrdinal bool, threadID, turnID string) bool {
 	if meta.ID == rootID {
 		return true
 	}
-	if uncertainOrdinal || meta.HistoryStart == nil && a.before[meta.ID] == nil {
+	// Without a fork ordinal or verified pre-call prefix, only an event
+	// explicitly written by this helper in its own turn proves a nested spawn.
+	if uncertainOrdinal || meta.HistoryStart == nil && a.before[meta.ID] == nil && (threadID != meta.ID || turnID == "") {
 		a.contentMissing(meta.ID)
 		return false
 	}
@@ -688,8 +703,11 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 			kind = "assistant"
 		case "user":
 			kind, contentType = "user", "input_text"
+		case "developer", "system", "tool":
+			return false // Agent instructions and tool inputs are outside discussion capture.
 		default:
-			return false // Developer and tool inputs are outside discussion capture.
+			a.contentMissing(meta.ID) // A future visible role must not disappear silently.
+			return false
 		}
 		var parts []string
 		for _, content := range item.Content {
