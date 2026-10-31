@@ -106,6 +106,52 @@ func TestRolloutActivityProgressRequiresNewHelperWork(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityProgressCountsRepeatedOutputAtDistinctOrdinals(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	first := `{"ordinal":9,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"current","chunk":"tick\n"}}`
+	second := `{"ordinal":10,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"current","chunk":"tick\n"}}`
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, first)
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first output progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, second)
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("second output progress=%d, want 2", *progress)
+	}
+	appendUsageEvents(t, child, second)
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("replayed ordinal renewed progress: %d", *progress)
+	}
+}
+
+func TestRolloutActivityProgressWithoutOrdinalDedupesPayload(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	zero := `{"ordinal":0,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"current","chunk":"tick\n"}}`
+	missing := `{"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"current","chunk":"tick\n"}}`
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil, zero)
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("zero ordinal progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, missing)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("missing ordinal renewed progress: %d", *progress)
+	}
+}
+
 func TestRolloutActivityFreshHelperResponseRequiresProvenTurn(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))

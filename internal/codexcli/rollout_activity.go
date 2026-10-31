@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -467,7 +468,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		fresh, turnID := a.consumeResponse(meta, event.Payload, uncertainOrdinal)
 		if fresh && !uncertainOrdinal &&
 			(meta.HistoryStart != nil || a.before[meta.ID] != nil || cursor.provedTurns[turnID]) {
-			a.newProgress(meta.ID, event, progressed)
+			a.newProgress(meta.ID, event, 0, progressed)
 		}
 		return
 	}
@@ -502,7 +503,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		}
 		if !uncertainOrdinal && a.helperProgressProven(meta, message.Author, message.Metadata.TurnID) &&
 			(message.Content != "" || message.EncryptedContent != "") {
-			a.newProgress(meta.ID, event, progressed)
+			a.newProgress(meta.ID, event, 0, progressed)
 		}
 		return
 	}
@@ -552,18 +553,20 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
 	if meta.ID != rootID && !uncertainOrdinal && a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) {
 		switch payload.Type {
+		case "exec_command_output":
+			a.newProgress(meta.ID, event, event.Ordinal, progressed)
 		case "task_started", "task_complete", "turn_aborted",
 			"patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
 			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",
-			"exec_command_begin", "exec_command_end", "exec_command_output":
-			a.newProgress(meta.ID, event, progressed)
+			"exec_command_begin", "exec_command_end":
+			a.newProgress(meta.ID, event, 0, progressed)
 		case "user_message", "agent_message":
 			if payload.Message != "" {
-				a.newProgress(meta.ID, event, progressed)
+				a.newProgress(meta.ID, event, 0, progressed)
 			}
 		case "agent_reasoning", "agent_reasoning_raw_content":
 			if payload.Text != "" {
-				a.newProgress(meta.ID, event, progressed)
+				a.newProgress(meta.ID, event, 0, progressed)
 			}
 		}
 	}
@@ -657,14 +660,14 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		switch item.Type {
 		case "Plan", "UserMessage", "AgentMessage":
 			if item.Text != "" || len(item.Content) != 0 {
-				a.newProgress(meta.ID, event, progressed)
+				a.newProgress(meta.ID, event, 0, progressed)
 			}
 		case "Reasoning", "CommandExecution", "DynamicToolCall", "WebSearch",
 			"FileChange", "McpToolCall", "FunctionCallOutput", "ImageGeneration", "Extension", "ImageView":
-			a.newProgress(meta.ID, event, progressed)
+			a.newProgress(meta.ID, event, 0, progressed)
 		case "CollabAgentToolCall":
 			if item.Tool != "wait" && item.Tool != "close_agent" {
-				a.newProgress(meta.ID, event, progressed)
+				a.newProgress(meta.ID, event, 0, progressed)
 			}
 		}
 	}
@@ -750,7 +753,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	a.emitVisible(meta.ID, kind, text, uncertain)
 }
 
-func (a *rolloutActivity) newProgress(id string, event rolloutEvent, progressed *bool) {
+func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int64, progressed *bool) {
 	if a.progress == nil {
 		return
 	}
@@ -760,6 +763,10 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, progressed 
 	_, _ = hash.Write([]byte(event.Type))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(event.Payload)
+	if ordinal > 0 {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write(strconv.AppendInt(nil, ordinal, 10))
+	}
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
 	if a.progressEvents[digest] || len(a.progressEvents) >= maxUsageRecords {
