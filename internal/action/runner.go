@@ -123,10 +123,10 @@ func guardAttemptRecordTextWithLimits(sink func(attemptRecord), secrets []string
 	if maxKeyBytes == 0 {
 		return sink
 	}
-	// JSON and Go quoting need at most twelve source bytes per key byte.
+	// Go named HTML entities use at most 33 bytes per decoded byte; allow one byte of margin.
 	lookback := historyLimit
-	if maxKeyBytes <= lookback/12 {
-		lookback = 12 * maxKeyBytes
+	if maxKeyBytes <= lookback/34 {
+		lookback = 34 * maxKeyBytes
 	}
 	var mu sync.Mutex
 	var prior string

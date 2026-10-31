@@ -503,6 +503,30 @@ func TestRunnerPreservesSafeHTMLNumericDiscussion(t *testing.T) {
 	}
 }
 
+func TestGuardAttemptRecordTextWithholdsNamedHTMLEntityJoin(t *testing.T) {
+	const secret = "||"
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	guard := guardAttemptRecordText(queue.add, []string{secret})
+	for _, event := range []attemptRecord{
+		{Kind: attemptRecordDiscussion, Call: "1", Provider: "codex", Agent: "native", EventSource: "codex.assistant", Text: "&VerticalLine;&VerticalLine"},
+		{Kind: attemptRecordDiscussion, Call: "1", Provider: "codex", Agent: "native", EventSource: "codex.final", Text: ";"},
+		{Kind: attemptRecordDiscussion, Call: "1", Provider: "codex", Agent: "native", EventSource: "codex.assistant", Text: "safe later text"},
+	} {
+		guard(event)
+	}
+	if queue.finish() || len(saved) != 4 || saved[0].Text != "&VerticalLine;&VerticalLine" ||
+		saved[1].EventSource != "codex.final" || saved[1].Text != "" ||
+		saved[2].EventSource != "codex.content_missing" || saved[2].Text != "" ||
+		saved[3].Text != "safe later text" {
+		t.Fatalf("named entity join retained the key or lost coverage gap: %+v", saved)
+	}
+	assertNoConfiguredKeyInOrderedText(t, saved, secret)
+}
+
 func TestGuardAttemptRecordTextStopsAfterHistoryOrScanExhaustion(t *testing.T) {
 	for _, test := range []struct {
 		name, first, second string
