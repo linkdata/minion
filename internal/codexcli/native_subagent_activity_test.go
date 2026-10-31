@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -20,6 +21,45 @@ func nativeActivityEvent(ordinal int, thread, turn, kind, child string) string {
 // Legacy history persists SubAgentActivity directly, without a turn or thread ID.
 func legacyActivityEvent(ordinal int, kind, child string) string {
 	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"activity_fixture","occurred_at_ms":123,"kind":%q,"agent_thread_id":%q,"agent_path":"/root/history_helper"}}`, ordinal, kind, child)
+}
+
+func TestAnonymousHelperActivityRejectsFinalAnswer(t *testing.T) {
+	for _, test := range []struct{ name, event string }{
+		{"legacy activity", legacyActivityEvent(25, "started", "")},
+		{"native activity", nativeActivityEvent(25, "root", "root-turn", "started", "")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := writeUsageRollout(t, t.TempDir(), "root", "",
+				usageEvent("task_started", "root-turn"), test.event,
+				usageRecord("root", "root-turn", "root-response", 10, 0, 1),
+				usageEvent("task_complete", "root-turn"))
+			budget := int64(maxUsageScanBytes)
+			got, complete, _, err := readRolloutUsage(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget)
+			if got != (usage.Tokens{Input: 10, Output: 1}) || complete || !errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("anonymous helper activity: tokens=%+v complete=%t err=%v", got, complete, err)
+			}
+
+			binary := installFakeCodex(t, `#!/bin/sh
+set -eu
+cat >/dev/null
+dir="$CODEX_HOME/sessions/$(cat "$0.day")"
+mkdir -p "$dir"
+cp "$0.root" "$dir/rollout-root.jsonl"
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}' '{"type":"turn.completed"}'
+`)
+			putRolloutTemplate(t, binary, "day", []byte(time.Now().Format("2006/01/02")))
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			putRolloutTemplate(t, binary, "root", data)
+			var session Session
+			result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if !errors.Is(err, errUnverifiedChildren) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
+				t.Fatalf("anonymous helper answer accepted: result=%+v err=%v", result, err)
+			}
+		})
+	}
 }
 
 func TestUsageSessionLegacyActivitySpawnProofAndMissingChild(t *testing.T) {

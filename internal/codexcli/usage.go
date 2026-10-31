@@ -497,7 +497,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	var children []string
 	seenChildren := map[string]bool{}
 	tooManyChildren := false
-	unattributedSpawn := false
+	unverifiedChild := false
 	appendChildren := func(ids ...string) {
 		if !appendChildIDs(&children, seenChildren, ids...) {
 			tooManyChildren, complete = true, false
@@ -526,7 +526,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				if mode.currentSpawns[id] {
 					appendSpawned(id)
 				} else {
-					unattributedSpawn = true
+					unverifiedChild = true
 					appendChildren(id)
 				}
 			}
@@ -708,6 +708,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				if payload.Type == "sub_agent_activity" {
 					if payload.AgentID == "" {
 						complete = false
+						unverifiedChild = true
 					} else if payload.Kind == "started" {
 						appendSpawnProof(payload.TurnID, payload.AgentID)
 					} else {
@@ -718,6 +719,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 					if payload.Item.Type == "SubAgentActivity" {
 						if payload.Item.AgentID == "" {
 							complete = false
+							unverifiedChild = true
 						} else if payload.Item.Kind == "started" {
 							appendSpawnProof(payload.TurnID, payload.Item.AgentID)
 						} else {
@@ -831,7 +833,7 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 	if seenHeader && readable && ctx.Err() == nil && !inheritedWithoutBoundary && !lifecycleCapped && latestOwnTurn != "" && latestOwnDone && !unfinished {
 		childError = nil
 	}
-	if unattributedSpawn {
+	if unverifiedChild {
 		complete = false
 		childError = joinUsageErrors(childError, errUnverifiedChildren)
 	}
