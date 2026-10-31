@@ -147,6 +147,7 @@ type jsonlOutput struct {
 	taskProgress        map[string]taskProgressState
 	taskRuns            map[string]bool
 	runlessPending      map[string]int
+	runlessAmbiguous    map[string]bool
 	runlessCount        int
 	anonymousPending    int
 	progressBytes       int64
@@ -355,6 +356,19 @@ func (o *jsonlOutput) finishLine(line []byte) {
 				if o.err != nil {
 					return
 				}
+			}
+		}
+		for id, count := range o.runlessPending {
+			if count > 1 {
+				if o.runlessAmbiguous == nil {
+					o.runlessAmbiguous = make(map[string]bool)
+				}
+				o.runlessAmbiguous[id] = true
+			}
+		}
+		for id := range o.runlessAmbiguous {
+			if o.runlessPending[id] == 0 {
+				delete(o.runlessAmbiguous, id)
 			}
 		}
 		o.updateTaskPending()
@@ -931,6 +945,7 @@ func taskRunKey(id, runID string) string {
 }
 
 // The open set is rebuilt once from bounded progress history on a resumed call.
+// List disappearance cannot close a tagged run: lists may replay without a sequence ID.
 func (o *jsonlOutput) ensureTaskRuns() {
 	if o.taskRuns != nil {
 		return
@@ -1012,8 +1027,8 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 				o.runlessPending[id] = 1
 				o.runlessCount++
 			}
-		} else if o.runlessPending[id] == 1 {
-			// An ID-only notice cannot distinguish concurrent same-ID tasks.
+		} else if o.runlessPending[id] == 1 && !o.runlessAmbiguous[id] {
+			// Once duplicated, an ID-only notice cannot identify the remaining task.
 			delete(o.runlessPending, id)
 			o.runlessCount--
 		}

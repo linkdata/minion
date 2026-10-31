@@ -419,6 +419,26 @@ func TestRunLessListCountsConcurrentSameIDTasks(t *testing.T) {
 	}
 }
 
+func TestRunLessListShrinkKeepsReusedIDPending(t *testing.T) {
+	o := jsonlOutput{}
+	const two = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"},{"task_id":"helper"}]}`
+	const one = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	writeChunks(t, &o, two+"\n"+one+"\n"+finished+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("delayed finish cleared remaining same-ID task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+	writeChunks(t, &o, one+"\n"+finished+"\n")
+	if o.err != nil || o.pending != 1 {
+		t.Fatalf("repeated list/finish cleared ambiguous task: pending=%d error=%v", o.pending, o.err)
+	}
+	writeChunks(t, &o, empty+"\n")
+	if o.err != nil || o.pending != 0 {
+		t.Fatalf("authoritative empty list did not clear task: pending=%d error=%v", o.pending, o.err)
+	}
+}
+
 func TestTaggedListAndSyntheticNoticeCannotClearOpenRun(t *testing.T) {
 	progress := 0
 	o := jsonlOutput{onProgress: func() { progress++ }}

@@ -729,7 +729,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 			return
 		}
 		// An identical ID-less completion could be a new command or a replay.
-		// Without a lifecycle event, it cannot prove fresh work.
+		// Without a distinguishable lifecycle event, it cannot prove fresh work.
 		freshCycle := item.ID == "" && prior.completed && event.Type == "item.started"
 		if !freshCycle && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
 			(event.Type != "item.completed" || prior.completed) {
