@@ -114,7 +114,7 @@ func rolloutFileInfo(home, path string) (os.FileInfo, error) {
 }
 
 func sameRolloutMeta(a, b rolloutMeta) bool {
-	if a.ID != b.ID || a.SessionID != b.SessionID || a.ParentID != b.ParentID {
+	if a.ID != b.ID || a.SessionID != b.SessionID || a.ParentID != b.ParentID || a.HistoryMode != b.HistoryMode {
 		return false
 	}
 	return a.HistoryStart == nil && b.HistoryStart == nil || a.HistoryStart != nil && b.HistoryStart != nil && *a.HistoryStart == *b.HistoryStart

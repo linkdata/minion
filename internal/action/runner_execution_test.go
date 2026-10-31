@@ -57,15 +57,19 @@ func TestRunnerReportsCleanupAfterModel(t *testing.T) {
 		statusUpdate: func(phase string, _ int, _ string) {
 			phases = append(phases, phase)
 		},
-		runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 			phases = append(phases, "native")
+			if request.onProgress == nil {
+				t.Fatal("native activity has no progress callback")
+			}
+			request.onProgress()
 			return aicli.Result{Answer: proposalJSON("Done.", "")}, nil
 		},
 	}
 	if _, err := runner.Run(t.Context(), testJob(command.Comment)); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"main", "native", "main", "cleanup"}; !slices.Equal(phases, want) {
+	if want := []string{"main", "native", "main", "main", "cleanup"}; !slices.Equal(phases, want) {
 		t.Fatalf("Runner phase order = %v, want %v", phases, want)
 	}
 }

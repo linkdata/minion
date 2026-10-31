@@ -54,6 +54,7 @@ type rolloutMeta struct {
 	SessionID    string          `json:"session_id"`
 	ParentID     string          `json:"parent_thread_id"`
 	HistoryStart *int64          `json:"subagent_history_start_ordinal"`
+	HistoryMode  string          `json:"history_mode"`
 	Source       json.RawMessage `json:"source"`
 	path         string
 	duplicate    bool // Confirmed identity collisions remain unsafe after their files age out of discovery.
@@ -183,7 +184,7 @@ func usageFilesWithLimit(ctx context.Context, home, rootID string, started time.
 			before := known[expectedID]
 			meta.duplicate = before.duplicate
 			sameBoundary := before.HistoryStart == nil && meta.HistoryStart == nil || before.HistoryStart != nil && meta.HistoryStart != nil && *before.HistoryStart == *meta.HistoryStart
-			if meta.ID != expectedID || meta.SessionID != before.SessionID || meta.ParentID != before.ParentID || !sameBoundary {
+			if meta.ID != expectedID || meta.SessionID != before.SessionID || meta.ParentID != before.ParentID || meta.HistoryMode != before.HistoryMode || !sameBoundary {
 				complete = false
 				return
 			}

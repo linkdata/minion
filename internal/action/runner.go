@@ -385,6 +385,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			if r.statusUpdate != nil {
+				request.onProgress = func() { r.statusUpdate(request.role, request.round, request.reviewPhase) }
+			}
+			if r.statusUpdate != nil {
 				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
