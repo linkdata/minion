@@ -178,18 +178,33 @@ func (o *jsonlOutput) markFatalGap(kind string) {
 }
 
 func (o *jsonlOutput) observe(code, message string) {
-	o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, code, aicli.RedactText(message, o.apiKey))
+	safe := o.safeDiagnosticText(message)
+	if safe == "" {
+		o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, "diagnostics_truncated", "")
+		safe = "native diagnostic could not be safely displayed"
+	}
+	o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, code, safe)
 }
 
 func (o *jsonlOutput) safeResultDetail(detail string) string {
 	if detail == "" {
 		return ""
 	}
-	redacted := aicli.RedactText(detail, o.apiKey)
-	if redacted == "" {
+	safe := o.safeDiagnosticText(detail)
+	if safe == "" {
+		o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, "diagnostics_truncated", "")
 		return "native result detail could not be safely displayed"
 	}
-	return aicli.DiagnosticText(redacted)
+	return safe
+}
+
+func (o *jsonlOutput) safeDiagnosticText(detail string) string {
+	redacted := aicli.RedactText(detail, o.apiKey)
+	safe := aicli.RedactText(aicli.DiagnosticText(redacted), o.apiKey)
+	if len(safe) > bounded.DiagnosticBytes {
+		return ""
+	}
+	return safe
 }
 
 func (o *jsonlOutput) finish() {
@@ -322,7 +337,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	}
 	o.observedResultText = o.safeResultDetail(e.Result)
 	o.observedResultErrors = ""
-	if raw := bytes.TrimSpace(e.Errors); len(raw) != 0 && raw[0] == '[' {
+	if raw := bytes.TrimSpace(e.Errors); len(raw) > 2 && raw[0] == '[' && len(bytes.TrimSpace(raw[1:len(raw)-1])) != 0 {
 		o.observedResultErrors = o.safeResultDetail(string(raw))
 	}
 	if o.structured {

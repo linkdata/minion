@@ -87,15 +87,16 @@ func TestProviderEventQueueRetainsCallFailureWithoutClaimingCoverage(t *testing.
 
 func TestProviderEventQueueAcceptsCallBoundDiagnosticsAndFeedback(t *testing.T) {
 	for _, test := range []struct {
-		name, source, kind, role string
-		complete, retained       bool
+		name, source, provider, kind, role string
+		complete, retained                 bool
 	}{
-		{"successful stderr", "codex.stderr_tail", attemptRecordDiagnostic, roleMain, true, true},
-		{"critic feedback", "minion.critic.feedback", attemptRecordReport, roleCritic, true, true},
-		{"truncated diagnostics", "codex.diagnostics_truncated", attemptRecordDiagnostic, roleMain, false, true},
-		{"unavailable stderr", "codex.stderr_unavailable", attemptRecordDiagnostic, roleMain, false, true},
-		{"forged diagnostic", "codex.other", attemptRecordDiagnostic, roleMain, false, false},
-		{"forged feedback", "minion.critic.feedback", attemptRecordReport, roleMain, false, false},
+		{"successful stderr", "codex.stderr_tail", "codex", attemptRecordDiagnostic, roleMain, true, true},
+		{"critic feedback", "minion.critic.feedback", "codex", attemptRecordReport, roleCritic, true, true},
+		{"truncated diagnostics", "codex.diagnostics_truncated", "codex", attemptRecordDiagnostic, roleMain, false, true},
+		{"unavailable Codex stderr", "codex.stderr_unavailable", "codex", attemptRecordDiagnostic, roleMain, false, true},
+		{"unavailable Claude stderr", "claude.stderr_unavailable", "claude", attemptRecordDiagnostic, roleMain, false, true},
+		{"forged diagnostic", "codex.other", "codex", attemptRecordDiagnostic, roleMain, false, false},
+		{"forged feedback", "minion.critic.feedback", "codex", attemptRecordReport, roleMain, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var saved []attemptRecord
@@ -103,7 +104,7 @@ func TestProviderEventQueueAcceptsCallBoundDiagnosticsAndFeedback(t *testing.T) 
 				saved = append(saved, event)
 				return nil
 			})
-			event := attemptRecord{Kind: test.kind, Provider: "codex", Role: test.role, Call: "2", EventSource: test.source, Text: "private detail"}
+			event := attemptRecord{Kind: test.kind, Provider: test.provider, Role: test.role, Call: "2", EventSource: test.source, Text: "private detail"}
 			queue.add(event)
 			if got := queue.finish(); got != test.complete {
 				t.Fatalf("coverage=%t want=%t", got, test.complete)

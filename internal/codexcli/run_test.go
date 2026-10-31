@@ -718,6 +718,77 @@ func TestRunRedactsExplicitNativeCredentials(t *testing.T) {
 	}
 }
 
+func TestRunRedactsConfiguredAndNativeCredentialsFromDiagnostics(t *testing.T) {
+	settings := config.CodexConfig{
+		APIKey:            `configured"secret`,
+		NativeAPIKey:      `native-api"secret`,
+		NativeAccessToken: `native-access"secret`,
+	}
+	secrets := []string{settings.APIKey, settings.NativeAPIKey, settings.NativeAccessToken}
+	var parts []string
+	for _, secret := range secrets {
+		encoded, err := json.Marshal(secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts = append(parts, secret, string(encoded[1:len(encoded)-1]))
+	}
+	message := strings.Join(parts, " ")
+	event, err := json.Marshal(map[string]any{"type": "error", "message": message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := json.Marshal(map[string]any{"type": "turn.failed", "error": map[string]string{"message": message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(`{"type":"thread.started","thread_id":"root"}`)+" "+aicli.ShellQuote(string(event))+" "+aicli.ShellQuote(string(failed))+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+	if err == nil || len(result.Diagnostics) != 2 {
+		t.Fatalf("native failure diagnostics missing: result=%+v error=%v", result, err)
+	}
+	for i, code := range []string{"native_error", "turn_failed"} {
+		diagnostic := result.Diagnostics[i]
+		if diagnostic.Code != code || !strings.Contains(diagnostic.Message, "[redacted]") {
+			t.Fatalf("native diagnostic %d was not redacted: %+v", i, diagnostic)
+		}
+		for _, part := range parts {
+			if strings.Contains(diagnostic.Message, part) {
+				t.Fatalf("native diagnostic %d exposed credential form %q: %+v", i, part, diagnostic)
+			}
+		}
+	}
+}
+
+func TestRunRedactsCredentialFormedByDiagnosticTruncation(t *testing.T) {
+	const secret = "head...tail"
+	const marker = "..."
+	head := (bounded.DiagnosticBytes - len(marker)) / 2
+	tail := bounded.DiagnosticBytes - len(marker) - head
+	message := strings.Repeat("x", head-len("head")) + "head" + "omitted" + "tail" + strings.Repeat("y", tail-len("tail"))
+	if !strings.Contains(aicli.DiagnosticText(message), secret) {
+		t.Fatal("fixture did not form a credential across the diagnostic marker")
+	}
+	event, err := json.Marshal(map[string]any{"type": "error", "message": message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(`{"type":"thread.started","thread_id":"root"}`)+" "+aicli.ShellQuote(string(event))+" "+aicli.ShellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}`)+" "+aicli.ShellQuote(`{"type":"turn.completed"}`)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: secret})
+	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "native_error" || strings.Contains(result.Diagnostics[0].Message, secret) || !strings.Contains(result.Diagnostics[0].Message, "[redacted]") {
+		t.Fatalf("diagnostic truncation formed a credential: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunMarksDiagnosticUnavailableWhenPostRedactionExceedsBound(t *testing.T) {
+	message := strings.Repeat("x", bounded.DiagnosticBytes+1)
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(`{"type":"thread.started","thread_id":"root"}`)+" "+aicli.ShellQuote(`{"type":"error","message":"`+message+`"}`)+" "+aicli.ShellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}`)+" "+aicli.ShellQuote(`{"type":"turn.completed"}`)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: "..."})
+	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated", Message: "native diagnostic could not be safely displayed"}) {
+		t.Fatalf("unsafe expanded diagnostic was retained: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunRedactsAmbientNativeCredentials(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "ambient-api-secret")
 	t.Setenv("CODEX_ACCESS_TOKEN", "ambient-access-secret")

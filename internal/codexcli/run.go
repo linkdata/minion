@@ -87,6 +87,17 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	defer func() {
 		result.Answer = redactCodexText(result.Answer, settings)
 		runError = redactCodexError(runError, settings)
+		for i := range result.Diagnostics {
+			if result.Diagnostics[i].Message == "" {
+				continue
+			}
+			message := redactCodexText(result.Diagnostics[i].Message, settings)
+			if message == "" || len(message) > bounded.DiagnosticBytes {
+				result.Diagnostics[i] = aicli.ProviderDiagnostic{Code: "diagnostics_truncated", Message: "native diagnostic could not be safely displayed"}
+				continue
+			}
+			result.Diagnostics[i].Message = message
+		}
 	}()
 	result.UsageComplete = true
 	if strings.TrimSpace(prompt) == "" {

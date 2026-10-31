@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -20,6 +21,43 @@ func writeChunks(t *testing.T, output *jsonlOutput, data string) {
 			t.Fatalf("Write=%d,%v; want %d bytes", wrote, err, n)
 		}
 		data = data[n:]
+	}
+}
+
+func TestDiagnosticRedactionAfterBounding(t *testing.T) {
+	raw := "capacity reached " + strings.Repeat("A", 8192) + strings.Repeat("B", 8192) + " session resets"
+	boundedText := aicli.DiagnosticText(raw)
+	join := strings.Index(boundedText, "...")
+	if join < 7 || join+10 > len(boundedText) {
+		t.Fatalf("bounded diagnostic has no head/tail join: length=%d", len(boundedText))
+	}
+	key := boundedText[join-7 : join+10]
+	if strings.Contains(raw, key) {
+		t.Fatalf("test key already appears before bounding: %q", key)
+	}
+	o := jsonlOutput{apiKey: key}
+	o.observe("task_stopped", raw)
+	if len(o.result.Diagnostics) != 1 || o.result.Diagnostics[0].Code != "task_stopped" || strings.Contains(o.result.Diagnostics[0].Message, key) ||
+		!strings.Contains(o.result.Diagnostics[0].Message, "capacity reached") || !strings.Contains(o.result.Diagnostics[0].Message, "session resets") || len(o.result.Diagnostics[0].Message) > bounded.DiagnosticBytes {
+		t.Fatalf("bounded native observation exposed key or lost evidence: %+v", o.result.Diagnostics)
+	}
+	detail := o.safeResultDetail(raw)
+	if strings.Contains(detail, key) || !strings.Contains(detail, "capacity reached") || !strings.Contains(detail, "session resets") || len(detail) > bounded.DiagnosticBytes || len(o.result.Diagnostics) != 1 {
+		t.Fatalf("bounded result detail exposed key or lost evidence: detail=%q diagnostics=%+v", detail, o.result.Diagnostics)
+	}
+}
+
+func TestUnsafeResultDetailMarksDiagnosticGap(t *testing.T) {
+	o := jsonlOutput{apiKey: `"x"`}
+	if detail := o.safeResultDetail(`{"x":1}`); detail != "native result detail could not be safely displayed" ||
+		len(o.result.Diagnostics) != 1 || o.result.Diagnostics[0].Code != "diagnostics_truncated" {
+		t.Fatalf("discarded result detail failed to mark incomplete diagnostics: detail=%q diagnostics=%+v", detail, o.result.Diagnostics)
+	}
+	o = jsonlOutput{apiKey: `"x"`}
+	o.observe("task_stopped", `{"x":1}`)
+	if len(o.result.Diagnostics) != 2 || o.result.Diagnostics[0].Code != "diagnostics_truncated" ||
+		o.result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "task_stopped", Message: "native diagnostic could not be safely displayed"}) {
+		t.Fatalf("discarded native observation failed to mark incomplete diagnostics: %+v", o.result.Diagnostics)
 	}
 }
 

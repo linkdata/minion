@@ -44,17 +44,22 @@ func AppendNativeDiagnostic(diagnostics []ProviderDiagnostic, code, message stri
 	return diagnostics
 }
 
-// DiagnosticText bounds a redacted observation and keeps it valid UTF-8.
+// DiagnosticText bounds a redacted observation, retaining both ends as valid UTF-8.
 func DiagnosticText(text string) string {
 	text = strings.ToValidUTF8(text, "�")
 	if len(text) <= bounded.DiagnosticBytes {
 		return text
 	}
-	cut := bounded.DiagnosticBytes - len("...")
-	for !utf8.ValidString(text[:cut]) {
-		cut--
+	const marker = "..."
+	head := (bounded.DiagnosticBytes - len(marker)) / 2
+	tail := len(text) - (bounded.DiagnosticBytes - len(marker) - head)
+	for !utf8.ValidString(text[:head]) {
+		head--
 	}
-	return text[:cut] + "..."
+	for !utf8.ValidString(text[tail:]) {
+		tail++
+	}
+	return text[:head] + marker + text[tail:]
 }
 
 // StreamEvent is one provider event or a metadata-only content_missing marker.

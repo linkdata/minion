@@ -602,6 +602,17 @@ func TestRunSuccessfulStructuredResultRetainsUtf8StderrTail(t *testing.T) {
 	}
 }
 
+func TestRunReportsUnavailableStderrAfterSafeRedaction(t *testing.T) {
+	key := strings.Repeat("k", 1366)
+	stderr := strings.Repeat("padding\n", 1100) + "Agent capacity reached; session resets at midnight\n"
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(successfulResult)+"\nprintf '%s' "+aicli.ShellQuote(stderr)+" >&2\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+		len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"}) {
+		t.Fatalf("unsafe stderr was silently omitted or changed success: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunFailureRetainsEarlierProvisionalStructuredOutput(t *testing.T) {
 	const structured = `{"approved":false,"findings":["capacity issue"]}`
 	provisional := strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`
@@ -666,6 +677,40 @@ func TestRunFailedResultRetainsNativeCapacityAndResetFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunFailedResultOmitsEmptyErrors(t *testing.T) {
+	for _, empty := range []string{"[]", "[ ]"} {
+		t.Run(empty, func(t *testing.T) {
+			failed := `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"capacity reached","errors":` + empty + `,"modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+			fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(failed)+"\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+				len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "result_error" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "capacity reached"}) {
+				t.Fatalf("empty native errors produced false detail or changed failure: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestRunFailedResultKeepsTrailingQuotaReset(t *testing.T) {
+	const reset = "session quota resets at 2026-11-01T01:20:00Z"
+	failed := `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"capacity reached","errors":["` +
+		strings.Repeat("x", bounded.DiagnosticBytes) + reset + `"]}`
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(failed)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || result.Answer != "" {
+		t.Fatalf("failed native result was accepted: result=%+v error=%v", result, err)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Code == "result_errors" {
+			if len(diagnostic.Message) > bounded.DiagnosticBytes || !strings.Contains(diagnostic.Message, reset) {
+				t.Fatalf("trailing quota reset was lost: %+v", diagnostic)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing native errors: %+v", result.Diagnostics)
 }
 
 func TestRunNativeDiagnosticOverflowKeepsFinalEvidence(t *testing.T) {

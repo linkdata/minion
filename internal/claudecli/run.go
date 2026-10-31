@@ -197,8 +197,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "result_errors", Message: output.observedResultErrors})
 		}
 	}
-	if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
-		finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: aicli.DiagnosticText(detail)})
+	if detail := output.safeDiagnosticText(aicli.RedactTail(&diagnostics, settings.APIKey)); detail != "" {
+		finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: detail})
+	} else if strings.TrimSpace(diagnostics.String()) != "" {
+		finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"})
 	}
 	if err != nil {
 		if output.observedStructured != "" {
