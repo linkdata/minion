@@ -409,6 +409,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			call, err := next(ctx, request)
 			secrets := configured.secretValues()
 			if configured.eventSink != nil {
+				var sentDiagnosticText string
 				for _, diagnostic := range call.Diagnostics {
 					event := record
 					event.Kind, event.ObservedAt = attemptRecordDiagnostic, time.Now().UTC().Format(time.RFC3339Nano)
@@ -418,11 +419,21 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 						boundedText := aicli.DiagnosticText(redacted)
 						dropped := len(boundedText) < len(redacted)
 						event.Text = redactActionText(boundedText, secrets...)
-						encoded, _ := json.Marshal(event.Text)
-						for _, secret := range secrets {
-							if secret != "" && containsConfiguredKey(encoded, secret) {
+						if event.Text != "" {
+							if len(sentDiagnosticText)+len(event.Text) > 64*bounded.DiagnosticBytes {
 								event.Text = ""
-								break
+							} else {
+								joinedText := sentDiagnosticText + event.Text
+								encoded, _ := json.Marshal(joinedText)
+								for _, secret := range secrets {
+									if secret != "" && (containsConfiguredKey([]byte(joinedText), secret) || containsConfiguredKey(encoded, secret)) {
+										event.Text = ""
+										break
+									}
+								}
+								if event.Text != "" {
+									sentDiagnosticText = joinedText
+								}
 							}
 						}
 						if len(event.Text) > bounded.DiagnosticBytes || diagnostic.Message != "" && event.Text == "" {

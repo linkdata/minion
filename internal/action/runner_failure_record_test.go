@@ -15,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func TestRunnerRecordsProviderCallFailuresWithoutClaimingCoverage(t *testing.T) {
@@ -219,6 +220,72 @@ func TestRunnerMarksActionTruncatedDiagnosticsWithoutLosingNativeCode(t *testing
 				t.Fatalf("diagnostic lost tail or exposed configured key: %+v, %v", saved[0], err)
 			}
 		})
+	}
+}
+
+func TestRunnerWithholdsCrossRecordDiagnosticSecret(t *testing.T) {
+	wantTokens := usage.Tokens{Input: 3, Output: 2}
+	for _, provider := range []struct{ name, code string }{{"codex", "stderr_tail"}, {"claude", "result_detail"}} {
+		for _, test := range []struct {
+			name, secret string
+			pieces       []string
+		}{
+			{"two pieces", "fixture-secret", []string{"fixture-", "secret"}},
+			{"three pieces", "fixture-secret", []string{"fixture-", "sec", "ret"}},
+			{"JSON escaped pieces", "<tag>", []string{`\u003c`, "tag", `\u003e`}},
+		} {
+			t.Run(provider.name+"/"+test.name, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.Main.Provider, job.Main.Model = provider.name, "fixture-"+provider.name
+				var saved []attemptRecord
+				queue := newProviderEventQueue(func(event attemptRecord) error {
+					saved = append(saved, event)
+					return nil
+				})
+				runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+					runModel: func(context.Context, modelRun) (aicli.Result, error) {
+						diagnostics := make([]aicli.ProviderDiagnostic, len(test.pieces))
+						for i, piece := range test.pieces {
+							diagnostics[i] = aicli.ProviderDiagnostic{Code: provider.code, Message: piece}
+						}
+						return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageComplete: true, Diagnostics: diagnostics}, nil
+					}}
+				if provider.name == "codex" {
+					runner.Claude.APIKey = test.secret
+				} else {
+					runner.Codex.APIKey = test.secret
+				}
+				result, err := runner.Run(t.Context(), job)
+				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 ||
+					result.Calls[0].Tokens != wantTokens || !result.Calls[0].Complete {
+					t.Fatalf("diagnostic gap changed answer or usage: %+v, %v", result, err)
+				}
+				if queue.finish() || len(saved) != len(test.pieces)+1 {
+					t.Fatalf("split key claimed coverage or lost gap: %+v", saved)
+				}
+				var joined strings.Builder
+				for i, piece := range test.pieces {
+					want := piece
+					if i == len(test.pieces)-1 {
+						want = ""
+					}
+					if saved[i].Kind != attemptRecordDiagnostic || saved[i].EventSource != provider.name+"."+provider.code ||
+						saved[i].Call != "1" || saved[i].Text != want {
+						t.Fatalf("native diagnostic %d lost code or safe text: %+v", i, saved[i])
+					}
+					joined.WriteString(saved[i].Text)
+				}
+				gap := saved[len(saved)-1]
+				if gap.Kind != attemptRecordDiagnostic || gap.EventSource != provider.name+".diagnostics_truncated" ||
+					gap.Call != "1" || gap.Text != "" {
+					t.Fatalf("split key lost call-bound gap: %+v", gap)
+				}
+				encoded, err := json.Marshal(joined.String())
+				if err != nil || containsConfiguredKey([]byte(joined.String()), test.secret) || containsConfiguredKey(encoded, test.secret) {
+					t.Fatalf("saved diagnostics reconstruct configured key: %q, %v", joined.String(), err)
+				}
+			})
+		}
 	}
 }
 
