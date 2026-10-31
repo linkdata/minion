@@ -171,9 +171,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		failureTimer.Stop()
 	}
 	result = output.result
-	if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
-		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: aicli.DiagnosticText(detail)})
-	}
 	s.usageGap = !output.hasCumulative || output.err != nil
 	if output.hasCumulative {
 		s.baseline = output.cumulative
@@ -191,10 +188,30 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
 	}
+	var finalDiagnostics []aicli.ProviderDiagnostic
+	if err != nil {
+		if output.observedResultText != "" {
+			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "result_detail", Message: output.observedResultText})
+		}
+		if output.observedResultErrors != "" {
+			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "result_errors", Message: output.observedResultErrors})
+		}
+	}
+	if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
+		finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: aicli.DiagnosticText(detail)})
+	}
 	if err != nil {
 		if output.observedStructured != "" {
-			result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: output.observedStructured})
+			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: output.observedStructured})
 		}
+	}
+	if len(result.Diagnostics)+len(finalDiagnostics) > 64 {
+		// Keep late native stop signals while reserving room for final evidence.
+		keep := 64 - len(finalDiagnostics) - 1
+		result.Diagnostics = append([]aicli.ProviderDiagnostic{{Code: "diagnostics_truncated"}}, result.Diagnostics[len(result.Diagnostics)-keep:]...)
+	}
+	result.Diagnostics = append(result.Diagnostics, finalDiagnostics...)
+	if err != nil {
 		result.Answer = ""
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false

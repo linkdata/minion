@@ -209,16 +209,22 @@ func TestRunnerDoesNotPromotePartialProviderJSONToCriticFeedback(t *testing.T) {
 			if request.role == roleMain {
 				return aicli.Result{Answer: proposalJSON("Candidate.", "")}, nil
 			}
-			return aicli.Result{Answer: partial, Diagnostics: []aicli.ProviderDiagnostic{{Code: "structured_output_observed", Message: partial}}}, errors.New("provider stopped")
+			return aicli.Result{Answer: partial, Diagnostics: []aicli.ProviderDiagnostic{
+				{Code: "result_detail", Message: "capacity exhausted"},
+				{Code: "result_errors", Message: `["reset tomorrow"]`},
+				{Code: "structured_output_observed", Message: partial},
+			}}, errors.New("provider stopped")
 		}}
 	result, err := runner.Run(t.Context(), job)
 	if err == nil || result.Answer != "" || len(result.Calls) != 2 || result.Calls[1].Approved ||
 		result.Calls[1].NoBlockers || result.Calls[1].HasBlockers || result.Calls[1].ReviewComplete {
 		t.Fatalf("partial provider data became a verdict: %+v, %v", result, err)
 	}
-	if queue.finish() || len(saved) != 2 || saved[0].Kind != attemptRecordDiagnostic ||
-		saved[0].EventSource != "claude.structured_output_observed" || saved[0].Text != partial ||
-		saved[1].EventSource != "claude.call.failed" {
+	if queue.finish() || len(saved) != 4 || saved[0].EventSource != "claude.result_detail" ||
+		saved[0].Text != "capacity exhausted" || saved[1].EventSource != "claude.result_errors" ||
+		saved[1].Text != `["reset tomorrow"]` || saved[2].Kind != attemptRecordDiagnostic ||
+		saved[2].EventSource != "claude.structured_output_observed" || saved[2].Text != partial ||
+		saved[3].EventSource != "claude.call.failed" {
 		t.Fatalf("partial provider diagnostic was promoted or lost: %+v", saved)
 	}
 }

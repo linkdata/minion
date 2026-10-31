@@ -608,8 +608,79 @@ func TestRunFailureRetainsEarlierProvisionalStructuredOutput(t *testing.T) {
 	quota := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(provisional)+" "+aicli.ShellQuote(quota)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "rate_limit_rejected" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) {
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 3 || result.Diagnostics[0].Code != "rate_limit_rejected" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) || result.Diagnostics[2] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) {
 		t.Fatalf("provisional output promoted or lost: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunFailedResultRetainsNativeCapacityAndResetFields(t *testing.T) {
+	key := `capacity"secret`
+	resultText := "Agent capacity reached; session resets at 2026-11-01T00:00:00Z " + key
+	errorText := "Session quota resets at 2026-11-01T00:00:00Z " + key
+	encodedKey, _ := json.Marshal(key)
+	for _, tc := range []struct {
+		name, before string
+		failed       bool
+		denied       bool
+		terminal     string
+	}{
+		{name: "native result error", failed: true},
+		{name: "permission denial", denied: true},
+		{name: "prior rejected quota", before: `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}` + "\n"},
+		{name: "prior stopped task", before: `{"type":"system","subtype":"task_notification","status":"stopped","summary":"worker stopped"}` + "\n"},
+		{name: "terminal reason", terminal: "aborted_tools"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := map[string]any{"type": "result", "subtype": "success", "result": resultText,
+				"errors": []string{errorText}, "modelUsage": map[string]any{"main": map[string]int{"inputTokens": 3, "cacheCreationInputTokens": 5, "cacheReadInputTokens": 7, "outputTokens": 11}}}
+			if tc.failed {
+				event["is_error"], event["subtype"] = true, "error_during_execution"
+			}
+			if tc.denied {
+				event["permission_denials"] = []map[string]any{{"tool_name": "Bash"}}
+			}
+			if tc.terminal != "" {
+				event["terminal_reason"] = tc.terminal
+			}
+			encoded, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'EVENTS'\n"+tc.before+string(encoded)+"\nEVENTS\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				t.Fatalf("native failure result=%+v error=%v", result, err)
+			}
+			seen := map[string]string{}
+			for _, diagnostic := range result.Diagnostics {
+				seen[diagnostic.Code] = diagnostic.Message
+				if strings.Contains(diagnostic.Message, key) || strings.Contains(diagnostic.Message, string(encodedKey[1:len(encodedKey)-1])) {
+					t.Fatalf("native detail exposed configured key: %+v", result.Diagnostics)
+				}
+			}
+			if !strings.Contains(seen["result_detail"], "Agent capacity reached; session resets") || !strings.Contains(seen["result_errors"], "Session quota resets") || !strings.Contains(seen["result_detail"], "[redacted]") || !strings.Contains(seen["result_errors"], "[redacted]") {
+				t.Fatalf("result-only capacity/reset fields lost: %+v", result.Diagnostics)
+			}
+			if _, ok := seen["stderr_tail"]; ok {
+				t.Fatalf("invented stderr tail: %+v", result.Diagnostics)
+			}
+		})
+	}
+}
+
+func TestRunNativeDiagnosticOverflowKeepsFinalEvidence(t *testing.T) {
+	const stop = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"worker stopped"}` + "\n"
+	const failed = `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"capacity reached","errors":["session resets at midnight"],"structured_output":{"approved":false}}`
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf 'stream FD failure' >&2\ncat <<'EVENTS'\n"+strings.Repeat(stop, 100)+failed+"\nEVENTS\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
+	if err == nil || result.Answer != "" || len(result.Diagnostics) != 64 || result.Diagnostics[0].Code != "diagnostics_truncated" {
+		t.Fatalf("diagnostic overflow result=%+v error=%v", result, err)
+	}
+	want := []string{"result_error", "result_detail", "result_errors", "stderr_tail", "structured_output_observed"}
+	for i, code := range want {
+		if got := result.Diagnostics[len(result.Diagnostics)-len(want)+i].Code; got != code {
+			t.Fatalf("late diagnostic %d=%q, want %q", i, got, code)
+		}
 	}
 }
 

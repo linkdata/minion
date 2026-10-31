@@ -52,6 +52,7 @@ type event struct {
 	Tasks             json.RawMessage   `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
+	Errors            json.RawMessage   `json:"errors"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
 	Usage             json.RawMessage   `json:"usage"`
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
@@ -114,35 +115,37 @@ type messageUsage struct {
 }
 
 type jsonlOutput struct {
-	sessionID           string
-	apiKey              string
-	onEvent             func(aicli.StreamEvent)
-	identitySeen        bool
-	baseline            usage.Tokens
-	baselineUnknown     bool
-	cumulative          usage.Tokens
-	hasCumulative       bool
-	cancel              context.CancelFunc
-	stream              aicli.JSONL
-	fatal               func()
-	fatalGap            bool
-	stopped             bool
-	err                 error
-	usageLimit          error
-	taskFailure         error
-	completed           bool
-	structured          bool
-	pending             int
-	results             int64
-	indexed             bool
-	result              aicli.Result
-	observedStructured  string
-	aggregateGeneration int64
-	aggregateTokens     usage.Tokens
-	assistantUsage      map[string]messageUsage
-	assistantTokens     usage.Tokens
-	rootTokens          usage.Tokens
-	uncovered           bool
+	sessionID            string
+	apiKey               string
+	onEvent              func(aicli.StreamEvent)
+	identitySeen         bool
+	baseline             usage.Tokens
+	baselineUnknown      bool
+	cumulative           usage.Tokens
+	hasCumulative        bool
+	cancel               context.CancelFunc
+	stream               aicli.JSONL
+	fatal                func()
+	fatalGap             bool
+	stopped              bool
+	err                  error
+	usageLimit           error
+	taskFailure          error
+	completed            bool
+	structured           bool
+	pending              int
+	results              int64
+	indexed              bool
+	result               aicli.Result
+	observedStructured   string
+	observedResultText   string
+	observedResultErrors string
+	aggregateGeneration  int64
+	aggregateTokens      usage.Tokens
+	assistantUsage       map[string]messageUsage
+	assistantTokens      usage.Tokens
+	rootTokens           usage.Tokens
+	uncovered            bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -176,6 +179,17 @@ func (o *jsonlOutput) markFatalGap(kind string) {
 
 func (o *jsonlOutput) observe(code, message string) {
 	o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, code, aicli.RedactText(message, o.apiKey))
+}
+
+func (o *jsonlOutput) safeResultDetail(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	redacted := aicli.RedactText(detail, o.apiKey)
+	if redacted == "" {
+		return "native result detail could not be safely displayed"
+	}
+	return aicli.DiagnosticText(redacted)
 }
 
 func (o *jsonlOutput) finish() {
@@ -306,10 +320,15 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type != "result" {
 		return
 	}
+	o.observedResultText = o.safeResultDetail(e.Result)
+	o.observedResultErrors = ""
+	if raw := bytes.TrimSpace(e.Errors); len(raw) != 0 && raw[0] == '[' {
+		o.observedResultErrors = o.safeResultDetail(string(raw))
+	}
 	if o.structured {
 		structured := bytes.TrimSpace(e.StructuredOutput)
 		if len(structured) != 0 && !bytes.Equal(structured, []byte("null")) {
-			o.observedStructured = aicli.DiagnosticText(aicli.RedactText(string(structured), o.apiKey))
+			o.observedStructured = o.safeResultDetail(string(structured))
 		}
 	}
 	tokens, complete := e.tokens()

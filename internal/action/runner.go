@@ -94,7 +94,7 @@ func validProviderDiagnosticCode(provider, code string) bool {
 		return code == "native_error" || code == "turn_failed" || code == "stderr_tail" || code == "stderr_unavailable" || code == "diagnostics_truncated"
 	case "claude":
 		switch code {
-		case "rate_limit_rejected", "result_error", "permission_denied", "terminal_reason", "task_stopped", "wait_ceiling", "stderr_tail", "structured_output_observed", "diagnostics_truncated":
+		case "rate_limit_rejected", "result_error", "result_detail", "result_errors", "permission_denied", "terminal_reason", "task_stopped", "wait_ceiling", "stderr_tail", "structured_output_observed", "diagnostics_truncated":
 			return true
 		}
 	}

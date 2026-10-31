@@ -28,7 +28,7 @@ type ProviderDiagnostic struct {
 }
 
 // AppendNativeDiagnostic retains recent native observations and marks lost ones.
-// Two slots remain available for the final stderr tail and observed structured output.
+// Call finalization may trim older entries to reserve room for its evidence.
 func AppendNativeDiagnostic(diagnostics []ProviderDiagnostic, code, message string) []ProviderDiagnostic {
 	const nativeLimit = 61
 	entry := ProviderDiagnostic{Code: code, Message: DiagnosticText(message)}
