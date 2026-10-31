@@ -38,11 +38,19 @@ func (q *providerEventQueue) add(event attemptRecord) {
 	}
 	failure := event.Kind == attemptRecordDiagnostic && event.Provider != "" &&
 		(event.EventSource == event.Provider+".call.failed" || event.EventSource == event.Provider+".call.diagnostic_unavailable")
-	if event.Agent == "" && event.Kind != attemptRecordInput && !failure {
+	missing := event.Kind == attemptRecordDiscussion && event.Provider != "" &&
+		event.EventSource == event.Provider+".content_missing"
+	incomplete := event.Kind == attemptRecordDiscussion && event.Provider != "" &&
+		(event.EventSource == event.Provider+".assistant_incomplete" || event.EventSource == event.Provider+".tool_incomplete")
+	if missing && event.Text != "" {
 		q.failed.Store(true)
 		return
 	}
-	if failure {
+	if event.Agent == "" && event.Kind != attemptRecordInput && !failure && !missing {
+		q.failed.Store(true)
+		return
+	}
+	if failure || missing || incomplete {
 		q.failed.Store(true)
 	}
 	size := int64(len(event.Text))

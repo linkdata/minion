@@ -17,8 +17,9 @@ type Result struct {
 	UsageComplete bool
 }
 
-// StreamEvent is one fully emitted provider event. NativeID is a root session
-// or helper agent ID. An empty ID marks a gap that prevents coverage proof.
+// StreamEvent is one provider event or a metadata-only content_missing marker.
+// NativeID is a root session or helper agent ID. An empty ID marks a gap that
+// prevents coverage proof.
 type StreamEvent struct {
 	NativeID string
 	Kind     string

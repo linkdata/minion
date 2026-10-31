@@ -85,6 +85,38 @@ func TestProviderEventQueueRetainsCallFailureWithoutClaimingCoverage(t *testing.
 	}
 }
 
+func TestProviderEventQueueRetainsPartialContentGapsWithoutCoverage(t *testing.T) {
+	for _, event := range []attemptRecord{
+		{Kind: attemptRecordDiscussion, Provider: "codex", EventSource: "codex.content_missing"},
+		{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.content_missing"},
+		{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.assistant_incomplete", Text: "closed text"},
+		{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.tool_incomplete", Text: "closed tool result"},
+	} {
+		t.Run(event.EventSource+"/"+event.Agent, func(t *testing.T) {
+			var sent []attemptRecord
+			queue := newProviderEventQueue(func(record attemptRecord) error {
+				sent = append(sent, record)
+				return nil
+			})
+			queue.add(event)
+			queue.add(attemptRecord{Kind: attemptRecordDiscussion, Agent: "native", Text: "later"})
+			if queue.finish() || len(sent) != 2 || sent[0] != event || sent[1].Text != "later" {
+				t.Fatalf("partial gap was lost or falsely proved coverage: %+v", sent)
+			}
+		})
+	}
+
+	var sent []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		sent = append(sent, event)
+		return nil
+	})
+	queue.add(attemptRecord{Kind: attemptRecordDiscussion, Provider: "codex", EventSource: "codex.content_missing", Text: "unsafe open text"})
+	if queue.finish() || len(sent) != 0 {
+		t.Fatalf("unsafe content_missing text reached Status or proved coverage: %+v", sent)
+	}
+}
+
 func TestProviderEventQueueKeepsLaterValidEventsAfterGap(t *testing.T) {
 	var sent []string
 	queue := newProviderEventQueue(func(event attemptRecord) error {
