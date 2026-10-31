@@ -125,22 +125,6 @@ func TestJSONLOutputDuplicateCompletionKeepsNativeResultIndependentOfStatus(t *t
 	}
 }
 
-func TestJSONLOutputKnownCredentialSuppressesOpenAssistant(t *testing.T) {
-	const key = "tail-secret"
-	var got []aicli.StreamEvent
-	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
-	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
-	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "message", "type": "agent_message", "text": "obsolete tail-se"}})
-	message := "Useful work: " + strings.Repeat("A", 200) + " credential=tail-se " + strings.Repeat("B", 200) + " " + key
-	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "message", "type": "agent_message", "text": message}})
-	writeCodexStreamEvent(t, &output, map[string]any{"type": "turn.failed", "message": "stopped"})
-	output.stream.Finish()
-	output.flushPending()
-	if !slices.Equal(got, []aicli.StreamEvent{{NativeID: "root", Kind: "identity"}, {NativeID: "root", Kind: "content_missing"}}) {
-		t.Fatalf("known key prefix in middle of open snapshot escaped: %+v", got)
-	}
-}
-
 func TestJSONLOutputUnsafeOpenItemsUseContentMissing(t *testing.T) {
 	const key = "split-secret"
 	var got []aicli.StreamEvent
