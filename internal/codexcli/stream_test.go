@@ -73,6 +73,34 @@ func writeCodexStreamEvent(t *testing.T, output *jsonlOutput, event any) {
 	_, _ = output.Write(append(data, '\n'))
 }
 
+func TestJSONLOutputObservesOpenWaitAndCloseWithoutSpawning(t *testing.T) {
+	var observed []string
+	output := jsonlOutput{onChild: func(ids []string, spawned bool) {
+		if spawned {
+			t.Fatalf("wait/close observation claimed spawn ownership: %v", ids)
+		}
+		observed = append(observed, ids...)
+	}}
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+	for _, item := range []struct{ event, tool, id string }{
+		{"item.started", "wait", "known"},
+		{"item.updated", "wait", "known"},
+		{"item.started", "close_agent", "unknown"},
+		{"item.updated", "close_agent", "unknown"},
+	} {
+		writeCodexStreamEvent(t, &output, map[string]any{"type": item.event, "item": map[string]any{
+			"type": "collab_tool_call", "tool": item.tool, "receiver_thread_ids": []string{item.id},
+		}})
+		if len(observed) == 0 || observed[len(observed)-1] != item.id {
+			t.Fatalf("%s %s did not announce %s before completion: %v", item.event, item.tool, item.id, observed)
+		}
+	}
+	if !slices.Equal(observed, []string{"known", "known", "unknown", "unknown"}) ||
+		len(output.spawns) != 0 || !output.observationOnly["unknown"] {
+		t.Fatalf("open observation changed helper ownership: observed=%v spawns=%v observationOnly=%v", observed, output.spawns, output.observationOnly)
+	}
+}
+
 func TestJSONLOutputProgressSnapshotsAndCompletedItems(t *testing.T) {
 	var got []aicli.StreamEvent
 	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, allowIncomplete: true}

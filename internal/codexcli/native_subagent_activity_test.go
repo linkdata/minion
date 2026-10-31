@@ -75,6 +75,53 @@ func TestUsageSessionLegacyActivityNoTurnOnResumeRemainsUnverified(t *testing.T)
 	}
 }
 
+func TestUsageSessionLegacyActivityInFreshHelperNeedsSpawnProof(t *testing.T) {
+	boundary := int64(9)
+	for _, test := range []struct {
+		name          string
+		boundary      *int64
+		activityAt    int
+		currentSpawns map[string]bool
+		want          int64
+		complete      bool
+	}{
+		{name: "inherited without boundary", activityAt: 4, want: 25},
+		{name: "current stdout spawn", activityAt: 12, currentSpawns: map[string]bool{"grandchild": true}, want: 32, complete: true},
+		{name: "bounded helper", boundary: &boundary, activityAt: 12, want: 32, complete: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, home := t.Context(), t.TempDir()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "r1", 100)...)
+			var session usageSession
+			session.begin(ctx, home, "root", time.Now())
+			appendUsageEvents(t, root,
+				usageEventAt(21, "task_started", "new-root"),
+				nativeActivityEvent(22, "root", "new-root", "started", "child"),
+				usageRecordAt(23, "root", "new-root", "r2", 20, 0, 0),
+				usageEventAt(24, "task_complete", "new-root"))
+			var childEvents []string
+			if test.activityAt < 10 {
+				childEvents = append(childEvents,
+					usageRecordAt(3, "root", "old-root", "r1", 100, 0, 0),
+					legacyActivityEvent(test.activityAt, "started", "grandchild"))
+			}
+			childEvents = append(childEvents, usageEventAt(10, "task_started", "child-turn"))
+			if test.activityAt >= 10 {
+				childEvents = append(childEvents, legacyActivityEvent(test.activityAt, "started", "grandchild"))
+			}
+			childEvents = append(childEvents,
+				usageRecordAt(13, "child", "child-turn", "c1", 5, 0, 0),
+				usageEventAt(14, "task_complete", "child-turn"))
+			writeUsageRolloutBoundary(t, home, "child", "root", test.boundary, childEvents...)
+			writeUsageRolloutBoundary(t, home, "grandchild", "child", nil, completedUsageTurn("grandchild", "grandchild-turn", "g1", 7)...)
+			got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil, test.currentSpawns)
+			if got != (usage.Tokens{Input: test.want}) || complete != test.complete || errors.Is(err, errUnverifiedChildren) == test.complete || test.complete && err != nil || session.provedSpawns["grandchild"] != test.complete || !session.provedSpawns["child"] {
+				t.Fatalf("legacy helper activity: tokens=%+v complete=%t error=%v proved=%v; want input=%d complete=%t", got, complete, err, session.provedSpawns, test.want, test.complete)
+			}
+		})
+	}
+}
+
 func TestUsageSessionNativeSubAgentActivityNewSpawnOnResume(t *testing.T) {
 	for _, test := range []struct {
 		name, kind, thread, turn       string

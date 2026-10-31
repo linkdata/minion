@@ -775,7 +775,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 				// A started spawn can already have a live helper. This only permits
 				// discussion capture; rollout cleanup still needs completed proof.
 				o.onChild(event.Item.ReceiverThreadIDs, true)
-			} else if event.Type == "item.completed" {
+			} else if event.Type == "item.completed" || observation {
 				o.onChild(event.Item.ReceiverThreadIDs, false)
 			}
 		}

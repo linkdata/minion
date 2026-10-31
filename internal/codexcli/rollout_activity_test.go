@@ -133,6 +133,51 @@ func TestRolloutActivityLegacyEventMsgCapturesHelperContent(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityLegacyCompletedToolOutputAndUnsupportedUserMessage(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	output := fmt.Sprintf(`{"type":"FunctionCallOutput","id":"output","output":%q}`, strings.Repeat("PASS\n", 100))
+	response := `{"type":"function_call_output","call_id":"call-1","output":"response source"}`
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutCompletedItem(9, "child", output),
+		fmt.Sprintf(`{"ordinal":10,"type":"response_item","payload":%s}`, response),
+		rolloutCompletedItem(11, "child", `{"type":"UserMessage","id":"unsupported","content":[{"type":"Text","text":"not a legacy item"}]}`))
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "tool_item_completed", Text: output},
+		{NativeID: "child", Kind: "tool", Text: response},
+		{NativeID: "child", Kind: "content_missing"},
+	}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("legacy completed tool, response source, or unsupported item = %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivityCompletedPlanVisibleInBothHistoryModes(t *testing.T) {
+	for _, mode := range []string{"legacy", "paginated"} {
+		t.Run(mode, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItem(9, "child", `{"type":"Plan","id":"plan","text":"Inspect tests, then patch."}`))
+			setActivityHistoryMode(t, child, mode)
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := []aicli.StreamEvent{{NativeID: "child", Kind: "plan", Text: "Inspect tests, then patch."}}
+			if !slices.Equal(*events, want) {
+				t.Fatalf("%s completed plan = %+v; want %+v", mode, *events, want)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityLegacyUserAttachmentsLeaveCoverageGap(t *testing.T) {
 	for _, test := range []struct {
 		name, payload, text string
@@ -758,7 +803,10 @@ func TestRolloutActivityRetriesTransientPartialHelperHeaderLive(t *testing.T) {
 	activity, events, _ := newActivityTestRecorder(t, home, started)
 	activity.root("root")
 	activity.child("child", true)
-	activity.poll()
+	for range 3 {
+		activity.lastDiscover = time.Now().Add(-time.Hour) // Make each incomplete retry due without sleeping.
+		activity.poll()
+	}
 	for _, event := range *events {
 		if event.NativeID == "child" && event.Kind == "assistant" {
 			t.Fatalf("incomplete header emitted helper content: %+v", *events)
@@ -1046,6 +1094,35 @@ func TestRolloutActivityResumeWithoutForkBoundaryUsesVerifiedPrefix(t *testing.T
 	activity.poll()
 	if len(events) != 1 || events[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "verified suffix"}) {
 		t.Fatalf("verified resumed suffix mislabeled or replayed: %+v", events)
+	}
+}
+
+func TestRolloutActivityResumeWithoutForkBoundarySecondHeaderMarksUnknownTurn(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		usageEventAt(9, "task_started", "old-child"),
+		rolloutMessageWithTurn(10, "old-message", "historical helper text", "old-child"),
+		usageRecordAt(11, "child", "old-child", "old-child-response", 1, 0, 0),
+		usageEventAt(12, "task_complete", "old-child"))
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	appendUsageEvents(t, child,
+		`{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}}}}`,
+		rolloutMessageWithTurn(13, "new-message", "unknown turn after second header", "new-child"))
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.child("child", false)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "content_missing"},
+		{NativeID: "child", Kind: "assistant_possibly_duplicate", Text: "unknown turn after second header"},
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("second header after verified prefix = %+v; want %+v", events, want)
 	}
 }
 

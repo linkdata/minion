@@ -520,8 +520,8 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 		}
 	}
 	appendSpawnProof := func(turnID string, ids ...string) {
-		if before != nil && turnID == "" {
-			// A late prior-turn event has no turn identity to exclude on resume.
+		if turnID == "" && (before != nil || meta.ID != rootID && meta.HistoryStart == nil) {
+			// A no-turn event can be from a prior call or copied helper history.
 			for _, id := range ids {
 				if mode.currentSpawns[id] {
 					appendSpawned(id)

@@ -42,7 +42,6 @@ type rolloutActivity struct {
 	files             map[string]rolloutMeta
 	ambiguous         map[string]bool
 	lastDiscover      time.Time
-	discoveryFailed   bool
 	discoveryFailures int
 	cursors           map[string]*rolloutActivityCursor
 	prefixFailed      map[string]bool
@@ -56,11 +55,13 @@ type rolloutActivity struct {
 }
 
 type rolloutActivityCursor struct {
-	meta     rolloutMeta
-	file     os.FileInfo
-	offset   int64
-	pending  []byte
-	dropping bool
+	meta       rolloutMeta
+	file       os.FileInfo
+	offset     int64
+	pending    []byte
+	dropping   bool
+	seenHeader bool
+	inherited  bool
 }
 
 const maxActivityPendingBytes = 8 << 20
@@ -187,20 +188,25 @@ func (a *rolloutActivity) poll() {
 	if rootID == "" {
 		return
 	}
-	periodic := !a.discoveryFailed && time.Since(a.lastDiscover) >= 5*time.Second && a.needsDiscovery(rootID, announced, spawned)
+	discoveryInterval := 5 * time.Second
+	if a.discoveryFailures >= maxActivityDiscoveryFailures {
+		discoveryInterval = 30 * time.Second
+	}
+	periodic := time.Since(a.lastDiscover) >= discoveryInterval && a.needsDiscovery(rootID, announced, spawned)
 	if refresh || a.files == nil || periodic {
 		files, ambiguous, complete := usageFiles(a.ctx, a.home, rootID, a.started, a.known)
 		a.files, a.ambiguous, a.lastDiscover = files, ambiguous, time.Now()
 		if !complete {
 			if _, err := os.Stat(filepath.Join(a.home, "sessions")); !errors.Is(err, os.ErrNotExist) {
-				a.discoveryFailures++
-				a.discoveryFailed = a.discoveryFailures >= maxActivityDiscoveryFailures
+				if a.discoveryFailures < maxActivityDiscoveryFailures {
+					a.discoveryFailures++
+				}
 				if _, rootFound := files[rootID]; rootFound || len(spawned) != 0 {
 					a.contentMissing(rootID)
 				}
 			}
 		} else {
-			a.discoveryFailures, a.discoveryFailed = 0, false
+			a.discoveryFailures = 0
 		}
 	}
 	files, ambiguous := a.files, a.ambiguous
@@ -294,6 +300,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 				return
 			}
 			cursor.offset = baseline.size
+			cursor.seenHeader = true // The verified prefix contains this file's header.
 		}
 		_ = f.Close()
 		a.cursors[meta.ID] = cursor
@@ -357,7 +364,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 			break // Retain only bounded unfinished bytes for the next poll.
 		}
 		if !cursor.dropping {
-			a.consume(meta, rootID, cursor.pending[:len(cursor.pending)-1], progressed)
+			a.consume(meta, rootID, cursor, cursor.pending[:len(cursor.pending)-1], progressed)
 		}
 		a.pendingBytes -= int64(len(cursor.pending))
 		cursor.pending, cursor.dropping = nil, false
@@ -373,16 +380,21 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 	}
 }
 
-func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, progressed *bool) {
+func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, line []byte, progressed *bool) {
 	var event rolloutEvent
 	if json.Unmarshal(line, &event) != nil {
 		a.contentMissing(meta.ID)
 		return
 	}
 	if event.Type == "session_meta" {
+		if meta.ID != rootID && meta.HistoryStart == nil && cursor.seenHeader {
+			cursor.inherited = true
+			a.contentMissing(meta.ID) // A second header can introduce inherited history.
+		}
+		cursor.seenHeader = true
 		return
 	}
-	uncertainOrdinal := false
+	uncertainOrdinal := cursor.inherited
 	if meta.ID != rootID && meta.HistoryStart != nil {
 		if event.Ordinal <= 0 && *meta.HistoryStart > 0 {
 			uncertainOrdinal = true
@@ -538,6 +550,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 		ID          string   `json:"id"`
 		Type        string   `json:"type"`
 		Kind        string   `json:"kind"`
+		Text        string   `json:"text"`
 		AgentID     string   `json:"agent_thread_id"`
 		Tool        string   `json:"tool"`
 		Status      string   `json:"status"`
@@ -574,10 +587,17 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 		return // Root stdout is canonical.
 	}
 	if meta.HistoryMode != "paginated" {
-		// Legacy persists only a few completed item types. A visible
-		// paginated-only item under a legacy header cannot be reconciled.
+		// Legacy persists selected completed items. Keep their unique content;
+		// an unexpected visible item under a legacy header leaves a gap.
+		uncertain := uncertainOrdinal || a.before[meta.ID] != nil && payload.TurnID == "" || meta.HistoryStart == nil && a.before[meta.ID] == nil
 		switch item.Type {
-		case "AgentMessage", "Reasoning", "CommandExecution", "DynamicToolCall", "CollabAgentToolCall", "WebSearch", "FileChange", "McpToolCall", "ImageView", "ImageGeneration":
+		case "SubAgentActivity", "Extension":
+			return
+		case "FunctionCallOutput":
+			a.emitVisible(meta.ID, "tool_item_completed", string(payload.Item), uncertain)
+		case "Plan":
+			a.emitVisible(meta.ID, "plan", item.Text, uncertain)
+		default:
 			a.contentMissing(meta.ID)
 		}
 		return
@@ -585,8 +605,10 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 	uncertain := uncertainOrdinal || a.before[meta.ID] != nil && payload.TurnID == "" || meta.HistoryStart == nil && a.before[meta.ID] == nil
 	kind, text := "", ""
 	switch item.Type {
-	case "SubAgentActivity", "Plan", "TodoList", "ContextCompaction":
+	case "SubAgentActivity", "ContextCompaction":
 		return // Lifecycle data are not discussion.
+	case "Plan":
+		kind, text = "plan", item.Text
 	case "UserMessage", "AgentMessage":
 		kind = "assistant"
 		if item.Type == "UserMessage" {
