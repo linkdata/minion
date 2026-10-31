@@ -669,10 +669,9 @@ func TestRolloutActivityLegacyInteractedDoesNotAdmitFreshHelper(t *testing.T) {
 	activity.root("root")
 	activity.poll()
 	activity.finish()
-	for _, event := range *events {
-		if event.NativeID == "child" {
-			t.Fatalf("legacy interaction admitted a fresh helper: %+v", *events)
-		}
+	want := []aicli.StreamEvent{{NativeID: "root", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("legacy interaction should gap only the root: got %+v; want %+v", *events, want)
 	}
 }
 
@@ -1321,6 +1320,78 @@ func TestRolloutActivityFinalScanCompletesPartialLineOnce(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityFinalScanGapsUnfinishedLine(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	boundary := int64(9)
+	path := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		usageEventAt(8, "task_started", "inherited-turn"))
+	line := rolloutMessage(9, "message", "never completed")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := f.WriteString(line[:len(line)/2])
+	if err := errors.Join(writeErr, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if len(*events) != 0 {
+		t.Fatalf("unfinished JSONL line emitted before finish: %+v", *events)
+	}
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("unfinished JSONL line should gap once at finish: got %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivitySharedPendingBytesCapGapsRejectedHelper(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	const prefix = `{"ordinal":9,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"`
+	fragment := prefix + strings.Repeat("x", maxActivityPendingBytes/3+1-len(prefix)) // Three unfinished lines exceed the shared cap by one byte.
+	if len(fragment) > aicli.MaxEventBytes {
+		t.Fatalf("test fragment exceeds the per-line limit: %d", len(fragment))
+	}
+	ids := []string{"child-a", "child-b", "child-c"}
+	boundary := int64(9)
+	for _, id := range ids {
+		path := writeUsageRolloutBoundary(t, home, id, "root", &boundary,
+			usageEventAt(8, "task_started", "inherited-turn"))
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := f.WriteString(fragment)
+		if err := errors.Join(writeErr, f.Close()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	for _, id := range ids {
+		activity.child(id, true)
+	}
+	activity.poll()
+	want := []aicli.StreamEvent{{NativeID: "child-c", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) || activity.pendingBytes != int64(2*len(fragment)) || activity.pendingBytes > maxActivityPendingBytes {
+		t.Fatalf("shared pending cap: events=%+v pending=%d; want one rejected helper gap and %d bytes retained", *events, activity.pendingBytes, 2*len(fragment))
+	}
+	activity.finish()
+	if len(*events) != len(ids) {
+		t.Fatalf("unfinished helper gap count = %d; want %d: %+v", len(*events), len(ids), *events)
+	}
+	for _, id := range ids {
+		if !slices.Contains(*events, aicli.StreamEvent{NativeID: id, Kind: "content_missing"}) {
+			t.Fatalf("unfinished helper %s lacked one gap: %+v", id, *events)
+		}
+	}
+}
+
 func TestRolloutActivityResumeSkipsVerifiedPrefix(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
@@ -1378,8 +1449,8 @@ func TestRolloutActivityLegacyInteractedReactivatesKnownHelper(t *testing.T) {
 			t.Fatalf("legacy interaction replayed history or emitted unexpected content: %+v", events)
 		}
 	}
-	if childMessages != 1 || rootGaps > 1 {
-		t.Fatalf("known helper suffix was not captured once: %+v", events)
+	if childMessages != 1 || rootGaps != 1 {
+		t.Fatalf("known helper suffix and root gap should each appear once: %+v", events)
 	}
 }
 

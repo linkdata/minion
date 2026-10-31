@@ -93,7 +93,8 @@ func (a *rolloutActivity) root(id string) {
 }
 
 // A wait/close observation can reactivate an owned resumed helper. New helper
-// files require a completed current spawn, not merely an observed receiver ID.
+// files require a current spawn, not merely an observed receiver ID. A started
+// stdout spawn permits live capture; cleanup still needs completed proof.
 func (a *rolloutActivity) child(id string, spawned bool) {
 	if id == "" || len(id) > maxItemIDBytes {
 		a.mu.Lock()

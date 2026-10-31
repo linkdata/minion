@@ -183,6 +183,9 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 		t.Fatalf("late helper record count = %d; events=%s", late, safeEvents())
 	}
 	for _, event := range captured {
+		if event.Kind == "content_missing" || event.Kind == "identity_unavailable" || event.NativeID == "" {
+			t.Fatalf("successful call emitted coverage gap: kind=%q id=%q events=%s", event.Kind, event.NativeID, safeEvents())
+		}
 		if strings.Contains(event.Text, key) {
 			t.Fatal("configured API key reached captured events")
 		}
