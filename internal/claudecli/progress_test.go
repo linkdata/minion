@@ -39,13 +39,13 @@ func TestProgressFollowsFreshExecutionEvents(t *testing.T) {
 		{`{"type":"system","subtype":"task_notification","task_id":"worker","status":"completed"}`, 10},
 		{`{"type":"system","subtype":"task_notification","task_id":"worker","status":"completed"}`, 10},
 		{`{"type":"system","subtype":"task_notification","task_id":"ambient","status":"completed","ambient":true}`, 10},
-		{`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`, 11},
-		{`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`, 11},
-		{`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`, 11},
-		{successfulResult, 11},
-		{`{"type":"stream_event","session_id":"native-id","event":{"type":"message_start","message":{"id":"message-1"}}}`, 11},
-		{`{"type":"stream_event","session_id":"native-id","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"working"}}}`, 11},
-		{`{"type":"assistant","session_id":"foreign","parent_tool_use_id":null,"message":{"id":"foreign","content":[{"type":"text","text":"foreign work"}]}}`, 11},
+		{`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`, 10},
+		{`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`, 10},
+		{`{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`, 10},
+		{successfulResult, 10},
+		{`{"type":"stream_event","session_id":"native-id","event":{"type":"message_start","message":{"id":"message-1"}}}`, 10},
+		{`{"type":"stream_event","session_id":"native-id","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"working"}}}`, 10},
+		{`{"type":"assistant","session_id":"foreign","parent_tool_use_id":null,"message":{"id":"foreign","content":[{"type":"text","text":"foreign work"}]}}`, 10},
 	} {
 		writeChunks(t, &o, step.line+"\n")
 		if o.err != nil || got != step.want {
@@ -74,7 +74,7 @@ func TestProgressDeduplicatesResumedMessagesAndSyntheticTaskNotices(t *testing.T
 	writeChunks(t, &resumed, worker+"\n"+clear+"\n")
 	replayed := jsonlOutput{sessionID: "native-id", onProgress: first.onProgress, progressSeen: resumed.progressSeen}
 	writeChunks(t, &replayed, worker+"\n"+clear+"\n")
-	if got != 4 || replayed.err != nil {
+	if got != 3 || replayed.err != nil {
 		t.Fatalf("replayed task list renewed progress: count=%d error=%v", got, replayed.err)
 	}
 	var session Session
@@ -82,6 +82,103 @@ func TestProgressDeduplicatesResumedMessagesAndSyntheticTaskNotices(t *testing.T
 	session.NewConversation()
 	if session.progressSeen != nil {
 		t.Fatal("new conversation retained replay IDs")
+	}
+}
+
+func TestProgressTracksForegroundTaskRuns(t *testing.T) {
+	var got int
+	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
+	const started = `{"type":"system","subtype":"task_started","session_id":"native-id","task_id":"helper","run_id":"run-1","is_backgrounded":false}`
+	const progress = `{"type":"system","subtype":"task_progress","session_id":"native-id","task_id":"helper","run_id":"run-1","usage":{"total_tokens":5,"tool_uses":1},"summary":"read files","duration_ms":300}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"system","subtype":"task_started","task_id":"ambient","run_id":"run-1","ambient":true}`, 0},
+		{`{"type":"system","subtype":"task_started","run_id":"run-1"}`, 0},
+		{`{"type":"system","subtype":"task_started","session_id":"foreign","task_id":"helper","run_id":"run-1"}`, 0},
+		{started, 1},
+		{started, 1},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":0,"tool_uses":0},"duration_ms":100}`, 1},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":0,"tool_uses":0},"duration_ms":200}`, 1},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":5,"tool_uses":0},"duration_ms":250}`, 2},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":5,"tool_uses":0},"duration_ms":300}`, 2},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":5,"tool_uses":1}}`, 3},
+		{progress, 4},
+		{progress, 4},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","summary":"write patch","duration_ms":400}`, 5},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":3,"tool_uses":0},"summary":"read files","duration_ms":500}`, 5},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":100},"ambient":true}`, 5},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 6},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 6},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2","is_backgrounded":false}`, 7},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-2","usage":{"total_tokens":1}}`, 8},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`, 9},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, o.err)
+		}
+	}
+	replayed := jsonlOutput{sessionID: "native-id", onProgress: o.onProgress, progressSeen: o.progressSeen, taskProgress: o.taskProgress}
+	for _, line := range []string{started, progress, `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`, `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-2","usage":{"total_tokens":1}}`} {
+		writeChunks(t, &replayed, line+"\n")
+	}
+	if replayed.err != nil || got != 9 {
+		t.Fatalf("replayed task run renewed progress: count=%d error=%v", got, replayed.err)
+	}
+	var session Session
+	session.progressSeen, session.taskProgress = replayed.progressSeen, replayed.taskProgress
+	session.NewConversation()
+	if session.progressSeen != nil || session.taskProgress != nil {
+		t.Fatal("new conversation retained task progress history")
+	}
+}
+
+func TestProgressTaskListUsesRunIdentity(t *testing.T) {
+	var got int
+	o := jsonlOutput{onProgress: func() { got++ }}
+	const first = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	const second = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-2"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{first, 1},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`, 1},
+		{first, 1},
+		{second, 3},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`, 3},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 3},
+		{second, 3},
+		{empty, 4},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`, 4},
+		{empty, 4},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, o.err)
+		}
+	}
+	replayed := jsonlOutput{onProgress: o.onProgress, progressSeen: o.progressSeen}
+	writeChunks(t, &replayed, first+"\n"+empty+"\n")
+	if replayed.err != nil || got != 4 {
+		t.Fatalf("replayed task-list run renewed progress: count=%d error=%v", got, replayed.err)
+	}
+	const third = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-3"}]}`
+	writeChunks(t, &replayed, `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-3"}`+"\n"+third+"\n")
+	if replayed.err != nil || got != 5 {
+		t.Fatalf("task list repeated task start: count=%d error=%v", got, replayed.err)
+	}
+	writeChunks(t, &replayed, `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-3","status":"completed"}`+"\n"+empty+"\n")
+	if replayed.err != nil || got != 6 {
+		t.Fatalf("task list repeated task finish: count=%d error=%v", got, replayed.err)
+	}
+	const legacy = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	writeChunks(t, &replayed, legacy+"\n"+empty+"\n")
+	if replayed.err != nil || got != 8 {
+		t.Fatalf("legacy task-list fallback: count=%d error=%v", got, replayed.err)
 	}
 }
 

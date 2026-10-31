@@ -39,6 +39,7 @@ type Session struct {
 	baseline       usage.Tokens
 	usageGap       bool
 	progressSeen   map[string]bool
+	taskProgress   map[string]taskProgressState
 	started, reset bool
 	closed         bool
 	initErr        error
@@ -49,6 +50,7 @@ type Session struct {
 func (s *Session) NewConversation() {
 	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
 	s.progressSeen = nil
+	s.taskProgress = nil
 	s.reset = s.runtimeDir != ""
 }
 

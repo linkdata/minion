@@ -61,6 +61,7 @@ type event struct {
 	StreamEvent       json.RawMessage   `json:"event"`
 	ParentToolUseID   json.RawMessage   `json:"parent_tool_use_id"`
 	TaskID            string            `json:"task_id"`
+	RunID             string            `json:"run_id"`
 	Status            string            `json:"status"`
 	Ambient           bool              `json:"ambient"`
 	Summary           string            `json:"summary"`
@@ -122,6 +123,12 @@ type progressStream struct {
 	tools     map[int]uint8 // 1 started, 2 stopped.
 }
 
+type taskProgressState struct {
+	totalTokens int64
+	toolUses    int64
+	summaries   map[string]bool
+}
+
 type jsonlOutput struct {
 	sessionID           string
 	apiKey              string
@@ -130,6 +137,7 @@ type jsonlOutput struct {
 	progressSeen        map[string]bool
 	progressStreams     map[string]*progressStream
 	progressTasks       map[string]bool
+	taskProgress        map[string]taskProgressState
 	identitySeen        bool
 	baseline            usage.Tokens
 	baselineUnknown     bool
@@ -302,6 +310,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
 		var tasks []struct {
 			TaskID  string `json:"task_id"`
+			RunID   string `json:"run_id"`
 			Ambient bool   `json:"ambient"`
 		}
 		if json.Unmarshal(e.Tasks, &tasks) != nil || tasks == nil {
@@ -314,7 +323,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			if !task.Ambient {
 				o.pending++
 				if task.TaskID != "" {
-					active[task.TaskID] = true
+					active[taskRunKey(task.TaskID, task.RunID)] = true
 				}
 			}
 		}
@@ -627,7 +636,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	status = strings.TrimSpace(html.UnescapeString(status))
 	if _, taskID, ok := strings.Cut(text, "<task-id>"); found && ok {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
-			o.recordTaskProgress(strings.TrimSpace(html.UnescapeString(taskID[:end])), status)
+			o.recordTaskProgress(strings.TrimSpace(html.UnescapeString(taskID[:end])), "", status)
 		}
 	}
 	if !found || status != "killed" && status != "stopped" {
@@ -693,8 +702,16 @@ func (o *jsonlOutput) recordProgress(e event) {
 			}
 		}
 	case "system":
-		if e.Subtype == "task_notification" && !e.Ambient {
-			o.recordTaskProgress(e.TaskID, e.Status)
+		if e.Ambient {
+			return
+		}
+		switch e.Subtype {
+		case "task_started":
+			o.recordTaskProgress(e.TaskID, e.RunID, "started")
+		case "task_notification":
+			o.recordTaskProgress(e.TaskID, e.RunID, e.Status)
+		case "task_progress":
+			o.recordTaskUsageProgress(e)
 		}
 	}
 }
@@ -803,13 +820,62 @@ func (o *jsonlOutput) recordUniqueProgress(key string) {
 	o.onProgress()
 }
 
-func (o *jsonlOutput) recordTaskProgress(id, status string) {
+func taskRunKey(id, runID string) string {
+	if runID == "" {
+		return id
+	}
+	return id + "\x00" + runID
+}
+
+func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	if o.onProgress == nil || id == "" {
 		return
 	}
 	switch status {
-	case "started", "running", "completed", "failed", "stopped", "killed":
-		o.recordUniqueProgress("task:" + id + ":" + status)
+	case "started":
+		o.recordUniqueProgress("task_start:" + taskRunKey(id, runID))
+	case "running":
+		o.recordUniqueProgress("task_running:" + taskRunKey(id, runID))
+	case "completed", "failed", "stopped", "killed":
+		o.recordUniqueProgress("task_finish:" + taskRunKey(id, runID))
+	}
+}
+
+func (o *jsonlOutput) recordTaskUsageProgress(e event) {
+	if e.TaskID == "" {
+		return
+	}
+	var usage struct {
+		TotalTokens *int64 `json:"total_tokens"`
+		ToolUses    *int64 `json:"tool_uses"`
+	}
+	if json.Unmarshal(e.Usage, &usage) != nil {
+		usage.TotalTokens, usage.ToolUses = nil, nil
+	}
+	key := taskRunKey(e.TaskID, e.RunID)
+	state := o.taskProgress[key]
+	changed := false
+	if usage.TotalTokens != nil && *usage.TotalTokens > state.totalTokens {
+		state.totalTokens = *usage.TotalTokens
+		changed = true
+	}
+	if usage.ToolUses != nil && *usage.ToolUses > state.toolUses {
+		state.toolUses = *usage.ToolUses
+		changed = true
+	}
+	if summary := strings.TrimSpace(e.Summary); summary != "" && !state.summaries[summary] {
+		if state.summaries == nil {
+			state.summaries = make(map[string]bool)
+		}
+		state.summaries[summary] = true
+		changed = true
+	}
+	if changed {
+		if o.taskProgress == nil {
+			o.taskProgress = make(map[string]taskProgressState)
+		}
+		o.taskProgress[key] = state
+		o.onProgress()
 	}
 }
 

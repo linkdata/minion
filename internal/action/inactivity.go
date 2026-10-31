@@ -65,7 +65,12 @@ func (w *inactivityTimer) progress() {
 
 func (w *inactivityTimer) stop() {
 	w.mu.Lock()
-	w.stopped = true
-	w.timer.Stop()
+	if !w.stopped {
+		w.stopped = true
+		w.timer.Stop()
+		if !time.Now().Before(w.last.Add(w.timeout)) {
+			w.cancel(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+		}
+	}
 	w.mu.Unlock()
 }

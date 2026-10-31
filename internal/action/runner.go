@@ -250,11 +250,26 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}
 	ctx, cancel := context.WithTimeout(ctx, job.RuntimeBudget)
 	defer cancel()
+	configured := *r
+	var inactivity *inactivityTimer
+	if configured.executionProgress == nil {
+		var cancelInactivity context.CancelCauseFunc
+		ctx, cancelInactivity = context.WithCancelCause(ctx)
+		defer cancelInactivity(nil)
+		inactivity = startInactivityTimer(time.Now(), job.InactivityTimeout, cancelInactivity)
+		configured.executionProgress = inactivity.progress
+	}
 	// Final status runs after resource cleanup so cleanup diagnostics survive.
 	defer func() {
+		if inactivity != nil {
+			inactivity.stop()
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Answer, result.Changes = "", nil
 			resultErr = errors.Join(monitor.ErrTerminalJob, ctx.Err(), resultErr)
+		} else if errors.Is(context.Cause(ctx), errExecutorInactivity) {
+			result.Answer, result.Changes = "", nil
+			resultErr = errors.Join(context.Cause(ctx), resultErr)
 		} else if ctx.Err() != nil && !errors.Is(resultErr, monitor.ErrTerminalJob) {
 			resultErr = errors.Join(ctx.Err(), resultErr)
 		}
@@ -262,7 +277,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "audit_incomplete", Message: "The audit failed; collected artifacts are incomplete and must not be published."})
 		}
 	}()
-	configured := *r
 	noteProgress := func() {
 		if ctx.Err() != nil {
 			return
