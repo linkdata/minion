@@ -300,6 +300,73 @@ func TestWorkerStatusSplitsRedactedUTF8BeforeTransit(t *testing.T) {
 	}
 }
 
+func TestWorkerStatusReplaysRedactedRecordAtFragmentBoundary(t *testing.T) {
+	job := testJob(command.Comment)
+	const secret = "fixture-boundary-secret"
+	root := t.TempDir()
+	store, err := openAttemptRecordStore(root, job.Identity, job.Source.Head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	text := strings.Repeat("x", maxAttemptRecordTextBytes-len("[redacted]")) + secret + " done"
+	var received []httpObservation
+	client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+		var observation httpObservation
+		if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+			return nil, err
+		}
+		if len(observation.Logs) != 1 {
+			return nil, errors.New("missing log fragment")
+		}
+		received = append(received, observation)
+		highest, err := store.Append(observation.Logs[0], secret)
+		if err != nil {
+			return nil, err
+		}
+		if len(received) == 1 {
+			return nil, errors.New("ack lost after append")
+		}
+		ack, err := httpEncode(httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status",
+			Sequence: observation.Status.Sequence, LogSequence: highest}, httpControlBytes)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
+	})}
+	base, _ := url.Parse("http://worker.test")
+	status := newWorkerStatus(job)
+	transport := &httpExecutionClient{client: client, base: base}
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: text}, secret); err != nil {
+		t.Fatal(err)
+	}
+	if err := status.drain(t.Context(), transport); err != nil {
+		t.Fatal(err)
+	}
+	if len(received) != 4 {
+		t.Fatalf("Status requests = %d, want first fragment, replay, second fragment, coverage", len(received))
+	}
+	first, replay, second, coverage := received[0], received[1], received[2], received[3]
+	if first.Status.Sequence != 1 || first.Status.LogSequence != 1 ||
+		replay.Status.Sequence != 2 || replay.Status.LogSequence != 1 || first.Logs[0] != replay.Logs[0] ||
+		first.Logs[0].Sequence != 1 || !first.Logs[0].More || len(first.Logs[0].Text) != maxAttemptRecordTextBytes ||
+		second.Status.Sequence != 3 || second.Status.LogSequence != 2 || second.Logs[0].Sequence != 2 || second.Logs[0].More ||
+		coverage.Status.Sequence != 4 || coverage.Status.LogSequence != 3 || coverage.Logs[0].Kind != attemptRecordCoverage || coverage.Logs[0].Sequence != 3 {
+		t.Fatalf("boundary split or replay changed: sequences=%d,%d,%d,%d fragments=%d,%d,%d,%d",
+			first.Status.Sequence, replay.Status.Sequence, second.Status.Sequence, coverage.Status.Sequence,
+			len(first.Logs[0].Text), len(replay.Logs[0].Text), len(second.Logs[0].Text), len(coverage.Logs[0].Text))
+	}
+	if got := first.Logs[0].Text + second.Logs[0].Text; got != strings.Repeat("x", maxAttemptRecordTextBytes-len("[redacted]"))+"[redacted] done" || strings.Contains(got, secret) {
+		t.Fatalf("redacted event did not survive boundary split: suffix=%q", got[len(got)-min(len(got), 40):])
+	}
+	saved := string(httpTestRecords(t, root, job))
+	if strings.Count(saved, "\n") != 3 || !strings.Contains(saved, "[redacted]") ||
+		!strings.Contains(saved, `"text":" done"`) || !strings.Contains(saved, `"kind":"coverage"`) || strings.Contains(saved, secret) {
+		t.Fatalf("durable split or coverage changed: suffix=%q", saved[len(saved)-min(len(saved), 200):])
+	}
+}
+
 func TestWorkerStatusRejectsProducerContinuation(t *testing.T) {
 	job := testJob(command.Comment)
 	requests := 0

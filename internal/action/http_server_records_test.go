@@ -344,6 +344,40 @@ func TestHTTPStatusRedactsAuthenticatedBearerToken(t *testing.T) {
 	}
 }
 
+func TestHTTPStatusRejectsCredentialJoinedAcrossFragments(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	const secret = "fixture-provider-secret"
+	f := newHTTPServerTestWithStopServerRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, nil,
+		func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, 0, root,
+		WorkerCredentials{CodexAPIKey: secret})
+	f.pull(t)
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
+	first := httpTestRecord(job, 1, "fixture-provider-")
+	first.More = true
+	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{first}}, http.StatusOK, 1); ack.LogSequence != 1 {
+		t.Fatalf("first fragment highwater = %d, want 1", ack.LogSequence)
+	}
+	before := httpTestRecords(t, root, job)
+	if bytes.Count(before, []byte{'\n'}) != 1 || !bytes.Contains(before, []byte(`"more":true`)) {
+		t.Fatalf("first fragment was not durable: %q", before)
+	}
+	status.Sequence, status.LogSequence = 2, 2
+	second := httpTestRecord(job, 2, "secret")
+	ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{second}}, http.StatusConflict, 2)
+	if ack.Failure == nil {
+		t.Fatal("joined credential received success acknowledgement")
+	}
+	if saved := httpTestRecords(t, root, job); !bytes.Equal(saved, before) || len(f.tx.records.lines) != 1 {
+		t.Fatalf("rejected continuation advanced highwater or added coverage: %q", saved)
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
 func TestHTTPStatusReconcilesUncertainSyncOnRetry(t *testing.T) {
 	root := t.TempDir()
 	job := testJob(command.Comment)

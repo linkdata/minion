@@ -320,6 +320,19 @@ func TestRedactTailCutsPartialKnownEncodings(t *testing.T) {
 	}
 }
 
+func TestRedactTailJoinsCredentialAcrossWrites(t *testing.T) {
+	const secret = "fixture-boundary-secret"
+	var tail bounded.Tail
+	for _, chunk := range []string{"stderr fixture-boundary-", "secret quota reset"} {
+		if _, err := tail.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := RedactTail(&tail, secret); got != "stderr [redacted] quota reset" {
+		t.Fatalf("split credential was not redacted: %q", got)
+	}
+}
+
 func TestRedactTailCutsEscapedBackslashSecret(t *testing.T) {
 	const secret = `\\`
 	const encoded = `\\\\`
