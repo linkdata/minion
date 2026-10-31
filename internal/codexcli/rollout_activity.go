@@ -172,6 +172,22 @@ func (a *rolloutActivity) finish() {
 				a.contentMissing(id) // Missing, excluded, or ambiguous eligible helper.
 			}
 		}
+		for id, meta := range ownedUsageFiles(a.files, rootID) {
+			if id == rootID || announced[id] {
+				continue
+			}
+			prior, known := a.known[id]
+			if !known || prior.path != meta.path || !sameRolloutMeta(prior, meta) {
+				a.contentMissing(rootID) // A new linked helper lacked spawn proof.
+				break
+			}
+			baseline := a.before[id]
+			info, err := rolloutFileInfo(a.home, meta.path)
+			if baseline == nil || !baseline.valid || !baseline.prefixKnown || err != nil || info.Size() != baseline.size {
+				a.contentMissing(rootID) // Historical helper work changed without an announcement.
+				break
+			}
+		}
 		if overflow {
 			a.contentMissing(rootID)
 		}

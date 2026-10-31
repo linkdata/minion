@@ -1408,6 +1408,71 @@ func TestRolloutActivityResumeSkipsVerifiedPrefix(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityFreshUnannouncedHelperGapsRoot(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "root-turn", "root-response", 1)...)
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		usageEventAt(9, "task_started", "child-turn"),
+		rolloutMessage(10, "reply", "unannounced helper text"),
+		usageRecordAt(11, "child", "child-turn", "child-response", 1, 0, 0),
+		usageEventAt(12, "task_complete", "child-turn"))
+	if tokens, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", started, nil, nil, nil); tokens.Input != 2 || !complete || err != nil {
+		t.Fatalf("fixture lacks complete root and helper usage: tokens=%+v complete=%t err=%v", tokens, complete, err)
+	}
+
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root") // Neither stdout nor the root rollout announces this helper.
+	activity.poll()
+	if len(*events) != 0 {
+		t.Fatalf("poll emitted unproved helper content: %+v", *events)
+	}
+	activity.finish()
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "root", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("unannounced helper activity = %+v; want one root gap and no helper text", *events)
+	}
+}
+
+func TestRolloutActivityResumedUnannouncedHistoricalHelper(t *testing.T) {
+	for _, appended := range []bool{false, true} {
+		name := "unchanged"
+		if appended {
+			name = "appended suffix"
+		}
+		t.Run(name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				usageEventAt(9, "task_started", "old-child"),
+				rolloutMessage(10, "old-message", "historical helper text"),
+				usageRecordAt(11, "child", "old-child", "old-child-response", 1, 0, 0),
+				usageEventAt(12, "task_complete", "old-child"))
+			var session usageSession
+			session.begin(t.Context(), home, "root", started)
+			appendUsageEvents(t, root, completedUsageTurn("root", "new-root", "new-root-response", 1)...)
+			if appended {
+				appendUsageEvents(t, child, rolloutMessageWithTurn(13, "new-message", "unannounced helper suffix", "new-child"))
+			}
+
+			var events []aicli.StreamEvent
+			activity := newRolloutActivity(t.Context(), home, started, session.known, nil, session.before, nil,
+				func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+			activity.root("root")
+			activity.finish()
+			var want []aicli.StreamEvent
+			if appended {
+				want = []aicli.StreamEvent{{NativeID: "root", Kind: "content_missing"}}
+			}
+			if !slices.Equal(events, want) {
+				t.Fatalf("unannounced historical helper activity = %+v; want %+v", events, want)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityLegacyInteractedReactivatesKnownHelper(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
