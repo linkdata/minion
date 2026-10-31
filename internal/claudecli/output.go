@@ -133,7 +133,6 @@ type progressStream struct {
 type taskProgressState struct {
 	totalTokens int64
 	toolUses    int64
-	summaries   map[string]bool
 }
 
 type jsonlOutput struct {
@@ -906,7 +905,18 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	case "running":
 		o.recordUniqueProgress("task_running:" + taskRunKey(id, runID))
 	case "completed", "failed", "stopped", "killed":
-		o.recordUniqueProgress("task_finish:" + taskRunKey(id, runID))
+		key := taskRunKey(id, runID)
+		finish := "task_finish:" + key
+		match := "task_synthetic_match:" + id
+		if runID != "" && !o.progressSeen[finish] && o.progressSeen["task_finish:"+id] &&
+			!o.progressSeen[match] && !o.progressSeen["task_start:"+key] {
+			// Bind one synthetic notice to its native run without renewing progress.
+			if o.reserveProgress(2, len(finish)+len(match)) {
+				o.progressSeen[finish], o.progressSeen[match] = true, true
+			}
+			return
+		}
+		o.recordUniqueProgress(finish)
 	}
 }
 
@@ -932,28 +942,13 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 		state.toolUses = *usage.ToolUses
 		changed = true
 	}
-	summary := strings.TrimSpace(e.Summary)
-	newSummary := summary != "" && !state.summaries[summary]
-	if newSummary {
-		changed = true
-	}
 	if changed {
 		entries, bytes := 0, 0
 		if !knownTask {
 			entries, bytes = 1, len(key)
 		}
-		if newSummary {
-			entries++
-			bytes += len(summary)
-		}
 		if !o.reserveProgress(entries, bytes) {
 			return
-		}
-		if newSummary {
-			if state.summaries == nil {
-				state.summaries = make(map[string]bool)
-			}
-			state.summaries[strings.Clone(summary)] = true
 		}
 		if o.taskProgress == nil {
 			o.taskProgress = make(map[string]taskProgressState)
