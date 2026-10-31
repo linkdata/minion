@@ -39,20 +39,21 @@ type rolloutActivity struct {
 	refresh   bool
 	overflow  bool
 
-	scanMu            sync.Mutex
-	files             map[string]rolloutMeta
-	ambiguous         map[string]bool
-	lastDiscover      time.Time
-	discoveryFailures int
-	cursors           map[string]*rolloutActivityCursor
-	prefixFailed      map[string]bool
-	missing           map[string]bool
-	scanned           int64
-	pendingBytes      int64
-	stop              chan struct{}
-	done              chan struct{}
-	startOnce         sync.Once
-	finishOnce        sync.Once
+	scanMu              sync.Mutex
+	files               map[string]rolloutMeta
+	ambiguous           map[string]bool
+	lastDiscover        time.Time
+	discoveryFailures   int
+	discoveryIncomplete bool
+	cursors             map[string]*rolloutActivityCursor
+	prefixFailed        map[string]bool
+	missing             map[string]bool
+	scanned             int64
+	pendingBytes        int64
+	stop                chan struct{}
+	done                chan struct{}
+	startOnce           sync.Once
+	finishOnce          sync.Once
 }
 
 type rolloutActivityCursor struct {
@@ -158,6 +159,9 @@ func (a *rolloutActivity) finish() {
 		a.mu.Lock()
 		announced, spawned, rootID, overflow := maps.Clone(a.announced), maps.Clone(a.spawned), a.rootID, a.overflow
 		a.mu.Unlock()
+		if a.discoveryIncomplete {
+			a.contentMissing(rootID) // The final discovery could not verify all relevant files.
+		}
 		for id, cursor := range a.cursors {
 			if len(cursor.pending) != 0 || cursor.dropping || a.ctx.Err() != nil && id != rootID {
 				a.contentMissing(id) // Partial bytes or cancellation leave content unverified.
@@ -198,14 +202,14 @@ func (a *rolloutActivity) poll() {
 	if refresh || a.files == nil || periodic {
 		files, ambiguous, complete := usageFiles(a.ctx, a.home, rootID, a.started, a.known)
 		a.files, a.ambiguous, a.lastDiscover = files, ambiguous, time.Now()
+		a.discoveryIncomplete = false
 		if !complete {
 			if _, err := os.Stat(filepath.Join(a.home, "sessions")); !errors.Is(err, os.ErrNotExist) {
 				if a.discoveryFailures < maxActivityDiscoveryFailures {
 					a.discoveryFailures++
 				}
-				if _, rootFound := files[rootID]; rootFound || len(spawned) != 0 {
-					a.contentMissing(rootID)
-				}
+				_, rootFound := files[rootID]
+				a.discoveryIncomplete = rootFound || len(spawned) != 0
 			}
 		} else {
 			a.discoveryFailures = 0

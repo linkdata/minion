@@ -930,6 +930,9 @@ func TestRolloutActivityDiscoveryGapsOnlyRelevantIncompleteTrees(t *testing.T) {
 			activity, events, _ := newActivityTestRecorder(t, home, started)
 			activity.root("root")
 			activity.poll()
+			if scenario == "incomplete recent tree" && len(*events) != 0 {
+				t.Fatalf("incomplete discovery gapped before finish: %+v", *events)
+			}
 			activity.finish()
 			if scenario == "no sessions" {
 				if len(*events) != 0 {
@@ -1005,35 +1008,22 @@ func TestRolloutActivityRetriesTransientPartialHelperHeaderLive(t *testing.T) {
 		activity.lastDiscover = time.Now().Add(-time.Hour) // Make each incomplete retry due without sleeping.
 		activity.poll()
 	}
-	for _, event := range *events {
-		if event.NativeID == "child" && event.Kind == "assistant" {
-			t.Fatalf("incomplete header emitted helper content: %+v", *events)
-		}
+	if len(*events) != 0 {
+		t.Fatalf("incomplete header emitted events before rediscovery: %+v", *events)
 	}
 	if err := os.WriteFile(child, complete, 0600); err != nil {
 		t.Fatal(err)
 	}
 	activity.lastDiscover = time.Now().Add(-time.Hour) // Make the bounded retry due now.
 	activity.poll()
-	var live int
-	for _, event := range *events {
-		if event == (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "helper appeared live"}) {
-			live++
-		}
-	}
-	if live != 1 {
-		t.Fatalf("completed helper header was not captured before finish: %+v", *events)
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "assistant", Text: "helper appeared live"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("completed helper header yielded %+v before finish; want %+v", *events, want)
 	}
 	activity.poll()
 	activity.finish()
-	live = 0
-	for _, event := range *events {
-		if event == (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "helper appeared live"}) {
-			live++
-		}
-	}
-	if live != 1 {
-		t.Fatalf("live/final scans duplicated or lost helper content: %+v", *events)
+	if !slices.Equal(*events, want) {
+		t.Fatalf("live/final scans yielded %+v; want %+v", *events, want)
 	}
 }
 
