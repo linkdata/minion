@@ -22,6 +22,7 @@ type Session struct {
 	// OnInput receives selected prepared input fields before process start.
 	OnInput func(aicli.PreparedInput)
 	// OnProgress receives new root output, tool activity, or attributable helper work while Run is active.
+	// Stdout and rollout discovery may call it concurrently; the callback must synchronize shared state.
 	OnProgress func()
 
 	bound, used, reset, skillsReady   bool

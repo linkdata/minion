@@ -667,14 +667,14 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		switch item.Type {
 		case "Plan", "UserMessage", "AgentMessage":
 			if item.Text != "" || len(item.Content) != 0 {
-				a.newProgress(meta.ID, event, 0, progressed)
+				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 			}
 		case "Reasoning", "CommandExecution", "DynamicToolCall", "WebSearch",
 			"FileChange", "McpToolCall", "FunctionCallOutput", "ImageGeneration", "Extension", "ImageView":
-			a.newProgress(meta.ID, event, 0, progressed)
+			a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 		case "CollabAgentToolCall":
 			if item.Tool != "wait" && item.Tool != "close_agent" {
-				a.newProgress(meta.ID, event, 0, progressed)
+				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 			}
 		}
 	}
@@ -758,6 +758,44 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		return
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
+}
+
+func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage, progressed *bool) {
+	// Hash item identity, lifecycle, and known output fields; timing metadata can change on replay.
+	type progressItem struct {
+		ID               string          `json:"id"`
+		Type             string          `json:"type"`
+		Kind             string          `json:"kind"`
+		Tool             string          `json:"tool"`
+		Status           string          `json:"status"`
+		Text             string          `json:"text"`
+		AggregatedOutput string          `json:"aggregated_output"`
+		Command          json.RawMessage `json:"command"`
+		Content          json.RawMessage `json:"content"`
+		Summary          json.RawMessage `json:"summary_text"`
+		Questions        json.RawMessage `json:"questions"`
+		Output           json.RawMessage `json:"output"`
+		Result           json.RawMessage `json:"result"`
+		Changes          json.RawMessage `json:"changes"`
+		ExitCode         json.RawMessage `json:"exit_code"`
+		Path             json.RawMessage `json:"path"`
+		Query            json.RawMessage `json:"query"`
+		Prompt           json.RawMessage `json:"prompt"`
+		Arguments        json.RawMessage `json:"arguments"`
+		Response         json.RawMessage `json:"response"`
+	}
+	var item progressItem
+	if json.Unmarshal(raw, &item) != nil {
+		return
+	}
+	snapshot, err := json.Marshal(struct {
+		TurnID string       `json:"turn_id"`
+		Item   progressItem `json:"item"`
+	}{turnID, item})
+	if err != nil {
+		return
+	}
+	a.newProgress(id, rolloutEvent{Type: "item_completed", Payload: snapshot}, 0, progressed)
 }
 
 func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int64, progressed *bool) {

@@ -490,9 +490,8 @@ type pendingCodexItem struct {
 }
 
 type progressCodexItem struct {
-	snapshot      [sha256.Size]byte
-	completed     bool
-	completedOnly bool
+	snapshot  [sha256.Size]byte
+	completed bool
 }
 
 type jsonlOutput struct {
@@ -706,12 +705,8 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		if item.ID != "" && prior.completed {
 			return
 		}
-		// Identical completed-only commands lack an identity that separates new work from replay.
-		if item.ID == "" && item.Type == "command_execution" && prior.completedOnly &&
-			event.Type == "item.completed" && prior.snapshot == snapshot {
-			o.stop(errors.New("Codex progress identity ambiguous: repeated ID-less completed-only command"))
-			return
-		}
+		// An identical ID-less completion could be a new command or a replay.
+		// Without a lifecycle event, it cannot prove fresh work.
 		freshCycle := item.ID == "" && prior.completed && event.Type == "item.started"
 		if !freshCycle && prior.snapshot == snapshot && (event.Type != "item.completed" || prior.completed) {
 			return
@@ -728,10 +723,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		o.stop(fmt.Errorf("%w: Codex progress identity limit reached", aicli.ErrOutputLimit))
 		return
 	}
-	o.progressItems[key] = progressCodexItem{
-		snapshot: snapshot, completed: event.Type == "item.completed",
-		completedOnly: event.Type == "item.completed" && (!seen || prior.completed),
-	}
+	o.progressItems[key] = progressCodexItem{snapshot: snapshot, completed: event.Type == "item.completed"}
 	o.onProgress()
 }
 

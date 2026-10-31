@@ -215,7 +215,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if !headerTimer.Stop() {
 		<-headerDone
 	}
-	if context.Cause(watchCtx) == headerErr {
+	watchAdmissionTimedOut := context.Cause(watchCtx) == headerErr
+	if watchAdmissionTimedOut {
 		if watchResponse != nil {
 			_ = watchResponse.Body.Close()
 		}
@@ -227,7 +228,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 	}
 	if err != nil {
-		protocolFailed = true
+		protocolFailed = !watchAdmissionTimedOut || !errors.Is(err, monitor.ErrTerminalJob)
 		stopWatch(errHTTPWatchStopped)
 		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}

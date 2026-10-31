@@ -119,7 +119,7 @@ func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
 	}
 }
 
-func TestJSONLOutputIDLessCompletedOnlyCommandReplayIsAmbiguous(t *testing.T) {
+func TestJSONLOutputIDLessCompletedOnlyCommandReplayDoesNotStopRun(t *testing.T) {
 	const completed = `{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`
 	for _, replay := range []struct {
 		name string
@@ -140,14 +140,13 @@ func TestJSONLOutputIDLessCompletedOnlyCommandReplayIsAmbiguous(t *testing.T) {
 				`{"type":"thread.started","thread_id":"root"}`,
 				completed,
 				replay.line,
-				`{"type":"item.started","item":{"type":"command_execution","command":"later command"}}`,
+				`{"type":"item.started","item":{"id":"next","type":"command_execution","command":"later command"}}`,
 			} {
 				_, _ = output.Write([]byte(line + "\n"))
 			}
-			if progress != 1 || cancellations != 1 || !output.failed || output.stopErr == nil ||
-				!strings.Contains(output.stopErr.Error(), "progress identity ambiguous") ||
-				len(events) != 3 || events[1].Kind != "tool" || events[2].Kind != "output_stop" {
-				t.Fatalf("ambiguous completion was accepted or replayed: progress=%d cancellations=%d stop=%v events=%+v", progress, cancellations, output.stopErr, events)
+			if progress != 2 || cancellations != 0 || output.failed || output.stopErr != nil ||
+				len(events) != 3 || events[1].Kind != "tool" || events[2].Kind != "tool" {
+				t.Fatalf("ambiguous completion stopped the run or renewed progress: progress=%d cancellations=%d stop=%v events=%+v", progress, cancellations, output.stopErr, events)
 			}
 		})
 	}
@@ -220,6 +219,39 @@ func TestRolloutActivityProgressRequiresNewHelperWork(t *testing.T) {
 	activity.poll()
 	if *progress != 4 {
 		t.Fatalf("helper tool event progress=%d, want 4", *progress)
+	}
+}
+
+func TestRolloutActivityCompletedHelperItemMetadataDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	completion := func(ordinal int, id, output string, elapsed int) string {
+		item := fmt.Sprintf(`{"type":"CommandExecution","id":%q,"command":["go","test"],"status":"completed","aggregated_output":%q,"elapsed_time_ms":%d}`, id, output, elapsed)
+		return rolloutCompletedItemTurn(ordinal, "child", "child-turn", item)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		completion(9, "tool", "PASS", 100))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first helper completion progress=%d, want 1", *progress)
+	}
+	for _, step := range []struct {
+		line string
+		want int
+	}{
+		{completion(10, "tool", "PASS", 200), 1},
+		{completion(11, "tool", "PASS\nmore output", 300), 2},
+		{completion(12, "next-tool", "PASS\nmore output", 400), 3},
+	} {
+		appendUsageEvents(t, child, step.line)
+		activity.poll()
+		if *progress != step.want {
+			t.Fatalf("after %s: progress=%d, want %d", step.line, *progress, step.want)
+		}
 	}
 }
 

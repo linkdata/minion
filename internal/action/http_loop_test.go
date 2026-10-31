@@ -1,6 +1,7 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -136,6 +138,136 @@ func TestRunHTTPLoopDoesNotHidePartialAssignmentOnCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("canceled partial assignment did not return")
+	}
+}
+
+func TestRunHTTPLoopContinuesAfterAcknowledgedWatchInactivity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		jobs := [2]Job{testJob(command.Comment), testJob(command.Comment)}
+		jobs[1].Identity.JobID, jobs[1].Identity.AttemptID = "second-job", "second-attempt"
+		for i := range jobs {
+			jobs[i].InactivityTimeout = 5 * time.Second
+		}
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(context.Canceled)
+		watchEntered := make(chan string, len(jobs))
+		outcomes := make(chan httpOutcome, len(jobs))
+		var pulls, acknowledged atomic.Int32
+		response := func(value any) (*http.Response, error) {
+			data, err := httpEncode(value, httpJobBytes)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				ContentLength: int64(len(data)), Body: io.NopCloser(bytes.NewReader(data))}, nil
+		}
+		client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/next":
+				n := int(pulls.Add(1))
+				if n > len(jobs) {
+					return nil, errors.New("unexpected third assignment pull")
+				}
+				return response(httpAssignment{Job: jobs[n-1], StopGrace: httpControlTimeout})
+			case "/cancel":
+				var binding httpBinding
+				if err := httpDecode(r.Body, httpControlBytes, &binding); err != nil {
+					return nil, err
+				}
+				watchEntered <- binding.Identity.JobID
+				<-r.Context().Done()
+				return nil, r.Context().Err()
+			case "/outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					return nil, err
+				}
+				outcomes <- outcome
+				n := int(acknowledged.Add(1))
+				if n > len(jobs) {
+					return nil, errors.New("unexpected third outcome")
+				}
+				ack, err := response(httpAcknowledgement{httpBinding: httpJobBinding(jobs[n-1]), Kind: "outcome", Sequence: outcome.Sequence})
+				if err != nil {
+					return nil, err
+				}
+				if n == len(jobs) {
+					ack.Body = httpClientCancelOnCloseBody{ReadCloser: ack.Body, cancel: cancel, cause: context.Canceled}
+				}
+				return ack, nil
+			default:
+				return nil, errors.New("unexpected HTTP request")
+			}
+		})}
+		done := make(chan error, 1)
+		go func() {
+			done <- RunHTTPLoop(ctx, client, "http://minion", jobs[0].Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+		}()
+		for _, job := range jobs {
+			select {
+			case got := <-watchEntered:
+				if got != job.Identity.JobID {
+					t.Fatalf("watch assignment = %q, want %q", got, job.Identity.JobID)
+				}
+			case err := <-done:
+				t.Fatalf("worker ended before %s watch: %v", job.Identity.JobID, err)
+			}
+			time.Sleep(job.InactivityTimeout)
+			synctest.Wait()
+		}
+		select {
+		case err := <-done:
+			if err != nil || pulls.Load() != int32(len(jobs)) {
+				t.Fatalf("worker stopped before two acknowledged outcomes: pulls=%d error=%v", pulls.Load(), err)
+			}
+		default:
+			t.Fatal("worker did not stop after the second acknowledged outcome")
+		}
+		for _, job := range jobs {
+			outcome := <-outcomes
+			if outcome.Result.Identity != job.Identity || outcome.Failure == nil || !outcome.Failure.Terminal ||
+				outcome.Failure.Deadline || outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown {
+				t.Fatalf("wrong acknowledged inactivity outcome for %s: %+v", job.Identity.JobID, outcome)
+			}
+		}
+	})
+}
+
+func TestRunHTTPLoopStopsAfterWatchAdmissionFailureWithOutcomeACK(t *testing.T) {
+	job := testJob(command.Comment)
+	binding := httpJobBinding(job)
+	var pulls atomic.Int32
+	outcomes := make(chan httpOutcome, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/next":
+			if pulls.Add(1) != 1 {
+				t.Error("watch admission failure allowed another assignment pull")
+			}
+			httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout})
+		case "/cancel":
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "invalid watch response")
+		case "/outcome":
+			var outcome httpOutcome
+			if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+				t.Error(err)
+			}
+			outcomes <- outcome
+			httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	err := RunHTTPLoop(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+	if err == nil || !strings.Contains(err.Error(), "response must be uncompressed JSON") || pulls.Load() != 1 {
+		t.Fatalf("acknowledged watch admission failure was retried: pulls=%d error=%v", pulls.Load(), err)
+	}
+	outcome := <-outcomes
+	if outcome.Failure == nil || outcome.Failure.Terminal || outcome.Failure.OutcomeUnknown || outcome.Result.Identity != job.Identity {
+		t.Fatalf("watch admission failure changed outcome: %+v", outcome)
 	}
 }
 
