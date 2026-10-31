@@ -45,8 +45,10 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 type event struct {
 	Type              string            `json:"type"`
 	SessionID         string            `json:"session_id"`
+	UUID              string            `json:"uuid"`
 	AgentID           string            `json:"agent_id"`
 	Subtype           string            `json:"subtype"`
+	ThinkingDelta     float64           `json:"estimated_tokens_delta"`
 	ResultIndex       *int64            `json:"result_index"`
 	TerminalReason    json.RawMessage   `json:"terminal_reason"`
 	Tasks             json.RawMessage   `json:"tasks"`
@@ -712,6 +714,10 @@ func (o *jsonlOutput) recordProgress(e event) {
 			o.recordTaskProgress(e.TaskID, e.RunID, e.Status)
 		case "task_progress":
 			o.recordTaskUsageProgress(e)
+		case "thinking_tokens":
+			if o.sessionID != "" && e.SessionID == o.sessionID && e.UUID != "" && e.ThinkingDelta > 0 {
+				o.recordUniqueProgress("thinking_tokens:" + e.UUID)
+			}
 		}
 	}
 }

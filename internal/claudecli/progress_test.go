@@ -54,6 +54,40 @@ func TestProgressFollowsFreshExecutionEvents(t *testing.T) {
 	}
 }
 
+func TestProgressThinkingTokensFrames(t *testing.T) {
+	var got int
+	first := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
+	const firstFrame = `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"frame-1","estimated_tokens":8,"estimated_tokens_delta":8}`
+	const secondFrame = `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"frame-2","estimated_tokens":12,"estimated_tokens_delta":4}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"assistant","session_id":"native-id","message":{"id":"redacted","content":[{"type":"redacted_thinking","data":"opaque"}]}}`, 0},
+		{firstFrame, 1},
+		{firstFrame, 1},
+		{secondFrame, 2},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"zero","estimated_tokens":12,"estimated_tokens_delta":0}`, 2},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"negative","estimated_tokens_delta":-1}`, 2},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","estimated_tokens_delta":3}`, 2},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"no-delta","estimated_tokens":15,"duration_ms":500}`, 2},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"foreign","uuid":"foreign","estimated_tokens_delta":3}`, 2},
+		{`{"type":"system","subtype":"thinking_tokens","uuid":"unbound","estimated_tokens_delta":3}`, 2},
+	} {
+		writeChunks(t, &first, step.line+"\n")
+		if first.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, first.err)
+		}
+	}
+
+	resumed := jsonlOutput{sessionID: "native-id", onProgress: first.onProgress, progressSeen: first.progressSeen}
+	writeChunks(t, &resumed, firstFrame+"\n"+secondFrame+"\n")
+	writeChunks(t, &resumed, `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"frame-3","estimated_tokens_delta":1}`+"\n")
+	if resumed.err != nil || got != 3 {
+		t.Fatalf("resumed thinking progress=%d, want 3; parser error=%v", got, resumed.err)
+	}
+}
+
 func TestProgressDeduplicatesResumedMessagesAndSyntheticTaskNotices(t *testing.T) {
 	var got int
 	first := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
