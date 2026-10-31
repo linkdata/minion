@@ -154,17 +154,17 @@ func (a *rolloutActivity) finish() {
 				break
 			}
 		}
+		a.mu.Lock()
+		announced, spawned, rootID, overflow := maps.Clone(a.announced), maps.Clone(a.spawned), a.rootID, a.overflow
+		a.mu.Unlock()
 		for id, cursor := range a.cursors {
-			if len(cursor.pending) != 0 || cursor.dropping {
-				a.contentMissing(id)
+			if len(cursor.pending) != 0 || cursor.dropping || a.ctx.Err() != nil && id != rootID {
+				a.contentMissing(id) // Partial bytes or cancellation leave content unverified.
 			}
 		}
-		a.mu.Lock()
-		spawned, rootID, overflow := maps.Clone(a.spawned), a.rootID, a.overflow
-		a.mu.Unlock()
-		for id := range spawned {
-			if _, captured := a.cursors[id]; !captured {
-				a.contentMissing(id) // Missing, excluded, or ambiguous current helper.
+		for id := range announced {
+			if (spawned[id] || a.provedKnown[id]) && a.cursors[id] == nil {
+				a.contentMissing(id) // Missing, excluded, or ambiguous eligible helper.
 			}
 		}
 		if overflow {

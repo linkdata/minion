@@ -729,6 +729,52 @@ func TestRolloutActivityKnownHelperObservationRequiresPriorProof(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityMissingProvedKnownHelperGapsAtFinish(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "root-response", 1)...)
+	boundary := int64(9)
+	proved := writeUsageRolloutBoundary(t, home, "proved", "root", &boundary,
+		completedUsageTurn("proved", "old-proved", "proved-response", 1)...)
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	if session.known["proved"].path != proved || session.before["proved"] == nil || !session.before["proved"].prefixKnown {
+		t.Fatal("fixture did not prove the resumed helper's prior rollout")
+	}
+	if err := os.Remove(proved); err != nil {
+		t.Fatal(err)
+	}
+	writeUsageRolloutBoundary(t, home, "unrelated", "root", &boundary,
+		rolloutMessage(9, "private", "unrelated helper text"))
+
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"proved": true}, session.before, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.child("proved", false)    // A wait/close observation reactivates prior proof.
+	activity.child("unrelated", false) // Observation alone does not prove ownership.
+	activity.poll()
+	for _, event := range events {
+		if event.NativeID == "proved" || event.NativeID == "unrelated" {
+			t.Fatalf("missing or unproved helper emitted before finish: %+v", events)
+		}
+	}
+	activity.finish()
+	provedGaps := 0
+	for _, event := range events {
+		switch event {
+		case aicli.StreamEvent{NativeID: "proved", Kind: "content_missing"}:
+			provedGaps++
+		case aicli.StreamEvent{NativeID: "root", Kind: "content_missing"}:
+			// A missing known rollout also makes discovery incomplete.
+		default:
+			t.Fatalf("unproved helper admitted or unexpected content emitted: %+v", events)
+		}
+	}
+	if provedGaps != 1 {
+		t.Fatalf("missing proved helper gaps = %d; want 1: %+v", provedGaps, events)
+	}
+}
+
 func TestRolloutActivityNativeCompletionReactivatesKnownHelper(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
@@ -1139,6 +1185,32 @@ func TestRolloutActivityCancellationStopsCurrentMultilineScan(t *testing.T) {
 	}
 	if !slices.Equal(events, want) {
 		t.Fatalf("canceled scan emitted later helper content or omitted gap: got %+v; want %+v", events, want)
+	}
+}
+
+func TestRolloutActivityCancellationAfterCompleteAppendGapsAtFinish(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "captured helper message"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(ctx, home, started, nil, nil, nil, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	first := aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "captured helper message"}
+	if !slices.Equal(events, []aicli.StreamEvent{first}) {
+		t.Fatalf("fixture did not capture first helper message: %+v", events)
+	}
+	appendUsageEvents(t, child, rolloutMessage(10, "second", "uncaptured complete suffix"))
+	cancel() // The final scan cannot read the newly completed line.
+	activity.finish()
+	want := []aicli.StreamEvent{first, {NativeID: "child", Kind: "content_missing"}}
+	if !slices.Equal(events, want) {
+		t.Fatalf("canceled final scan claimed complete suffix or missed gap: got %+v; want %+v", events, want)
 	}
 }
 
