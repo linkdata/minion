@@ -228,6 +228,9 @@ func TestOutputBackgroundTasks(t *testing.T) {
 	const worker = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
 	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
 	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const taggedFinish = `{"type":"system","subtype":"task_notification","task_id":"worker","run_id":"run-1","status":"completed"}`
+	const runlessFailure = `{"type":"system","subtype":"task_notification","task_id":"worker","status":"failed"}`
+	const syntheticFinish = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>worker</task-id><status>completed</status></task-notification>"}}`
 	for _, tc := range []struct {
 		name, before, after string
 		fails               bool
@@ -244,6 +247,16 @@ func TestOutputBackgroundTasks(t *testing.T) {
 		{name: "work after result needs new answer", after: pending + "\n" + empty, fails: true},
 		{name: "answer after new work", before: successfulResult + "\n" + pending + "\n" + empty},
 		{name: "failed command recovered", before: `{"type":"system","subtype":"task_notification","task_id":"test","status":"failed"}`},
+		{name: "late tagged completion needs new answer", after: taggedFinish, fails: true},
+		{name: "late runless failure needs new answer", after: runlessFailure, fails: true},
+		{name: "late synthetic completion needs new answer", after: syntheticFinish, fails: true},
+		{name: "answer after late tagged completion", after: taggedFinish + "\n" + successfulResult},
+		{name: "answer after late runless failure", after: runlessFailure + "\n" + successfulResult},
+		{name: "answer after late synthetic completion", after: syntheticFinish + "\n" + successfulResult},
+		{name: "tagged finish replay after answer", before: taggedFinish, after: taggedFinish},
+		{name: "runless failure replay after answer", before: runlessFailure, after: runlessFailure},
+		{name: "synthetic finish replay after answer", before: syntheticFinish, after: syntheticFinish},
+		{name: "synthetic replay of tagged finish", before: taggedFinish, after: syntheticFinish},
 		{name: "user text is not task state", after: `{"type":"user","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

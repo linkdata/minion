@@ -1018,6 +1018,17 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	default:
 		return
 	}
+	if status == "completed" || status == "failed" {
+		// A first completion after a result makes that result provisional.
+		newNotice := o.rememberProgress("task_notice:" + id + "\x00" + status)
+		if o.err != nil {
+			return
+		}
+		newRun := runID != "" && !o.progressSeen["task_finish:"+taskRunKey(id, runID)]
+		if o.completed && (newNotice || newRun) {
+			o.completed, o.result.Answer = false, ""
+		}
+	}
 	if runID == "" {
 		if status == "started" {
 			if o.runlessPending == nil {
