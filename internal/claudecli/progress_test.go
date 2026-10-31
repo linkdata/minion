@@ -480,6 +480,49 @@ func TestProgressSyntheticCompletionBeforeNativeRun(t *testing.T) {
 	}
 }
 
+func TestProgressSyntheticCompletionBindsFirstNativeRunOnResume(t *testing.T) {
+	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for _, tc := range []struct {
+		name  string
+		lines []string
+	}{
+		{"start then finish", []string{started, finished}},
+		{"finish then start", []string{finished, started}},
+		{"task list then empty", []string{listed, empty}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := 0
+			first := jsonlOutput{onProgress: func() { got++ }}
+			writeChunks(t, &first, notice+"\n")
+			if first.err != nil || got != 1 {
+				t.Fatalf("synthetic completion: progress=%d error=%v", got, first.err)
+			}
+			resumed := jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen,
+				progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+			for _, line := range tc.lines {
+				writeChunks(t, &resumed, line+"\n")
+				if resumed.err != nil || got != 1 {
+					t.Fatalf("first native run renewed progress after %s: progress=%d error=%v", line, got, resumed.err)
+				}
+			}
+			writeChunks(t, &resumed, started+"\n"+finished+"\n")
+			if resumed.err != nil || got != 1 {
+				t.Fatalf("native replay renewed progress: progress=%d error=%v", got, resumed.err)
+			}
+			const fresh = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}` + "\n" +
+				`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}` + "\n"
+			writeChunks(t, &resumed, fresh)
+			if resumed.err != nil || got != 3 {
+				t.Fatalf("distinct native run lost progress: progress=%d error=%v", got, resumed.err)
+			}
+		})
+	}
+}
+
 func TestProgressNativeUsageBeforeSyntheticCompletion(t *testing.T) {
 	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
 	var got int
@@ -579,6 +622,117 @@ func TestProgressTaskListUsesRunIdentity(t *testing.T) {
 	writeChunks(t, &replayed, legacy+"\n"+empty+"\n")
 	if replayed.err != nil || got != 8 {
 		t.Fatalf("legacy task-list fallback: count=%d error=%v", got, replayed.err)
+	}
+}
+
+func TestProgressRunLessTaskListUpgradesToNativeRun(t *testing.T) {
+	got := 0
+	o := jsonlOutput{onProgress: func() { got++ }}
+	const runless = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const runful = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{runless, 1},
+		{runful, 1},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`, 1},
+		{runful, 1},
+		{runless, 1},
+		{empty, 2},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 2},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`, 3},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`, 4},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, o.err)
+		}
+	}
+	resumed := jsonlOutput{onProgress: o.onProgress, progressSeen: o.progressSeen,
+		progressBytes: o.progressBytes, progressEntries: o.progressEntries}
+	writeChunks(t, &resumed, runless+"\n"+runful+"\n"+empty+"\n")
+	if resumed.err != nil || got != 4 {
+		t.Fatalf("resumed task-list replay renewed progress: progress=%d error=%v", got, resumed.err)
+	}
+}
+
+func TestProgressRunLessTaskListUpgradeAcrossResume(t *testing.T) {
+	got := 0
+	first := jsonlOutput{onProgress: func() { got++ }}
+	const runless = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const runful = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	writeChunks(t, &first, runless+"\n")
+	if first.err != nil || got != 1 {
+		t.Fatalf("run-less start: progress=%d error=%v", got, first.err)
+	}
+	resumed := jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &resumed, runful+"\n"+empty+"\n")
+	if resumed.err != nil || got != 2 {
+		t.Fatalf("run identity upgrade across resume: progress=%d error=%v", got, resumed.err)
+	}
+	writeChunks(t, &resumed, `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`+"\n")
+	if resumed.err != nil || got != 4 {
+		t.Fatalf("distinct run after completed upgrade: progress=%d error=%v", got, resumed.err)
+	}
+}
+
+func TestProgressRunLessListNativeFinishCountsOnce(t *testing.T) {
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	for _, resume := range []bool{false, true} {
+		for _, nativeFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("resume=%t/native_first=%t", resume, nativeFirst), func(t *testing.T) {
+				got := 0
+				first := jsonlOutput{onProgress: func() { got++ }}
+				writeChunks(t, &first, listed+"\n")
+				if first.err != nil || got != 1 {
+					t.Fatalf("list start: progress=%d error=%v", got, first.err)
+				}
+				current := &first
+				if resume {
+					current = &jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen,
+						progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+				}
+				lines := []string{empty, finished}
+				if nativeFirst {
+					lines[0], lines[1] = lines[1], lines[0]
+				}
+				for _, line := range lines {
+					writeChunks(t, current, line+"\n")
+				}
+				if current.err != nil || got != 2 {
+					t.Fatalf("one task finish counted more than once: progress=%d error=%v", got, current.err)
+				}
+			})
+		}
+	}
+}
+
+func TestProgressRunLessListDoesNotBindFinishedNativeRun(t *testing.T) {
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for _, stale := range []string{started, `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`} {
+		t.Run(stale, func(t *testing.T) {
+			got := 0
+			o := jsonlOutput{onProgress: func() { got++ }}
+			for _, step := range []struct {
+				line string
+				want int
+			}{{started, 1}, {finished, 2}, {listed, 3}, {stale, 3}, {empty, 4}} {
+				writeChunks(t, &o, step.line+"\n")
+				if o.err != nil || got != step.want {
+					t.Fatalf("after %s: progress=%d, want %d; error=%v", step.line, got, step.want, o.err)
+				}
+			}
+		})
 	}
 }
 
