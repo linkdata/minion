@@ -334,8 +334,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 		for _, role := range roles {
 			noteProgress() // Selected CLI validation is starting.
-			message, err := checkSelectedRoleCLI(ctx, &configured, role, true)
-			noteProgress()
+			message, err := checkSelectedRoleCLI(ctx, &configured, role, true, noteProgress)
 			if err != nil {
 				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
 			}
@@ -716,8 +715,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 		owned = append(owned, validationDir)
 		noteProgress() // The audit validator is starting.
-		err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head)
-		noteProgress()
+		err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head, noteProgress)
 		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}

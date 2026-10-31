@@ -200,6 +200,48 @@ func TestValidateChecksExecAndResumeCapabilitiesWithoutCredentials(t *testing.T)
 	}
 }
 
+func TestValidateReportsCompletedNativeChecks(t *testing.T) {
+	const page = `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`
+	t.Run("all checks", func(t *testing.T) {
+		installFakeCodex(t, catalogueScriptFor(t.TempDir(), page, ""))
+		progress := 0
+		if _, err := Validate(t.Context(), config.CodexConfig{}, func() { progress++ }); err != nil || progress != 11 {
+			t.Fatalf("Validate() error=%v, completed checks=%d; want 11", err, progress)
+		}
+	})
+	t.Run("failed positive probe", func(t *testing.T) {
+		script := strings.Replace(catalogueScriptFor(t.TempDir(), page, ""), "#!/bin/sh\n", "#!/bin/sh\ncase \" $* \" in *' model_reasoning_effort='*) exit 2 ;; esac\n", 1)
+		installFakeCodex(t, script)
+		progress := 0
+		if _, err := Validate(t.Context(), config.CodexConfig{}, func() { progress++ }); err == nil || progress != 1 {
+			t.Fatalf("failed probe error=%v, completed checks=%d; want 1", err, progress)
+		}
+	})
+	t.Run("failed rejection probe", func(t *testing.T) {
+		script := strings.Replace(catalogueScriptFor(t.TempDir(), page, ""), "case \" $* \" in *' minion_unsupported_capability_probe=true '*) printf '%s\\n' 'unknown config key: minion_unsupported_capability_probe' >&2; exit 2 ;; esac", "", 1)
+		installFakeCodex(t, script)
+		progress := 0
+		if _, err := Validate(t.Context(), config.CodexConfig{}, func() { progress++ }); err == nil || progress != 2 {
+			t.Fatalf("failed rejection error=%v, completed checks=%d; want 2", err, progress)
+		}
+	})
+	t.Run("canceled after positive probe", func(t *testing.T) {
+		installFakeCodex(t, catalogueScriptFor(t.TempDir(), page, ""))
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		progress := 0
+		_, err := Validate(ctx, config.CodexConfig{}, func() {
+			progress++
+			if progress == 2 {
+				cancel()
+			}
+		})
+		if err == nil || ctx.Err() != context.Canceled || progress != 2 {
+			t.Fatalf("canceled check error=%v, completed checks=%d; want 2", err, progress)
+		}
+	})
+}
+
 func TestValidateRejectsUnsupportedExecResumeFlag(t *testing.T) {
 	dir := t.TempDir()
 	page := `{"id":2,"result":{"data":[{"model":"fixture","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}`

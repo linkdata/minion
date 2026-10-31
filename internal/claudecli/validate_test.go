@@ -64,6 +64,43 @@ fi
 	}
 }
 
+func TestValidateProgressCountsAcceptedProbes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		behavior validationCLIBehavior
+		want     int
+		fails    bool
+	}{
+		{name: "all probes", want: 5},
+		{name: "fresh invocation rejected", behavior: validationCLIBehavior{rejected: "--session-id"}, want: 2, fails: true},
+		{name: "unknown option ignored", behavior: validationCLIBehavior{ignoreUnknown: true}, want: 3, fails: true},
+		{name: "resume lookup rejected", behavior: validationCLIBehavior{unsupportedResume: true}, want: 4, fails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeValidationCLI(t, tc.behavior)
+			progress := 0
+			_, err := Validate(t.Context(), config.ClaudeConfig{}, func() { progress++ })
+			if (err != nil) != tc.fails || progress != tc.want {
+				t.Fatalf("Validate error = %v, progress = %d; want error = %t, progress = %d", err, progress, tc.fails, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateProgressStopsAfterCancellation(t *testing.T) {
+	fakeValidationCLI(t, validationCLIBehavior{})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	progress := 0
+	_, err := Validate(ctx, config.ClaudeConfig{}, func() {
+		progress++
+		cancel()
+	})
+	if !errors.Is(err, context.Canceled) || progress != 1 {
+		t.Fatalf("Validate error = %v, progress = %d; want cancellation after one accepted probe", err, progress)
+	}
+}
+
 func TestValidateRejectsPaidDiscoveryOutput(t *testing.T) {
 	fakeExecutable(t, "claude", `if [ "$3" = auth ]; then
   printf '%s\n' '{"loggedIn":true}'
@@ -72,8 +109,12 @@ else
   printf '%s\n' '`+modelCatalogue+`' '{"type":"result","modelUsage":{"main":{"inputTokens":1}}}'
 fi
 `)
-	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "model discovery emitted model activity") {
+	progress := 0
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}, func() { progress++ }); err == nil || !strings.Contains(err.Error(), "model discovery emitted model activity") {
 		t.Fatalf("accepted paid event after catalogue: %v", err)
+	}
+	if progress != 1 {
+		t.Fatalf("progress = %d; want only accepted authentication probe", progress)
 	}
 }
 
@@ -128,8 +169,12 @@ func TestValidateHonorsCallerCancellation(t *testing.T) {
 	fakeValidationCLI(t, validationCLIBehavior{})
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := Validate(ctx, config.ClaudeConfig{}); !errors.Is(err, context.Canceled) {
+	progress := 0
+	if _, err := Validate(ctx, config.ClaudeConfig{}, func() { progress++ }); !errors.Is(err, context.Canceled) {
 		t.Fatalf("lost caller cancellation: %v", err)
+	}
+	if progress != 0 {
+		t.Fatalf("canceled validation reported progress %d", progress)
 	}
 }
 

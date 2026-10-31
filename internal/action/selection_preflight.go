@@ -152,7 +152,12 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	return nil
 }
 
-func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings, allowClaudeAlias bool) (string, error) {
+func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings, allowClaudeAlias bool, onProgress ...func()) (string, error) {
+	progress := func() {
+		if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
+			onProgress[0]()
+		}
+	}
 	switch role.Provider {
 	case "codex":
 		settings := configured.Codex
@@ -160,10 +165,12 @@ func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSett
 		if err := codexcli.CheckLogin(ctx, settings); err != nil {
 			return preflightCodexLoginUnavailable, fmt.Errorf("codex login: %w", err)
 		}
+		progress()
 		if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
 			return preflightCodexBoundaryUnavailable, fmt.Errorf("codex instruction boundary: %w", err)
 		}
-		validated, err := codexcli.Validate(ctx, settings)
+		progress()
+		validated, err := codexcli.Validate(ctx, settings, progress)
 		if err != nil {
 			return preflightCodexInvocationUnsupported, fmt.Errorf("codex settings: %w", err)
 		}
@@ -173,7 +180,7 @@ func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSett
 	case "claude":
 		settings := configured.Claude
 		settings.Model, settings.Effort = role.Model, role.Effort
-		validated, err := claudecli.Validate(ctx, settings)
+		validated, err := claudecli.Validate(ctx, settings, progress)
 		if err != nil {
 			return preflightClaudeSettingsUnavailable, fmt.Errorf("claude settings: %w", err)
 		}

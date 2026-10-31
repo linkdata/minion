@@ -243,12 +243,12 @@ func auditArtifactMayBeEmpty(name string) bool {
 	return name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md"
 }
 
-func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) error {
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string, onProgress ...func()) error {
 	byPath, err := validateAuditArtifactInput(files, repo, target, head)
 	if err != nil {
 		return err
 	}
-	return runAuditValidators(ctx, byPath, validationDir, skill, tools)
+	return runAuditValidators(ctx, byPath, validationDir, skill, tools, onProgress...)
 }
 
 func validateAuditArtifactInput(files []workspace.File, repo, target, head string) (map[string][]byte, error) {
@@ -269,7 +269,7 @@ func validateAuditArtifactInput(files []workspace.File, repo, target, head strin
 	return byPath, nil
 }
 
-func runAuditValidators(ctx context.Context, byPath map[string][]byte, validationDir, skill string, tools auditTools) error {
+func runAuditValidators(ctx context.Context, byPath map[string][]byte, validationDir, skill string, tools auditTools, onProgress ...func()) error {
 	for _, validator := range auditValidators {
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
 			return fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
@@ -284,6 +284,9 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 				err = errors.Join(cause, err)
 			}
 			return fmt.Errorf("audit %s failed: %w", validator.script, err)
+		}
+		if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
+			onProgress[0]()
 		}
 	}
 	return nil

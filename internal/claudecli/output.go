@@ -654,7 +654,9 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	if _, taskID, ok := strings.Cut(text, "<task-id>"); found && ok {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
 			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
-			if !o.progressSeen["task_native:"+id] {
+			if runID := o.openTaskRun(id); runID != "" {
+				o.recordTaskProgress(id, runID, status)
+			} else if !o.progressSeen["task_native:"+id] {
 				o.recordTaskProgress(id, "", status)
 			}
 		}
@@ -882,18 +884,45 @@ func taskRunKey(id, runID string) string {
 	return id + "\x00" + runID
 }
 
+func (o *jsonlOutput) openTaskRun(id string) string {
+	// A run-less notice can only identify a run when exactly one is unfinished.
+	runPrefix := id + "\x00"
+	var found string
+	consider := func(runID string) bool {
+		if o.progressSeen["task_finish:"+runPrefix+runID] {
+			return true
+		}
+		if found != "" && found != runID {
+			return false
+		}
+		found = runID
+		return true
+	}
+	for key := range o.progressSeen {
+		if runID, ok := strings.CutPrefix(key, "task_start:"+runPrefix); ok && !consider(runID) {
+			return ""
+		}
+	}
+	for key := range o.taskProgress {
+		if runID, ok := strings.CutPrefix(key, runPrefix); ok && !consider(runID) {
+			return ""
+		}
+	}
+	return found
+}
+
 func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	if o.onProgress == nil || id == "" {
 		return
 	}
 	switch status {
-	case "started", "running", "completed", "failed", "stopped", "killed":
+	case "started", "completed", "failed", "stopped", "killed":
 	default:
 		return
 	}
 	if runID != "" {
-		// Claude also emits synthetic task notices without run_id. Once a
-		// native run is known, those notices only replay its lifecycle.
+		// Native identity lets later run-less replay notices be ignored after
+		// the run finishes.
 		o.rememberProgress("task_native:" + id)
 		if o.err != nil {
 			return
@@ -902,8 +931,6 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	switch status {
 	case "started":
 		o.recordUniqueProgress("task_start:" + taskRunKey(id, runID))
-	case "running":
-		o.recordUniqueProgress("task_running:" + taskRunKey(id, runID))
 	case "completed", "failed", "stopped", "killed":
 		key := taskRunKey(id, runID)
 		finish := "task_finish:" + key

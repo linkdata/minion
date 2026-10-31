@@ -28,8 +28,14 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 //
 // APIKey overrides environment credentials and stored login. Without it,
 // environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
-func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
+// onProgress reports each completed native check, including expected rejections.
+func Validate(ctx context.Context, settings config.ClaudeConfig, onProgress ...func()) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
+	progress := func() {
+		if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
+			onProgress[0]()
+		}
+	}
 	validated = settings
 	dir, err := os.MkdirTemp("", "minion-claude-check-")
 	if err != nil {
@@ -82,6 +88,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if json.Unmarshal(auth, &status) != nil || !status.LoggedIn {
 		return validated, errors.New("claude is not authenticated; configure claude.api_key or run claude auth login")
 	}
+	progress()
 	args := append(arguments(policy), "--no-session-persistence", "--input-format", "stream-json", "--json-schema", `{"type":"object"}`)
 	data, err := probe(args, initializeRequest)
 	if err != nil {
@@ -94,6 +101,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if !cleanFreshInitialization(data) {
 		return validated, errors.New("claude model discovery emitted model activity or malformed output")
 	}
+	progress()
 	for _, model := range models {
 		if settings.Model == "" {
 			if model.Value != "default" {
@@ -109,7 +117,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		if validated.Effort != "" && !slices.Contains(model.Efforts, validated.Effort) {
 			return validated, fmt.Errorf("claude effort %q is unsupported for model %q", validated.Effort, validated.Model)
 		}
-		if err := validateInvocationCapabilities(probe, dir, policy, validated); err != nil {
+		if err := validateInvocationCapabilities(probe, dir, policy, validated, progress); err != nil {
 			return validated, err
 		}
 		return validated, nil
@@ -120,7 +128,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 // Probe the fresh invocation and resume's session lookup without a model turn.
 // An initialize-only fresh call does not create a resumable conversation, so
 // resume can prove argument parsing and lookup, not session continuation.
-func validateInvocationCapabilities(probe func([]string, string) ([]byte, error), dir, policy string, settings config.ClaudeConfig) error {
+func validateInvocationCapabilities(probe func([]string, string) ([]byte, error), dir, policy string, settings config.ClaudeConfig, onProgress func()) error {
 	freshID, err := conversationID()
 	if err != nil {
 		return err
@@ -140,12 +148,14 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	if !cleanFreshInitialization(data) {
 		return errors.New("claude fresh invocation emitted model activity or malformed output")
 	}
+	onProgress()
 	const unknownOption = "--minion-unsupported-capability-probe"
 	invalid := append(slices.Clone(args), unknownOption)
 	invalidData, err := probe(invalid, initializeRequest)
 	if !cliRejected(err) || !strings.Contains(err.Error(), unknownOption) || !cleanFreshInitialization(invalidData) {
 		return fmt.Errorf("claude fresh invocation did not reject an unknown option: %v", err)
 	}
+	onProgress()
 	resumeID, err := conversationID()
 	if err != nil {
 		return err
@@ -159,6 +169,7 @@ func validateInvocationCapabilities(probe func([]string, string) ([]byte, error)
 	if !cliRejected(err) || !missingSessionDiagnostic(err, resumeID) || !isEmptySessionLookup(data) {
 		return fmt.Errorf("claude resume invocation did not reach empty-session lookup: %v", err)
 	}
+	onProgress()
 	return nil
 }
 

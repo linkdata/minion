@@ -295,6 +295,62 @@ func TestProgressTaskSummariesDoNotRenewInactivity(t *testing.T) {
 	}
 }
 
+func TestProgressRunningTaskNotificationDoesNotRenewInactivity(t *testing.T) {
+	var got int
+	o := jsonlOutput{onProgress: func() { got++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"running"}`, 0},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`, 1},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"running"}`, 1},
+		{`{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":1}}`, 2},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"running"}`, 2},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 3},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, o.err)
+		}
+	}
+}
+
+func TestProgressSyntheticCompletionAfterNativeStart(t *testing.T) {
+	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	var got int
+	first := jsonlOutput{onProgress: func() { got++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`, 1},
+		{notice, 2},
+		{notice, 2},
+	} {
+		writeChunks(t, &first, step.line+"\n")
+		if first.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, first.err)
+		}
+	}
+	resumed := jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 2},
+		{notice, 2},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`, 3},
+		{notice, 4},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`, 4},
+	} {
+		writeChunks(t, &resumed, step.line+"\n")
+		if resumed.err != nil || got != step.want {
+			t.Fatalf("resumed step %d: progress=%d, want %d; parser error=%v", i, got, step.want, resumed.err)
+		}
+	}
+}
+
 func TestProgressSyntheticCompletionBeforeNativeRun(t *testing.T) {
 	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
 	var got int
@@ -333,6 +389,14 @@ func TestProgressNativeUsageBeforeSyntheticCompletion(t *testing.T) {
 	writeChunks(t, &o, `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`+"\n")
 	if o.err != nil || got != 2 {
 		t.Fatalf("native completion repeated synthetic completion: count=%d error=%v", got, o.err)
+	}
+	writeChunks(t, &o, `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-2","usage":{"total_tokens":1}}`+"\n"+notice+"\n")
+	if o.err != nil || got != 4 {
+		t.Fatalf("reused task ID lost synthetic completion: count=%d error=%v", got, o.err)
+	}
+	writeChunks(t, &o, `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`+"\n")
+	if o.err != nil || got != 4 {
+		t.Fatalf("reused task ID repeated synthetic completion: count=%d error=%v", got, o.err)
 	}
 }
 
