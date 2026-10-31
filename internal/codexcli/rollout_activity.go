@@ -274,7 +274,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 	if a.prefixFailed[meta.ID] || meta.path == "" || a.excluded[meta.path] && a.known[meta.ID].path != meta.path {
 		return
 	}
-	if meta.HistoryMode != "" && meta.HistoryMode != "legacy" && meta.HistoryMode != "paginated" {
+	if meta.ID != rootID && meta.HistoryMode != "" && meta.HistoryMode != "legacy" && meta.HistoryMode != "paginated" {
 		a.contentMissing(meta.ID) // A future persistence mode may omit response_item.
 	}
 	info, err := rolloutFileInfo(a.home, meta.path)
@@ -348,12 +348,16 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 	}
 	reader := bufio.NewReaderSize(io.LimitReader(f, limit), 64<<10)
 	for {
+		if a.ctx.Err() != nil {
+			a.contentMissing(meta.ID)
+			break
+		}
 		chunk, readErr := reader.ReadSlice('\n')
 		cursor.offset += int64(len(chunk))
 		a.scanned += int64(len(chunk))
 		if !cursor.dropping {
-			// The line limit excludes the newline, as the CLI JSONL reader does.
-			if len(cursor.pending)+len(chunk) <= aicli.MaxEventBytes+1 && a.pendingBytes+int64(len(chunk)) <= maxActivityPendingBytes {
+			// The rollout scanner excludes CRLF from its JSON payload limit.
+			if len(cursor.pending)+len(chunk) <= aicli.MaxEventBytes+2 && a.pendingBytes+int64(len(chunk)) <= maxActivityPendingBytes {
 				cursor.pending = append(cursor.pending, chunk...)
 				a.pendingBytes += int64(len(chunk))
 			} else {
@@ -373,7 +377,15 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 			break // Retain only bounded unfinished bytes for the next poll.
 		}
 		if !cursor.dropping {
-			a.consume(meta, rootID, cursor, cursor.pending[:len(cursor.pending)-1], progressed)
+			line := cursor.pending[:len(cursor.pending)-1]
+			if len(line) != 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+			if len(line) > aicli.MaxEventBytes {
+				a.contentMissing(meta.ID)
+			} else {
+				a.consume(meta, rootID, cursor, line, progressed)
+			}
 		}
 		a.pendingBytes -= int64(len(cursor.pending))
 		cursor.pending, cursor.dropping = nil, false
@@ -569,18 +581,20 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		}
 	}
 	var item struct {
-		ID          string   `json:"id"`
-		Type        string   `json:"type"`
-		Kind        string   `json:"kind"`
-		Text        string   `json:"text"`
-		AgentID     string   `json:"agent_thread_id"`
-		Tool        string   `json:"tool"`
-		Status      string   `json:"status"`
-		ReceiverIDs []string `json:"receiver_thread_ids"`
-		Content     []struct {
+		ID               string   `json:"id"`
+		Type             string   `json:"type"`
+		Kind             string   `json:"kind"`
+		Text             string   `json:"text"`
+		AggregatedOutput string   `json:"aggregated_output"`
+		AgentID          string   `json:"agent_thread_id"`
+		Tool             string   `json:"tool"`
+		Status           string   `json:"status"`
+		ReceiverIDs      []string `json:"receiver_thread_ids"`
+		Content          []struct {
 			Type, Text string
 		} `json:"content"`
-		Summary []string `json:"summary_text"`
+		Summary   []string          `json:"summary_text"`
+		Questions []json.RawMessage `json:"questions"`
 	}
 	if json.Unmarshal(payload.Item, &item) != nil {
 		a.contentMissing(meta.ID)
@@ -632,6 +646,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	case "Plan":
 		kind, text = "plan", item.Text
 	case "UserMessage", "AgentMessage":
+		if item.Type == "AgentMessage" && len(item.Questions) != 0 {
+			a.contentMissing(meta.ID) // Structured questions are not retained as text.
+		}
 		kind = "assistant"
 		if item.Type == "UserMessage" {
 			kind = "user"
@@ -650,7 +667,13 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		}
 	case "Reasoning":
 		kind, text = "reasoning_summary", strings.Join(item.Summary, "\n")
-	case "CommandExecution", "DynamicToolCall", "CollabAgentToolCall", "WebSearch", "FileChange", "McpToolCall", "FunctionCallOutput", "ImageView", "ImageGeneration", "Extension":
+	case "CommandExecution", "DynamicToolCall", "CollabAgentToolCall", "WebSearch", "FileChange", "McpToolCall", "FunctionCallOutput", "ImageGeneration", "Extension":
+		if item.Type == "CommandExecution" && strings.Contains(item.AggregatedOutput, "\n... command output truncated for persistence ...\n") {
+			a.contentMissing(meta.ID)
+		}
+		kind, text = "tool", string(payload.Item)
+	case "ImageView":
+		a.contentMissing(meta.ID) // The persisted path does not contain the viewed pixels.
 		kind, text = "tool", string(payload.Item)
 	default:
 		a.contentMissing(meta.ID) // Unknown completed item may contain visible data.

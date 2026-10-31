@@ -1,7 +1,9 @@
 package codexcli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -69,6 +71,10 @@ func TestRolloutActivityRootAnnouncesQuietHelperDiscussion(t *testing.T) {
 		rolloutMessage(8, "root-message", "root already streamed on stdout"),
 		rolloutSpawn(10, "child"))
 	start := int64(9)
+	activity, events, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.poll() // Root spawn can report progress before helper discussion exists.
+	baselineProgress := *progress
 	writeUsageRolloutBoundary(t, home, "child", "root", &start,
 		rolloutMessage(8, "inherited", "inherited parent text"),
 		rolloutMessage(9, "message", "helper is working"),
@@ -76,8 +82,6 @@ func TestRolloutActivityRootAnnouncesQuietHelperDiscussion(t *testing.T) {
 		`{"ordinal":11,"type":"response_item","payload":{"type":"function_call","id":"call","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\"}","call_id":"call-1"}}`,
 		`{"ordinal":12,"type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"PASS"}}`)
 
-	activity, events, progress := newActivityTestRecorder(t, home, started)
-	activity.root("root")
 	activity.poll()
 	activity.poll() // A scan of unchanged files must not replay content or progress.
 	if len(*events) != 4 {
@@ -101,7 +105,7 @@ func TestRolloutActivityRootAnnouncesQuietHelperDiscussion(t *testing.T) {
 			t.Fatalf("private, inherited, or root text emitted: %+v", event)
 		}
 	}
-	if *progress == 0 {
+	if *progress <= baselineProgress {
 		t.Fatal("quiet helper entries did not signal progress")
 	}
 	progressBefore := *progress
@@ -246,6 +250,60 @@ func TestRolloutActivityLegacyAgentQuestionsLeaveCoverageGap(t *testing.T) {
 	}
 	if textCount != 1 || gaps != 1 {
 		t.Fatalf("agent question text/gap count = %d/%d; events=%+v", textCount, gaps, *events)
+	}
+}
+
+func TestRolloutActivityPaginatedAgentQuestionsWithoutTextLeaveCoverageGap(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutCompletedItem(9, "child", `{"type":"AgentMessage","id":"question","content":[],"questions":[{"question":"Which target?"}]}`))
+	setActivityHistoryMode(t, child, "paginated")
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("paginated structured question without text = %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivityPaginatedTruncatedCommandOutputKeepsPreviewAndGap(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	output := "PASS\n... command output truncated for persistence ...\n"
+	item := fmt.Sprintf(`{"type":"CommandExecution","id":"tool","command":["go","test"],"aggregated_output":%q}`, output)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, rolloutCompletedItem(9, "child", item))
+	setActivityHistoryMode(t, child, "paginated")
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	preview := aicli.StreamEvent{NativeID: "child", Kind: "tool", Text: item}
+	gap := aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}
+	if len(*events) != 2 || !slices.Contains(*events, preview) || !slices.Contains(*events, gap) {
+		t.Fatalf("persisted truncated output = %+v; want preview and gap", *events)
+	}
+}
+
+func TestRolloutActivityPaginatedImageViewKeepsPreviewAndGap(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	item := `{"type":"ImageView","id":"image","path":"figure.png"}`
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, rolloutCompletedItem(9, "child", item))
+	setActivityHistoryMode(t, child, "paginated")
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	preview := aicli.StreamEvent{NativeID: "child", Kind: "tool", Text: item}
+	gap := aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}
+	if len(*events) != 2 || !slices.Contains(*events, preview) || !slices.Contains(*events, gap) {
+		t.Fatalf("persisted image view = %+v; want preview and gap", *events)
 	}
 }
 
@@ -514,6 +572,19 @@ func TestRolloutActivityUnknownHistoryModeKeepsVisibleResponseWithGap(t *testing
 	}
 }
 
+func TestRolloutActivityUnknownRootHistoryModeWithoutHelperDoesNotGap(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	setActivityHistoryMode(t, root, "future_mode")
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.poll()
+	activity.finish()
+	if len(*events) != 0 {
+		t.Fatalf("root-only unknown history mode invented a coverage gap: %+v", *events)
+	}
+}
+
 func TestRolloutActivityNestedSpawnRequiresParentAnnouncement(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
@@ -583,7 +654,7 @@ func TestRolloutActivityMetadataAndObservationDoNotAdmitNewHelper(t *testing.T) 
 	}
 	activity.child("child", true)
 	activity.poll()
-	if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "private concurrent work"}) || *progress == 0 {
+	if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "private concurrent work"}) || *progress <= baselineProgress {
 		t.Fatalf("proved spawn did not admit helper: events=%+v progress=%d", *events, *progress)
 	}
 }
@@ -1043,6 +1114,34 @@ func TestRolloutActivityConcurrentAnnouncementAndPoll(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityCancellationStopsCurrentMultilineScan(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "first helper message"),
+		rolloutMessage(10, "second", "later helper message"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(ctx, home, started, nil, nil, nil, nil,
+		func(event aicli.StreamEvent) {
+			events = append(events, event)
+			if event.Kind == "assistant" {
+				cancel()
+			}
+		}, func() {})
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "assistant", Text: "first helper message"},
+		{NativeID: "child", Kind: "content_missing"},
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("canceled scan emitted later helper content or omitted gap: got %+v; want %+v", events, want)
+	}
+}
+
 func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
@@ -1051,6 +1150,8 @@ func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing
 
 	activity, events, progress := newActivityTestRecorder(t, home, started)
 	activity.root("root")
+	activity.poll()
+	baselineProgress := *progress
 	activity.child("child", true)
 	activity.poll()
 	activity.poll()
@@ -1071,7 +1172,7 @@ func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing
 			t.Fatalf("unexpected event: %+v", event)
 		}
 	}
-	if labeled != 1 || missing != 1 || *progress == 0 {
+	if labeled != 1 || missing != 1 || *progress <= baselineProgress {
 		t.Fatalf("unknown boundary events=%+v progress=%d; want labeled content and one coverage gap", *events, *progress)
 	}
 }
@@ -1117,7 +1218,7 @@ func TestRolloutActivityFinalScanCompletesPartialLineOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, writeErr := f.WriteString(line[:len(line)/2])
-	if err := joinClose(writeErr, f.Close()); err != nil {
+	if err := errors.Join(writeErr, f.Close()); err != nil {
 		t.Fatal(err)
 	}
 	activity, events, progress := newActivityTestRecorder(t, home, started)
@@ -1139,20 +1240,13 @@ func TestRolloutActivityFinalScanCompletesPartialLineOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, writeErr = f.WriteString(line[len(line)/2:] + "\n")
-	if err := joinClose(writeErr, f.Close()); err != nil {
+	if err := errors.Join(writeErr, f.Close()); err != nil {
 		t.Fatal(err)
 	}
 	activity.finish()
 	if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "arrived after last live scan"}) || *progress == 0 {
 		t.Fatalf("final scan missed completed line: events=%+v progress=%d", *events, *progress)
 	}
-}
-
-func joinClose(writeErr, closeErr error) error {
-	if writeErr != nil {
-		return writeErr
-	}
-	return closeErr
 }
 
 func TestRolloutActivityResumeSkipsVerifiedPrefix(t *testing.T) {
@@ -1448,7 +1542,7 @@ func TestRolloutActivityLineAtEventByteLimit(t *testing.T) {
 				boundary := int64(9)
 				child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
 					usageEventAt(8, "task_started", "inherited-turn"))
-				textBytes := aicli.MaxEventBytes - len(prefix) - len(suffix) - len(ending) + 1 + extra // LF is the delimiter, not part of the JSONL line.
+				textBytes := aicli.MaxEventBytes - len(prefix) - len(suffix) + extra // JSONL delimiters, including CRLF, are outside the payload limit.
 				f, err := os.OpenFile(child, os.O_APPEND|os.O_WRONLY, 0)
 				if err != nil {
 					t.Fatal(err)
@@ -1459,7 +1553,7 @@ func TestRolloutActivityLineAtEventByteLimit(t *testing.T) {
 						break
 					}
 				}
-				if err := joinClose(writeErr, f.Close()); err != nil {
+				if err := errors.Join(writeErr, f.Close()); err != nil {
 					t.Fatal(err)
 				}
 				activity, events, _ := newActivityTestRecorder(t, home, started)
