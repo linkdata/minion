@@ -148,6 +148,25 @@ func TestRolloutActivityProgressCountsRepeatedOutputAtDistinctOrdinals(t *testin
 	}
 }
 
+func TestRolloutActivityOrdinalProgressDoesNotFillIdentityCap(t *testing.T) {
+	activity := rolloutActivity{progress: func() {}}
+	event := rolloutEvent{Type: "event_msg", Payload: []byte(`{"type":"exec_command_output","chunk":"tick"}`)}
+	progressed := false
+	activity.newProgress("helper", event, 1, &progressed)
+	if !progressed || activity.progressOrdinal["helper"] != 1 || len(activity.progressEvents) != 0 {
+		t.Fatalf("first ordinal progress: changed=%t, ordinal=%d, identities=%d", progressed, activity.progressOrdinal["helper"], len(activity.progressEvents))
+	}
+	progressed = false
+	activity.newProgress("helper", event, 1, &progressed)
+	if progressed {
+		t.Fatal("replayed ordinal renewed progress")
+	}
+	activity.newProgress("helper", event, maxUsageRecords+1, &progressed)
+	if !progressed || activity.progressOrdinal["helper"] != maxUsageRecords+1 || len(activity.progressEvents) != 0 {
+		t.Fatalf("later ordinal progress: changed=%t, ordinal=%d, identities=%d", progressed, activity.progressOrdinal["helper"], len(activity.progressEvents))
+	}
+}
+
 func TestRolloutActivityProgressCountsDistinctIdenticalHelperMessages(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))

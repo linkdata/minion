@@ -15,20 +15,20 @@ func TestProgressHistoryIsBoundedAcrossResumedCalls(t *testing.T) {
 	summary := func(text string) string {
 		return `{"type":"system","subtype":"task_progress","session_id":"native-id","task_id":"helper","run_id":"run","summary":"` + text + `"}`
 	}
-	first := jsonlOutput{sessionID: "native-id", onProgress: func() { progress++ }, progressEntryLimit: 4}
+	first := jsonlOutput{sessionID: "native-id", onProgress: func() { progress++ }, progressEntryLimit: 5}
 	writeChunks(t, &first, started+"\n"+summary("read")+"\n")
-	if first.err != nil || progress != 2 || first.progressEntries != 3 {
+	if first.err != nil || progress != 2 || first.progressEntries != 4 {
 		t.Fatalf("initial progress: count=%d entries=%d err=%v", progress, first.progressEntries, first.err)
 	}
 	resumed := jsonlOutput{sessionID: "native-id", onProgress: first.onProgress,
 		progressSeen: first.progressSeen, taskProgress: first.taskProgress,
-		progressBytes: first.progressBytes, progressEntries: first.progressEntries, progressEntryLimit: 4}
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries, progressEntryLimit: 5}
 	writeChunks(t, &resumed, started+"\n"+summary("read")+"\n"+summary("write")+"\n")
-	if resumed.err != nil || progress != 3 || resumed.progressEntries != 4 {
+	if resumed.err != nil || progress != 3 || resumed.progressEntries != 5 {
 		t.Fatalf("resumed progress: count=%d entries=%d err=%v", progress, resumed.progressEntries, resumed.err)
 	}
 	writeChunks(t, &resumed, summary("review")+"\n")
-	if !errors.Is(resumed.err, aicli.ErrOutputLimit) || progress != 3 || resumed.progressEntries != 4 {
+	if !errors.Is(resumed.err, aicli.ErrOutputLimit) || progress != 3 || resumed.progressEntries != 5 {
 		t.Fatalf("entry limit: count=%d entries=%d err=%v", progress, resumed.progressEntries, resumed.err)
 	}
 
@@ -267,6 +267,39 @@ func TestProgressTracksForegroundTaskRuns(t *testing.T) {
 	session.NewConversation()
 	if session.progressSeen != nil || session.taskProgress != nil {
 		t.Fatal("new conversation retained task progress history")
+	}
+}
+
+func TestProgressSyntheticTaskNoticeDoesNotReplayNativeRun(t *testing.T) {
+	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	for _, tc := range []struct {
+		name, native string
+	}{
+		{"task events", `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}` + "\n" +
+			`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`},
+		{"task list", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}` + "\n" +
+			`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got int
+			first := jsonlOutput{onProgress: func() { got++ }}
+			writeChunks(t, &first, tc.native+"\n")
+			if first.err != nil || got != 2 {
+				t.Fatalf("native task progress=%d, error=%v", got, first.err)
+			}
+			resumed := jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen,
+				progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+			writeChunks(t, &resumed, notice+"\n")
+			if resumed.err != nil || got != 2 {
+				t.Fatalf("synthetic replay renewed task progress: count=%d, error=%v", got, resumed.err)
+			}
+		})
+	}
+	var got int
+	legacy := jsonlOutput{onProgress: func() { got++ }}
+	writeChunks(t, &legacy, notice+"\n")
+	if legacy.err != nil || got != 1 {
+		t.Fatalf("legacy synthetic-only task progress=%d, error=%v", got, legacy.err)
 	}
 }
 

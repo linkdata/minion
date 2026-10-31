@@ -279,6 +279,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
+	inactivity.stop() // Execution is over; Status drain and Result upload are not progress.
 	eventsDone := make(chan bool, 1)
 	go func() { eventsDone <- events.finish() }()
 	// A normal Runner return can still have a large Result to upload. Keep its
@@ -298,7 +299,6 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		jobRunner.phaseUpdate("upload", 0, "")
 	}
 	outcomeErr := statusFeed.finish(actionCtx, transport, func() error {
-		inactivity.stop() // Final upload no longer renews or observes inactivity.
 		cause := context.Cause(actionCtx)
 		if runErr == nil && httpWatchUncertainty(cause) {
 			// A completed result can resolve independent watch uncertainty through its receipt.

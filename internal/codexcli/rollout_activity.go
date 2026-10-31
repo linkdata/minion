@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,16 +22,17 @@ import (
 // remains the source of root discussion; rollout cursors supply helper content
 // and progress when the root stream is quiet.
 type rolloutActivity struct {
-	ctx            context.Context
-	home           string
-	started        time.Time
-	known          map[string]rolloutMeta
-	provedKnown    map[string]bool
-	before         map[string]*usageBoundary
-	excluded       map[string]bool
-	emit           func(aicli.StreamEvent)
-	progress       func()
-	progressEvents map[[sha256.Size]byte]bool
+	ctx             context.Context
+	home            string
+	started         time.Time
+	known           map[string]rolloutMeta
+	provedKnown     map[string]bool
+	before          map[string]*usageBoundary
+	excluded        map[string]bool
+	emit            func(aicli.StreamEvent)
+	progress        func()
+	progressEvents  map[[sha256.Size]byte]bool
+	progressOrdinal map[string]int64
 
 	mu        sync.Mutex // stdout announcements may arrive while a scan runs
 	rootID    string
@@ -757,16 +757,26 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 	if a.progress == nil {
 		return
 	}
+	if ordinal > 0 {
+		// Rollout ordinals are appended in order. A cursor needs only its
+		// latest ordinal to distinguish fresh output from replay, even for a
+		// helper that emits more than maxUsageRecords output chunks.
+		if ordinal <= a.progressOrdinal[id] {
+			return
+		}
+		if a.progressOrdinal == nil {
+			a.progressOrdinal = make(map[string]int64)
+		}
+		a.progressOrdinal[id] = ordinal
+		*progressed = true
+		return
+	}
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(id))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write([]byte(event.Type))
 	_, _ = hash.Write([]byte{0})
 	_, _ = hash.Write(event.Payload)
-	if ordinal > 0 {
-		_, _ = hash.Write([]byte{0})
-		_, _ = hash.Write(strconv.AppendInt(nil, ordinal, 10))
-	}
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
 	if a.progressEvents[digest] || len(a.progressEvents) >= maxUsageRecords {

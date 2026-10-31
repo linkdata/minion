@@ -339,6 +339,9 @@ func (o *jsonlOutput) finishLine(line []byte) {
 				o.pending++
 				if task.TaskID != "" {
 					active[taskRunKey(task.TaskID, task.RunID)] = true
+					if task.RunID != "" && o.onProgress != nil {
+						o.rememberProgress("task_native:" + task.TaskID)
+					}
 				}
 			}
 		}
@@ -651,7 +654,10 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	status = strings.TrimSpace(html.UnescapeString(status))
 	if _, taskID, ok := strings.Cut(text, "<task-id>"); found && ok {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
-			o.recordTaskProgress(strings.TrimSpace(html.UnescapeString(taskID[:end])), "", status)
+			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
+			if !o.progressSeen["task_native:"+id] {
+				o.recordTaskProgress(id, "", status)
+			}
 		}
 	}
 	if !found || status != "killed" && status != "stopped" {
@@ -834,17 +840,23 @@ func (o *jsonlOutput) markStreamProgress(state *progressStream) {
 }
 
 func (o *jsonlOutput) recordUniqueProgress(key string) {
+	if o.rememberProgress(key) {
+		o.onProgress()
+	}
+}
+
+func (o *jsonlOutput) rememberProgress(key string) bool {
 	if o.progressSeen[key] {
-		return
+		return false
 	}
 	if !o.reserveProgress(1, len(key)) {
-		return
+		return false
 	}
 	if o.progressSeen == nil {
 		o.progressSeen = make(map[string]bool)
 	}
 	o.progressSeen[key] = true
-	o.onProgress()
+	return true
 }
 
 func (o *jsonlOutput) reserveProgress(entries, bytes int) bool {
@@ -874,6 +886,19 @@ func taskRunKey(id, runID string) string {
 func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	if o.onProgress == nil || id == "" {
 		return
+	}
+	switch status {
+	case "started", "running", "completed", "failed", "stopped", "killed":
+	default:
+		return
+	}
+	if runID != "" {
+		// Claude also emits synthetic task notices without run_id. Once a
+		// native run is known, those notices only replay its lifecycle.
+		o.rememberProgress("task_native:" + id)
+		if o.err != nil {
+			return
+		}
 	}
 	switch status {
 	case "started":
