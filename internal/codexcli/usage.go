@@ -673,6 +673,8 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				TurnID      string `json:"turn_id"`
 				ThreadID    string `json:"thread_id"`
 				NewThreadID string `json:"new_thread_id"`
+				AgentID     string `json:"agent_thread_id"`
+				Kind        string `json:"kind"`
 				Item        *struct {
 					Type       string   `json:"type"`
 					Kind       string   `json:"kind"`
@@ -702,6 +704,15 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 			if own && ownThread {
 				if payload.Type == "collab_agent_spawn_end" && payload.NewThreadID != "" {
 					appendSpawnProof(payload.TurnID, payload.NewThreadID)
+				}
+				if payload.Type == "sub_agent_activity" {
+					if payload.AgentID == "" {
+						complete = false
+					} else if payload.Kind == "started" {
+						appendSpawnProof(payload.TurnID, payload.AgentID)
+					} else {
+						appendChildren(payload.AgentID)
+					}
 				}
 				if payload.Type == "item_completed" && payload.Item != nil {
 					if payload.Item.Type == "SubAgentActivity" {

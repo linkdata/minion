@@ -78,6 +78,9 @@ func newRolloutActivity(ctx context.Context, home string, started time.Time, kno
 
 func (a *rolloutActivity) root(id string) {
 	if id == "" || len(id) > maxItemIDBytes {
+		a.mu.Lock()
+		a.overflow = true
+		a.mu.Unlock()
 		return
 	}
 	a.mu.Lock()
@@ -91,6 +94,9 @@ func (a *rolloutActivity) root(id string) {
 // files require a completed current spawn, not merely an observed receiver ID.
 func (a *rolloutActivity) child(id string, spawned bool) {
 	if id == "" || len(id) > maxItemIDBytes {
+		a.mu.Lock()
+		a.overflow = true
+		a.mu.Unlock()
 		return
 	}
 	a.mu.Lock()
@@ -295,6 +301,9 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 		a.contentMissing(meta.ID)
 		return
 	}
+	if info.Size() == cursor.offset {
+		return // No complete or partial bytes have arrived since the last scan.
+	}
 	if cursor.offset >= maxUsageRolloutBytes || a.scanned >= maxUsageScanBytes {
 		if info.Size() > cursor.offset {
 			a.contentMissing(meta.ID)
@@ -383,23 +392,69 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 		}
 	}
 	if event.Type == "response_item" {
-		if meta.ID == rootID || meta.HistoryMode == "paginated" {
-			return // Root stdout or paginated item_completed supplies activity.
+		if meta.ID == rootID {
+			return // Root stdout supplies discussion.
 		}
 		if a.consumeResponse(meta, event.Payload, uncertainOrdinal) && !uncertainOrdinal {
 			*progressed = true
 		}
 		return
 	}
+	if event.Type == "inter_agent_communication_metadata" {
+		return
+	}
+	if event.Type == "inter_agent_communication" {
+		if meta.ID == rootID {
+			return // Root stdout supplies its own tool discussion.
+		}
+		var message struct {
+			Author, Recipient, Content string
+			EncryptedContent           string `json:"encrypted_content"`
+			Metadata                   struct {
+				TurnID string `json:"turn_id"`
+			} `json:"internal_chat_message_metadata_passthrough"`
+		}
+		if json.Unmarshal(event.Payload, &message) != nil {
+			a.contentMissing(meta.ID)
+			return
+		}
+		before := a.before[meta.ID]
+		if before != nil && message.Metadata.TurnID != "" && before.turns[message.Metadata.TurnID] {
+			return
+		}
+		if message.Author == "" || message.Recipient == "" || message.EncryptedContent != "" {
+			a.contentMissing(meta.ID)
+		}
+		if message.Content != "" {
+			uncertain := uncertainOrdinal || before != nil && message.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
+			a.emitVisible(meta.ID, "inter_agent_communication", message.Author+" -> "+message.Recipient+"\n"+message.Content, uncertain)
+		}
+		if !uncertainOrdinal && (message.Content != "" || message.EncryptedContent != "") {
+			*progressed = true
+		}
+		return
+	}
+	if event.Type != "event_msg" {
+		switch event.Type {
+		case "turn_context", "token_usage_record", "world_state", "compacted":
+			return // Known metadata, not visible assistant discussion.
+		default:
+			if meta.ID != rootID {
+				a.contentMissing(meta.ID)
+			}
+			return
+		}
+	}
 	var payload struct {
 		Type        string          `json:"type"`
 		ThreadID    string          `json:"thread_id"`
 		TurnID      string          `json:"turn_id"`
 		NewThreadID string          `json:"new_thread_id"`
+		AgentID     string          `json:"agent_thread_id"`
+		Kind        string          `json:"kind"`
+		Message     string          `json:"message"`
+		Text        string          `json:"text"`
 		Item        json.RawMessage `json:"item"`
-	}
-	if event.Type != "event_msg" {
-		return
 	}
 	if json.Unmarshal(event.Payload, &payload) != nil {
 		a.contentMissing(meta.ID)
@@ -420,8 +475,64 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 		}
 		return
 	}
-	if payload.Type != "item_completed" && payload.Type != "item_started" && payload.Type != "item_updated" || len(payload.Item) == 0 {
+	if payload.Type == "sub_agent_activity" {
+		switch payload.Kind {
+		case "started":
+			if a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+				a.rolloutSpawn(meta, payload.TurnID, payload.AgentID)
+			}
+		case "interacted", "interrupted", "completed":
+			if a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+				a.rolloutObserve(meta, payload.TurnID, payload.AgentID)
+			}
+		default:
+			a.contentMissing(meta.ID)
+		}
 		return
+	}
+	if meta.ID != rootID && meta.HistoryMode != "paginated" {
+		uncertain := uncertainOrdinal || a.before[meta.ID] != nil && payload.TurnID == "" || meta.HistoryStart == nil && a.before[meta.ID] == nil
+		switch payload.Type {
+		case "user_message":
+			var input struct {
+				Images      []json.RawMessage
+				FileIDs     []json.RawMessage `json:"file_ids"`
+				LocalImages []json.RawMessage `json:"local_images"`
+				Audio       []json.RawMessage
+				LocalAudio  []json.RawMessage `json:"local_audio"`
+			}
+			if json.Unmarshal(event.Payload, &input) != nil || len(input.Images)+len(input.FileIDs)+len(input.LocalImages)+len(input.Audio)+len(input.LocalAudio) != 0 {
+				a.contentMissing(meta.ID) // Non-text attachments are not retained in discussion records.
+			}
+			a.emitVisible(meta.ID, "user_event_msg", payload.Message, uncertain)
+			return
+		case "agent_message":
+			var output struct {
+				Questions []json.RawMessage
+			}
+			if json.Unmarshal(event.Payload, &output) != nil || len(output.Questions) != 0 {
+				a.contentMissing(meta.ID) // Structured questions are separate from message text.
+			}
+			a.emitVisible(meta.ID, "assistant_event_msg", payload.Message, uncertain)
+			return
+		case "agent_reasoning":
+			a.emitVisible(meta.ID, "reasoning_summary_event_msg", payload.Text, uncertain)
+			return
+		case "patch_apply_end", "mcp_tool_call_end", "web_search_end", "image_generation_end":
+			a.emitVisible(meta.ID, "tool_event_msg", string(event.Payload), uncertain)
+			return
+		}
+	}
+	if payload.Type != "item_completed" && payload.Type != "item_started" && payload.Type != "item_updated" || len(payload.Item) == 0 {
+		switch payload.Type {
+		case "task_started", "task_complete", "turn_aborted", "token_count", "thread_goal_updated", "thread_rolled_back", "thread_settings_applied", "entered_review_mode", "exited_review_mode", "context_compacted", "agent_reasoning_raw_content":
+			return // Lifecycle/metadata or raw reasoning, never visible discussion.
+		default:
+			if meta.ID != rootID {
+				a.contentMissing(meta.ID)
+			}
+			return
+		}
 	}
 	var item struct {
 		ID          string   `json:"id"`
@@ -444,8 +555,15 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 		a.contentMissing(meta.ID) // Native persistence does not include partial item events.
 		return
 	}
-	if item.Type == "SubAgentActivity" && item.Kind == "started" && a.spawnAttributable(meta, rootID, uncertainOrdinal) {
-		a.rolloutSpawn(meta, payload.TurnID, item.AgentID)
+	if payload.Type == "item_completed" && item.Type == "SubAgentActivity" && a.spawnAttributable(meta, rootID, uncertainOrdinal) {
+		switch item.Kind {
+		case "started":
+			a.rolloutSpawn(meta, payload.TurnID, item.AgentID)
+		case "interacted", "interrupted", "completed":
+			a.rolloutObserve(meta, payload.TurnID, item.AgentID)
+		default:
+			a.contentMissing(meta.ID)
+		}
 	}
 	if item.Type == "CollabAgentToolCall" && item.Tool == "spawn_agent" && item.Status == "completed" && a.spawnAttributable(meta, rootID, uncertainOrdinal) {
 		for _, id := range item.ReceiverIDs {
@@ -467,10 +585,13 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, line []byte, 
 	uncertain := uncertainOrdinal || a.before[meta.ID] != nil && payload.TurnID == "" || meta.HistoryStart == nil && a.before[meta.ID] == nil
 	kind, text := "", ""
 	switch item.Type {
-	case "UserMessage", "SubAgentActivity", "Plan", "TodoList":
-		return // Prompt/lifecycle data are not assistant discussion.
-	case "AgentMessage":
+	case "SubAgentActivity", "Plan", "TodoList", "ContextCompaction":
+		return // Lifecycle data are not discussion.
+	case "UserMessage", "AgentMessage":
 		kind = "assistant"
+		if item.Type == "UserMessage" {
+			kind = "user"
+		}
 		var parts []string
 		for _, content := range item.Content {
 			if content.Type != "Text" && content.Type != "text" {
@@ -504,8 +625,8 @@ func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, unc
 
 func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage, uncertainOrdinal bool) bool {
 	var item struct {
-		Type, Role string
-		Metadata   struct {
+		Type, Role, Author, Recipient string
+		Metadata                      struct {
 			TurnID string `json:"turn_id"`
 		} `json:"internal_chat_message_metadata_passthrough"`
 		Content []struct {
@@ -527,13 +648,18 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	kind, text := "", ""
 	switch item.Type {
 	case "message":
-		if item.Role != "assistant" {
-			return false // User, developer, and tool inputs are not helper output.
+		contentType := "output_text"
+		switch item.Role {
+		case "assistant":
+			kind = "assistant"
+		case "user":
+			kind, contentType = "user", "input_text"
+		default:
+			return false // Developer and tool inputs are outside discussion capture.
 		}
-		kind = "assistant"
 		var parts []string
 		for _, content := range item.Content {
-			if content.Type != "output_text" {
+			if content.Type != contentType {
 				a.contentMissing(meta.ID)
 				continue
 			}
@@ -554,13 +680,34 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 			parts = append(parts, summary.Text)
 		}
 		text = strings.Join(parts, "\n") // Never inspect raw or encrypted reasoning.
+	case "agent_message":
+		kind = "inter_agent_message"
+		var parts []string
+		for _, content := range item.Content {
+			if content.Type != "input_text" {
+				a.contentMissing(meta.ID) // Encrypted or unknown content is unavailable.
+				continue
+			}
+			parts = append(parts, content.Text)
+		}
+		if item.Author == "" || item.Recipient == "" {
+			a.contentMissing(meta.ID)
+		}
+		if len(parts) != 0 {
+			text = item.Author + " -> " + item.Recipient + "\n" + strings.Join(parts, "\n")
+		}
 	case "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "computer_call", "tool_search_call", "tool_search_output", "image_generation_call":
 		kind, text = "tool", string(raw)
-	case "agent_message", "additional_tools", "configuration_update", "compaction", "context_compaction":
+	case "additional_tools", "configuration_update", "compaction", "context_compaction":
 		return false // Agent input and session metadata are not helper discussion.
 	default:
 		a.contentMissing(meta.ID)
 		return false
+	}
+	if meta.HistoryMode == "paginated" {
+		// Paginated response and completed-item records are independently
+		// persisted. Both are exposed; neither proves the other was emitted.
+		kind += "_response_item"
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
 	return true
@@ -585,6 +732,7 @@ func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {
 
 func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string) {
 	if id == "" || len(id) > maxItemIDBytes {
+		a.contentMissing(meta.ID)
 		return
 	}
 	// On resume, a late old event without a turn cannot prove a current spawn.
@@ -593,10 +741,25 @@ func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string) {
 		current := a.spawned[id]
 		a.mu.Unlock()
 		if !current {
+			a.contentMissing(meta.ID)
 			return
 		}
 	}
 	a.child(id, true)
+}
+
+func (a *rolloutActivity) rolloutObserve(meta rolloutMeta, turnID, id string) {
+	if id == "" || len(id) > maxItemIDBytes {
+		a.contentMissing(meta.ID)
+		return
+	}
+	a.mu.Lock()
+	spawned := a.spawned[id]
+	a.mu.Unlock()
+	if !spawned && a.known[id].ID == "" || a.before[meta.ID] != nil && turnID == "" {
+		a.contentMissing(meta.ID) // Observation alone cannot prove a new or resumed spawn.
+	}
+	a.child(id, false)
 }
 
 func (a *rolloutActivity) contentMissing(id string) {

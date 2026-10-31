@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -44,9 +45,12 @@ func setActivityHistoryMode(t *testing.T, path, mode string) {
 	}
 }
 
-func rolloutSpawn(ordinal int, parent, child string) string {
-	item := fmt.Sprintf(`{"type":"SubAgentActivity","id":"spawn","kind":"started","agent_thread_id":%q,"agent_path":"/root/helper"}`, child)
-	return rolloutCompletedItem(ordinal, parent, item)
+func rolloutSpawn(ordinal int, child string) string {
+	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"spawn","kind":"started","agent_thread_id":%q,"agent_path":"/root/helper"}}`, ordinal, child)
+}
+
+func rolloutInteracted(ordinal int, child string) string {
+	return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"observe","kind":"interacted","agent_thread_id":%q,"agent_path":"/root/helper"}}`, ordinal, child)
 }
 
 func newActivityTestRecorder(t *testing.T, home string, started time.Time) (*rolloutActivity, *[]aicli.StreamEvent, *int) {
@@ -63,7 +67,7 @@ func TestRolloutActivityRootAnnouncesQuietHelperDiscussion(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "",
 		rolloutMessage(8, "root-message", "root already streamed on stdout"),
-		rolloutSpawn(10, "root", "child"))
+		rolloutSpawn(10, "child"))
 	start := int64(9)
 	writeUsageRolloutBoundary(t, home, "child", "root", &start,
 		rolloutMessage(8, "inherited", "inherited parent text"),
@@ -107,7 +111,100 @@ func TestRolloutActivityRootAnnouncesQuietHelperDiscussion(t *testing.T) {
 	}
 }
 
-func TestRolloutActivityPaginatedUsesCompletedItemsWithoutResponseDuplicates(t *testing.T) {
+func TestRolloutActivityLegacyEventMsgCapturesHelperContent(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		`{"ordinal":9,"type":"event_msg","payload":{"type":"agent_message","message":"legacy helper reply"}}`,
+		`{"ordinal":10,"type":"event_msg","payload":{"type":"agent_reasoning","text":"visible legacy summary"}}`,
+		`{"ordinal":11,"type":"event_msg","payload":{"type":"agent_reasoning_raw_content","text":"private reasoning"}}`,
+		`{"ordinal":12,"type":"event_msg","payload":{"type":"mcp_tool_call_end","call_id":"tool-1","turn_id":"current","result":{"Ok":{"content":[{"type":"text","text":"PASS"}]}}}}`)
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	if len(*events) != 3 ||
+		(*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant_event_msg", Text: "legacy helper reply"}) ||
+		(*events)[1] != (aicli.StreamEvent{NativeID: "child", Kind: "reasoning_summary_event_msg", Text: "visible legacy summary"}) ||
+		(*events)[2].NativeID != "child" || (*events)[2].Kind != "tool_event_msg" ||
+		!json.Valid([]byte((*events)[2].Text)) || !strings.Contains((*events)[2].Text, `"PASS"`) {
+		t.Fatalf("legacy helper content missing, duplicated, or leaked raw reasoning: %+v", *events)
+	}
+}
+
+func TestRolloutActivityLegacyUserAttachmentsLeaveCoverageGap(t *testing.T) {
+	for _, test := range []struct {
+		name, payload, text string
+	}{
+		{"text and image", `{"type":"user_message","message":"review this image","images":["image-ref"]}`, "review this image"},
+		{"file without text", `{"type":"user_message","file_ids":["file-1"]}`, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				fmt.Sprintf(`{"ordinal":9,"type":"event_msg","payload":%s}`, test.payload))
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			var textCount, gaps int
+			for _, event := range *events {
+				switch event.Kind {
+				case "user_event_msg":
+					if event.NativeID != "child" || event.Text != test.text {
+						t.Fatalf("wrong visible user text: %+v", event)
+					}
+					textCount++
+				case "content_missing":
+					if event.NativeID != "child" || event.Text != "" {
+						t.Fatalf("wrong attachment gap: %+v", event)
+					}
+					gaps++
+				default:
+					t.Fatalf("attachment content leaked: %+v", event)
+				}
+			}
+			wantText := 0
+			if test.text != "" {
+				wantText = 1
+			}
+			if gaps != 1 || textCount != wantText {
+				t.Fatalf("attachment text/gap count = %d/%d; events=%+v", textCount, gaps, *events)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityLegacyAgentQuestionsLeaveCoverageGap(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		`{"ordinal":9,"type":"event_msg","payload":{"type":"agent_message","message":"Please clarify the scope.","questions":[{"question":"Which target?"}]}}`)
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	var textCount, gaps int
+	for _, event := range *events {
+		switch event {
+		case aicli.StreamEvent{NativeID: "child", Kind: "assistant_event_msg", Text: "Please clarify the scope."}:
+			textCount++
+		case aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}:
+			gaps++
+		default:
+			t.Fatalf("unexpected agent question event: %+v", event)
+		}
+	}
+	if textCount != 1 || gaps != 1 {
+		t.Fatalf("agent question text/gap count = %d/%d; events=%+v", textCount, gaps, *events)
+	}
+}
+
+func TestRolloutActivityPaginatedRetainsBothPersistedSources(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
 	boundary := int64(9)
@@ -124,16 +221,195 @@ func TestRolloutActivityPaginatedUsesCompletedItemsWithoutResponseDuplicates(t *
 	activity.child("child", true)
 	activity.poll()
 	activity.finish()
-	if len(*events) != 3 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "paginated reply"}) ||
-		(*events)[1] != (aicli.StreamEvent{NativeID: "child", Kind: "reasoning_summary", Text: "visible summary"}) ||
-		(*events)[2].Kind != "tool" || !json.Valid([]byte((*events)[2].Text)) ||
-		!strings.Contains((*events)[2].Text, `"aggregated_output":"PASS"`) {
-		t.Fatalf("paginated content/duplicates = %+v", *events)
+	if len(*events) != 6 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "paginated reply"}) ||
+		(*events)[1] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant_response_item", Text: "paginated reply"}) ||
+		(*events)[2] != (aicli.StreamEvent{NativeID: "child", Kind: "reasoning_summary", Text: "visible summary"}) ||
+		(*events)[3] != (aicli.StreamEvent{NativeID: "child", Kind: "reasoning_summary_response_item", Text: "visible summary"}) ||
+		(*events)[4].Kind != "tool" || !json.Valid([]byte((*events)[4].Text)) ||
+		!strings.Contains((*events)[4].Text, `"aggregated_output":"PASS"`) ||
+		(*events)[5].Kind != "tool_response_item" || !json.Valid([]byte((*events)[5].Text)) ||
+		!strings.Contains((*events)[5].Text, `"call_id":"call-1"`) {
+		t.Fatalf("paginated persisted sources = %+v", *events)
 	}
 	for _, event := range *events {
 		if strings.Contains(event.Text, "hidden reasoning") {
 			t.Fatalf("raw reasoning leaked: %+v", event)
 		}
+	}
+}
+
+func TestRolloutActivityPaginatedRetainsUnpairedSource(t *testing.T) {
+	for _, test := range []struct {
+		name, record, kind, text string
+	}{
+		{"response only", rolloutMessage(9, "unpaired", "only in response"), "assistant_response_item", "only in response"},
+		{"completed only", rolloutCompletedItem(9, "child", `{"type":"AgentMessage","id":"unpaired","content":[{"type":"Text","text":"only in completed"}]}`), "assistant", "only in completed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, test.record)
+			setActivityHistoryMode(t, child, "paginated")
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: test.kind, Text: test.text}) {
+				t.Fatalf("unpaired persisted content = %+v", *events)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityPaginatedContextCompactionIsMetadata(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutCompletedItem(9, "child", `{"type":"ContextCompaction","id":"compaction"}`),
+		rolloutMessage(10, "after-compaction", "helper resumed discussion"))
+	setActivityHistoryMode(t, child, "paginated")
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "assistant_response_item", Text: "helper resumed discussion"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("compaction metadata caused a gap or hid discussion: got %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivityPaginatedHelperUserPromptSources(t *testing.T) {
+	completed := rolloutCompletedItem(9, "child", `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"helper task"}]}`)
+	response := `{"ordinal":10,"type":"response_item","payload":{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"helper task"}]}}`
+	for _, test := range []struct {
+		name    string
+		records []string
+		want    []aicli.StreamEvent
+	}{
+		{"both sources", []string{completed, response}, []aicli.StreamEvent{
+			{NativeID: "child", Kind: "user", Text: "helper task"},
+			{NativeID: "child", Kind: "user_response_item", Text: "helper task"},
+		}},
+		{"completed only", []string{completed}, []aicli.StreamEvent{
+			{NativeID: "child", Kind: "user", Text: "helper task"},
+		}},
+		{"response only", []string{response}, []aicli.StreamEvent{
+			{NativeID: "child", Kind: "user_response_item", Text: "helper task"},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, test.records...)
+			setActivityHistoryMode(t, child, "paginated")
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			if !slices.Equal(*events, test.want) {
+				t.Fatalf("paginated helper prompt = %+v; want %+v", *events, test.want)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityPaginatedHelperUserPromptResumeSkipsOldTurn(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		completedUsageTurn("child", "old-child", "old-child-response", 1)...)
+	setActivityHistoryMode(t, child, "paginated")
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	appendUsageEvents(t, child,
+		rolloutCompletedItemTurn(20, "child", "old-child", `{"type":"UserMessage","id":"late-old","content":[{"type":"text","text":"old helper task"}]}`),
+		`{"ordinal":21,"type":"response_item","payload":{"type":"message","id":"late-old","role":"user","content":[{"type":"input_text","text":"old helper task"}],"internal_chat_message_metadata_passthrough":{"turn_id":"old-child"}}}`,
+		rolloutCompletedItemTurn(22, "child", "new-child", `{"type":"UserMessage","id":"new-prompt","content":[{"type":"text","text":"current helper task"}]}`),
+		`{"ordinal":23,"type":"response_item","payload":{"type":"message","id":"new-prompt","role":"user","content":[{"type":"input_text","text":"current helper task"}],"internal_chat_message_metadata_passthrough":{"turn_id":"new-child"}}}`)
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.child("child", false)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "user", Text: "current helper task"},
+		{NativeID: "child", Kind: "user_response_item", Text: "current helper task"},
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("resumed helper prompts = %+v; want %+v", events, want)
+	}
+}
+
+func TestRolloutActivityPaginatedAgentMessage(t *testing.T) {
+	for _, test := range []struct {
+		name, content string
+		want          aicli.StreamEvent
+	}{
+		{"plaintext", `{"type":"input_text","text":"helper progress"}`,
+			aicli.StreamEvent{NativeID: "child", Kind: "inter_agent_message_response_item", Text: "child -> root\nhelper progress"}},
+		{"encrypted", `{"type":"encrypted_content","encrypted_content":"opaque-ciphertext"}`,
+			aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			line := fmt.Sprintf(`{"ordinal":9,"type":"response_item","payload":{"type":"agent_message","author":"child","recipient":"root","content":[%s]}}`, test.content)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, line)
+			setActivityHistoryMode(t, child, "paginated")
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			if len(*events) != 1 {
+				t.Fatalf("%s agent message produced %d events; want one", test.name, len(*events))
+			}
+			if got := (*events)[0]; got != test.want {
+				if test.name == "encrypted" {
+					t.Fatalf("encrypted agent message yielded id=%q kind=%q text_bytes=%d; want one child gap", got.NativeID, got.Kind, len(got.Text))
+				}
+				t.Fatalf("plaintext agent message = %+v; want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityInterAgentCommunication(t *testing.T) {
+	for _, mode := range []string{"legacy", "paginated"} {
+		t.Run(mode, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"inter_agent_communication_metadata","payload":{"author":"child","recipient":"root","trigger_turn":true}}`,
+				`{"ordinal":10,"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"visible update","trigger_turn":true}}`,
+				`{"ordinal":11,"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","encrypted_content":"opaque-ciphertext","trigger_turn":true}}`)
+			if mode == "paginated" {
+				setActivityHistoryMode(t, child, mode)
+			}
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			if len(*events) != 2 {
+				for i, event := range *events {
+					t.Logf("event %d: id=%q kind=%q text_bytes=%d", i, event.NativeID, event.Kind, len(event.Text))
+				}
+				t.Fatalf("%s communication produced %d events; want plaintext and one gap", mode, len(*events))
+			}
+			if got := (*events)[0]; got != (aicli.StreamEvent{NativeID: "child", Kind: "inter_agent_communication", Text: "child -> root\nvisible update"}) {
+				t.Fatalf("%s plaintext communication yielded id=%q kind=%q text_bytes=%d", mode, got.NativeID, got.Kind, len(got.Text))
+			}
+			if got := (*events)[1]; got != (aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}) {
+				t.Fatalf("%s encrypted communication yielded id=%q kind=%q text_bytes=%d", mode, got.NativeID, got.Kind, len(got.Text))
+			}
+		})
 	}
 }
 
@@ -169,7 +445,7 @@ func TestRolloutActivityNestedSpawnRequiresParentAnnouncement(t *testing.T) {
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
 	boundary := int64(9)
 	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
-		rolloutSpawn(9, "child", "grandchild"),
+		rolloutSpawn(9, "grandchild"),
 		rolloutMessage(10, "child-message", "child discussion"))
 	writeUsageRolloutBoundary(t, home, "grandchild", "child", &boundary,
 		rolloutMessage(9, "grandchild-message", "grandchild discussion"))
@@ -218,6 +494,67 @@ func TestRolloutActivityMetadataAndObservationDoNotAdmitNewHelper(t *testing.T) 
 	}
 }
 
+func TestRolloutActivityLegacyInteractedDoesNotAdmitFreshHelper(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", rolloutInteracted(9, "child"))
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "message", "unannounced helper text"))
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.poll()
+	activity.finish()
+	for _, event := range *events {
+		if event.NativeID == "child" {
+			t.Fatalf("legacy interaction admitted a fresh helper: %+v", *events)
+		}
+	}
+}
+
+func TestRolloutActivityNativeCompletionDoesNotAdmitFreshHelper(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "",
+		usageEvent("task_started", "root-turn"),
+		nativeActivityEvent(9, "root", "root-turn", "completed", "child"))
+	setActivityHistoryMode(t, root, "paginated")
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "message", "unproved helper text"))
+	setActivityHistoryMode(t, child, "paginated")
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "root", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("completed-only helper should gap parent without admitting helper: got %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivityNativeCompletionReactivatesKnownHelper(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
+	setActivityHistoryMode(t, root, "paginated")
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		completedUsageTurn("child", "old-child", "old-child-response", 1)...)
+	setActivityHistoryMode(t, child, "paginated")
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	appendUsageEvents(t, root, nativeActivityEvent(20, "root", "new-root", "completed", "child"))
+	appendUsageEvents(t, child, rolloutMessageWithTurn(20, "message", "current helper text", "new-child"))
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "assistant_response_item", Text: "current helper text"}}
+	if !slices.Equal(events, want) {
+		t.Fatalf("known helper completion failed to capture suffix: got %+v; want %+v", events, want)
+	}
+}
+
 func TestRolloutActivityStdoutSpawnWorksBeforeRootRolloutAppears(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)
@@ -229,6 +566,37 @@ func TestRolloutActivityStdoutSpawnWorksBeforeRootRolloutAppears(t *testing.T) {
 	activity.poll()
 	if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "active without root file"}) || *progress == 0 {
 		t.Fatalf("stdout-announced helper depended on root rollout file: events=%+v progress=%d", *events, *progress)
+	}
+}
+
+func TestRolloutActivityOversizedCurrentSpawnGapsParent(t *testing.T) {
+	tooLong := strings.Repeat("x", maxItemIDBytes+1)
+	for _, source := range []string{"stdout", "root rollout", "child rollout"} {
+		t.Run(source, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			parent := "root"
+			switch source {
+			case "root rollout":
+				writeUsageRollout(t, home, "root", "", rolloutSpawn(9, tooLong))
+			case "child rollout":
+				parent = "child"
+				boundary := int64(9)
+				writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+					rolloutSpawn(9, tooLong))
+			}
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			if source == "stdout" {
+				activity.child(tooLong, true)
+			} else if source == "child rollout" {
+				activity.child("child", true)
+			}
+			activity.poll()
+			activity.finish()
+			if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: parent, Kind: "content_missing"}) {
+				t.Fatalf("oversized %s spawn should gap its parent once: %+v", source, *events)
+			}
+		})
 	}
 }
 
@@ -578,10 +946,46 @@ func TestRolloutActivityResumeSkipsVerifiedPrefix(t *testing.T) {
 		func(event aicli.StreamEvent) { events = append(events, event) },
 		func() { progress++ })
 	activity.root("root")
-	activity.child("child", true)
+	activity.child("child", false) // A known resumed helper needs only a wait/close observation.
 	activity.poll()
 	if len(events) != 1 || events[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "current helper text"}) || progress == 0 {
 		t.Fatalf("resume replayed baseline or missed suffix: events=%+v progress=%d", events, progress)
+	}
+}
+
+func TestRolloutActivityLegacyInteractedReactivatesKnownHelper(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		usageEventAt(9, "task_started", "old-child"),
+		rolloutMessage(10, "old-message", "historical helper text"),
+		usageRecordAt(11, "child", "old-child", "old-child-response", 1, 0, 0),
+		usageEventAt(12, "task_complete", "old-child"))
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	appendUsageEvents(t, root, rolloutInteracted(21, "child"))
+	appendUsageEvents(t, child, rolloutMessageWithTurn(13, "new-message", "current helper text", "new-child"))
+
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.poll()
+	activity.finish()
+	var childMessages, rootGaps int
+	for _, event := range events {
+		switch event {
+		case aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "current helper text"}:
+			childMessages++
+		case aicli.StreamEvent{NativeID: "root", Kind: "content_missing"}:
+			rootGaps++ // The persisted observation has no turn ID.
+		default:
+			t.Fatalf("legacy interaction replayed history or emitted unexpected content: %+v", events)
+		}
+	}
+	if childMessages != 1 || rootGaps > 1 {
+		t.Fatalf("known helper suffix was not captured once: %+v", events)
 	}
 }
 
@@ -617,10 +1021,8 @@ func TestRolloutActivityResumeRejectsChangedPrefix(t *testing.T) {
 	}
 	appendUsageEvents(t, child, rolloutMessage(14, "retry-message", "restored suffix must stay blocked"))
 	activity.poll()
-	for _, event := range events {
-		if strings.Contains(event.Text, "should not be trusted") || strings.Contains(event.Text, "restored suffix must stay blocked") {
-			t.Fatalf("changed historical prefix admitted new content: %+v", events)
-		}
+	if len(events) != 1 || events[0] != (aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}) {
+		t.Fatalf("changed historical prefix should gap once without admitting either suffix: %+v", events)
 	}
 }
 
@@ -695,30 +1097,38 @@ func TestRolloutActivityResumeUsesResponseTurnMetadata(t *testing.T) {
 	}
 }
 
-func TestRolloutActivityIgnoresHelperUserMessage(t *testing.T) {
+func TestRolloutActivityCapturesHelperUserMessage(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
 	boundary := int64(9)
-	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
-		rolloutCompletedItem(9, "child", `{"type":"UserMessage","id":"input","content":[{"type":"text","text":"private user prompt"}]}`),
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutCompletedItem(9, "child", `{"type":"UserMessage","id":"input","content":[{"type":"text","text":"helper task"}]}`),
 		rolloutMessage(10, "reply", "helper reply"))
+	setActivityHistoryMode(t, child, "paginated")
 	activity, events, _ := newActivityTestRecorder(t, home, started)
 	activity.root("root")
 	activity.child("child", true)
 	activity.poll()
-	if len(*events) != 1 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "helper reply"}) {
-		t.Fatalf("helper user message leaked or blocked reply: %+v", *events)
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "user", Text: "helper task"},
+		{NativeID: "child", Kind: "assistant_response_item", Text: "helper reply"},
+	}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("helper prompt or reply lost: got %+v; want %+v", *events, want)
 	}
 }
 
-func TestRolloutActivityIgnoresResponseMetadata(t *testing.T) {
+func TestRolloutActivityIgnoresKnownMetadata(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)
 	events := []string{}
 	for ordinal, kind := range []string{"additional_tools", "configuration_update", "compaction", "context_compaction"} {
 		events = append(events, fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":%q}}`, ordinal+9, kind))
 	}
-	events = append(events, rolloutMessage(13, "message", "discussion after metadata"))
+	for ordinal, kind := range []string{"turn_context", "token_usage_record", "world_state", "compacted"} {
+		events = append(events, fmt.Sprintf(`{"ordinal":%d,"type":%q,"payload":{}}`, ordinal+13, kind))
+	}
+	events = append(events, rolloutMessage(17, "message", "discussion after metadata"))
 	writeUsageRolloutBoundary(t, home, "child", "root", &boundary, events...)
 	activity, got, _ := newActivityTestRecorder(t, home, started)
 	activity.root("root")
@@ -726,6 +1136,23 @@ func TestRolloutActivityIgnoresResponseMetadata(t *testing.T) {
 	activity.poll()
 	if len(*got) != 1 || (*got)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "discussion after metadata"}) {
 		t.Fatalf("response metadata caused discussion gap or hid later content: %+v", *got)
+	}
+}
+
+func TestRolloutActivityUnknownRecordTypeGapsEligibleHelper(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		`{"ordinal":9,"type":"future_record","payload":{"text":"possibly visible"}}`,
+		rolloutMessage(10, "message", "discussion after unknown record"))
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	activity.finish()
+	if len(*events) != 2 || (*events)[0] != (aicli.StreamEvent{NativeID: "child", Kind: "content_missing"}) ||
+		(*events)[1] != (aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "discussion after unknown record"}) {
+		t.Fatalf("unknown record should gap once and preserve following discussion: %+v", *events)
 	}
 }
 

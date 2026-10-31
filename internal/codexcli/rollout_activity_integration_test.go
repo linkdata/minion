@@ -5,7 +5,9 @@ package codexcli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,8 @@ import (
 // The parent stdout goes quiet after announcing a helper. The only evidence of
 // ongoing work is the helper's native rollout until the test releases the CLI.
 func TestSessionCapturesQuietParentHelperBeforeCLIExit(t *testing.T) {
+	const key = "helper-configured-secret"
+	settings := config.CodexConfig{APIKey: key}
 	binary := installFakeCodex(t, `#!/bin/sh
 set -eu
 cat >/dev/null
@@ -40,9 +44,9 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 	boundary := int64(9)
 	child := writeUsageRolloutBoundary(t, t.TempDir(), "child", "root", &boundary,
 		usageEventAt(9, "task_started", "child-turn"),
-		`{"ordinal":10,"type":"response_item","payload":{"type":"message","id":"live-message","role":"assistant","content":[{"type":"output_text","text":"live-helper"}]}}`,
+		rolloutMessage(10, "live-message", "live-helper "+key),
 		`{"ordinal":11,"type":"response_item","payload":{"type":"reasoning","id":"live-reasoning","summary":[{"type":"summary_text","text":"reasoning-summary"}]}}`,
-		`{"ordinal":12,"type":"response_item","payload":{"type":"custom_tool_call","id":"live-tool","call_id":"call-live","name":"exec","input":"echo hello"}}`,
+		fmt.Sprintf(`{"ordinal":12,"type":"response_item","payload":{"type":"custom_tool_call","id":"live-tool","call_id":"call-live","name":"exec","input":%q}}`, "echo "+key),
 		`{"ordinal":13,"type":"response_item","payload":{"type":"custom_tool_call_output","id":"live-output","call_id":"call-live","output":[{"type":"input_text","text":"hello"}]}}`,
 		usageRecordAt(15, "child", "child-turn", "child-response", 20, 0, 1))
 	childData, err := os.ReadFile(child)
@@ -70,7 +74,12 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 	events := make(chan aicli.StreamEvent, 32)
 	progress := make(chan struct{}, 8)
 	var session Session
-	session.OnEvent = func(event aicli.StreamEvent) { events <- event }
+	session.OnEvent = func(event aicli.StreamEvent) {
+		if strings.Contains(event.Text, key) {
+			t.Error("configured API key reached OnEvent callback")
+		}
+		events <- event
+	}
 	session.OnProgress = func() {
 		select {
 		case progress <- struct{}{}:
@@ -84,11 +93,12 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 	done := make(chan callResult, 1)
 	source := t.TempDir()
 	go func() {
-		result, err := session.Run(ctx, source, "task", false, "", config.CodexConfig{})
+		result, err := session.Run(ctx, source, "task", false, "", settings)
 		done <- callResult{result, err}
 	}()
 	seen := map[string]bool{}
 	var captured []aicli.StreamEvent
+	safeEvents := func() string { return redactCodexText(fmt.Sprintf("%+v", captured), settings) }
 	for !(seen["assistant"] && seen["reasoning_summary"] && seen["tool"]) {
 		select {
 		case event := <-events:
@@ -97,10 +107,26 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 				seen[event.Kind] = true
 			}
 		case result := <-done:
-			t.Fatalf("CLI exited before live helper capture: result=%+v err=%v events=%+v", result.result, result.err, captured)
+			t.Fatalf("CLI exited before live helper capture: result=%+v err=%v events=%s", result.result, result.err, safeEvents())
 		case <-ctx.Done():
-			t.Fatalf("live helper capture did not arrive: %v; events=%+v", ctx.Err(), captured)
+			t.Fatalf("live helper capture did not arrive: %v; events=%s", ctx.Err(), safeEvents())
 		}
+	}
+	liveMessage, liveTool := false, false
+	for _, event := range captured {
+		if event.NativeID != "child" {
+			continue
+		}
+		if event.Kind == "assistant" && event.Text == "live-helper [redacted]" {
+			liveMessage = true
+		}
+		if event.Kind == "tool" && json.Valid([]byte(event.Text)) &&
+			strings.Contains(event.Text, `"id":"live-tool"`) && strings.Contains(event.Text, `"input":"echo [redacted]"`) {
+			liveTool = true
+		}
+	}
+	if !liveMessage || !liveTool {
+		t.Fatalf("live helper credential redaction or tool JSON lost: message=%t tool=%t events=%s", liveMessage, liveTool, safeEvents())
 	}
 	select {
 	case <-progress:
@@ -154,7 +180,12 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 		}
 	}
 	if late != 1 {
-		t.Fatalf("late helper record count = %d; events=%+v", late, captured)
+		t.Fatalf("late helper record count = %d; events=%s", late, safeEvents())
+	}
+	for _, event := range captured {
+		if strings.Contains(event.Text, key) {
+			t.Fatal("configured API key reached captured events")
+		}
 	}
 	if err := session.Close(); err != nil {
 		t.Fatalf("cleanup: %v", err)

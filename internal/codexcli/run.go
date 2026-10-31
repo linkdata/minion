@@ -221,7 +221,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			original := event.Text
 			event.Text = redactCodexText(event.Text, settings)
 			if original != "" && event.Text == "" || len(event.Text) > aicli.MaxEventBytes ||
-				(event.Kind == "tool" || event.Kind == "tool_possibly_duplicate") && !json.Valid([]byte(event.Text)) {
+				strings.HasPrefix(event.Kind, "tool") && !json.Valid([]byte(event.Text)) {
 				event.Kind, event.Text = "content_missing", ""
 			}
 			emit(event)
