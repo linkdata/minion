@@ -541,6 +541,95 @@ func TestProgressTaskListUsesRunIdentity(t *testing.T) {
 	}
 }
 
+func TestProgressMixedRunLessTaskSignalsShareNativeRun(t *testing.T) {
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const runlessFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const nativeFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	for _, nativeStartFirst := range []bool{true, false} {
+		for _, listFinishFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("native_start_first=%t/list_finish_first=%t", nativeStartFirst, listFinishFirst), func(t *testing.T) {
+				progress := 0
+				output := jsonlOutput{onProgress: func() { progress++ }}
+				check := func(line string, want int) {
+					t.Helper()
+					writeChunks(t, &output, line+"\n")
+					if output.err != nil || progress != want {
+						t.Fatalf("after %s: progress=%d, want %d; error=%v", line, progress, want, output.err)
+					}
+				}
+				if nativeStartFirst {
+					check(started, 1)
+					check(listed, 1)
+				} else {
+					check(listed, 1)
+					check(started, 1)
+				}
+				check(listed, 1)
+				if listFinishFirst {
+					check(empty, 2)
+					check(runlessFinish, 2)
+				} else {
+					check(runlessFinish, 2)
+					check(listed, 2)
+					check(empty, 2)
+				}
+				check(nativeFinish, 2)
+			})
+		}
+	}
+}
+
+func TestProgressRunLessListOverlapDoesNotRetargetNotice(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for _, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`, 1},
+		{`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`, 1},
+		{`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`, 2},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`, 3},
+		{`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`, 3},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`, 3},
+		{`{"type":"system","subtype":"background_tasks_changed","tasks":[]}`, 3},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`, 3},
+		{`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`, 4},
+	} {
+		writeChunks(t, &output, step.line+"\n")
+		if output.err != nil || progress != step.want {
+			t.Fatalf("after %s: progress=%d, want %d; error=%v", step.line, progress, step.want, output.err)
+		}
+	}
+}
+
+func TestProgressAmbiguousRunLessListReuseNeedsNativeIdentity(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	writeChunks(t, &output, `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`+"\n"+
+		`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`+"\n"+
+		listed+"\n"+empty+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`+"\n")
+	if output.err != nil || progress != 4 {
+		t.Fatalf("initial native runs: count=%d error=%v", progress, output.err)
+	}
+	replayed := jsonlOutput{onProgress: output.onProgress, progressSeen: output.progressSeen,
+		progressBytes: output.progressBytes, progressEntries: output.progressEntries}
+	writeChunks(t, &replayed, listed+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`+"\n"+empty+"\n"+
+		`{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-3"}]}`+"\n"+empty+"\n"+
+		`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-3"}`+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-3","status":"completed"}`+"\n")
+	if replayed.err != nil || progress != 6 {
+		t.Fatalf("ambiguous reuse or new native run: count=%d error=%v", progress, replayed.err)
+	}
+}
+
 func TestProgressRequiresNativeContentIdentity(t *testing.T) {
 	var got int
 	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}

@@ -150,6 +150,7 @@ type jsonlOutput struct {
 	streamSeen          map[string]bool
 	streamSeenBytes     int
 	progressTasks       map[string]bool
+	runlessListRuns     map[string]string
 	taskProgress        map[string]taskProgressState
 	openTaskRuns        map[string]openTaskRuns
 	progressBytes       int64
@@ -341,18 +342,71 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		o.pending = 0
 		active := make(map[string]bool)
+		seenRunless := make(map[string]bool)
 		for _, task := range tasks {
 			if !task.Ambient {
 				o.pending++
 				if task.TaskID != "" {
-					active[taskRunKey(task.TaskID, task.RunID)] = true
+					runID := task.RunID
+					if runID == "" && o.onProgress != nil {
+						seenRunless[task.TaskID] = true
+						if o.progressSeen["task_ambiguous:"+task.TaskID] {
+							continue
+						}
+						if alias := o.runlessListRuns[task.TaskID]; alias != "" {
+							open := o.openTaskRun(task.TaskID)
+							if (open != "" && open != alias) || o.openTaskRuns[task.TaskID].many != nil {
+								o.markAmbiguousRunless(task.TaskID)
+								continue
+							}
+							runID = alias
+						} else if !o.progressTasks[task.TaskID] {
+							runID = o.openTaskRun(task.TaskID)
+							if runID == "" && o.openTaskRuns[task.TaskID].many != nil {
+								o.markAmbiguousRunless(task.TaskID)
+								continue
+							}
+							if runID != "" {
+								o.rememberProgress("task_start:" + task.TaskID)
+								if o.err != nil {
+									return
+								}
+								if o.runlessListRuns == nil {
+									o.runlessListRuns = make(map[string]string)
+								}
+								o.runlessListRuns[task.TaskID] = runID
+							}
+						}
+					}
+					active[taskRunKey(task.TaskID, runID)] = true
 					if task.RunID != "" && o.onProgress != nil {
 						o.rememberProgress("task_native:" + task.TaskID)
 					}
 				}
 			}
 		}
+		for prior := range o.progressTasks {
+			id, _, _ := strings.Cut(prior, "\x00")
+			if seenRunless[id] && o.progressSeen["task_ambiguous:"+id] {
+				delete(o.progressTasks, prior) // The run-less list cannot prove these runs finished.
+			}
+		}
+		if o.err != nil {
+			return
+		}
 		o.recordTaskListProgress(active)
+		if o.err != nil {
+			return
+		}
+		for id := range o.runlessListRuns {
+			if !seenRunless[id] {
+				o.rememberProgress("task_finish:" + id)
+				if o.err != nil {
+					return
+				}
+				delete(o.runlessListRuns, id)
+			}
+		}
 		if o.pending != 0 {
 			o.completed = false
 			o.result.Answer = ""
@@ -662,10 +716,12 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	if _, taskID, ok := strings.Cut(text, "<task-id>"); found && ok {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
 			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
-			if runID := o.openTaskRun(id); runID != "" {
-				o.recordTaskProgress(id, runID, status)
-			} else if !o.progressSeen["task_native:"+id] {
-				o.recordTaskProgress(id, "", status)
+			if !o.progressSeen["task_ambiguous:"+id] {
+				if runID := o.openTaskRun(id); runID != "" {
+					o.recordTaskProgress(id, runID, status)
+				} else if !o.progressSeen["task_native:"+id] {
+					o.recordTaskProgress(id, "", status)
+				}
 			}
 		}
 	}
@@ -995,6 +1051,11 @@ func (o *jsonlOutput) removeOpenTaskRun(id, runID string) {
 	}
 }
 
+func (o *jsonlOutput) markAmbiguousRunless(id string) {
+	o.rememberProgress("task_ambiguous:" + id)
+	delete(o.progressTasks, taskRunKey(id, o.runlessListRuns[id]))
+}
+
 func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	if o.onProgress == nil || id == "" {
 		return
@@ -1003,6 +1064,25 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	case "started", "completed", "failed", "stopped", "killed":
 	default:
 		return
+	}
+	hadNative := o.progressSeen["task_native:"+id]
+	if runID == "" && status != "started" {
+		if o.progressSeen["task_ambiguous:"+id] {
+			return
+		}
+		if alias := o.runlessListRuns[id]; alias != "" {
+			open := o.openTaskRun(id)
+			if (open != "" && open != alias) || o.openTaskRuns[id].many != nil {
+				o.markAmbiguousRunless(id)
+				return
+			}
+			runID = alias
+		} else if hadNative {
+			runID = o.openTaskRun(id)
+			if runID == "" {
+				return // A run-less notice cannot identify an open native run.
+			}
+		}
 	}
 	if runID != "" {
 		// Native identity lets later run-less replay notices be ignored after
@@ -1014,7 +1094,28 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	}
 	switch status {
 	case "started":
-		o.recordUniqueProgress("task_start:" + taskRunKey(id, runID))
+		key := taskRunKey(id, runID)
+		if runID != "" && o.runlessListRuns[id] != "" && o.runlessListRuns[id] != runID {
+			o.markAmbiguousRunless(id)
+		}
+		if runID != "" && o.progressTasks[id] && !hadNative && !o.progressSeen["task_finish:"+id] && !o.progressSeen["task_ambiguous:"+id] {
+			open := o.openTaskRun(id)
+			if (open == "" && o.openTaskRuns[id].many == nil) || open == runID {
+				o.rememberProgress("task_start:" + key)
+				if o.err != nil {
+					return
+				}
+				delete(o.progressTasks, id)
+				o.progressTasks[key] = true
+				if o.runlessListRuns == nil {
+					o.runlessListRuns = make(map[string]string)
+				}
+				o.runlessListRuns[id] = runID
+				return
+			}
+			o.markAmbiguousRunless(id)
+		}
+		o.recordUniqueProgress("task_start:" + key)
 	case "completed", "failed", "stopped", "killed":
 		key := taskRunKey(id, runID)
 		finish := "task_finish:" + key
@@ -1031,6 +1132,9 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 			return
 		}
 		o.recordUniqueProgress(finish)
+		if o.err == nil && runID != "" && o.runlessListRuns[id] == runID && !o.progressSeen["task_ambiguous:"+id] {
+			o.rememberProgress("task_finish:" + id)
+		}
 	}
 }
 

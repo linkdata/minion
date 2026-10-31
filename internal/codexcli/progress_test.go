@@ -375,7 +375,7 @@ func TestRolloutActivityProvenNativeEventsCountDistinctOrdinals(t *testing.T) {
 		{"agent_message", `,"message":"same work"`},
 		{"agent_reasoning", `,"text":"same work"`},
 		{"agent_reasoning_raw_content", `,"text":"same work"`},
-		{"task_started", ""},
+		{"exec_command_begin", ""},
 	} {
 		t.Run(test.eventType, func(t *testing.T) {
 			home, started := t.TempDir(), time.Now()
@@ -404,6 +404,39 @@ func TestRolloutActivityProvenNativeEventsCountDistinctOrdinals(t *testing.T) {
 				t.Fatalf("replayed ordinal renewed progress: %d", *progress)
 			}
 		})
+	}
+}
+
+func TestRolloutActivityTaskLifecycleDedupesAcrossOrdinals(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		usageEventAt(9, "task_started", "child-turn"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first helper task start progress=%d, want 1", *progress)
+	}
+	for _, step := range []struct {
+		line string
+		want int
+	}{
+		{usageEventAt(10, "task_started", "child-turn"), 1},
+		{`{"ordinal":11,"type":"event_msg","payload":{"type":"task_started","turn_id":"child-turn","elapsed_time_ms":500}}`, 1},
+		{usageEventAt(12, "task_complete", "child-turn"), 2},
+		{usageEventAt(13, "task_complete", "child-turn"), 2},
+		{usageEventAt(14, "task_started", "next-turn"), 3},
+		{usageEventAt(15, "turn_aborted", "next-turn"), 4},
+		{usageEventAt(16, "turn_aborted", "next-turn"), 4},
+	} {
+		appendUsageEvents(t, child, step.line)
+		activity.poll()
+		if *progress != step.want {
+			t.Fatalf("after %s: progress=%d, want %d", step.line, *progress, step.want)
+		}
 	}
 }
 

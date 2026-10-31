@@ -563,8 +563,10 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	if meta.ID != rootID && !uncertainOrdinal && proven {
 		switch payload.Type {
-		case "task_started", "task_complete", "turn_aborted",
-			"patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
+		case "task_started", "task_complete", "turn_aborted":
+			// One lifecycle transition of each kind belongs to a turn, even if replayed at a new ordinal.
+			a.newProgress(meta.ID, rolloutEvent{Type: payload.Type, Payload: []byte(payload.TurnID)}, 0, progressed)
+		case "patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
 			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",
 			"exec_command_begin", "exec_command_end":
 			a.newProgress(meta.ID, event, event.Ordinal, progressed)
