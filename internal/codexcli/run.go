@@ -87,16 +87,21 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	defer func() {
 		result.Answer = redactCodexText(result.Answer, settings)
 		runError = redactCodexError(runError, settings)
+		gap := false
 		for i := range result.Diagnostics {
 			if result.Diagnostics[i].Message == "" {
 				continue
 			}
 			message := redactCodexText(result.Diagnostics[i].Message, settings)
 			if message == "" || len(message) > bounded.DiagnosticBytes {
-				result.Diagnostics[i] = aicli.ProviderDiagnostic{Code: "diagnostics_truncated", Message: "native diagnostic could not be safely displayed"}
+				result.Diagnostics[i].Message = ""
+				gap = true
 				continue
 			}
 			result.Diagnostics[i].Message = message
+		}
+		if gap {
+			result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "diagnostics_truncated"})
 		}
 	}()
 	result.UsageComplete = true
@@ -533,10 +538,10 @@ func (o *jsonlOutput) observe(code, message string) {
 	if o.redact != nil {
 		message = o.redact(message)
 	}
-	if original != "" && message == "" {
-		code, message = "diagnostics_truncated", "native diagnostic could not be safely displayed"
-	}
 	o.diagnostics = aicli.AppendNativeDiagnostic(o.diagnostics, code, message)
+	if original != "" && message == "" {
+		o.diagnostics = aicli.AppendNativeDiagnostic(o.diagnostics, "diagnostics_truncated", "")
+	}
 }
 
 func (o *jsonlOutput) acceptLine(line []byte) {

@@ -119,9 +119,9 @@ func TestOutputRecordsNativeStopSignalsWithoutChangingRecovery(t *testing.T) {
 		fails        bool
 	}{
 		{"rejected quota and failed result", quota + "\n" + failed, []string{"rate_limit_rejected", "permission_denied", "terminal_reason", "result_error"}, true},
-		{"paid overage", overage + "\n" + successfulResult, nil, false},
-		{"stopped task assessed by fresh root", stopped + "\n" + root + "\n" + successfulResult, []string{"task_stopped"}, false},
-		{"terminal reason abort", strings.TrimSuffix(successfulResult, "}") + `,"terminal_reason":"aborted_tools"}`, []string{"terminal_reason"}, true},
+		{"paid overage", overage + "\n" + successfulResult, []string{"result_detail"}, false},
+		{"stopped task assessed by fresh root", stopped + "\n" + root + "\n" + successfulResult, []string{"task_stopped", "result_detail"}, false},
+		{"terminal reason abort", strings.TrimSuffix(successfulResult, "}") + `,"terminal_reason":"aborted_tools"}`, []string{"terminal_reason", "result_detail"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := jsonlOutput{}

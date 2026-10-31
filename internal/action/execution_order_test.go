@@ -218,6 +218,10 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 			if r.URL.Path == "/outcome" {
 				select {
 				case <-coveragePersisted:
+				case <-time.After(3 * statusSendTimeout):
+					t.Error("outcome arrived before durable coverage marker")
+					http.Error(w, "coverage marker missing", http.StatusInternalServerError)
+					return
 				case <-r.Context().Done():
 					return
 				}

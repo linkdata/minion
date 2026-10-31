@@ -580,13 +580,13 @@ func TestRunRetainsPrivateStderrAndFailedStructuredResult(t *testing.T) {
 	if err == nil || result.Answer != "" || result.UsageComplete || len(result.Diagnostics) != 4 {
 		t.Fatalf("failed structured result=%+v error=%v", result, err)
 	}
-	want := []string{"permission_denied", "result_error", "stderr_tail", "structured_output_observed"}
+	want := []string{"permission_denied", "result_error", "structured_output_observed", "stderr_tail"}
 	for i, code := range want {
 		if result.Diagnostics[i].Code != code || strings.Contains(result.Diagnostics[i].Message, "configured-secret") {
 			t.Fatalf("diagnostic %d=%+v, want %q without secret", i, result.Diagnostics[i], code)
 		}
 	}
-	if !strings.Contains(result.Diagnostics[1].Message, "HTTP status=429") || !strings.Contains(result.Diagnostics[2].Message, "[redacted]") || !strings.Contains(result.Diagnostics[3].Message, `"approved":true`) || !strings.Contains(result.Diagnostics[3].Message, "[redacted]") {
+	if !strings.Contains(result.Diagnostics[1].Message, "HTTP status=429") || !strings.Contains(result.Diagnostics[2].Message, `"approved":true`) || !strings.Contains(result.Diagnostics[2].Message, "[redacted]") || !strings.Contains(result.Diagnostics[3].Message, "[redacted]") {
 		t.Fatalf("native evidence lost: %+v", result.Diagnostics)
 	}
 }
@@ -597,7 +597,10 @@ func TestRunSuccessfulStructuredResultRetainsUtf8StderrTail(t *testing.T) {
 	stderr := "€\n" + strings.Repeat("x", bounded.DiagnosticBytes-2)
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(completed)+"\nprintf '%s' "+aicli.ShellQuote(stderr)+" >&2\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
-	if err != nil || result.Answer != structured || !result.UsageComplete || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "stderr_tail" || !utf8.ValidString(result.Diagnostics[0].Message) || len(result.Diagnostics[0].Message) > bounded.DiagnosticBytes {
+	if err != nil || result.Answer != structured || !result.UsageComplete || len(result.Diagnostics) != 3 ||
+		result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
+		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) ||
+		result.Diagnostics[2].Code != "stderr_tail" || !utf8.ValidString(result.Diagnostics[2].Message) || len(result.Diagnostics[2].Message) > bounded.DiagnosticBytes {
 		t.Fatalf("successful result or bounded stderr tail lost: result=%+v error=%v", result, err)
 	}
 }
@@ -608,7 +611,8 @@ func TestRunReportsUnavailableStderrAfterSafeRedaction(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(successfulResult)+"\nprintf '%s' "+aicli.ShellQuote(stderr)+" >&2\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
 	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
-		len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"}) {
+		len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
+		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"}) {
 		t.Fatalf("unsafe stderr was silently omitted or changed success: result=%+v error=%v", result, err)
 	}
 }
@@ -619,7 +623,9 @@ func TestRunFailureRetainsEarlierProvisionalStructuredOutput(t *testing.T) {
 	quota := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(provisional)+" "+aicli.ShellQuote(quota)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 3 || result.Diagnostics[0].Code != "rate_limit_rejected" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) || result.Diagnostics[2] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) {
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 3 ||
+		result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
+		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) || result.Diagnostics[2].Code != "rate_limit_rejected" {
 		t.Fatalf("provisional output promoted or lost: result=%+v error=%v", result, err)
 	}
 }
@@ -630,10 +636,72 @@ func TestRunFailedResultRetainsEarlierNonemptyDetails(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(first)+" "+aicli.ShellQuote(failed)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
-		len(result.Diagnostics) != 3 || result.Diagnostics[0].Code != "result_error" ||
-		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "Agent capacity reached; session resets at midnight"}) ||
-		result.Diagnostics[2] != (aicli.ProviderDiagnostic{Code: "result_errors", Message: `["Session quota resets at midnight"]`}) {
+		len(result.Diagnostics) != 3 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "Agent capacity reached; session resets at midnight"}) ||
+		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_errors", Message: `["Session quota resets at midnight"]`}) || result.Diagnostics[2].Code != "result_error" {
 		t.Fatalf("empty final result erased earlier native evidence or changed failure: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunRetainsEveryIndexedResultObservation(t *testing.T) {
+	key := `sensitive"key`
+	makeResult := func(index int, detail, issue string, structured map[string]string) string {
+		event := map[string]any{"type": "result", "subtype": "success", "result_index": index, "result": detail,
+			"errors": []string{issue}, "structured_output": structured,
+			"modelUsage": map[string]any{"main": map[string]int{"inputTokens": 3, "cacheCreationInputTokens": 5, "cacheReadInputTokens": 7, "outputTokens": 11}}}
+		data, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	first := makeResult(0, "first capacity "+key, "first reset "+key, map[string]string{"phase": "first", "secret": key})
+	last := makeResult(1, "last capacity", "last reset", map[string]string{"phase": "last"})
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(first)+" "+aicli.ShellQuote(last)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`, APIKey: key})
+	if err != nil || result.Answer != `{"phase":"last"}` || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 6 {
+		t.Fatalf("indexed result outcome or observation count changed: result=%+v error=%v", result, err)
+	}
+	wantCodes := []string{"result_detail", "result_errors", "structured_output_observed", "result_detail", "result_errors", "structured_output_observed"}
+	encodedKey, _ := json.Marshal(key)
+	for i, diagnostic := range result.Diagnostics {
+		if diagnostic.Code != wantCodes[i] || len(diagnostic.Message) > bounded.DiagnosticBytes || strings.Contains(diagnostic.Message, key) ||
+			strings.Contains(diagnostic.Message, string(encodedKey[1:len(encodedKey)-1])) {
+			t.Fatalf("indexed diagnostic %d is lost, oversized, or unredacted: %+v", i, diagnostic)
+		}
+		if i < 3 && !strings.Contains(diagnostic.Message, "first") || i >= 3 && !strings.Contains(diagnostic.Message, "last") ||
+			i < 3 && !strings.Contains(diagnostic.Message, "[redacted]") {
+			t.Fatalf("indexed diagnostic %d lost native content: %+v", i, diagnostic)
+		}
+	}
+}
+
+func TestRunSuccessfulResultRecordsNativeErrorsPrivately(t *testing.T) {
+	completed := strings.TrimSuffix(successfulResult, "}") + `,"errors":["Session quota resets at midnight"]}`
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(completed)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+		len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
+		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_errors", Message: `["Session quota resets at midnight"]`}) {
+		t.Fatalf("successful result errors changed verdict or were omitted: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunManyIndexedResultsMarkDiagnosticOverflow(t *testing.T) {
+	var events strings.Builder
+	for i := range 30 {
+		fmt.Fprintf(&events, `{"type":"result","subtype":"success","result_index":%d,"result":"phase-%d","errors":["error-%d"],"structured_output":{"phase":%d},"modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`+"\n", i, i, i, i)
+	}
+	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'EVENTS'\n"+events.String()+"EVENTS\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
+	if err != nil || result.Answer != `{"phase":29}` || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+		len(result.Diagnostics) > 64 || len(result.Diagnostics) < 4 || result.Diagnostics[0].Code != "diagnostics_truncated" {
+		t.Fatalf("indexed result overflow lost gap marker or changed outcome: result=%+v error=%v", result, err)
+	}
+	want := []aicli.ProviderDiagnostic{{Code: "result_detail", Message: "phase-29"}, {Code: "result_errors", Message: `["error-29"]`}, {Code: "structured_output_observed", Message: `{"phase":29}`}}
+	for i, diagnostic := range want {
+		if got := result.Diagnostics[len(result.Diagnostics)-len(want)+i]; got != diagnostic {
+			t.Fatalf("late result observation %d lost after overflow: got=%+v want=%+v", i, got, diagnostic)
+		}
 	}
 }
 
@@ -772,10 +840,10 @@ func TestRunNativeDiagnosticOverflowKeepsFinalEvidence(t *testing.T) {
 	const failed = `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"capacity reached","errors":["session resets at midnight"],"structured_output":{"approved":false}}`
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf 'stream FD failure' >&2\ncat <<'EVENTS'\n"+strings.Repeat(stop, 100)+failed+"\nEVENTS\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
-	if err == nil || result.Answer != "" || len(result.Diagnostics) != 64 || result.Diagnostics[0].Code != "diagnostics_truncated" {
+	if err == nil || result.Answer != "" || len(result.Diagnostics) > 64 || result.Diagnostics[0].Code != "diagnostics_truncated" {
 		t.Fatalf("diagnostic overflow result=%+v error=%v", result, err)
 	}
-	want := []string{"result_error", "result_detail", "result_errors", "stderr_tail", "structured_output_observed"}
+	want := []string{"result_error", "result_detail", "result_errors", "structured_output_observed", "stderr_tail"}
 	for i, code := range want {
 		if got := result.Diagnostics[len(result.Diagnostics)-len(want)+i].Code; got != code {
 			t.Fatalf("late diagnostic %d=%q, want %q", i, got, code)

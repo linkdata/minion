@@ -767,20 +767,21 @@ func TestRunMarksNativeDiagnosticGapWhenRedactionDiscardsMessage(t *testing.T) {
 		t.Fatalf("fixture was not discarded by redaction: %q", got)
 	}
 	for _, tc := range []struct {
-		name, event, completion, answer string
-		wantError                       bool
-		wantTokens                      usage.Tokens
+		name, event, completion, answer, code string
+		wantError                             bool
+		wantTokens                            usage.Tokens
 	}{
 		{
 			name:  "recoverable native error",
 			event: `{"type":"error","message":"{\"x\":1}"}`,
 			completion: `{"type":"item.completed","item":{"type":"agent_message","text":"report"}}` + "\n" +
 				`{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":2,"output_tokens":3}}`,
-			answer: "report", wantTokens: usage.Tokens{Input: 5, CachedInput: 2, Output: 3},
+			answer: "report", code: "native_error", wantTokens: usage.Tokens{Input: 5, CachedInput: 2, Output: 3},
 		},
 		{
 			name:      "failed turn",
 			event:     `{"type":"turn.failed","error":{"message":"{\"x\":1}"}}`,
+			code:      "turn_failed",
 			wantError: true,
 		},
 	} {
@@ -792,7 +793,7 @@ func TestRunMarksNativeDiagnosticGapWhenRedactionDiscardsMessage(t *testing.T) {
 			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(events)+"\n")
 			result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
 			if (err != nil) != tc.wantError || result.Answer != tc.answer || result.Tokens != tc.wantTokens || result.UsageComplete ||
-				len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated", Message: "native diagnostic could not be safely displayed"}) {
+				len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: tc.code}) || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated"}) {
 				t.Fatalf("redaction gap changed call result or hid coverage loss: result=%+v error=%v", result, err)
 			}
 		})
@@ -821,9 +822,17 @@ func TestRunRedactsCredentialFormedByDiagnosticTruncation(t *testing.T) {
 
 func TestRunMarksDiagnosticUnavailableWhenPostRedactionExceedsBound(t *testing.T) {
 	message := strings.Repeat("x", bounded.DiagnosticBytes+1)
-	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(`{"type":"thread.started","thread_id":"root"}`)+" "+aicli.ShellQuote(`{"type":"error","message":"`+message+`"}`)+" "+aicli.ShellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}`)+" "+aicli.ShellQuote(`{"type":"turn.completed"}`)+"\n")
+	events := `{"type":"thread.started","thread_id":"root"}` + "\n" +
+		strings.Repeat(`{"type":"error","message":"ordinary"}`+"\n", 100) +
+		`{"type":"error","message":"` + message + `"}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}` + "\n" + `{"type":"turn.completed"}`
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(events)+"\nprintf '%s\\n' 'stderr note' >&2\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: "..."})
-	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated", Message: "native diagnostic could not be safely displayed"}) {
+	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 64 ||
+		result.Diagnostics[0].Code != "diagnostics_truncated" ||
+		result.Diagnostics[61] != (aicli.ProviderDiagnostic{Code: "native_error"}) ||
+		result.Diagnostics[62] != (aicli.ProviderDiagnostic{Code: "stderr_tail", Message: "stderr note"}) ||
+		result.Diagnostics[63] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated"}) {
 		t.Fatalf("unsafe expanded diagnostic was retained: result=%+v error=%v", result, err)
 	}
 }

@@ -115,37 +115,34 @@ type messageUsage struct {
 }
 
 type jsonlOutput struct {
-	sessionID            string
-	apiKey               string
-	onEvent              func(aicli.StreamEvent)
-	identitySeen         bool
-	baseline             usage.Tokens
-	baselineUnknown      bool
-	cumulative           usage.Tokens
-	hasCumulative        bool
-	cancel               context.CancelFunc
-	stream               aicli.JSONL
-	fatal                func()
-	fatalGap             bool
-	stopped              bool
-	err                  error
-	usageLimit           error
-	taskFailure          error
-	completed            bool
-	structured           bool
-	pending              int
-	results              int64
-	indexed              bool
-	result               aicli.Result
-	observedStructured   string
-	observedResultText   string
-	observedResultErrors string
-	aggregateGeneration  int64
-	aggregateTokens      usage.Tokens
-	assistantUsage       map[string]messageUsage
-	assistantTokens      usage.Tokens
-	rootTokens           usage.Tokens
-	uncovered            bool
+	sessionID           string
+	apiKey              string
+	onEvent             func(aicli.StreamEvent)
+	identitySeen        bool
+	baseline            usage.Tokens
+	baselineUnknown     bool
+	cumulative          usage.Tokens
+	hasCumulative       bool
+	cancel              context.CancelFunc
+	stream              aicli.JSONL
+	fatal               func()
+	fatalGap            bool
+	stopped             bool
+	err                 error
+	usageLimit          error
+	taskFailure         error
+	completed           bool
+	structured          bool
+	pending             int
+	results             int64
+	indexed             bool
+	result              aicli.Result
+	aggregateGeneration int64
+	aggregateTokens     usage.Tokens
+	assistantUsage      map[string]messageUsage
+	assistantTokens     usage.Tokens
+	rootTokens          usage.Tokens
+	uncovered           bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -196,6 +193,12 @@ func (o *jsonlOutput) safeResultDetail(detail string) string {
 		return "native result detail could not be safely displayed"
 	}
 	return safe
+}
+
+func (o *jsonlOutput) observeResultDetail(code, detail string) {
+	if detail != "" {
+		o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, code, o.safeResultDetail(detail))
+	}
 }
 
 func (o *jsonlOutput) safeDiagnosticText(detail string) string {
@@ -335,18 +338,6 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type != "result" {
 		return
 	}
-	if e.Result != "" {
-		o.observedResultText = o.safeResultDetail(e.Result)
-	}
-	if raw := bytes.TrimSpace(e.Errors); len(raw) > 2 && raw[0] == '[' && len(bytes.TrimSpace(raw[1:len(raw)-1])) != 0 {
-		o.observedResultErrors = o.safeResultDetail(string(raw))
-	}
-	if o.structured {
-		structured := bytes.TrimSpace(e.StructuredOutput)
-		if len(structured) != 0 && !bytes.Equal(structured, []byte("null")) {
-			o.observedStructured = o.safeResultDetail(string(structured))
-		}
-	}
 	tokens, complete := e.tokens()
 	o.hasCumulative = false
 	if complete {
@@ -432,6 +423,16 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			resultFailure += fmt.Sprintf("; HTTP status=%d", status)
 		}
 		o.observe("result_error", resultFailure)
+	}
+	o.observeResultDetail("result_detail", e.Result)
+	if raw := bytes.TrimSpace(e.Errors); len(raw) > 2 && raw[0] == '[' && len(bytes.TrimSpace(raw[1:len(raw)-1])) != 0 {
+		o.observeResultDetail("result_errors", string(raw))
+	}
+	if o.structured {
+		structured := bytes.TrimSpace(e.StructuredOutput)
+		if len(structured) != 0 && !bytes.Equal(structured, []byte("null")) {
+			o.observeResultDetail("structured_output_observed", string(structured))
+		}
 	}
 	if failure := errors.Join(o.usageLimit, o.taskFailure); failure != nil {
 		o.fail(failure)

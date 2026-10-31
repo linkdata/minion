@@ -188,31 +188,11 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
 	}
-	var finalDiagnostics []aicli.ProviderDiagnostic
-	if err != nil {
-		if output.observedResultText != "" {
-			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "result_detail", Message: output.observedResultText})
-		}
-		if output.observedResultErrors != "" {
-			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "result_errors", Message: output.observedResultErrors})
-		}
-	}
 	if detail := output.safeDiagnosticText(aicli.RedactTail(&diagnostics, settings.APIKey)); detail != "" {
-		finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: detail})
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: detail})
 	} else if strings.TrimSpace(diagnostics.String()) != "" {
-		finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"})
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"})
 	}
-	if err != nil {
-		if output.observedStructured != "" {
-			finalDiagnostics = append(finalDiagnostics, aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: output.observedStructured})
-		}
-	}
-	if len(result.Diagnostics)+len(finalDiagnostics) > 64 {
-		// Keep late native stop signals while reserving room for final evidence.
-		keep := 64 - len(finalDiagnostics) - 1
-		result.Diagnostics = append([]aicli.ProviderDiagnostic{{Code: "diagnostics_truncated"}}, result.Diagnostics[len(result.Diagnostics)-keep:]...)
-	}
-	result.Diagnostics = append(result.Diagnostics, finalDiagnostics...)
 	if err != nil {
 		result.Answer = ""
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
