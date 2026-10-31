@@ -84,6 +84,64 @@ func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	}
 }
 
+func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		job.RuntimeBudget = time.Minute
+		job.InactivityTimeout = 5 * time.Second
+		binding := httpJobBinding(job)
+		watchEntered := make(chan struct{}, 1)
+		releaseWatch := make(chan struct{})
+		defer close(releaseWatch)
+		outcomes := make(chan httpOutcome, 1)
+		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/next":
+				httpClientTestJSON(t, w, httpAssignment{Job: job, StopGrace: httpControlTimeout})
+			case "/cancel":
+				watchEntered <- struct{}{}
+				<-releaseWatch // Never admit the watch with response headers.
+			case "/outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					t.Error(err)
+				}
+				outcomes <- outcome
+				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+			default:
+				t.Errorf("worker advanced before watch admission: %s", r.URL.Path)
+				http.NotFound(w, r)
+			}
+		}))
+		done := make(chan error, 1)
+		go func() {
+			done <- RunHTTP(t.Context(), server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+		}()
+		<-watchEntered
+		time.Sleep(job.InactivityTimeout)
+		synctest.Wait()
+		select {
+		case err := <-done:
+			if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
+				errors.Is(err, monitor.ErrRequestTransport) || errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("watch admission lost inactivity cause: %v", err)
+			}
+		default:
+			t.Fatal("stalled watch outlived the inactivity deadline")
+		}
+		select {
+		case outcome := <-outcomes:
+			if outcome.Failure == nil || !outcome.Failure.Terminal || outcome.Failure.Deadline ||
+				outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown ||
+				len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
+				t.Fatalf("watch admission reported wrong outcome: %+v", outcome)
+			}
+		default:
+			t.Fatal("stalled watch did not send a terminal outcome")
+		}
+	})
+}
+
 func TestRunHTTPStatusContactDoesNotRenewInactivity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)

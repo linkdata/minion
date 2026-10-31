@@ -201,8 +201,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	// Bound admission only; the held body must survive model expiry for paid receipts.
 	headerErr := fmt.Errorf("cancellation watch admission timed out: %w", context.DeadlineExceeded)
+	headerWait := min(httpControlTimeout, time.Until(expires))
+	if remaining := time.Until(started.Add(job.InactivityTimeout)); remaining < headerWait {
+		headerWait = max(0, remaining)
+		headerErr = fmt.Errorf("cancellation watch admission timed out: %w", errExecutorInactivity)
+	}
 	headerDone := make(chan struct{})
-	headerTimer := time.AfterFunc(min(httpControlTimeout, time.Until(expires)), func() {
+	headerTimer := time.AfterFunc(headerWait, func() {
 		stopWatch(headerErr)
 		close(headerDone)
 	})
@@ -215,7 +220,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			_ = watchResponse.Body.Close()
 		}
 		err = headerErr
-		if !time.Now().Before(expires) {
+		if errors.Is(err, errExecutorInactivity) || !time.Now().Before(expires) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		} else {
 			err = errors.Join(monitor.ErrRequestTransport, err)
@@ -256,7 +261,6 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	defer cancelStatus()
 	eventCtx, cancelEvents := context.WithCancel(controlCtx)
 	defer cancelEvents()
-	jobRunner.statusUpdate = statusFeed.progress
 	jobRunner.phaseUpdate = statusFeed.phase
 	jobRunner.statusActivity = statusFeed.activity
 	events := newProviderEventQueue(func(event attemptRecord) error {

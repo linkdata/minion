@@ -47,7 +47,6 @@ type Runner struct {
 	WorkRoot    string
 	// recordReview synchronously persists borrowed evidence without mutating it.
 	recordReview      func([]CallUsage, []Refutation, string) error
-	statusUpdate      func(string, int, string)
 	phaseUpdate       func(string, int, string)
 	statusActivity    func()
 	executionProgress func()
@@ -345,8 +344,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	markCleanup := sync.OnceFunc(func() {
 		if r.phaseUpdate != nil {
 			r.phaseUpdate("cleanup", 0, "")
-		} else if r.statusUpdate != nil {
-			r.statusUpdate("cleanup", 0, "")
 		}
 	})
 	// Remove owned paths after sessions, report collection, and review snapshots close.
@@ -542,19 +539,14 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					configured.eventSink(streamRecord)
 				}
 			}
-			if configured.executionProgress != nil || r.statusUpdate != nil || configured.statusActivity != nil {
+			if configured.executionProgress != nil || configured.statusActivity != nil || r.phaseUpdate != nil {
 				request.onProgress = func() {
-					if !noteProgress() || ctx.Err() != nil {
-						return
-					}
-					if configured.statusActivity != nil && r.phaseUpdate != nil {
-						r.phaseUpdate(request.role, request.round, request.reviewPhase)
-					}
-					if configured.statusActivity == nil && r.statusUpdate != nil {
-						r.statusUpdate(request.role, request.round, request.reviewPhase)
-					}
+					noteProgress()
 				}
 				request.onProgress() // A real main or critic invocation is starting.
+				if r.phaseUpdate != nil && ctx.Err() == nil {
+					r.phaseUpdate(request.role, request.round, request.reviewPhase)
+				}
 			}
 			call, err := next(ctx, request)
 			noteProgress() // The invocation finished, even if it returned an error.
@@ -615,9 +607,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				if checkpointErr := checkpoints.AfterCall(checkpoint); checkpointErr != nil {
 					err = errors.Join(err, fmt.Errorf("%w: checkpoint model usage: %w", monitor.ErrTerminalJob, checkpointErr))
 				}
-			}
-			if r.statusUpdate != nil && configured.statusActivity == nil && ctx.Err() == nil {
-				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			return call, err
 		}

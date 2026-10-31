@@ -38,27 +38,6 @@ func newWorkerStatus(job Job, started time.Time) *workerStatus {
 	return status
 }
 
-func (s *workerStatus) progress(phase string, round int, reviewPhase string) {
-	s.mu.Lock()
-	if s.closed || s.value.WorkerState != "busy" {
-		s.mu.Unlock()
-		return
-	}
-	phaseChanged := s.value.Phase != phase || s.value.Round != round || s.value.ReviewPhase != reviewPhase
-	s.value.Phase, s.value.Round, s.value.ReviewPhase = phase, round, reviewPhase
-	s.value.ProgressSequence++
-	now := time.Now()
-	s.progressAt = now
-	notify := phaseChanged || now.Sub(s.lastProgressSignal) >= statusProgressNotifyInterval
-	if notify {
-		s.lastProgressSignal = now
-	}
-	s.mu.Unlock()
-	if notify {
-		s.signal()
-	}
-}
-
 func (s *workerStatus) activity() {
 	s.mu.Lock()
 	if s.closed || s.value.WorkerState != "busy" {
