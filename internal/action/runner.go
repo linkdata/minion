@@ -351,6 +351,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			record := attemptRecord{Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role,
 				Round: request.round, ReviewPhase: request.reviewPhase, Provider: request.provider, Model: request.model}
 			if configured.eventSink != nil {
+				hasConfiguredSecret := slices.ContainsFunc(configured.secretValues(), func(secret string) bool { return secret != "" })
 				request.onInput = func(input aicli.PreparedInput) {
 					text, unavailable := preparedInputText(input, configured.secretValues()...)
 					if unavailable != "" {
@@ -369,6 +370,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					}
 				}
 				request.onEvent = func(event aicli.StreamEvent) {
+					if hasConfiguredSecret && (event.Kind == "assistant_incomplete" || event.Kind == "tool_incomplete") {
+						event.Kind, event.Text = "content_missing", ""
+					}
 					streamRecord := record
 					streamRecord.Kind = attemptRecordDiscussion
 					if event.Kind == "identity" {

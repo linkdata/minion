@@ -26,6 +26,9 @@ import (
 const (
 	maxCodexChildren = 256
 	instructionRoot  = ".minion-codex-root"
+	maxPendingItems  = 256
+	maxCompletedIDs  = 10000
+	maxItemIDBytes   = 256
 )
 
 var runtimeMetadataNames = [...]string{".git", ".agents", ".codex"}
@@ -178,9 +181,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent, redact: func(text string) string {
-		return redactCodexText(text, settings)
-	}}
+	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent,
+		redact:          func(text string) string { return redactCodexText(text, settings) },
+		allowIncomplete: !slices.ContainsFunc(codexSecrets(settings), func(secret string) bool { return secret != "" }),
+	}
 	stderr := bounded.Tail{}
 	cmd.Stdout = &output
 	cmd.Stderr = &stderr
@@ -223,6 +227,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	s.used = true
 	output.stream.Finish()
+	output.flushPending()
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		output.gap("pipe_drain_incomplete")
 	}
@@ -390,6 +395,7 @@ type codexEvent struct {
 	Message  string          `json:"message"`
 	Error    json.RawMessage `json:"error"`
 	Item     *struct {
+		ID                string   `json:"id"`
 		Type              string   `json:"type"`
 		Tool              string   `json:"tool"`
 		Text              string   `json:"text"`
@@ -397,11 +403,19 @@ type codexEvent struct {
 	} `json:"item"`
 }
 
+type pendingCodexItem struct {
+	kind  string
+	text  string
+	order int
+}
+
 type jsonlOutput struct {
 	cancel          context.CancelFunc
 	onEvent         func(aicli.StreamEvent)
 	redact          func(string) string
+	allowIncomplete bool
 	gapSent         bool
+	missingSent     bool
 	threadID        string
 	expectedID      string
 	conflictingID   string
@@ -416,6 +430,10 @@ type jsonlOutput struct {
 	completed       bool
 	failed          bool
 	failureReason   string
+	pending         map[string]pendingCodexItem
+	pendingBytes    int
+	nextPending     int
+	completedItems  map[string]bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -453,12 +471,32 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 			}
 		}
 	} else {
-		o.accept(event)
-		if o.stopErr != nil || event.Type != "item.completed" {
+		if (event.Type == "item.started" || event.Type == "item.updated") &&
+			event.ThreadID != "" && event.ThreadID != o.threadID {
+			o.contentMissing()
 			return
 		}
-		if event.Item == nil {
-			o.gap("missing_item")
+		capture := true
+		if event.Type == "item.completed" {
+			if event.Item == nil {
+				o.gap("missing_item")
+				return
+			}
+			process, selected := o.completeItem(event)
+			if !process {
+				return
+			}
+			capture = selected
+		}
+		o.accept(event)
+		if o.stopErr != nil {
+			return
+		}
+		if event.Type == "item.started" || event.Type == "item.updated" {
+			o.recordProgress(event, line)
+			return
+		}
+		if event.Type != "item.completed" || !capture {
 			return
 		}
 		switch {
@@ -492,6 +530,134 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 	}
 }
 
+// Progress events contain full snapshots. Keep only the latest bounded item.
+func (o *jsonlOutput) recordProgress(event codexEvent, line []byte) {
+	if o.onEvent == nil || event.Item != nil && event.Item.Type == "todo_list" {
+		return
+	}
+	if event.Item == nil || o.threadID == "" || event.ThreadID != "" && event.ThreadID != o.threadID ||
+		event.Item.ID == "" || len(event.Item.ID) > maxItemIDBytes {
+		o.contentMissing()
+		return
+	}
+	item := event.Item
+	if o.completedItems[item.ID] {
+		o.contentMissing()
+		return
+	}
+	prior, exists := o.pending[item.ID]
+	if exists && prior.kind != item.Type {
+		o.contentMissing()
+	}
+	if !exists && len(o.pending) == maxPendingItems {
+		o.contentMissing()
+		return
+	}
+	text := ""
+	if o.allowIncomplete && item.Type == "agent_message" {
+		text = item.Text
+	} else if o.allowIncomplete && codexToolItem(item.Type) {
+		var selected struct {
+			Item json.RawMessage `json:"item"`
+		}
+		if json.Unmarshal(line, &selected) == nil && json.Valid(selected.Item) {
+			text = string(selected.Item)
+		}
+	}
+	bytes := o.pendingBytes - len(prior.text) + len(text)
+	if bytes > aicli.MaxEventBytes {
+		text = ""
+		bytes = o.pendingBytes - len(prior.text)
+	}
+	if o.pending == nil {
+		o.pending = make(map[string]pendingCodexItem)
+	}
+	if !exists {
+		o.nextPending++
+		prior.order = o.nextPending
+	}
+	o.pending[item.ID] = pendingCodexItem{kind: item.Type, text: text, order: prior.order}
+	o.pendingBytes = bytes
+}
+
+// process keeps native lifecycle and usage even when Status capture is capped.
+func (o *jsonlOutput) completeItem(event codexEvent) (process, capture bool) {
+	item := event.Item
+	if event.ThreadID != "" && event.ThreadID != o.threadID {
+		o.contentMissing()
+		return false, false
+	}
+	if o.onEvent == nil {
+		return true, false
+	}
+	if item.Type == "todo_list" {
+		return true, false // Todo lists are not provider discussion records.
+	}
+	if item.ID == "" {
+		return true, true // Old Codex events without IDs remain valid completed items.
+	}
+	if len(item.ID) > maxItemIDBytes || o.threadID == "" {
+		o.contentMissing()
+		return true, false
+	}
+	if o.completedItems[item.ID] {
+		o.contentMissing()
+		return true, false // Duplicate native events still affect the native result.
+	}
+	if len(o.completedItems) == maxCompletedIDs {
+		if pending, ok := o.pending[item.ID]; ok {
+			o.pendingBytes -= len(pending.text)
+			delete(o.pending, item.ID)
+		}
+		o.contentMissing()
+		return true, false
+	}
+	if o.completedItems == nil {
+		o.completedItems = make(map[string]bool)
+	}
+	o.completedItems[item.ID] = true
+	if pending, ok := o.pending[item.ID]; ok {
+		o.pendingBytes -= len(pending.text)
+		delete(o.pending, item.ID)
+		if pending.kind != item.Type {
+			o.contentMissing()
+		}
+	}
+	return true, true
+}
+
+func (o *jsonlOutput) flushPending() {
+	if len(o.pending) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(o.pending))
+	for id := range o.pending {
+		ids = append(ids, id)
+	}
+	slices.SortFunc(ids, func(a, b string) int { return cmp.Compare(o.pending[a].order, o.pending[b].order) })
+	for _, id := range ids {
+		item := o.pending[id]
+		if o.allowIncomplete && item.kind == "agent_message" && item.text != "" {
+			o.emit("assistant_incomplete", item.text)
+			continue
+		}
+		if o.allowIncomplete && codexToolItem(item.kind) && json.Valid([]byte(item.text)) {
+			o.emit("tool_incomplete", item.text)
+			continue
+		}
+		o.contentMissing()
+	}
+	o.pending, o.pendingBytes = nil, 0
+}
+
+// A missing-content event is visible even after another kind of stream gap.
+func (o *jsonlOutput) contentMissing() {
+	if o.onEvent != nil && !o.missingSent {
+		o.missingSent, o.gapSent = true, true
+		o.onEvent(aicli.StreamEvent{NativeID: o.threadID, Kind: "content_missing"})
+	}
+}
+
 func codexToolItem(kind string) bool {
 	switch kind {
 	case "command_execution", "file_change", "mcp_tool_call", "dynamic_tool_call", "web_search", "collab_tool_call", "error":
@@ -511,17 +677,27 @@ func (o *jsonlOutput) emit(kind, text string) {
 	if o.onEvent == nil {
 		return
 	}
+	incomplete := kind == "assistant_incomplete" || kind == "tool_incomplete"
 	if o.threadID == "" {
-		o.gap(kind)
+		if incomplete {
+			o.contentMissing()
+		} else {
+			o.gap(kind)
+		}
 		return
 	}
+	original := text
 	if o.redact != nil {
-		redacted := o.redact(text)
-		if text != "" && redacted == "" || len(redacted) > aicli.MaxEventBytes || kind == "tool" && !json.Valid([]byte(redacted)) {
+		text = o.redact(text)
+	}
+	if original != "" && text == "" || len(text) > aicli.MaxEventBytes ||
+		(kind == "tool" || kind == "tool_incomplete") && !json.Valid([]byte(text)) {
+		if incomplete {
+			o.contentMissing()
+		} else {
 			o.gap(kind)
-			return
 		}
-		text = redacted
+		return
 	}
 	o.onEvent(aicli.StreamEvent{NativeID: o.threadID, Kind: kind, Text: text})
 }
