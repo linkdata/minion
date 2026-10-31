@@ -58,13 +58,14 @@ type rolloutActivity struct {
 }
 
 type rolloutActivityCursor struct {
-	meta       rolloutMeta
-	file       os.FileInfo
-	offset     int64
-	pending    []byte
-	dropping   bool
-	seenHeader bool
-	untrusted  bool
+	meta        rolloutMeta
+	file        os.FileInfo
+	offset      int64
+	pending     []byte
+	dropping    bool
+	seenHeader  bool
+	untrusted   bool
+	provedTurns map[string]bool
 }
 
 const maxActivityPendingBytes = 8 << 20
@@ -463,8 +464,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		if meta.ID == rootID {
 			return // Root stdout supplies discussion.
 		}
-		if a.consumeResponse(meta, event.Payload, uncertainOrdinal) && !uncertainOrdinal &&
-			(meta.HistoryStart != nil || a.before[meta.ID] != nil) {
+		fresh, turnID := a.consumeResponse(meta, event.Payload, uncertainOrdinal)
+		if fresh && !uncertainOrdinal &&
+			(meta.HistoryStart != nil || a.before[meta.ID] != nil || cursor.provedTurns[turnID]) {
 			a.newProgress(meta.ID, event, progressed)
 		}
 		return
@@ -506,7 +508,18 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	if event.Type != "event_msg" {
 		switch event.Type {
-		case "turn_context", "token_usage_record", "world_state", "compacted":
+		case "token_usage_record":
+			var record struct {
+				ThreadID   string `json:"thread_id"`
+				SessionID  string `json:"session_id"`
+				TurnID     string `json:"turn_id"`
+				ResponseID string `json:"response_id"`
+			}
+			if json.Unmarshal(event.Payload, &record) == nil && record.SessionID == rootID && record.ResponseID != "" {
+				a.proveHelperTurn(meta, rootID, cursor, record.ThreadID, record.TurnID, uncertainOrdinal)
+			}
+			return
+		case "turn_context", "world_state", "compacted":
 			return // Known metadata, not visible assistant discussion.
 		default:
 			if meta.ID != rootID {
@@ -536,6 +549,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if b := a.before[meta.ID]; b != nil && payload.TurnID != "" && b.turns[payload.TurnID] {
 		return
 	}
+	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
 	if meta.ID != rootID && !uncertainOrdinal && a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) {
 		switch payload.Type {
 		case "task_started", "task_complete", "turn_aborted",
@@ -770,6 +784,20 @@ func (a *rolloutActivity) helperProgressProven(meta rolloutMeta, threadID, turnI
 	return threadID == meta.ID && turnID != ""
 }
 
+// Response items omit thread_id, so retain turns identified by child-owned native events.
+func (a *rolloutActivity) proveHelperTurn(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, threadID, turnID string, uncertainOrdinal bool) {
+	if meta.ID == rootID || meta.HistoryStart != nil || a.before[meta.ID] != nil ||
+		threadID != meta.ID || turnID == "" || uncertainOrdinal {
+		return
+	}
+	if cursor.provedTurns == nil {
+		cursor.provedTurns = make(map[string]bool)
+	}
+	if len(cursor.provedTurns) < maxUsageRecords {
+		cursor.provedTurns[turnID] = true
+	}
+}
+
 func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, uncertainOrdinal bool, threadID, turnID string) bool {
 	if meta.ID == rootID {
 		return true
@@ -783,7 +811,7 @@ func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, unc
 	return true
 }
 
-func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage, uncertainOrdinal bool) bool {
+func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage, uncertainOrdinal bool) (bool, string) {
 	var item struct {
 		Type, Role, Author, Recipient string
 		Metadata                      struct {
@@ -798,11 +826,11 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	}
 	if json.Unmarshal(raw, &item) != nil {
 		a.contentMissing(meta.ID)
-		return false
+		return false, ""
 	}
 	before := a.before[meta.ID]
 	if before != nil && item.Metadata.TurnID != "" && before.turns[item.Metadata.TurnID] {
-		return false
+		return false, ""
 	}
 	uncertain := uncertainOrdinal || before != nil && item.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 	kind, text := "", ""
@@ -815,10 +843,10 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		case "user":
 			kind, contentType = "user", "input_text"
 		case "developer", "system", "tool":
-			return false // Agent instructions and tool inputs are outside discussion capture.
+			return false, "" // Agent instructions and tool inputs are outside discussion capture.
 		default:
 			a.contentMissing(meta.ID) // A future visible role must not disappear silently.
-			return false
+			return false, ""
 		}
 		var parts []string
 		for _, content := range item.Content {
@@ -862,10 +890,10 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	case "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "computer_call", "tool_search_call", "tool_search_output", "image_generation_call":
 		kind, text = "tool", string(raw)
 	case "additional_tools", "configuration_update", "compaction", "context_compaction":
-		return false // Agent input and session metadata are not helper discussion.
+		return false, "" // Agent input and session metadata are not helper discussion.
 	default:
 		a.contentMissing(meta.ID)
-		return false
+		return false, ""
 	}
 	if meta.HistoryMode == "paginated" {
 		// Paginated response and completed-item records are independently
@@ -873,7 +901,7 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		kind += "_response_item"
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
-	return (before == nil || item.Metadata.TurnID != "") && (text != "" || item.Type == "reasoning")
+	return (before == nil || item.Metadata.TurnID != "") && (text != "" || item.Type == "reasoning"), item.Metadata.TurnID
 }
 
 func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {

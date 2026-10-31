@@ -263,20 +263,19 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 	}()
 	configured := *r
-	noteProgress := func() bool {
+	noteProgress := func() {
 		if ctx.Err() != nil {
-			return false
+			return
 		}
 		if configured.executionProgress != nil {
 			configured.executionProgress()
 		}
 		if ctx.Err() != nil {
-			return false
+			return
 		}
 		if configured.statusActivity != nil {
 			configured.statusActivity()
 		}
-		return true
 	}
 	checkpointReview := func(history []Refutation) error {
 		result.Refutations = history
@@ -540,9 +539,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			if configured.executionProgress != nil || configured.statusActivity != nil || r.phaseUpdate != nil {
-				request.onProgress = func() {
-					noteProgress()
-				}
+				request.onProgress = noteProgress
 				request.onProgress() // A real main or critic invocation is starting.
 				if r.phaseUpdate != nil && ctx.Err() == nil {
 					r.phaseUpdate(request.role, request.round, request.reviewPhase)

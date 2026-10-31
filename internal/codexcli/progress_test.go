@@ -106,6 +106,63 @@ func TestRolloutActivityProgressRequiresNewHelperWork(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityFreshHelperResponseRequiresProvenTurn(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	response := func(ordinal int, id, turn, text string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":"message","id":%q,"role":"assistant","content":[{"type":"output_text","text":%q}],"internal_chat_message_metadata_passthrough":{"turn_id":%q}}}`, ordinal, id, text, turn)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		response(8, "copied", "old-turn", "copied history"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 0 {
+		t.Fatalf("copied helper history renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":9,"type":"event_msg","payload":{"type":"thread_goal_updated","turn_id":"current"}}`,
+		response(10, "unattributed", "current", "output before turn proof"))
+	activity.poll()
+	if *progress != 0 {
+		t.Fatalf("unattributed helper output renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":11,"type":"event_msg","payload":{"type":"thread_goal_updated","thread_id":"child","turn_id":"current"}}`,
+		response(12, "current", "current", "new helper output"))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("proven helper response did not renew progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		response(13, "copied", "old-turn", "copied history"),
+		response(14, "missing-turn", "", "unattributed output"),
+		response(15, "current", "current", "new helper output"))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("copied, unbound or replayed helper output renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child, response(16, "next", "current", "further helper output"))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("later proven helper response did not renew progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		usageRecordAt(17, "root", "foreign", "foreign-response", 1, 0, 1),
+		response(18, "foreign", "foreign", "foreign-thread output"),
+		usageRecordAt(19, "child", "usage-turn", "usage-response", 1, 0, 1))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("usage records or foreign-thread output renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child, response(20, "usage-output", "usage-turn", "output after own-thread usage"))
+	activity.poll()
+	if *progress != 3 {
+		t.Fatalf("own-thread usage did not prove the helper response turn: %d", *progress)
+	}
+}
+
 func TestRolloutActivityUnattributedResumeContentDoesNotRenewProgress(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "root-response", 1)...)
