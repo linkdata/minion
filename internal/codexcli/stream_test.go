@@ -177,10 +177,126 @@ func TestJSONLOutputBoundsCompletedIdentities(t *testing.T) {
 	for i := range maxCompletedIDs {
 		output.completedItems[fmt.Sprintf("old-%d", i)] = true
 	}
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "item": map[string]any{"id": "helper", "type": "collab_tool_call", "tool": "spawn_agent", "receiver_thread_ids": []string{"child"}}})
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "item": map[string]any{"id": "new", "type": "agent_message", "text": "untracked"}})
-	if len(output.completedItems) != maxCompletedIDs || output.finalMessage != "" ||
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "turn.completed"})
+	if len(output.completedItems) != maxCompletedIDs || output.finalMessage != "untracked" || !output.completed ||
+		!slices.Equal(output.children, []string{"child"}) || !output.spawns["child"] ||
 		!slices.Equal(got, []aicli.StreamEvent{{NativeID: "root", Kind: "content_missing"}}) {
-		t.Fatalf("completed-item cap did not withhold coverage: count=%d final=%q events=%+v", len(output.completedItems), output.finalMessage, got)
+		t.Fatalf("completed-item cap lost lifecycle or coverage: count=%d final=%q children=%v events=%+v", len(output.completedItems), output.finalMessage, output.children, got)
+	}
+}
+
+func TestJSONLOutputForeignItemCannotChangeNativeResultOrHelpers(t *testing.T) {
+	for _, withStatus := range []bool{false, true} {
+		t.Run(fmt.Sprintf("status=%t", withStatus), func(t *testing.T) {
+			var got []aicli.StreamEvent
+			output := jsonlOutput{}
+			if withStatus {
+				output.onEvent = func(event aicli.StreamEvent) { got = append(got, event) }
+			}
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "item": map[string]any{"id": "good", "type": "agent_message", "text": "trusted binding"}})
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "thread_id": "foreign", "item": map[string]any{"id": "bad-helper", "type": "collab_tool_call", "tool": "spawn_agent", "receiver_thread_ids": []string{"foreign-child"}}})
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "thread_id": "foreign", "item": map[string]any{"id": "bad", "type": "agent_message", "text": "foreign answer"}})
+			writeCodexStreamEvent(t, &output, map[string]any{"type": "turn.completed"})
+			if output.finalMessage != "trusted binding" || len(output.children) != 0 || !output.completed {
+				t.Fatalf("foreign item changed result or helper accounting: final=%q children=%v complete=%t", output.finalMessage, output.children, output.completed)
+			}
+			if withStatus && !slices.Equal(got, []aicli.StreamEvent{
+				{NativeID: "root", Kind: "identity"}, {NativeID: "root", Kind: "assistant", Text: "trusted binding"}, {NativeID: "root", Kind: "content_missing"},
+			}) {
+				t.Fatalf("foreign item did not mark missing coverage: %+v", got)
+			}
+		})
+	}
+}
+
+func TestJSONLOutputSkipsProgressMapsWithoutStatusSink(t *testing.T) {
+	var output jsonlOutput
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "one", "type": "agent_message", "text": "pending"}})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "one", "type": "agent_message", "text": "updated"}})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.completed", "item": map[string]any{"id": "one", "type": "agent_message", "text": "done"}})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "turn.completed"})
+	output.flushPending()
+	if output.pending != nil || output.completedItems != nil || output.finalMessage != "done" || !output.completed {
+		t.Fatalf("optional maps changed native result: pending=%v completed=%v final=%q turn=%t", output.pending, output.completedItems, output.finalMessage, output.completed)
+	}
+}
+
+func TestJSONLOutputOpenReasoningMarksGapWithoutHiddenText(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }}
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "reason", "type": "reasoning", "content": "hidden reasoning"}})
+	output.stream.Finish()
+	output.flushPending()
+	if !slices.Equal(got, []aicli.StreamEvent{{NativeID: "root", Kind: "identity"}, {NativeID: "root", Kind: "content_missing"}}) {
+		t.Fatalf("open reasoning lost gap or exposed hidden text: %+v", got)
+	}
+}
+
+func TestJSONLOutputFlushesPendingInFirstSeenOrder(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, incomplete: func(text string) string { return text }}
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "z-first", "type": "agent_message", "text": "first"}})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "a-second", "type": "agent_message", "text": "second"}})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "z-first", "type": "agent_message", "text": "first updated"}})
+	output.flushPending()
+	if !slices.Equal(got, []aicli.StreamEvent{
+		{NativeID: "root", Kind: "identity"},
+		{NativeID: "root", Kind: "assistant_incomplete", Text: "first updated"},
+		{NativeID: "root", Kind: "assistant_incomplete", Text: "second"},
+	}) {
+		t.Fatalf("pending order changed by ID sorting or updates: %+v", got)
+	}
+}
+
+func TestJSONLOutputOpenToolUpdatesReplaceSnapshot(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) }, incompleteTool: func(text string) string { return text }}
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.started", "item": map[string]any{"id": "tool", "type": "command_execution", "aggregated_output": "old"}})
+	writeCodexStreamEvent(t, &output, map[string]any{"type": "item.updated", "item": map[string]any{"id": "tool", "type": "command_execution", "aggregated_output": "new"}})
+	output.flushPending()
+	if len(got) != 2 || got[1].NativeID != "root" || got[1].Kind != "tool_incomplete" ||
+		!json.Valid([]byte(got[1].Text)) || !strings.Contains(got[1].Text, `"aggregated_output":"new"`) || strings.Contains(got[1].Text, "old") {
+		t.Fatalf("open tool snapshot was appended, dropped, or malformed: %+v", got)
+	}
+}
+
+func TestSessionStreamOpenToolRequiresNoKnownCredential(t *testing.T) {
+	for _, test := range []struct {
+		name, key, wantKind string
+	}{
+		{name: "no credential", wantKind: "tool_incomplete"},
+		{name: "configured credential", key: "native-secret", wantKind: "content_missing"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CODEX_API_KEY", "")
+			t.Setenv("CODEX_ACCESS_TOKEN", "")
+			installFakeCodex(t, `#!/bin/sh
+cat >/dev/null
+printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.started","item":{"id":"tool","type":"command_execution","command":"echo old"}}' '{"type":"item.updated","item":{"id":"tool","type":"command_execution","command":"echo new native-secret"}}' '{"type":"turn.failed","message":"stopped"}'
+exit 1
+`)
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			var got []aicli.StreamEvent
+			session.OnEvent = func(event aicli.StreamEvent) { got = append(got, event) }
+			_, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: test.key})
+			if err == nil || len(got) != 2 || got[1].NativeID != "root" || got[1].Kind != test.wantKind ||
+				test.key != "" && strings.Contains(got[1].Text, "native-secret") || test.key == "" && !strings.Contains(got[1].Text, `"command":"echo new`) ||
+				test.key != "" && got[1].Text != "" {
+				t.Fatalf("known-credential tool policy: error=%v events=%+v", err, got)
+			}
+		})
 	}
 }
 
