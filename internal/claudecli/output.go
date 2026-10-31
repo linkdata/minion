@@ -729,7 +729,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	if _, taskID, ok := strings.Cut(text, "<task-id>"); found && ok {
 		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
 			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
-			if !o.progressSeen["task_ambiguous:"+id] {
+			if id != "" && o.onProgress != nil && !o.progressSeen["task_ambiguous:"+id] {
 				if runID := o.openTaskRun(id); runID != "" {
 					o.recordTaskProgress(id, runID, status)
 				} else if !o.progressSeen["task_native:"+id] {
