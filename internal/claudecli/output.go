@@ -142,6 +142,8 @@ type jsonlOutput struct {
 	onProgress          func()
 	progressSeen        map[string]bool
 	progressStreams     map[string]*progressStream
+	streamSeen          map[string]bool
+	streamSeenBytes     int
 	progressTasks       map[string]bool
 	taskProgress        map[string]taskProgressState
 	progressBytes       int64
@@ -675,12 +677,17 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 // result-only usage, result waiting, or repeated snapshots. The callback is
 // separate from transcript capture and sends no text.
 func (o *jsonlOutput) recordProgress(e event) {
-	if o.onProgress == nil || !o.acceptsSession(e.SessionID) {
+	if !o.acceptsSession(e.SessionID) {
+		return
+	}
+	if e.Type == "stream_event" {
+		o.recordStreamProgress(e)
+		return
+	}
+	if o.onProgress == nil {
 		return
 	}
 	switch e.Type {
-	case "stream_event":
-		o.recordStreamProgress(e)
 	case "assistant":
 		var message struct {
 			ID      string          `json:"id"`
@@ -778,7 +785,29 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 			delete(o.progressStreams, key)
 			return
 		}
-		state = &progressStream{messageID: native.Message.ID, replay: o.progressSeen["assistant:"+native.Message.ID]}
+		startKey := "stream_start:" + native.Message.ID
+		_, assistantSeen := o.assistantUsage[native.Message.ID]
+		replay := assistantSeen || o.progressSeen["assistant:"+native.Message.ID] || o.progressSeen[startKey] || o.streamSeen[native.Message.ID]
+		if !replay {
+			// Without a callback, cap replay memory; missed IDs fail closed as fresh work.
+			if o.onProgress != nil {
+				if !o.rememberProgress(startKey) {
+					return
+				}
+			} else if len(o.streamSeen) < maxProgressHistoryEntries && len(native.Message.ID) <= maxProgressHistoryBytes-o.streamSeenBytes {
+				if o.streamSeen == nil {
+					o.streamSeen = make(map[string]bool)
+				}
+				o.streamSeen[native.Message.ID] = true
+				o.streamSeenBytes += len(native.Message.ID)
+			}
+			var parentID string
+			helper := e.AgentID != "" || json.Unmarshal(e.ParentToolUseID, &parentID) == nil && parentID != ""
+			if o.results != 0 && !helper {
+				o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+			}
+		}
+		state = &progressStream{messageID: native.Message.ID, replay: replay}
 		o.progressStreams[key] = state
 		return
 	}
@@ -829,6 +858,9 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 }
 
 func (o *jsonlOutput) markStreamProgress(state *progressStream) {
+	if o.onProgress == nil {
+		return
+	}
 	key := "assistant:" + state.messageID
 	if !o.progressSeen[key] && !o.reserveProgress(1, len(key)) {
 		return

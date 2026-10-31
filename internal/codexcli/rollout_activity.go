@@ -504,7 +504,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			uncertain := uncertainOrdinal || before != nil && message.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 			a.emitVisible(meta.ID, "inter_agent_communication", message.Author+" -> "+message.Recipient+"\n"+message.Content, uncertain)
 		}
-		if !uncertainOrdinal && a.helperProgressProven(meta, message.Author, message.Metadata.TurnID) &&
+		// A fresh helper's own author ID proves a no-turn native message.
+		if !uncertainOrdinal && (a.helperProgressProven(meta, message.Author, message.Metadata.TurnID) ||
+			before == nil && message.Author == meta.ID) &&
 			(message.Content != "" || message.EncryptedContent != "") {
 			a.newProgress(meta.ID, event, event.Ordinal, progressed)
 		}

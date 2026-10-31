@@ -3,11 +3,13 @@ package claudecli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
 )
@@ -53,6 +55,56 @@ func TestNewAssistantParentageCannotPreserveStaleResult(t *testing.T) {
 				o.finish()
 				if o.completed != test.want || (o.err == nil) != test.want || !test.want && o.result.Answer != "" || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
 					t.Fatalf("stale completion or lost usage: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+				}
+			})
+		}
+	}
+}
+
+func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
+	start := func(id, fields string) string {
+		return fmt.Sprintf(`{"type":"stream_event"%s,"event":{"type":"message_start","message":{"id":%q}}}`, fields, id)
+	}
+	const delta = `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"new answer"}}}`
+	const stop = `{"type":"stream_event","event":{"type":"message_stop"}}`
+	const helperDelta = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"tool","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"helper answer"}}}`
+	const helperStop = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"tool","event":{"type":"message_stop"}}`
+	for _, tc := range []struct {
+		name, before, after, resumeKey string
+		want                           bool
+	}{
+		{"fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", false},
+		{"empty fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + stop, "", false},
+		{"fresh untagged", "", start("new", "") + "\n" + delta + "\n" + stop, "", false},
+		{"unknown parent", "", start("new", `,"parent_tool_use_id":0`) + "\n" + delta + "\n" + stop, "", false},
+		{"helper", "", start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`) + "\n" + helperDelta + "\n" + helperStop, "", true},
+		{"parent-tagged helper", "", start("helper", `,"parent_tool_use_id":"tool"`) + "\n" + strings.ReplaceAll(helperDelta, `"agent_id":"worker",`, "") + "\n" + strings.ReplaceAll(helperStop, `"agent_id":"worker",`, ""), "", true},
+		{"stream replay", start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", true},
+		{"assistant replay", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`, start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", true},
+		{"resumed replay", "", start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "assistant:old", true},
+		{"resumed empty replay", "", start("old", `,"parent_tool_use_id":null`) + "\n" + stop, "stream_start:old", true},
+		{"fresh result", "", start("new", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop + "\n" + successfulResult, "", true},
+	} {
+		for _, progress := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/progress=%t", tc.name, progress), func(t *testing.T) {
+				data := tc.before
+				if data != "" {
+					data += "\n"
+				}
+				data += successfulResult + "\n" + tc.after + "\n"
+				o := jsonlOutput{}
+				if tc.resumeKey != "" {
+					o.progressSeen = map[string]bool{tc.resumeKey: true}
+				}
+				if progress {
+					o.onProgress = func() {}
+				} else {
+					o.progressByteLimit, o.progressEntryLimit = 1, 1
+				}
+				writeChunks(t, &o, numberResultEvents(data))
+				o.finish()
+				if errors.Is(o.err, aicli.ErrOutputLimit) || (o.err == nil) != tc.want || o.completed != tc.want || (o.result.Answer == "final answer") != tc.want || o.result.UsageComplete != tc.want || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+					t.Fatalf("stale stream completion: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
 				}
 			})
 		}

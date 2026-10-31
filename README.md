@@ -308,7 +308,7 @@ Key contract and execution limits:
 | Fix result; binary patch | 100 changes, 1 MiB of full changed-file contents including mode-only changes; separate 1 MiB patch limit includes removed/deleted contents and encoding overhead |
 | Fix control files / source scans | 64 MiB per `.gitignore`/`.gitattributes`; 1 MiB total of new or changed control-file contents before Git reads them. Unchanged supplied controls are exempt. Scans allow 100,000 combined file and distinct ancestor-directory entries per admitted layout, and 100,000 visited entries in fix/frozen-input walks. |
 | Provider stream | 64 MiB, 750,000 records; 4 MiB per raw JSONL line before LF, including a preceding CR |
-| Claude resumed progress history | 16 MiB of retained identity and summary text, 100,000 entries per conversation; exceeding either limit stops the call with an explicit error |
+| Claude resumed progress history | 16 MiB of retained progress keys, 100,000 entries per conversation; exceeding either limit stops the call with an explicit error |
 | Codex model catalogue | 4 MiB per line after removing CR/LF; exact-cap LF, CRLF and EOF accepted |
 | Codex rollout accounting | 128 MiB per rollout per pass; separate 512 MiB budgets for current collection, unchanged-history proof and the baseline pass on resume; 100,000 retained turn IDs and response IDs each per rollout |
 | Codex live progress identities | 100,000 root item identities and 100,000 distinct hashed rollout progress records per CLI call; reaching either cap stops the call with an output-limit error. Positive ordinals use one high-water mark per rollout for command-output chunks and inter-agent messages. Eligible helper responses, completed items and lifecycle events use the hash cap regardless of ordinal. |

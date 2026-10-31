@@ -303,6 +303,69 @@ func TestRolloutActivityProgressCountsDistinctIdenticalHelperMessages(t *testing
 	}
 }
 
+func TestRolloutActivityFreshHelperCommunicationWithoutTurnRenewsProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", rolloutSpawn(9, "child"))
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		`{"ordinal":8,"type":"inter_agent_communication","payload":{"author":"root","recipient":"child","content":"copied parent history"}}`)
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.poll() // The root admitted the helper, but copied history is not work.
+	if *progress != 0 {
+		t.Fatalf("copied parent history renewed progress: %d", *progress)
+	}
+	message := func(ordinal int, author string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"inter_agent_communication","payload":{"author":%q,"recipient":"root","content":"still working"}}`, ordinal, author)
+	}
+	first := message(10, "child")
+	appendUsageEvents(t, child, first)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first child-authored message progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, message(11, "child"))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("second child-authored message progress=%d, want 2", *progress)
+	}
+	appendUsageEvents(t, child, first, message(12, "other"))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("replayed or foreign-authored message renewed progress: %d", *progress)
+	}
+}
+
+func TestRolloutActivityResumedHelperCommunicationRequiresTurn(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "root-response", 1)...)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		usageEventAt(9, "task_started", "old-child"),
+		usageRecordAt(10, "child", "old-child", "child-response", 1, 0, 0),
+		usageEventAt(11, "task_complete", "old-child"))
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	if session.before["child"] == nil {
+		t.Fatal("fixture did not establish a resumed helper prefix")
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":12,"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"unattributed suffix"}}`)
+	progress := 0
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil, nil,
+		func() { progress++ })
+	activity.root("root")
+	activity.child("child", false)
+	activity.poll()
+	if progress != 0 {
+		t.Fatalf("resumed message without turn renewed progress: %d", progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":13,"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"current suffix","internal_chat_message_metadata_passthrough":{"turn_id":"new-child"}}}`)
+	activity.poll()
+	if progress != 1 {
+		t.Fatalf("resumed message with current turn progress=%d, want 1", progress)
+	}
+}
+
 func TestRolloutActivityProgressWithoutOrdinalDedupesPayload(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
