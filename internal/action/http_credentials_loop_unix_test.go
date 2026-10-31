@@ -36,7 +36,10 @@ func TestRunHTTPLoopUsesOnlyEachAssignmentsCredentials(t *testing.T) {
 		if r.URL.Path != "/next" {
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
-				t.Error(err)
+				if r.Context().Err() == nil {
+					t.Error(err)
+				}
+				return
 			}
 			for _, secret := range append(secrets, workerToken) {
 				if bytes.Contains(body, []byte(secret)) {

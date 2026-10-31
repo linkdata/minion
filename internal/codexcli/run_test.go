@@ -940,6 +940,19 @@ func TestRunRedactsConfiguredAPIKey(t *testing.T) {
 	}
 }
 
+func TestRunRedactsConfiguredAPIKeyAcrossStderrWrites(t *testing.T) {
+	const key = "fixture-boundary-secret"
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\n"+
+		"printf '%s' "+aicli.ShellQuote("stderr fixture-boundary-")+" >&2\n"+
+		"printf '%s\\n' "+aicli.ShellQuote("secret quota reset")+" >&2\n"+
+		"printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"report\"}}' '{\"type\":\"turn.completed\"}'\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: key})
+	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 1 ||
+		result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "stderr_tail", Message: "stderr [redacted] quota reset"}) {
+		t.Fatalf("split stderr credential escaped or diagnostic was lost: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunRedactsEncodedKeyBeforeQuotingFailure(t *testing.T) {
 	key := `fixture"secret`
 	encoded, err := json.Marshal(key)

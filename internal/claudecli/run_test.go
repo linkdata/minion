@@ -605,6 +605,19 @@ func TestRunSuccessfulStructuredResultRetainsUtf8StderrTail(t *testing.T) {
 	}
 }
 
+func TestRunRedactsConfiguredAPIKeyAcrossStderrWrites(t *testing.T) {
+	const key = "fixture-boundary-secret"
+	fakeExecutable(t, "claude", "cat >/dev/null\n"+
+		"printf '%s' "+aicli.ShellQuote("stderr fixture-boundary-")+" >&2\n"+
+		"printf '%s\\n' "+aicli.ShellQuote("secret quota reset")+" >&2\n"+
+		"printf '%s\\n' "+aicli.ShellQuote(successfulResult)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+	if err != nil || result.Answer != "final answer" || len(result.Diagnostics) == 0 ||
+		result.Diagnostics[len(result.Diagnostics)-1] != (aicli.ProviderDiagnostic{Code: "stderr_tail", Message: "stderr [redacted] quota reset"}) {
+		t.Fatalf("split stderr credential escaped or diagnostic was lost: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunReportsUnavailableStderrAfterSafeRedaction(t *testing.T) {
 	key := strings.Repeat("k", 1366)
 	stderr := strings.Repeat("padding\n", 1100) + "Agent capacity reached; session resets at midnight\n"
