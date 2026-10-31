@@ -173,6 +173,29 @@ func TestRolloutActivityProgressCountsRepeatedOutputAtDistinctOrdinals(t *testin
 	}
 }
 
+func TestRolloutActivityRootCommandOutputRenewsProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.poll()
+	if *progress != 0 {
+		t.Fatalf("root metadata renewed progress: %d", *progress)
+	}
+	chunk := `{"ordinal":9,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"root-turn","chunk":"still working"}}`
+	appendUsageEvents(t, root, chunk)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("root output progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, root, chunk,
+		`{"ordinal":10,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"root-turn","chunk":""}}`)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("replayed or empty root output renewed progress: %d", *progress)
+	}
+}
+
 func TestRolloutActivityOrdinalProgressDoesNotFillIdentityCap(t *testing.T) {
 	activity := rolloutActivity{progress: func() {}}
 	event := rolloutEvent{Type: "event_msg", Payload: []byte(`{"type":"exec_command_output","chunk":"tick"}`)}

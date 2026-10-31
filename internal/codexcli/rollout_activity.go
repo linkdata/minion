@@ -552,13 +552,12 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		return
 	}
 	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
-	if meta.ID != rootID && !uncertainOrdinal &&
-		(a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]) {
+	proven := meta.ID == rootID || a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]
+	if !uncertainOrdinal && proven && payload.Type == "exec_command_output" && payload.Chunk != "" {
+		a.newProgress(meta.ID, event, event.Ordinal, progressed)
+	}
+	if meta.ID != rootID && !uncertainOrdinal && proven {
 		switch payload.Type {
-		case "exec_command_output":
-			if payload.Chunk != "" {
-				a.newProgress(meta.ID, event, event.Ordinal, progressed)
-			}
 		case "task_started", "task_complete", "turn_aborted",
 			"patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
 			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",

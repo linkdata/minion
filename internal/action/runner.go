@@ -552,12 +552,10 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					configured.eventSink(streamRecord)
 				}
 			}
-			if configured.executionProgress != nil || configured.statusActivity != nil || r.phaseUpdate != nil {
-				request.onProgress = noteProgress
-				request.onProgress() // A real main or critic invocation is starting.
-				if r.phaseUpdate != nil && ctx.Err() == nil {
-					r.phaseUpdate(request.role, request.round, request.reviewPhase)
-				}
+			request.onProgress = noteProgress
+			request.onProgress() // A real main or critic invocation is starting.
+			if r.phaseUpdate != nil && ctx.Err() == nil {
+				r.phaseUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
 			noteProgress() // The invocation finished, even if it returned an error.

@@ -84,6 +84,18 @@ func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	}
 }
 
+func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	inactivity := startInactivityTimer(time.Now().Add(-time.Minute), time.Second, cancel)
+	err := admissionFailure(errors.Join(monitor.ErrRequestTransport, errors.New("watch failed")), ctx, inactivity)
+	failure := newHTTPFailure(err)
+	if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
+		failure == nil || !failure.Terminal || failure.Deadline || !failure.RequestTransport {
+		t.Fatalf("overdue admission failure lost terminal inactivity: error=%v failure=%+v", err, failure)
+	}
+}
+
 func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)

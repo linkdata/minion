@@ -231,9 +231,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		stopWatch(errHTTPWatchStopped)
 		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = admissionFailure(err, actionCtx, inactivity)
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		inactivity.stop() // Outcome upload is governed by transport and hard-runtime limits.
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
@@ -340,6 +340,15 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		runErr = errors.Join(runErr, errHTTPWorkerCleanup)
 	}
 	return redactActionError(errors.Join(runErr, outcomeErr, watchErr, callerErr), assignedSecrets...)
+}
+
+func admissionFailure(err error, actionCtx context.Context, inactivity *inactivityTimer) error {
+	inactivity.stop() // Expiry can precede the timer callback when admission returns.
+	cause := context.Cause(actionCtx)
+	if errors.Is(cause, context.DeadlineExceeded) {
+		cause = errors.Join(monitor.ErrTerminalJob, cause)
+	}
+	return errors.Join(err, cause)
 }
 
 func httpClientUnknown(kind string, err error) error {
