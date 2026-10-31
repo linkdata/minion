@@ -268,6 +268,10 @@ func (o *jsonlOutput) finish() {
 	}
 }
 
+func (o *jsonlOutput) acceptsSession(id string) bool {
+	return id == "" || id == o.sessionID
+}
+
 func (o *jsonlOutput) finishLine(line []byte) {
 	if o.err != nil {
 		return
@@ -295,7 +299,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
 	}
 	o.recordProgress(e)
-	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient {
+	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID) {
 		o.recordTaskStop(e.Status, e.Summary)
 	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
@@ -309,7 +313,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 		o.startFailureGrace()
 	}
-	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
+	if e.Type == "system" && e.Subtype == "background_tasks_changed" && o.acceptsSession(e.SessionID) {
 		var tasks []struct {
 			TaskID  string `json:"task_id"`
 			RunID   string `json:"run_id"`
@@ -345,7 +349,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		content := bytes.TrimSpace(message.Content)
 		var text string
-		if e.IsSynthetic && !e.Ambient && json.Unmarshal(content, &text) == nil {
+		if e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID) && json.Unmarshal(content, &text) == nil {
 			o.recordTaskNotice(text)
 		}
 		if len(content) != 0 && content[0] == '[' {
@@ -358,7 +362,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 				return
 			}
 			for _, content := range blocks {
-				if e.IsSynthetic && !e.Ambient && content.Type == "text" {
+				if e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID) && content.Type == "text" {
 					o.recordTaskNotice(content.Text)
 				}
 			}
@@ -651,10 +655,11 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	o.recordTaskStop(status, html.UnescapeString(summary))
 }
 
-// Progress is only native execution, never usage, result waiting, or repeated
-// snapshots. The callback is separate from transcript capture and sends no text.
+// Progress is native execution, including task usage changes, but never
+// result-only usage, result waiting, or repeated snapshots. The callback is
+// separate from transcript capture and sends no text.
 func (o *jsonlOutput) recordProgress(e event) {
-	if o.onProgress == nil || e.SessionID != "" && e.SessionID != o.sessionID {
+	if o.onProgress == nil || !o.acceptsSession(e.SessionID) {
 		return
 	}
 	switch e.Type {

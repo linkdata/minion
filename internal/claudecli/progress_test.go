@@ -1,10 +1,63 @@
 package claudecli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
 )
+
+func TestTaskStateIgnoresForeignSession(t *testing.T) {
+	const init = `{"type":"system","subtype":"init","session_id":"native-id"}`
+	const notice = `<task-notification><task-id>worker</task-id><status>stopped</status></task-notification>`
+	for _, tc := range []struct {
+		name, foreign string
+	}{
+		{"background task list", `{"type":"system","subtype":"background_tasks_changed","session_id":"foreign","tasks":[{"task_id":"worker"}]}`},
+		{"native task notification", `{"type":"system","subtype":"task_notification","session_id":"foreign","task_id":"worker","status":"stopped"}`},
+		{"synthetic string notice", `{"type":"user","isSynthetic":true,"session_id":"foreign","message":{"content":"` + notice + `"}}`},
+		{"synthetic text block notice", `{"type":"user","isSynthetic":true,"session_id":"foreign","message":{"content":[{"type":"text","text":"` + notice + `"}]}}`},
+	} {
+		for _, session := range []struct {
+			name, id string
+			accept   bool
+		}{
+			{"foreign", "foreign", false},
+			{"current", "native-id", true},
+			{"legacy missing", "", true},
+		} {
+			t.Run(tc.name+"/"+session.name, func(t *testing.T) {
+				var progress int
+				o := jsonlOutput{sessionID: "native-id", onProgress: func() { progress++ }}
+				event := strings.Replace(tc.foreign, `,"session_id":"foreign"`, "", 1)
+				if session.id != "" {
+					event = strings.Replace(tc.foreign, `"session_id":"foreign"`, `"session_id":"`+session.id+`"`, 1)
+				}
+				writeChunks(t, &o, init+"\n"+successfulResult+"\n"+event+"\n")
+				o.finish()
+				if session.accept {
+					if o.err == nil || progress != 1 || o.completed || o.result.Answer != "" {
+						t.Fatalf("task event was ignored: result=%+v error=%v progress=%d", o.result, o.err, progress)
+					}
+				} else if o.err != nil || progress != 0 || o.pending != 0 || o.stopped || !o.completed || o.result.Answer != "final answer" || !o.result.UsageComplete {
+					t.Fatalf("foreign task event changed root result: result=%+v error=%v progress=%d pending=%d stopped=%v", o.result, o.err, progress, o.pending, o.stopped)
+				}
+			})
+		}
+	}
+}
+
+func TestForeignTaskListCannotClearCurrentPendingTasks(t *testing.T) {
+	const init = `{"type":"system","subtype":"init","session_id":"native-id"}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","session_id":"native-id","tasks":[{"task_id":"worker"}]}`
+	const foreignClear = `{"type":"system","subtype":"background_tasks_changed","session_id":"foreign","tasks":[]}`
+	o := jsonlOutput{sessionID: "native-id"}
+	writeChunks(t, &o, init+"\n"+pending+"\n"+foreignClear+"\n"+successfulResult+"\n")
+	o.finish()
+	if o.pending != 1 || o.err == nil || o.completed || o.result.Answer != "" {
+		t.Fatalf("foreign task list cleared pending work: pending=%d result=%+v error=%v", o.pending, o.result, o.err)
+	}
+}
 
 func TestProgressFollowsFreshExecutionEvents(t *testing.T) {
 	var got int

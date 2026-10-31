@@ -557,6 +557,25 @@ func readRolloutUsageFrom(ctx context.Context, meta rolloutMeta, rootID string, 
 				// later session header prevents attributing inherited lifecycle.
 				inheritedWithoutBoundary, complete = true, false
 			}
+		case "response_item":
+			if capture == nil || meta.ID != rootID && (inheritedWithoutBoundary || meta.HistoryStart != nil && event.Ordinal < *meta.HistoryStart) {
+				continue
+			}
+			var item struct {
+				Metadata struct {
+					TurnID string `json:"turn_id"`
+				} `json:"internal_chat_message_metadata_passthrough"`
+			}
+			if json.Unmarshal(event.Payload, &item) != nil || item.Metadata.TurnID == "" {
+				continue
+			}
+			if len(item.Metadata.TurnID) > maxItemIDBytes {
+				capture.valid, complete = false, false
+				continue
+			}
+			if admitTurn(item.Metadata.TurnID) {
+				capture.turns[item.Metadata.TurnID] = true
+			}
 		case "token_usage_record":
 			var record struct {
 				ThreadID   string          `json:"thread_id"`

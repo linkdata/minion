@@ -643,12 +643,11 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if !tool && !output {
 		return
 	}
+	if len(item.ID) > maxItemIDBytes {
+		return
+	}
 	switch event.Type {
-	case "item.started", "item.updated":
-		if len(item.ID) > maxItemIDBytes {
-			return
-		}
-	case "item.completed":
+	case "item.started", "item.updated", "item.completed":
 	default:
 		return
 	}

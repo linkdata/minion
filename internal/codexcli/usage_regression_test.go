@@ -167,6 +167,33 @@ func TestUsageTurnLimitCountsLifecycleAndResponseIdentitiesTogether(t *testing.T
 	}
 }
 
+func TestUsageResponseItemTurnCaptureSharesIdentityLimit(t *testing.T) {
+	path := writeUsageRollout(t, t.TempDir(), "root", "",
+		usageEventAt(9, "task_complete", "lifecycle"),
+		rolloutMessageWithTurn(10, "first", "first reply", "response-one"),
+		rolloutMessageWithTurn(11, "second", "second reply", "response-two"))
+	boundary := &usageBoundary{valid: true, turns: map[string]bool{}}
+	budget := int64(maxUsageScanBytes)
+	_, _, _, err := readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget,
+		rolloutUsageMode{capture: boundary, recordLimit: 2})
+	if err != nil || boundary.valid || !boundary.prefixKnown || len(boundary.turns) != 2 ||
+		!boundary.turns["lifecycle"] || !boundary.turns["response-one"] || boundary.turns["response-two"] {
+		t.Fatalf("response item exceeded shared turn budget: turns=%v valid=%t prefixKnown=%t err=%v",
+			boundary.turns, boundary.valid, boundary.prefixKnown, err)
+	}
+
+	path = writeUsageRollout(t, t.TempDir(), "root", "",
+		rolloutMessageWithTurn(9, "oversized", "old reply", strings.Repeat("x", maxItemIDBytes+1)))
+	boundary = &usageBoundary{valid: true, turns: map[string]bool{}}
+	budget = maxUsageScanBytes
+	_, _, _, err = readRolloutUsageFrom(t.Context(), rolloutMeta{ID: "root", path: path}, "root", &budget,
+		rolloutUsageMode{capture: boundary})
+	if err != nil || boundary.valid || !boundary.prefixKnown || len(boundary.turns) != 0 {
+		t.Fatalf("oversized response turn entered baseline: turns=%v valid=%t prefixKnown=%t err=%v",
+			boundary.turns, boundary.valid, boundary.prefixKnown, err)
+	}
+}
+
 func TestUsageLateOldResponseLimitPreservesSubtractionCertainty(t *testing.T) {
 	const recordLimit = 1000
 	ctx := t.Context()

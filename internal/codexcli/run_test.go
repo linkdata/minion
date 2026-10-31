@@ -1151,20 +1151,13 @@ func TestJSONLOutputStopsAtChildLimit(t *testing.T) {
 	}
 }
 
-func TestJSONLOutputFramingLimitCancelsCLI(t *testing.T) {
-	for _, test := range []struct{ name, events string }{
-		{"line", strings.Repeat("x", aicli.MaxEventBytes+1) + "\n"},
-		{"event count", strings.Repeat("{}\n", 100001)},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			cancellations := 0
-			output := jsonlOutput{cancel: func() { cancellations++ }}
-			_, _ = output.Write([]byte(test.events))
-			_, _ = output.Write([]byte(`{"type":"turn.completed"}` + "\n"))
-			if cancellations != 1 || !output.failed || !errors.Is(output.stopErr, aicli.ErrOutputLimit) || output.completed {
-				t.Fatalf("framing limit did not stop CLI once: cancellations=%d failed=%t stop=%v completed=%t", cancellations, output.failed, output.stopErr, output.completed)
-			}
-		})
+func TestJSONLOutputLineLimitCancelsCLI(t *testing.T) {
+	cancellations := 0
+	output := jsonlOutput{cancel: func() { cancellations++ }}
+	_, _ = output.Write([]byte(strings.Repeat("x", aicli.MaxEventBytes+1) + "\n"))
+	_, _ = output.Write([]byte(`{"type":"turn.completed"}` + "\n"))
+	if cancellations != 1 || !output.failed || !errors.Is(output.stopErr, aicli.ErrOutputLimit) || output.completed {
+		t.Fatalf("line limit did not stop CLI once: cancellations=%d failed=%t stop=%v completed=%t", cancellations, output.failed, output.stopErr, output.completed)
 	}
 }
 

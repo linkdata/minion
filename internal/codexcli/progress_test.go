@@ -2,9 +2,25 @@ package codexcli
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestJSONLOutputProgressRejectsOversizedCompletedItemID(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n"))
+	oversized := strings.Repeat("x", maxItemIDBytes+1)
+	_, _ = output.Write([]byte(fmt.Sprintf(`{"type":"item.completed","item":{"id":%q,"type":"command_execution"}}`, oversized) + "\n"))
+	if progress != 0 || len(output.progressItems) != 0 {
+		t.Fatalf("oversized completed item entered progress: count=%d items=%d", progress, len(output.progressItems))
+	}
+	_, _ = output.Write([]byte(`{"type":"item.completed","item":{"id":"valid","type":"command_execution"}}` + "\n"))
+	if progress != 1 || len(output.progressItems) != 1 {
+		t.Fatalf("valid completed item lost progress: count=%d items=%d", progress, len(output.progressItems))
+	}
+}
 
 func TestJSONLOutputProgressRequiresNewRootWork(t *testing.T) {
 	progress := 0
@@ -228,5 +244,34 @@ func TestRolloutActivityUnattributedResumeContentDoesNotRenewProgress(t *testing
 	activity.poll()
 	if progress != 0 {
 		t.Fatalf("unattributed resumed content renewed progress: %d", progress)
+	}
+}
+
+func TestRolloutActivityResumeResponseOnlyTurnDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "root-response", 1)...)
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessageWithTurn(8, "inherited", "copied history", "inherited-turn"),
+		rolloutMessageWithTurn(9, "old", "old helper output", "response-only-turn"))
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	appendUsageEvents(t, child, rolloutMessageWithTurn(10, "old", "old helper output", "response-only-turn"))
+	progress := 0
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil, nil,
+		func() { progress++ })
+	activity.root("root")
+	activity.child("child", false)
+	activity.poll()
+	if progress != 0 {
+		t.Fatalf("replayed response-only old turn renewed progress: %d", progress)
+	}
+	if before := session.before["child"]; before == nil || !before.turns["response-only-turn"] || before.turns["inherited-turn"] {
+		t.Fatalf("response-only baseline ignored ownership: %+v", before)
+	}
+	appendUsageEvents(t, child, rolloutMessageWithTurn(11, "new", "new helper output", "new-turn"))
+	activity.poll()
+	if progress != 1 {
+		t.Fatalf("current helper turn did not renew progress: %d", progress)
 	}
 }
