@@ -575,7 +575,7 @@ func TestRunRetainsPrivateStderrAndFailedStructuredResult(t *testing.T) {
 	const schema = `{"type":"object"}`
 	const partial = `{"approved":true,"note":"configured-secret"}`
 	failed := `{"type":"result","subtype":"error_during_execution","is_error":true,"permission_denials":[{}],"api_error":"usage_limit_reached","api_error_status":429,"structured_output":` + partial + `}`
-	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(failed)+"\nprintf '%s\\n' 'stream FD failure configured-secret' >&2\nexit 7\n")
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' 'stream FD failure configured-secret' >&2\nprintf '%s\\n' "+aicli.ShellQuote(failed)+"\nexit 7\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: schema, APIKey: "configured-secret"})
 	if err == nil || result.Answer != "" || result.UsageComplete || len(result.Diagnostics) != 4 {
 		t.Fatalf("failed structured result=%+v error=%v", result, err)
