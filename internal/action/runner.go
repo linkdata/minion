@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
@@ -65,6 +66,26 @@ func (r *Runner) logf(format string, args ...any) {
 	if r.Logger != nil {
 		r.Logger.Printf(format, args...)
 	}
+}
+
+func providerCallFailureText(err error, secrets ...string) string {
+	raw := err.Error()
+	if strings.TrimSpace(raw) == "" || !utf8.ValidString(raw) || strings.ContainsRune(raw, 0) {
+		return ""
+	}
+	message := redactActionError(err, secrets...).Error()
+	if message == "action error could not be safely displayed" || strings.TrimSpace(message) == "" ||
+		!utf8.ValidString(message) || strings.ContainsRune(message, 0) {
+		return ""
+	}
+	text := "provider call failed; provider content may be incomplete: " + httpFailureDiagnostic(message)
+	encoded, _ := json.Marshal(text)
+	for _, secret := range secrets {
+		if secret != "" && containsConfiguredKey(encoded, secret) {
+			return ""
+		}
+	}
+	return text
 }
 
 // Run uses supplied complete Git history without fetching or publication rights.
@@ -327,36 +348,52 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					return aicli.Result{}, err
 				}
 			}
+			record := attemptRecord{Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role,
+				Round: request.round, ReviewPhase: request.reviewPhase, Provider: request.provider, Model: request.model}
 			if configured.eventSink != nil {
 				request.onInput = func(input aicli.PreparedInput) {
 					text, unavailable := preparedInputText(input, configured.secretValues()...)
 					if unavailable != "" {
 						text = unavailableInputText(unavailable)
 					}
-					configured.eventSink(attemptRecord{Kind: attemptRecordInput, Text: text,
-						Call: strconv.Itoa(checkpoint.Ordinal), Agent: input.NativeID, Role: request.role,
-						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + ".input.prepared"})
+					inputRecord := record
+					inputRecord.Kind, inputRecord.Text, inputRecord.Agent = attemptRecordInput, text, input.NativeID
+					inputRecord.EventSource = request.provider + ".input.prepared"
+					inputRecord.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					configured.eventSink(inputRecord)
 					if unavailable != "" {
 						// Keep the call's prepared-input gap visible and withhold coverage.
-						configured.eventSink(attemptRecord{Kind: attemptRecordDiscussion,
-							Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role, Round: request.round,
-							ReviewPhase: request.reviewPhase, EventSource: request.provider + ".input.unavailable"})
+						gap := record
+						gap.Kind, gap.EventSource, gap.ObservedAt = attemptRecordDiscussion, request.provider+".input.unavailable", inputRecord.ObservedAt
+						configured.eventSink(gap)
 					}
 				}
 				request.onEvent = func(event aicli.StreamEvent) {
-					kind := attemptRecordDiscussion
+					streamRecord := record
+					streamRecord.Kind = attemptRecordDiscussion
 					if event.Kind == "identity" {
-						kind = attemptRecordInput
+						streamRecord.Kind = attemptRecordInput
 					}
-					configured.eventSink(attemptRecord{Kind: kind, Text: event.Text,
-						Call: strconv.Itoa(checkpoint.Ordinal), Agent: event.NativeID, Role: request.role,
-						Round: request.round, ReviewPhase: request.reviewPhase, EventSource: request.provider + "." + event.Kind})
+					streamRecord.Text, streamRecord.Agent = event.Text, event.NativeID
+					streamRecord.EventSource = request.provider + "." + event.Kind
+					streamRecord.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					configured.eventSink(streamRecord)
 				}
 			}
 			if r.statusUpdate != nil {
 				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
+			if err != nil && configured.eventSink != nil {
+				failure := record
+				failure.Kind, failure.Text = attemptRecordDiagnostic, providerCallFailureText(err, configured.secretValues()...)
+				failure.EventSource = request.provider + ".call.failed"
+				if failure.Text == "" {
+					failure.EventSource = request.provider + ".call.diagnostic_unavailable"
+				}
+				failure.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				configured.eventSink(failure)
+			}
 			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
 			if err == nil && request.role == roleCritic {
 				approved, hasBlockers, reviewComplete, _, parseErr := parseCritique(call.Answer, configured.secretValues()...)

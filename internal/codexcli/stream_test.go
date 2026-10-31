@@ -23,7 +23,8 @@ func TestJSONLOutputStreamsOnlyCompleteKnownItems(t *testing.T) {
 		`{"type":"thread.started","thread_id":"native-root"}`,
 		`{"type":"item.started","item":{"type":"agent_message","text":"partial"}}`,
 		`{"type":"item.updated","item":{"type":"command_execution","aggregated_output":"partial"}}`,
-		`{"type":"item.completed","item":{"type":"reasoning","text":"private thought"}}`,
+		`{"type":"item.completed","item":{"type":"reasoning","text":"visible summary"}}`,
+		`{"type":"item.completed","item":{"type":"reasoning","content":"hidden content"}}`,
 		`{"type":"item.completed","item":{"type":"todo_list","items":["not a tool"]}}`,
 		`{"type":"item.completed","item":{"type":"agent_message","text":"complete message"}}`,
 		`{"type":"item.completed","item":{"type":"command_execution","command":"go test ./...","aggregated_output":"PASS","exit_code":0}}`,
@@ -41,22 +42,41 @@ func TestJSONLOutputStreamsOnlyCompleteKnownItems(t *testing.T) {
 		data = data[chunk:]
 	}
 	output.stream.Finish()
-	if len(got) != 9 || got[0] != (aicli.StreamEvent{Kind: "assistant"}) ||
+	if len(got) != 10 || got[0] != (aicli.StreamEvent{Kind: "assistant"}) ||
 		got[1] != (aicli.StreamEvent{NativeID: "native-root", Kind: "identity"}) ||
-		got[2] != (aicli.StreamEvent{NativeID: "native-root", Kind: "assistant", Text: "complete message"}) {
+		got[2] != (aicli.StreamEvent{NativeID: "native-root", Kind: "reasoning_summary", Text: "visible summary"}) ||
+		got[3] != (aicli.StreamEvent{NativeID: "native-root", Kind: "assistant", Text: "complete message"}) {
 		t.Fatalf("stream identity or filters: %+v", got)
 	}
-	for _, event := range got[3:] {
+	for _, event := range got[4:] {
 		if event.Kind != "tool" || event.NativeID != "native-root" || !json.Valid([]byte(event.Text)) {
 			t.Fatalf("tool was not complete native item JSON: %+v", event)
 		}
 	}
-	if !strings.Contains(got[3].Text, `"command":"go test ./..."`) || !strings.Contains(got[3].Text, `"aggregated_output":"PASS"`) ||
-		!strings.Contains(got[4].Text, `"changes":[`) || !strings.Contains(got[5].Text, `"result":"done"`) {
+	if !strings.Contains(got[4].Text, `"command":"go test ./..."`) || !strings.Contains(got[4].Text, `"aggregated_output":"PASS"`) ||
+		!strings.Contains(got[5].Text, `"changes":[`) || !strings.Contains(got[6].Text, `"result":"done"`) {
 		t.Fatalf("tool payload fields lost: %+v", got)
 	}
 	if output.threadID != "native-root" || !output.completed || output.finalMessage != "complete message" {
 		t.Fatalf("streaming changed native accounting: %+v", output)
+	}
+}
+
+func TestJSONLOutputReasoningSummaryRedactsOnlyEmittedSummary(t *testing.T) {
+	var got []aicli.StreamEvent
+	output := jsonlOutput{onEvent: func(event aicli.StreamEvent) { got = append(got, event) },
+		redact: func(text string) string { return strings.ReplaceAll(text, "private-key", "[redacted]") }}
+	stream := strings.Join([]string{
+		`{"type":"thread.started","thread_id":"native-root"}`,
+		`{"type":"item.completed","item":{"type":"reasoning","text":"visible private-key summary"}}`,
+		`{"type":"item.completed","item":{"type":"reasoning","content":"unexposed private-key"}}`,
+	}, "\n") + "\n"
+	_, _ = output.Write([]byte(stream))
+	if !slices.Equal(got, []aicli.StreamEvent{
+		{NativeID: "native-root", Kind: "identity"},
+		{NativeID: "native-root", Kind: "reasoning_summary", Text: "visible [redacted] summary"},
+	}) {
+		t.Fatalf("reasoning summary was not isolated and redacted: %+v", got)
 	}
 }
 

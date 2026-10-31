@@ -140,8 +140,9 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	if len(event.Text) > maxAttemptEventBytes {
 		return fail(errAttemptRecordsFull)
 	}
-	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent,
-		Role: event.Role, Round: event.Round, ReviewPhase: event.ReviewPhase, EventSource: event.EventSource}).validateShape(); err != nil {
+	metadata := event
+	metadata.Text = ""
+	if err := metadata.validateShape(); err != nil {
 		return fail(err)
 	}
 	raw := event
@@ -150,10 +151,15 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	event.Call = redactActionText(event.Call, secrets...)
 	event.Agent = redactActionText(event.Agent, secrets...)
 	event.Role = redactActionText(event.Role, secrets...)
+	event.Provider = redactActionText(event.Provider, secrets...)
+	event.Model = redactActionText(event.Model, secrets...)
+	event.ObservedAt = redactActionText(event.ObservedAt, secrets...)
 	event.ReviewPhase = redactActionText(event.ReviewPhase, secrets...)
 	event.EventSource = redactActionText(event.EventSource, secrets...)
 	if raw.Text != "" && event.Text == "" || raw.Call != "" && event.Call == "" ||
 		raw.Agent != "" && event.Agent == "" || raw.Role != "" && event.Role == "" ||
+		raw.Provider != "" && event.Provider == "" || raw.Model != "" && event.Model == "" ||
+		raw.ObservedAt != "" && event.ObservedAt == "" ||
 		raw.ReviewPhase != "" && event.ReviewPhase == "" ||
 		raw.EventSource != "" && event.EventSource == "" {
 		return fail(errors.New("HTTP status log cannot be safely redacted"))
@@ -161,11 +167,13 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 	if len(event.Text) > maxAttemptEventBytes {
 		return fail(errAttemptRecordsFull)
 	}
-	if err := (attemptRecord{Kind: event.Kind, Call: event.Call, Agent: event.Agent, Role: event.Role,
-		Round: event.Round, ReviewPhase: event.ReviewPhase, EventSource: event.EventSource}).validateShape(); err != nil {
+	metadata = event
+	metadata.Text = ""
+	if err := metadata.validateShape(); err != nil {
 		return fail(err)
 	}
-	for _, value := range []string{event.Text, event.Call, event.Agent, event.Role, event.ReviewPhase, event.EventSource} {
+	for _, value := range []string{event.Text, event.Call, event.Agent, event.Role, event.Provider, event.Model,
+		event.ObservedAt, event.ReviewPhase, event.EventSource} {
 		data, err := json.Marshal(value)
 		if err != nil {
 			return fail(err)

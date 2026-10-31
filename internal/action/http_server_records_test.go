@@ -46,17 +46,22 @@ func (r statusSyncReceiver) ReceiveCompletedResult(Result) error {
 func TestHTTPStatusRecordsPersistBeforeOutcomeAndReplay(t *testing.T) {
 	root := t.TempDir()
 	job := testJob(command.Comment)
+	job.Main.Model = "pinned-main"
 	f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
 	f.pull(t)
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
-	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{httpTestRecord(job, 1, "first")}}, http.StatusOK, 1)
+	first := httpTestRecord(job, 1, "first")
+	first.Call = "call-1"
+	first.Role, first.Provider, first.Model, first.ObservedAt = roleMain, job.Main.Provider, job.Main.Model, "2026-10-31T12:34:56Z"
+	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{first}}, http.StatusOK, 1)
 	status.Sequence, status.LogSequence = 2, 2
 	logs := []attemptRecord{httpTestRecord(job, 2, "second")}
 	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: logs}, http.StatusOK, 2); ack.LogSequence != 2 {
 		t.Fatalf("durable highwater = %d, want 2", ack.LogSequence)
 	}
 	before := httpTestRecords(t, root, job)
-	if bytes.Count(before, []byte{'\n'}) != 2 || !bytes.Contains(before, []byte(`"text":"first"`)) || !bytes.Contains(before, []byte(`"text":"second"`)) {
+	if bytes.Count(before, []byte{'\n'}) != 2 || !bytes.Contains(before, []byte(`"text":"first"`)) || !bytes.Contains(before, []byte(`"text":"second"`)) ||
+		!bytes.Contains(before, []byte(`"provider":"codex","model":"pinned-main","observed_at":"2026-10-31T12:34:56Z"`)) {
 		t.Fatalf("records were not durable before outcome: %q", before)
 	}
 	status.Sequence = 3
@@ -78,6 +83,113 @@ func TestHTTPStatusRecordsPersistBeforeOutcomeAndReplay(t *testing.T) {
 	}
 	if saved := httpTestRecords(t, root, job); bytes.Count(saved, []byte{'\n'}) != 3 || !bytes.Contains(saved, []byte(`"kind":"coverage"`)) {
 		t.Fatalf("coverage was not durable before outcome: %q", saved)
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
+func TestHTTPStatusRejectsMismatchedCallMetadata(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	job.Main.Model = "pinned-main"
+	f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
+	f.pull(t)
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
+	first := httpTestRecord(job, 1, "first")
+	first.Call = "call-1"
+	first.Role, first.Provider, first.Model, first.ObservedAt = roleMain, job.Main.Provider, job.Main.Model, "2026-10-31T12:34:56Z"
+	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{first}}, http.StatusOK, 1)
+	before := httpTestRecords(t, root, job)
+	status.Sequence, status.LogSequence = 2, 2
+	second := httpTestRecord(job, 2, "second")
+	second.Call = "call-2"
+	second.Role, second.Provider, second.Model, second.ObservedAt = first.Role, first.Provider, first.Model, first.ObservedAt
+	for _, test := range []struct {
+		name   string
+		change func(*attemptRecord)
+	}{
+		{"wrong provider", func(r *attemptRecord) { r.Provider = "claude" }},
+		{"wrong model", func(r *attemptRecord) { r.Model = "other-model" }},
+		{"missing provider", func(r *attemptRecord) { r.Provider = "" }},
+		{"missing model", func(r *attemptRecord) { r.Model = "" }},
+		{"missing observed time", func(r *attemptRecord) { r.ObservedAt = "" }},
+		{"time without provider or model", func(r *attemptRecord) { r.Provider, r.Model = "", "" }},
+		{"call without provenance", func(r *attemptRecord) { r.Provider, r.Model, r.ObservedAt = "", "", "" }},
+		{"unbound role", func(r *attemptRecord) { r.Role = "" }},
+		{"unselected critic", func(r *attemptRecord) { r.Role = roleCritic }},
+		{"malformed observed time", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T13:34:56+01:00" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := second
+			test.change(&changed)
+			ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{changed}}, http.StatusConflict, 2)
+			if ack.Failure == nil {
+				t.Fatal("mismatched call metadata received success ACK")
+			}
+			if saved := httpTestRecords(t, root, job); !bytes.Equal(saved, before) {
+				t.Fatalf("mismatched call metadata changed records: %q", saved)
+			}
+		})
+	}
+	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{second}}, http.StatusOK, 2); ack.LogSequence != 2 {
+		t.Fatalf("valid call metadata highwater = %d", ack.LogSequence)
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
+func TestHTTPStatusRecordsDistinguishFixtureSameProviderRoles(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	job.Main.Model = "main-model"
+	job.Critic = &RoleSettings{Provider: job.Main.Provider, Model: "critic-model"}
+	// Job.Validate intentionally rejects same-provider roles until #145; this isolates record matching.
+	tx := &httpTransaction{job: job, recordRoot: root}
+	t.Cleanup(func() {
+		if tx.records != nil {
+			_ = tx.records.Close()
+		}
+	})
+	main := httpTestRecord(job, 1, "main call")
+	main.Call = "call-1"
+	main.Role, main.Provider, main.Model, main.ObservedAt = roleMain, job.Main.Provider, job.Main.Model, "2026-10-31T12:34:56Z"
+	if ack, err := tx.appendStatusLogs(Status{LogSequence: 1}, []attemptRecord{main}, ""); err != nil || ack != 1 {
+		t.Fatalf("main record: ack=%d error=%v", ack, err)
+	}
+	critic := httpTestRecord(job, 2, "critic call")
+	critic.Call = "call-2"
+	critic.Role, critic.Provider, critic.Model, critic.ObservedAt = roleCritic, job.Critic.Provider, job.Main.Model, "2026-10-31T12:34:57Z"
+	if ack, err := tx.appendStatusLogs(Status{LogSequence: 2}, []attemptRecord{critic}, ""); ack != 1 || !errors.Is(err, errAttemptRecordConflict) {
+		t.Fatalf("main model accepted for critic role: ack=%d error=%v", ack, err)
+	}
+	critic.Model = job.Critic.Model
+	if ack, err := tx.appendStatusLogs(Status{LogSequence: 2}, []attemptRecord{critic}, ""); err != nil || ack != 2 {
+		t.Fatalf("critic record: ack=%d error=%v", ack, err)
+	}
+	saved := httpTestRecords(t, root, job)
+	if bytes.Count(saved, []byte{'\n'}) != 2 || !bytes.Contains(saved, []byte(`"role":"main","provider":"codex","model":"main-model"`)) ||
+		!bytes.Contains(saved, []byte(`"role":"critic","provider":"codex","model":"critic-model"`)) {
+		t.Fatalf("fixture roles were not retained distinctly: %q", saved)
+	}
+}
+
+func TestHTTPStatusAcceptsConfiguredEmptyModelProvenance(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
+	f.pull(t)
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
+	record := httpTestRecord(job, 1, "available call")
+	record.Call = "call-1"
+	record.Role, record.Provider, record.ObservedAt = roleMain, job.Main.Provider, "2026-10-31T12:34:56Z"
+	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{record}}, http.StatusOK, 1); ack.LogSequence != 1 {
+		t.Fatalf("empty configured model highwater = %d", ack.LogSequence)
 	}
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if got := f.result(t); got.err != nil {

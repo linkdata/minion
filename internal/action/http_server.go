@@ -736,6 +736,23 @@ func (tx *httpTransaction) appendStatusLogs(status Status, logs []attemptRecord,
 			record.validateShape() != nil {
 			return highest, errAttemptRecordConflict
 		}
+		if record.Call != "" || record.Provider != "" || record.Model != "" || record.ObservedAt != "" {
+			var role RoleSettings
+			switch record.Role {
+			case roleMain:
+				role = tx.job.Main
+			case roleCritic:
+				if tx.job.Critic == nil {
+					return highest, errAttemptRecordConflict
+				}
+				role = *tx.job.Critic
+			default:
+				return highest, errAttemptRecordConflict
+			}
+			if record.Provider != role.Provider || record.Model != role.Model || record.ObservedAt == "" {
+				return highest, errAttemptRecordConflict
+			}
+		}
 	}
 	if len(logs) > 0 {
 		if logs[0].Sequence > highest+1 || status.LogSequence != logs[len(logs)-1].Sequence {

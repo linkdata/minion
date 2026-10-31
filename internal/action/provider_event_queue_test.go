@@ -45,6 +45,7 @@ func TestProviderEventQueueReportsGapsAndBoundedBacklog(t *testing.T) {
 		limit int64
 	}{
 		{"missing native identity", []attemptRecord{{Text: "unbound"}}, maxAttemptRecordBytes},
+		{"unbound ordinary diagnostic", []attemptRecord{{Kind: attemptRecordDiagnostic, Provider: "codex", EventSource: "codex.other", Text: "unbound"}}, maxAttemptRecordBytes},
 		{"backlog cap", []attemptRecord{{Agent: "native", Text: "too large"}}, 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -59,6 +60,26 @@ func TestProviderEventQueueReportsGapsAndBoundedBacklog(t *testing.T) {
 			}
 			if queue.finish() || len(sent) != 0 {
 				t.Fatalf("gap falsely marked complete or sent: %+v", sent)
+			}
+		})
+	}
+}
+
+func TestProviderEventQueueRetainsCallFailureWithoutClaimingCoverage(t *testing.T) {
+	for _, test := range []struct{ source, text string }{
+		{"codex.call.failed", "failed"},
+		{"codex.call.diagnostic_unavailable", ""},
+	} {
+		t.Run(test.source, func(t *testing.T) {
+			var sent []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				sent = append(sent, event)
+				return nil
+			})
+			queue.add(attemptRecord{Kind: attemptRecordDiagnostic, Provider: "codex", EventSource: test.source, Text: test.text})
+			queue.add(attemptRecord{Kind: attemptRecordDiscussion, Agent: "native", Text: "later"})
+			if queue.finish() || len(sent) != 2 || sent[0].Agent != "" || sent[0].Text != test.text || sent[1].Text != "later" {
+				t.Fatalf("call failure was lost or falsely proved coverage: %+v", sent)
 			}
 		})
 	}

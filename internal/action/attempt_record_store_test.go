@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -488,8 +489,13 @@ func TestAttemptRecordsMetadataAndTerminalCoverage(t *testing.T) {
 	store := openAttemptFixture(t, root)
 	entry := attemptRecordFixture(1, attemptRecordDiscussion, "part one")
 	entry.Call, entry.Agent, entry.Role, entry.EventSource = "call-1", "helper-2", "critic", "claude"
+	entry.Provider, entry.Model, entry.ObservedAt = "claude", "pinned-model", "2026-10-31T12:34:56.123456789Z"
 	if ack, err := store.Append(entry); err != nil || ack != 1 {
 		t.Fatalf("metadata append: ack=%d error=%v", ack, err)
+	}
+	if saved, err := os.ReadFile(filepath.Join(root, "attempt-records", "attempt.jsonl")); err != nil ||
+		!bytes.Contains(saved, []byte(`"provider":"claude","model":"pinned-model","observed_at":"2026-10-31T12:34:56.123456789Z"`)) {
+		t.Fatalf("call metadata was not persisted: %q error=%v", saved, err)
 	}
 	coverage := attemptRecordFixture(2, attemptRecordCoverage, "")
 	if ack, err := store.Append(coverage); err != nil || ack != 2 {
@@ -505,11 +511,59 @@ func TestAttemptRecordsMetadataAndTerminalCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	reopened := openAttemptFixture(t, root)
+	for _, test := range []struct {
+		name   string
+		change func(*attemptRecord)
+	}{
+		{"provider", func(r *attemptRecord) { r.Provider = "codex" }},
+		{"model", func(r *attemptRecord) { r.Model = "other-model" }},
+		{"observed time", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T12:34:57Z" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			changed := entry
+			test.change(&changed)
+			if ack, err := reopened.Append(changed); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
+				t.Fatalf("changed call metadata replay: ack=%d error=%v", ack, err)
+			}
+		})
+	}
 	if ack, err := reopened.Append(coverage); err != nil || ack != 2 {
 		t.Fatalf("coverage replay after reopen: ack=%d error=%v", ack, err)
 	}
 	if ack, err := reopened.Append(attemptRecordFixture(3, attemptRecordDiscussion, "late")); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
 		t.Fatalf("reopened store appended after coverage: ack=%d error=%v", ack, err)
+	}
+}
+
+func TestAttemptRecordsRejectMalformedCallMetadata(t *testing.T) {
+	store := openAttemptFixture(t, t.TempDir())
+	for _, test := range []struct {
+		name   string
+		change func(*attemptRecord)
+	}{
+		{"provider too long", func(r *attemptRecord) { r.Provider = strings.Repeat("p", config.MaxModelSettingBytes+1) }},
+		{"provider whitespace", func(r *attemptRecord) { r.Provider = "co dex" }},
+		{"model too long", func(r *attemptRecord) { r.Model = strings.Repeat("m", config.MaxModelSettingBytes+1) }},
+		{"model invalid UTF-8", func(r *attemptRecord) { r.Model = "\xff" }},
+		{"model whitespace", func(r *attemptRecord) { r.Model = "model\nname" }},
+		{"observed time offset", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T13:34:56+01:00" }},
+		{"observed time noncanonical", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T12:34:56.000Z" }},
+		{"observed time invalid", func(r *attemptRecord) { r.ObservedAt = "2026-02-30T12:34:56Z" }},
+		{"observed time too long", func(r *attemptRecord) { r.ObservedAt = strings.Repeat("x", 100) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			entry := attemptRecordFixture(1, attemptRecordDiscussion, "safe")
+			entry.Role, entry.Provider, entry.Model, entry.ObservedAt = "main", "codex", "pinned-model", "2026-10-31T12:34:56Z"
+			test.change(&entry)
+			if ack, err := store.Append(entry); ack != 0 || err == nil {
+				t.Fatalf("malformed metadata accepted: ack=%d error=%v", ack, err)
+			}
+		})
+	}
+	marker := attemptRecordFixture(1, attemptRecordCoverage, "")
+	marker.ObservedAt = "2026-10-31T12:34:56Z"
+	if ack, err := store.Append(marker); ack != 0 || err == nil {
+		t.Fatalf("marker with call metadata accepted: ack=%d error=%v", ack, err)
 	}
 }
 
@@ -525,6 +579,23 @@ func TestAttemptRecordsRejectCredentialInMetadata(t *testing.T) {
 		if ack, err := store.Append(entry, key); ack != 0 || err == nil {
 			t.Fatalf("credential in metadata accepted: value=%q ack=%d error=%v", value, ack, err)
 		}
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*attemptRecord)
+		key    string
+	}{
+		{"provider", func(r *attemptRecord) { r.Provider = "secret" }, "secret"},
+		{"model", func(r *attemptRecord) { r.Model = "model-secret" }, "secret"},
+		{"observed time", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T12:34:56Z" }, "2026"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			entry := attemptRecordFixture(1, attemptRecordDiscussion, "safe")
+			test.change(&entry)
+			if ack, err := store.Append(entry, test.key); ack != 0 || err == nil {
+				t.Fatalf("credential in %s accepted: ack=%d error=%v", test.name, ack, err)
+			}
+		})
 	}
 	entry := attemptRecordFixture(1, attemptRecordDiscussion, "safe")
 	entry.Call = "safe"
@@ -553,6 +624,7 @@ func TestAttemptRecordsCoverageRequiresFinishedContinuation(t *testing.T) {
 	store := openAttemptFixture(t, root)
 	first := attemptRecordFixture(1, attemptRecordDiscussion, "first")
 	first.Call, first.Agent, first.Round, first.ReviewPhase, first.More = "call-1", "session-1", 1, reviewFull, true
+	first.Provider, first.Model, first.ObservedAt = "claude", "pinned-model", "2026-10-31T12:34:56Z"
 	if ack, err := store.Append(first); err != nil || ack != 1 {
 		t.Fatalf("first fragment: ack=%d error=%v", ack, err)
 	}
@@ -569,21 +641,25 @@ func TestAttemptRecordsCoverageRequiresFinishedContinuation(t *testing.T) {
 	}
 	last := attemptRecordFixture(2, attemptRecordDiscussion, "last")
 	last.Call, last.Agent, last.Round, last.ReviewPhase = first.Call, first.Agent, first.Round, first.ReviewPhase
+	last.Provider, last.Model, last.ObservedAt = first.Provider, first.Model, first.ObservedAt
 	path := filepath.Join(root, "attempt-records", "attempt.jsonl")
 	prefix, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		name, reviewPhase string
-		round             int
+		name   string
+		change func(*attemptRecord)
 	}{
-		{"changed round", reviewFull, 2},
-		{"changed review phase", reviewVerification, 1},
+		{"changed round", func(r *attemptRecord) { r.Round = 2 }},
+		{"changed review phase", func(r *attemptRecord) { r.ReviewPhase = reviewVerification }},
+		{"changed provider", func(r *attemptRecord) { r.Provider = "codex" }},
+		{"changed model", func(r *attemptRecord) { r.Model = "other-model" }},
+		{"changed observed time", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T12:34:57Z" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			changed := last
-			changed.Round, changed.ReviewPhase = test.round, test.reviewPhase
+			test.change(&changed)
 			if ack, err := store.Append(changed); ack != 0 || !errors.Is(err, errAttemptRecordConflict) {
 				t.Fatalf("changed continuation metadata accepted: ack=%d error=%v", ack, err)
 			}
@@ -736,6 +812,9 @@ func TestAttemptRecordsMaximumValidLineFits(t *testing.T) {
 	record.Call = strings.Repeat("\x01", 128)
 	record.Agent = strings.Repeat("\x01", 128)
 	record.Role = strings.Repeat("\x01", 128)
+	record.Provider = strings.Repeat("\x01", config.MaxModelSettingBytes)
+	record.Model = strings.Repeat("\x01", config.MaxModelSettingBytes)
+	record.ObservedAt = "2026-10-31T12:34:56.123456789Z"
 	record.EventSource = strings.Repeat("\x01", 128)
 	record.More = true
 	store, err := openAttemptRecordStore(root, record.Identity, record.SourceRef)

@@ -36,9 +36,14 @@ func (q *providerEventQueue) add(event attemptRecord) {
 	if q.stopped.Load() {
 		return
 	}
-	if event.Agent == "" && event.Kind != attemptRecordInput {
+	failure := event.Kind == attemptRecordDiagnostic && event.Provider != "" &&
+		(event.EventSource == event.Provider+".call.failed" || event.EventSource == event.Provider+".call.diagnostic_unavailable")
+	if event.Agent == "" && event.Kind != attemptRecordInput && !failure {
 		q.failed.Store(true)
 		return
+	}
+	if failure {
+		q.failed.Store(true)
 	}
 	size := int64(len(event.Text))
 	if q.bytes.Add(size) > q.limit {

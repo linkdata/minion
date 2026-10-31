@@ -102,7 +102,8 @@ func TestWorkerStatusRetriesLostLogAckAndDrainsCoverage(t *testing.T) {
 	transport := &httpExecutionClient{client: client, base: base}
 	status := newWorkerStatus(job)
 	event := attemptRecord{Kind: attemptRecordDiscussion, Text: "before secret after", Call: "call-1",
-		Agent: "agent secret", Role: "main", EventSource: "claude"}
+		Agent: "agent secret", Role: "main", Provider: "claude", Model: "model-secret",
+		ObservedAt: "2026-10-31T12:34:56Z", EventSource: "claude"}
 	if err := status.emit(t.Context(), transport, event, "secret"); err != nil {
 		t.Fatal(err)
 	}
@@ -121,12 +122,49 @@ func TestWorkerStatusRetriesLostLogAckAndDrainsCoverage(t *testing.T) {
 	got := first.Logs[0]
 	if got.Sequence != 1 || got.Identity != job.Identity || got.SourceRef != job.Source.Head ||
 		got.Kind != event.Kind || got.Text != "before [redacted] after" || got.Call != event.Call ||
-		got.Agent != "agent [redacted]" || got.Role != event.Role || got.EventSource != event.EventSource {
+		got.Agent != "agent [redacted]" || got.Role != event.Role || got.Provider != event.Provider ||
+		got.Model != "model-[redacted]" || got.ObservedAt != event.ObservedAt || got.EventSource != event.EventSource {
 		t.Fatalf("event metadata or pre-transit redaction changed: %+v", got)
 	}
 	if coverage.Status.Sequence != 3 || coverage.Status.LogSequence != 2 || len(coverage.Logs) != 1 ||
 		coverage.Logs[0].Sequence != 2 || coverage.Logs[0].Kind != attemptRecordCoverage || coverage.Logs[0].Text != "" {
 		t.Fatalf("terminal coverage marker = %+v", coverage)
+	}
+}
+
+func TestWorkerStatusRejectsUnsafeCallMetadataBeforeTransport(t *testing.T) {
+	job := testJob(command.Comment)
+	requests := 0
+	client := &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("unexpected Status request")
+	})}
+	base, _ := url.Parse("http://worker.test")
+	transport := &httpExecutionClient{client: client, base: base}
+	for _, test := range []struct {
+		name   string
+		change func(*attemptRecord)
+		secret string
+	}{
+		{"oversized model", func(r *attemptRecord) { r.Model = strings.Repeat("m", 129) }, ""},
+		{"non-UTC time", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T13:34:56+01:00" }, ""},
+		{"time contains credential", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T12:34:56Z" }, "2026"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status := newWorkerStatus(job)
+			event := attemptRecord{Kind: attemptRecordDiscussion, Text: "safe", Role: roleMain,
+				Provider: "codex", Model: "pinned", ObservedAt: "2026-10-31T12:34:56Z"}
+			test.change(&event)
+			if err := status.emit(t.Context(), transport, event, test.secret); err == nil {
+				t.Fatal("unsafe metadata reached Status transport")
+			}
+			if err := status.drain(t.Context(), transport); err == nil {
+				t.Fatal("unsafe metadata produced coverage")
+			}
+		})
+	}
+	if requests != 0 {
+		t.Fatalf("unsafe metadata sent %d Status requests", requests)
 	}
 }
 
