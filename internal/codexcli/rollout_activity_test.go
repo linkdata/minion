@@ -57,7 +57,7 @@ func newActivityTestRecorder(t *testing.T, home string, started time.Time) (*rol
 	t.Helper()
 	var events []aicli.StreamEvent
 	progress := 0
-	activity := newRolloutActivity(t.Context(), home, started, nil, nil, nil,
+	activity := newRolloutActivity(t.Context(), home, started, nil, nil, nil, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) },
 		func() { progress++ })
 	return activity, &events, &progress
@@ -376,7 +376,7 @@ func TestRolloutActivityPaginatedHelperUserPromptResumeSkipsOldTurn(t *testing.T
 		rolloutCompletedItemTurn(22, "child", "new-child", `{"type":"UserMessage","id":"new-prompt","content":[{"type":"text","text":"current helper task"}]}`),
 		`{"ordinal":23,"type":"response_item","payload":{"type":"message","id":"new-prompt","role":"user","content":[{"type":"input_text","text":"current helper task"}],"internal_chat_message_metadata_passthrough":{"turn_id":"new-child"}}}`)
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.child("child", false)
@@ -576,6 +576,39 @@ func TestRolloutActivityNativeCompletionDoesNotAdmitFreshHelper(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityKnownHelperObservationRequiresPriorProof(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "root-response", 1)...)
+	boundary := int64(9)
+	unproved := writeUsageRolloutBoundary(t, home, "unproved", "root", &boundary,
+		completedUsageTurn("unproved", "old-unproved", "unproved-response", 1)...)
+	proved := writeUsageRolloutBoundary(t, home, "proved", "root", &boundary,
+		completedUsageTurn("proved", "old-proved", "proved-response", 1)...)
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	if session.known["unproved"].path != unproved || session.known["proved"].path != proved {
+		t.Fatalf("fixture did not retain both metadata-linked helpers: %+v", session.known)
+	}
+	appendUsageEvents(t, unproved, rolloutMessageWithTurn(20, "unproved-new", "private unproved suffix", "new-unproved"))
+	appendUsageEvents(t, proved, rolloutMessageWithTurn(20, "proved-new", "proved suffix", "new-proved"))
+
+	var events []aicli.StreamEvent
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"proved": true}, session.before, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
+	activity.root("root")
+	activity.child("unproved", false)
+	activity.child("proved", false)
+	activity.poll()
+	activity.finish()
+	want := []aicli.StreamEvent{
+		{NativeID: "unproved", Kind: "content_missing"},
+		{NativeID: "proved", Kind: "assistant", Text: "proved suffix"},
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("known helper proof boundary = %+v; want %+v", events, want)
+	}
+}
+
 func TestRolloutActivityNativeCompletionReactivatesKnownHelper(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-root-response", 1)...)
@@ -589,7 +622,7 @@ func TestRolloutActivityNativeCompletionReactivatesKnownHelper(t *testing.T) {
 	appendUsageEvents(t, root, nativeActivityEvent(20, "root", "new-root", "completed", "child"))
 	appendUsageEvents(t, child, rolloutMessageWithTurn(20, "message", "current helper text", "new-child"))
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.poll()
@@ -839,6 +872,79 @@ func TestRolloutActivityRetriesTransientPartialHelperHeaderLive(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityRejectsHeaderReplacedAfterDiscovery(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "original", "original helper text"))
+	files, ambiguous, complete := usageFiles(t.Context(), home, "root", started, nil)
+	if !complete || len(ambiguous) != 0 || files["child"].path != child {
+		t.Fatalf("fixture discovery failed: files=%+v ambiguous=%+v complete=%t", files, ambiguous, complete)
+	}
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.files, activity.ambiguous = files, ambiguous
+	activity.lastDiscover = time.Now()
+	activity.refresh = false // Hold the discovered header while the file changes before scan.
+	foreign := writeUsageRolloutBoundary(t, home, "other", "root", &boundary,
+		rolloutMessage(9, "foreign", "private foreign helper text"))
+	if err := os.Rename(foreign, child); err != nil {
+		t.Fatal(err)
+	}
+	activity.poll()
+	want := []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("replaced discovered header admitted foreign helper text: got %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivityRejectsSameInodeHeaderRewriteBeforeSuffix(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "first helper text"))
+	activity, events, _ := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	first := aicli.StreamEvent{NativeID: "child", Kind: "assistant", Text: "first helper text"}
+	if !slices.Equal(*events, []aicli.StreamEvent{first}) {
+		t.Fatalf("fixture did not establish helper cursor: %+v", *events)
+	}
+	before, err := os.Stat(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten := strings.Replace(string(data), `"id":"child"`, `"id":"other"`, 1)
+	if rewritten == string(data) {
+		t.Fatal("fixture did not rewrite helper identity")
+	}
+	if err := os.WriteFile(child, []byte(rewritten), 0600); err != nil {
+		t.Fatal(err)
+	}
+	appendUsageEvents(t, child, rolloutMessage(10, "foreign", "private foreign suffix"))
+	after, err := os.Stat(child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("fixture replaced inode instead of rewriting it")
+	}
+	activity.lastDiscover = time.Now() // Exercise the existing cursor before periodic discovery.
+	activity.poll()
+	want := []aicli.StreamEvent{first, {NativeID: "child", Kind: "content_missing"}}
+	if !slices.Equal(*events, want) {
+		t.Fatalf("same-inode header rewrite admitted foreign suffix: got %+v; want %+v", *events, want)
+	}
+}
+
 func TestRolloutActivityConcurrentAnnouncementAndPoll(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)
@@ -990,7 +1096,7 @@ func TestRolloutActivityResumeSkipsVerifiedPrefix(t *testing.T) {
 
 	var events []aicli.StreamEvent
 	progress := 0
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) },
 		func() { progress++ })
 	activity.root("root")
@@ -1016,7 +1122,7 @@ func TestRolloutActivityLegacyInteractedReactivatesKnownHelper(t *testing.T) {
 	appendUsageEvents(t, child, rolloutMessageWithTurn(13, "new-message", "current helper text", "new-child"))
 
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.poll()
@@ -1059,7 +1165,7 @@ func TestRolloutActivityResumeRejectsChangedPrefix(t *testing.T) {
 	}
 	appendUsageEvents(t, child, rolloutMessage(13, "new-message", "should not be trusted"))
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.child("child", true)
@@ -1087,7 +1193,7 @@ func TestRolloutActivityResumeWithoutForkBoundaryUsesVerifiedPrefix(t *testing.T
 	appendUsageEvents(t, child, rolloutMessageWithTurn(13, "new-message", "verified suffix", "new-child"))
 
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.child("child", true)
@@ -1111,7 +1217,7 @@ func TestRolloutActivityResumeWithoutForkBoundarySecondHeaderMarksUnknownTurn(t 
 		`{"type":"session_meta","payload":{"id":"child","session_id":"root","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root"}}}}}`,
 		rolloutMessageWithTurn(13, "new-message", "unknown turn after second header", "new-child"))
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.child("child", false)
@@ -1142,7 +1248,7 @@ func TestRolloutActivityResumeUsesResponseTurnMetadata(t *testing.T) {
 		rolloutMessage(14, "missing-turn", "uncertain turn"),
 		rolloutMessageWithTurn(15, "new-message", "current turn", "new-child"))
 	var events []aicli.StreamEvent
-	activity := newRolloutActivity(t.Context(), home, started, session.known, session.before, nil,
+	activity := newRolloutActivity(t.Context(), home, started, session.known, map[string]bool{"child": true}, session.before, nil,
 		func(event aicli.StreamEvent) { events = append(events, event) }, func() {})
 	activity.root("root")
 	activity.child("child", true)

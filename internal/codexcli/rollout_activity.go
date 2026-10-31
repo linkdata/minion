@@ -22,14 +22,15 @@ import (
 // remains the source of root discussion; rollout cursors supply helper content
 // and progress when the root stream is quiet.
 type rolloutActivity struct {
-	ctx      context.Context
-	home     string
-	started  time.Time
-	known    map[string]rolloutMeta
-	before   map[string]*usageBoundary
-	excluded map[string]bool
-	emit     func(aicli.StreamEvent)
-	progress func()
+	ctx         context.Context
+	home        string
+	started     time.Time
+	known       map[string]rolloutMeta
+	provedKnown map[string]bool
+	before      map[string]*usageBoundary
+	excluded    map[string]bool
+	emit        func(aicli.StreamEvent)
+	progress    func()
 
 	mu        sync.Mutex // stdout announcements may arrive while a scan runs
 	rootID    string
@@ -67,9 +68,9 @@ type rolloutActivityCursor struct {
 const maxActivityPendingBytes = 8 << 20
 const maxActivityDiscoveryFailures = 3
 
-func newRolloutActivity(ctx context.Context, home string, started time.Time, known map[string]rolloutMeta, before map[string]*usageBoundary, excluded map[string]bool, emit func(aicli.StreamEvent), progress func()) *rolloutActivity {
+func newRolloutActivity(ctx context.Context, home string, started time.Time, known map[string]rolloutMeta, provedKnown map[string]bool, before map[string]*usageBoundary, excluded map[string]bool, emit func(aicli.StreamEvent), progress func()) *rolloutActivity {
 	return &rolloutActivity{
-		ctx: ctx, home: home, started: started, known: maps.Clone(known), before: maps.Clone(before),
+		ctx: ctx, home: home, started: started, known: maps.Clone(known), provedKnown: maps.Clone(provedKnown), before: maps.Clone(before),
 		excluded: maps.Clone(excluded), emit: emit, progress: progress,
 		announced: map[string]bool{}, spawned: map[string]bool{},
 		cursors: map[string]*rolloutActivityCursor{}, prefixFailed: map[string]bool{}, missing: map[string]bool{},
@@ -210,6 +211,11 @@ func (a *rolloutActivity) poll() {
 		}
 	}
 	files, ambiguous := a.files, a.ambiguous
+	for id := range announced {
+		if !spawned[id] && a.known[id].ID != "" && !a.provedKnown[id] {
+			a.contentMissing(id) // Metadata-linked history alone does not prove ownership.
+		}
+	}
 	for id := range ambiguous {
 		if id == rootID || spawned[id] || a.cursors[id] != nil {
 			a.contentMissing(id) // A second path invalidates even an earlier live selection.
@@ -237,8 +243,7 @@ func (a *rolloutActivity) poll() {
 			if meta.ParentID != "" && !selected[meta.ParentID] || meta.ParentID == "" && meta.SessionID != rootID {
 				continue
 			}
-			_, wasKnown := a.known[id]
-			if !wasKnown && !spawned[id] {
+			if !a.provedKnown[id] && !spawned[id] {
 				continue
 			}
 			selected[id], changed = true, true
@@ -255,7 +260,7 @@ func (a *rolloutActivity) needsDiscovery(rootID string, announced, spawned map[s
 		return true
 	}
 	for id := range announced {
-		if !spawned[id] && a.known[id].ID == "" {
+		if !spawned[id] && !a.provedKnown[id] {
 			continue // An observation does not require a new helper rollout.
 		}
 		if _, found := a.files[id]; !found || a.ambiguous[id] {
@@ -285,7 +290,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 			return
 		}
 		opened, err := f.Stat()
-		if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
+		if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || !matchingActivityHeader(f, meta) {
 			_ = f.Close()
 			a.contentMissing(meta.ID)
 			return
@@ -323,7 +328,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 		return
 	}
 	opened, err := f.Stat()
-	if err != nil || !os.SameFile(info, opened) {
+	if err != nil || !os.SameFile(info, opened) || !matchingActivityHeader(f, meta) {
 		_ = f.Close()
 		a.contentMissing(meta.ID)
 		return
@@ -378,6 +383,13 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 	if opened.Size() > cursor.offset && (cursor.offset >= maxUsageRolloutBytes || a.scanned >= maxUsageScanBytes) {
 		a.contentMissing(meta.ID)
 	}
+}
+
+// Recheck the header on the descriptor used for content, since discovery and
+// this suffix read can observe different files at the same path.
+func matchingActivityHeader(f *os.File, meta rolloutMeta) bool {
+	header, err := readRolloutHeaderFrom(io.NopCloser(io.NewSectionReader(f, 0, maxUsageHeaderBytes+1)), meta.path)
+	return err == nil && sameRolloutMeta(header, meta)
 }
 
 func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, line []byte, progressed *bool) {
@@ -778,7 +790,7 @@ func (a *rolloutActivity) rolloutObserve(meta rolloutMeta, turnID, id string) {
 	a.mu.Lock()
 	spawned := a.spawned[id]
 	a.mu.Unlock()
-	if !spawned && a.known[id].ID == "" || a.before[meta.ID] != nil && turnID == "" {
+	if !spawned && !a.provedKnown[id] || a.before[meta.ID] != nil && turnID == "" {
 		a.contentMissing(meta.ID) // Observation alone cannot prove a new or resumed spawn.
 	}
 	a.child(id, false)

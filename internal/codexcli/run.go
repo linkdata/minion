@@ -206,6 +206,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 
 	s.accounting.begin(ctx, codexHome, s.threadID, started)
+	provedKnown := map[string]bool{}
+	for path, owned := range s.ownedRollouts {
+		if known, ok := s.accounting.known[owned.meta.ID]; ok && known.path == path && sameRolloutMeta(known, owned.meta) {
+			provedKnown[owned.meta.ID] = true
+		}
+	}
 	var activity *rolloutActivity
 	if s.OnEvent != nil || s.OnProgress != nil {
 		var eventMu sync.Mutex
@@ -226,7 +232,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			}
 			emit(event)
 		}
-		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
+		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
 		if s.threadID != "" {
 			activity.root(s.threadID)
 		}
