@@ -22,17 +22,20 @@ import (
 // remains the source of root discussion; rollout cursors supply helper content
 // and progress when the root stream is quiet.
 type rolloutActivity struct {
-	ctx             context.Context
-	home            string
-	started         time.Time
-	known           map[string]rolloutMeta
-	provedKnown     map[string]bool
-	before          map[string]*usageBoundary
-	excluded        map[string]bool
-	emit            func(aicli.StreamEvent)
-	progress        func()
-	progressEvents  map[[sha256.Size]byte]bool
-	progressOrdinal map[string]int64
+	ctx                context.Context
+	home               string
+	started            time.Time
+	known              map[string]rolloutMeta
+	provedKnown        map[string]bool
+	before             map[string]*usageBoundary
+	excluded           map[string]bool
+	emit               func(aicli.StreamEvent)
+	progress           func()
+	stopRun            func()
+	progressEvents     map[[sha256.Size]byte]bool
+	progressOrdinal    map[string]int64
+	progressEventLimit int // Tests lower the cap; zero uses maxUsageRecords.
+	progressLimit      bool
 
 	mu        sync.Mutex // stdout announcements may arrive while a scan runs
 	rootID    string
@@ -781,8 +784,21 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 	_, _ = hash.Write(event.Payload)
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
-	if a.progressEvents[digest] || len(a.progressEvents) >= maxUsageRecords {
-		return // shortcut: Stop at the evidence cap; raise it if real sessions need more helper events.
+	if a.progressEvents[digest] {
+		return
+	}
+	limit := maxUsageRecords
+	if a.progressEventLimit > 0 {
+		limit = min(limit, a.progressEventLimit)
+	}
+	if len(a.progressEvents) >= limit {
+		if !a.progressLimit {
+			a.progressLimit = true
+			if a.stopRun != nil {
+				a.stopRun()
+			}
+		}
+		return
 	}
 	if a.progressEvents == nil {
 		a.progressEvents = make(map[[sha256.Size]byte]bool)

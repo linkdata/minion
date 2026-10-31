@@ -215,6 +215,24 @@ func TestRolloutActivityOrdinalProgressDoesNotFillIdentityCap(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityUnorderedIdentityCapStopsRun(t *testing.T) {
+	stops := 0
+	activity := rolloutActivity{progress: func() {}, stopRun: func() { stops++ }, progressEventLimit: 1}
+	progressed := false
+	first := rolloutEvent{Type: "event_msg", Payload: []byte(`{"chunk":"first"}`)}
+	second := rolloutEvent{Type: "event_msg", Payload: []byte(`{"chunk":"second"}`)}
+	activity.newProgress("helper", first, 0, &progressed)
+	if !progressed || activity.progressLimit || stops != 0 {
+		t.Fatalf("first unordered event: progressed=%t limit=%t stops=%d", progressed, activity.progressLimit, stops)
+	}
+	progressed = false
+	activity.newProgress("helper", second, 0, &progressed)
+	activity.newProgress("helper", second, 0, &progressed)
+	if progressed || !activity.progressLimit || stops != 1 {
+		t.Fatalf("overflowed unordered events: progressed=%t limit=%t stops=%d", progressed, activity.progressLimit, stops)
+	}
+}
+
 func TestRolloutActivityProgressCountsDistinctIdenticalHelperMessages(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))

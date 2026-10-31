@@ -250,6 +250,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			emit(event)
 		}
 		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
+		activity.stopRun = cancelRun
 		if s.threadID != "" {
 			activity.root(s.threadID)
 		}
@@ -345,6 +346,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("codex exec: %w", errors.Join(err, runErr))
+	}
+	if activity != nil && activity.progressLimit {
+		result.UsageComplete = false
+		return result, fmt.Errorf("codex exec: %w: rollout progress identity limit reached", aicli.ErrOutputLimit)
 	}
 	if output.stopErr != nil {
 		return result, fmt.Errorf("codex exec: %w", errors.Join(output.stopErr, runErr))
