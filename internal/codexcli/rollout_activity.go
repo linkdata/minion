@@ -658,8 +658,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		a.contentMissing(meta.ID)
 		return
 	}
-	if meta.ID != rootID && payload.Type == "item_completed" && !uncertainOrdinal &&
-		a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) {
+	if meta.ID != rootID && payload.Type == "item_completed" && !uncertainOrdinal && proven {
 		switch item.Type {
 		case "Plan", "UserMessage", "AgentMessage":
 			if item.Text != "" || len(item.Content) != 0 {

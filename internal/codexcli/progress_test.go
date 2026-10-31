@@ -330,6 +330,11 @@ func TestRolloutActivityFreshHelperResponseRequiresProvenTurn(t *testing.T) {
 	if *progress != 4 {
 		t.Fatalf("empty helper output renewed progress: %d", *progress)
 	}
+	appendUsageEvents(t, child, `{"ordinal":24,"type":"event_msg","payload":{"type":"item_completed","turn_id":"usage-turn","item":{"type":"CommandExecution","id":"finished-tool","aggregated_output":"PASS"}}}`)
+	activity.poll()
+	if *progress != 5 {
+		t.Fatalf("proved helper completion without thread ID did not renew progress: %d", *progress)
+	}
 }
 
 func TestRolloutActivityUnattributedResumeContentDoesNotRenewProgress(t *testing.T) {
