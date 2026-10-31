@@ -736,6 +736,83 @@ func TestProgressRunLessListDoesNotBindFinishedNativeRun(t *testing.T) {
 	}
 }
 
+func TestProgressFinishedNativeRunDoesNotReplayStart(t *testing.T) {
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	for _, stale := range []struct {
+		name, line string
+	}{
+		{"task started", `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`},
+		{"task list", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`},
+	} {
+		for _, resume := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/resume=%t", stale.name, resume), func(t *testing.T) {
+				got := 0
+				first := jsonlOutput{onProgress: func() { got++ }}
+				writeChunks(t, &first, finished+"\n"+successfulResult+"\n")
+				if first.err != nil || got != 1 || !first.completed {
+					t.Fatalf("native finish and result: progress=%d completed=%t error=%v", got, first.completed, first.err)
+				}
+				current := &first
+				if resume {
+					current = &jsonlOutput{onProgress: first.onProgress, progressSeen: first.progressSeen,
+						progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+				}
+				writeChunks(t, current, stale.line+"\n")
+				if current.err != nil || got != 1 || current.pending != 0 || !resume && (!current.completed || current.result.Answer != "final answer") {
+					t.Fatalf("finished run replayed state: progress=%d pending=%d completed=%t answer=%q error=%v", got, current.pending, current.completed, current.result.Answer, current.err)
+				}
+				writeChunks(t, current, empty+"\n")
+				if current.err != nil || got != 1 {
+					t.Fatalf("finished run replayed start: progress=%d error=%v", got, current.err)
+				}
+				writeChunks(t, current, `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`+"\n"+
+					`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`+"\n")
+				if current.err != nil || got != 3 {
+					t.Fatalf("distinct run lost progress: progress=%d error=%v", got, current.err)
+				}
+			})
+		}
+	}
+}
+
+func TestProgressStaleFinishedRunListPreservesOtherActiveRun(t *testing.T) {
+	got := 0
+	o := jsonlOutput{onProgress: func() { got++ }}
+	const stale = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	const active = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-2"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	writeChunks(t, &o, `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`+"\n"+
+		`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`+"\n"+
+		`{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-2"}`+"\n"+active+"\n")
+	if o.err != nil || got != 3 || o.pending != 1 || !o.progressTasks[taskRunKey("helper", "run-2")] {
+		t.Fatalf("second run not active: progress=%d pending=%d tasks=%v error=%v", got, o.pending, o.progressTasks, o.err)
+	}
+	writeChunks(t, &o, stale+"\n"+stale+"\n")
+	if o.err != nil || got != 3 || o.pending != 1 || !o.progressTasks[taskRunKey("helper", "run-2")] || o.progressSeen["task_finish:"+taskRunKey("helper", "run-2")] {
+		t.Fatalf("stale list finished active run: progress=%d pending=%d tasks=%v error=%v", got, o.pending, o.progressTasks, o.err)
+	}
+	writeChunks(t, &o, `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-2","status":"completed"}`+"\n"+empty+"\n")
+	if o.err != nil || got != 4 || o.pending != 0 {
+		t.Fatalf("second run finish: progress=%d pending=%d error=%v", got, o.pending, o.err)
+	}
+}
+
+func TestFinishedRunListWithoutProgressCallbackKeepsResult(t *testing.T) {
+	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const stale = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
+	first := jsonlOutput{onProgress: func() {}}
+	writeChunks(t, &first, finished+"\n")
+	if first.err != nil || !first.progressSeen["task_finish:"+taskRunKey("helper", "run-1")] {
+		t.Fatalf("missing finished-run history: error=%v", first.err)
+	}
+	resumed := jsonlOutput{progressSeen: first.progressSeen, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &resumed, successfulResult+"\n"+stale+"\n")
+	if resumed.err != nil || resumed.pending != 0 || !resumed.completed || resumed.result.Answer != "final answer" {
+		t.Fatalf("stale list invalidated result without callback: pending=%d completed=%t answer=%q error=%v", resumed.pending, resumed.completed, resumed.result.Answer, resumed.err)
+	}
+}
+
 func TestProgressMixedRunLessTaskSignalsShareNativeRun(t *testing.T) {
 	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
 	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`

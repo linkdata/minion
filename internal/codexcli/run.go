@@ -674,6 +674,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		AggregatedOutput string          `json:"aggregated_output"`
 		Output           json.RawMessage `json:"output"`
 		Result           json.RawMessage `json:"result"`
+		Results          json.RawMessage `json:"results"`
 		Changes          json.RawMessage `json:"changes"`
 	}
 	if json.Unmarshal(selected.Item, &visible) != nil {

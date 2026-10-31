@@ -138,6 +138,28 @@ func TestJSONLOutputMetadataOnlyUpdatesDoNotRenewProgress(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputWebSearchResultsRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"search","type":"web_search","query":"example"}}`, 1},
+		{`{"type":"item.updated","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"one"}]}}`, 2},
+		{`{"type":"item.updated","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"one"}],"elapsed_time_ms":100}}`, 2},
+		{`{"type":"item.updated","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"two"}]}}`, 3},
+		{`{"type":"item.completed","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"two"}]}}`, 4},
+		{`{"type":"item.completed","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"three"}]}}`, 4},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
 func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}
@@ -298,6 +320,117 @@ func TestRolloutActivityCompletedHelperItemMetadataDoesNotRenewProgress(t *testi
 	}
 }
 
+func TestRolloutActivityResponseMetadataDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	response := func(ordinal int, payload string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":%s}`, ordinal, payload)
+	}
+	message := func(id, text string, elapsed int) string {
+		return fmt.Sprintf(`{"type":"message","id":%q,"role":"assistant","content":[{"type":"output_text","text":%q,"annotations":[{"page":%d}],"logprobs":[{"score":%d}]}],"internal_chat_message_metadata_passthrough":{"turn_id":"current"},"elapsed_time_ms":%d}`, id, text, elapsed, elapsed, elapsed)
+	}
+	reasoning := func(summary, hidden string, elapsed int) string {
+		return fmt.Sprintf(`{"type":"reasoning","id":"thought","summary":[{"type":"summary_text","text":%q}],"content":[{"type":"reasoning_text","text":%q}],"internal_chat_message_metadata_passthrough":{"turn_id":"current"},"elapsed_time_ms":%d}`, summary, hidden, elapsed)
+	}
+	toolOutput := func(callID, output string, elapsed int) string {
+		return fmt.Sprintf(`{"type":"function_call_output","call_id":%q,"output":%q,"internal_chat_message_metadata_passthrough":{"turn_id":"current"},"elapsed_time_ms":%d}`, callID, output, elapsed)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		response(9, message("reply", "working", 100)))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first response progress=%d, want 1", *progress)
+	}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{response(10, message("reply", "working", 200)), 1},
+		{response(11, message("reply", "more work", 300)), 2},
+		{response(12, message("next", "more work", 400)), 3},
+		{response(13, reasoning("summary", "private one", 100)), 4},
+		{response(14, reasoning("summary", "private two", 200)), 4},
+		{response(15, reasoning("new summary", "private two", 300)), 5},
+		{response(16, toolOutput("call-1", "PASS", 100)), 6},
+		{response(17, toolOutput("call-1", "PASS", 200)), 6},
+		{response(18, toolOutput("call-1", "MORE", 300)), 7},
+		{response(19, toolOutput("call-2", "MORE", 400)), 8},
+	} {
+		appendUsageEvents(t, child, step.line)
+		activity.poll()
+		if *progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, *progress, step.want)
+		}
+	}
+}
+
+func TestRolloutActivityResponseVisibleContentRenewsProgress(t *testing.T) {
+	for _, test := range []struct {
+		name, first, changed string
+	}{
+		{"image URL", `{"type":"input_image","image_url":"data:image/png;base64,one","detail":"high"}`, `{"type":"input_image","image_url":"data:image/png;base64,two","detail":"high"}`},
+		{"image file ID", `{"type":"input_image","file_id":"image-one"}`, `{"type":"input_image","file_id":"image-two"}`},
+		{"image detail", `{"type":"input_image","file_id":"image-one","detail":"low"}`, `{"type":"input_image","file_id":"image-one","detail":"high"}`},
+		{"audio URL", `{"type":"input_audio","audio_url":"data:audio/wav;base64,one"}`, `{"type":"input_audio","audio_url":"data:audio/wav;base64,two"}`},
+		{"audio file ID", `{"type":"input_audio","file_id":"audio-one"}`, `{"type":"input_audio","file_id":"audio-two"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			response := func(ordinal, elapsed int, content string) string {
+				return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":"message","id":"reply","role":"user","content":[{"type":"input_text","text":"working"},%s],"elapsed_time_ms":%d}}`, ordinal, content, elapsed)
+			}
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, response(9, 100, test.first))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			appendUsageEvents(t, child, response(10, 200, test.first))
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("metadata replay progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, response(11, 300, test.changed))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("changed visible content progress=%d, want 2", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityAgentMessageHiddenContentDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	response := func(ordinal, elapsed int, text, encrypted string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"input_text","text":%q,"elapsed_time_ms":%d},{"type":"encrypted_content","encrypted_content":%q}],"elapsed_time_ms":%d}}`, ordinal, text, elapsed, encrypted, elapsed)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, response(9, 100, "working", "private one"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	for _, step := range []struct {
+		line string
+		want int
+	}{
+		{response(10, 200, "working", "private two"), 1},
+		{response(11, 300, "more work", "private two"), 2},
+	} {
+		appendUsageEvents(t, child, step.line)
+		activity.poll()
+		if *progress != step.want {
+			t.Fatalf("agent message progress=%d, want %d", *progress, step.want)
+		}
+	}
+}
+
 func TestRolloutActivityProgressCountsRepeatedOutputAtDistinctOrdinals(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
@@ -418,7 +551,6 @@ func TestRolloutActivityProvenNativeEventsCountDistinctOrdinals(t *testing.T) {
 		{"agent_message", `,"message":"same work"`},
 		{"agent_reasoning", `,"text":"same work"`},
 		{"agent_reasoning_raw_content", `,"text":"same work"`},
-		{"exec_command_begin", ""},
 	} {
 		t.Run(test.eventType, func(t *testing.T) {
 			home, started := t.TempDir(), time.Now()
@@ -445,6 +577,92 @@ func TestRolloutActivityProvenNativeEventsCountDistinctOrdinals(t *testing.T) {
 			activity.poll()
 			if *progress != 2 {
 				t.Fatalf("replayed ordinal renewed progress: %d", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityToolLifecycleRequiresNewWork(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	toolEnd := func(ordinal int, callID, result string, elapsed int) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"mcp_tool_call_end","thread_id":"child","turn_id":"current","call_id":%q,"result":%q,"elapsed_time_ms":%d}}`, ordinal, callID, result, elapsed)
+	}
+	commandBegin := func(ordinal int, command string) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"exec_command_begin","thread_id":"child","turn_id":"current","command":%q}}`, ordinal, command)
+	}
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		toolEnd(9, "call-1", "PASS", 100))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first tool end progress=%d, want 1", *progress)
+	}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{toolEnd(10, "call-1", "PASS", 100), 1},
+		{toolEnd(11, "call-1", "PASS", 200), 1},
+		{toolEnd(12, "call-2", "PASS", 100), 2},
+		{toolEnd(13, "call-2", "MORE", 200), 3},
+		{commandBegin(14, "go test"), 4},
+		{commandBegin(15, "go test"), 4},
+		{commandBegin(16, "go vet"), 5},
+	} {
+		appendUsageEvents(t, child, step.line)
+		activity.poll()
+		if *progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, *progress, step.want)
+		}
+	}
+}
+
+func TestRolloutActivityToolLifecycleNativeOutputRenewsProgress(t *testing.T) {
+	for _, test := range []struct {
+		name, eventType, first, changed string
+	}{
+		{"MCP invocation", "mcp_tool_call_end", `"invocation":{"server":"repo","tool":"search","arguments":{"query":"one"}}`, `"invocation":{"server":"repo","tool":"search","arguments":{"query":"two"}}`},
+		{"exec stdout", "exec_command_end", `"stdout":"one"`, `"stdout":"two"`},
+		{"exec stderr", "exec_command_end", `"stderr":"one"`, `"stderr":"two"`},
+		{"exec aggregate", "exec_command_end", `"aggregated_output":"one"`, `"aggregated_output":"two"`},
+		{"exec formatted output", "exec_command_end", `"formatted_output":"one"`, `"formatted_output":"two"`},
+		{"patch success", "patch_apply_end", `"success":false`, `"success":true`},
+		{"web action", "web_search_end", `"action":{"search_query":"one"}`, `"action":{"search_query":"two"}`},
+		{"image revised prompt", "image_generation_end", `"revised_prompt":"one"`, `"revised_prompt":"two"`},
+		{"image failure", "image_generation_end", `"failure":{"type":"usage_limit_exceeded","limit_id":"one","resets_at":100}`, `"failure":{"type":"usage_limit_exceeded","limit_id":"two","resets_at":200}`},
+		{"image saved path", "image_generation_end", `"saved_path":"one.png"`, `"saved_path":"two.png"`},
+		{"image result", "image_generation_end", `"image":{"type":"inline","result":"one"}`, `"image":{"type":"inline","result":"two"}`},
+		{"malformed optional failure", "image_generation_end", `"failure":"malformed"`, `"failure":"malformed","status":"completed"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			toolEnd := func(ordinal, elapsed int, content string) string {
+				return fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":%q,"thread_id":"child","turn_id":"current","call_id":"call-1",%s,"elapsed_time_ms":%d}}`, ordinal, test.eventType, content, elapsed)
+			}
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, toolEnd(9, 100, test.first))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			replayed := test.first
+			if test.name == "image failure" {
+				replayed = strings.Replace(test.first, `"resets_at":100`, `"resets_at":200`, 1)
+			}
+			appendUsageEvents(t, child, toolEnd(10, 200, replayed))
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("metadata replay progress=%d, want 1", *progress)
+			}
+			appendUsageEvents(t, child, toolEnd(11, 300, test.changed))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("changed native output progress=%d, want 2", *progress)
 			}
 		})
 	}

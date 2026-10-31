@@ -343,16 +343,18 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.pending = 0
 		active := make(map[string]bool)
 		seenRunless := make(map[string]bool)
+		staleFinishedIDs := make(map[string]bool)
 		for _, task := range tasks {
 			if !task.Ambient {
 				o.pending++
 				if task.TaskID != "" {
 					runID := task.RunID
+					if runID != "" && o.progressSeen["task_finish:"+taskRunKey(task.TaskID, runID)] {
+						staleFinishedIDs[task.TaskID] = true
+						o.pending-- // A replayed snapshot cannot reopen a finished native run.
+						continue
+					}
 					if runID != "" && o.onProgress != nil {
-						if o.progressTasks[task.TaskID] && o.progressSeen["task_finish:"+taskRunKey(task.TaskID, runID)] {
-							active[task.TaskID] = true // A finished native run cannot identify this active run-less task.
-							continue
-						}
 						hadNative := o.progressSeen["task_native:"+task.TaskID]
 						if !o.bindRunLessTaskStart(task.TaskID, runID) {
 							o.bindRunLessTaskCompletion(task.TaskID, runID, hadNative)
@@ -402,6 +404,11 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			id, _, _ := strings.Cut(prior, "\x00")
 			if seenRunless[id] && o.progressSeen["task_ambiguous:"+id] {
 				delete(o.progressTasks, prior) // The run-less list cannot prove these runs finished.
+				continue
+			}
+			if staleFinishedIDs[id] && (prior == id || !o.progressSeen["task_finish:"+prior]) && !active[prior] {
+				active[prior] = true // A stale entry cannot prove another run with this task ID finished.
+				o.pending++
 			}
 		}
 		if o.err != nil {
@@ -1152,6 +1159,9 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status string) {
 	switch status {
 	case "started":
 		key := taskRunKey(id, runID)
+		if runID != "" && o.progressSeen["task_finish:"+key] {
+			return // A delayed start for an already finished native run is replay.
+		}
 		if runID != "" && o.runlessListRuns[id] != "" && o.runlessListRuns[id] != runID {
 			o.markAmbiguousRunless(id)
 		}

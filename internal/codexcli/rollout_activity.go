@@ -471,7 +471,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		fresh, turnID := a.consumeResponse(meta, event.Payload, uncertainOrdinal)
 		if fresh && !uncertainOrdinal &&
 			(meta.HistoryStart != nil || a.before[meta.ID] != nil || cursor.provedTurns[turnID]) {
-			a.newProgress(meta.ID, event, 0, progressed)
+			a.newResponseProgress(meta.ID, event.Payload, progressed)
 		}
 		return
 	}
@@ -569,7 +569,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		case "patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
 			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",
 			"exec_command_begin", "exec_command_end":
-			a.newProgress(meta.ID, event, event.Ordinal, progressed)
+			a.newToolProgress(meta.ID, event.Payload, progressed)
 		case "user_message", "agent_message":
 			if payload.Message != "" {
 				a.newProgress(meta.ID, event, event.Ordinal, progressed)
@@ -798,6 +798,154 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 		return
 	}
 	a.newProgress(id, rolloutEvent{Type: "item_completed", Payload: snapshot}, 0, progressed)
+}
+
+func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progressed *bool) {
+	// A call ID proves a new tool call; identical ID-less events cannot prove one.
+	var tool struct {
+		Type                  string          `json:"type"`
+		TurnID                string          `json:"turn_id"`
+		CallID                string          `json:"call_id"`
+		ID                    string          `json:"id"`
+		Name                  json.RawMessage `json:"name"`
+		Server                json.RawMessage `json:"server"`
+		Tool                  json.RawMessage `json:"tool"`
+		Invocation            json.RawMessage `json:"invocation"`
+		Status                json.RawMessage `json:"status"`
+		Command               json.RawMessage `json:"command"`
+		CWD                   json.RawMessage `json:"cwd"`
+		ParsedCmd             json.RawMessage `json:"parsed_cmd"`
+		Source                json.RawMessage `json:"source"`
+		InteractionInput      json.RawMessage `json:"interaction_input"`
+		Arguments             json.RawMessage `json:"arguments"`
+		Input                 json.RawMessage `json:"input"`
+		Output                json.RawMessage `json:"output"`
+		Stdout                json.RawMessage `json:"stdout"`
+		Stderr                json.RawMessage `json:"stderr"`
+		AggregatedOutput      json.RawMessage `json:"aggregated_output"`
+		FormattedOutput       json.RawMessage `json:"formatted_output"`
+		Result                json.RawMessage `json:"result"`
+		Results               json.RawMessage `json:"results"`
+		Response              json.RawMessage `json:"response"`
+		Changes               json.RawMessage `json:"changes"`
+		Success               json.RawMessage `json:"success"`
+		ExitCode              json.RawMessage `json:"exit_code"`
+		Query                 json.RawMessage `json:"query"`
+		Action                json.RawMessage `json:"action"`
+		Prompt                json.RawMessage `json:"prompt"`
+		RevisedPrompt         json.RawMessage `json:"revised_prompt"`
+		Path                  json.RawMessage `json:"path"`
+		SavedPath             json.RawMessage `json:"saved_path"`
+		Image                 json.RawMessage `json:"image"`
+		InputImages           json.RawMessage `json:"input_images"`
+		TransparentBackground json.RawMessage `json:"transparent_background"`
+		GenerationID          json.RawMessage `json:"generation_id"`
+		Failure               json.RawMessage `json:"failure"`
+		Error                 json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(raw, &tool) != nil {
+		return
+	}
+	var invocation *struct {
+		Server    string          `json:"server"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(tool.Invocation, &invocation) == nil && invocation != nil {
+		tool.Invocation, _ = json.Marshal(invocation)
+	} else {
+		tool.Invocation = nil
+	}
+	var failure *struct {
+		Type    string `json:"type"`
+		LimitID string `json:"limit_id"`
+	}
+	if json.Unmarshal(tool.Failure, &failure) == nil && failure != nil {
+		tool.Failure, _ = json.Marshal(failure)
+	} else {
+		tool.Failure = nil
+	}
+	snapshot, err := json.Marshal(tool)
+	if err != nil {
+		return
+	}
+	a.newProgress(id, rolloutEvent{Type: "tool_event", Payload: snapshot}, 0, progressed)
+}
+
+func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, progressed *bool) {
+	var response struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		Role      string `json:"role"`
+		Author    string `json:"author"`
+		Recipient string `json:"recipient"`
+		CallID    string `json:"call_id"`
+		Metadata  struct {
+			TurnID string `json:"turn_id"`
+		} `json:"internal_chat_message_metadata_passthrough"`
+		Name      json.RawMessage `json:"name"`
+		Content   json.RawMessage `json:"content"`
+		Summary   json.RawMessage `json:"summary"`
+		Command   json.RawMessage `json:"command"`
+		Arguments json.RawMessage `json:"arguments"`
+		Input     json.RawMessage `json:"input"`
+		Output    json.RawMessage `json:"output"`
+		Result    json.RawMessage `json:"result"`
+		Changes   json.RawMessage `json:"changes"`
+		Query     json.RawMessage `json:"query"`
+		Results   json.RawMessage `json:"results"`
+		Action    json.RawMessage `json:"action"`
+		Tools     json.RawMessage `json:"tools"`
+		Images    json.RawMessage `json:"images"`
+		Path      json.RawMessage `json:"path"`
+		Prompt    json.RawMessage `json:"prompt"`
+		Status    json.RawMessage `json:"status"`
+		ExitCode  json.RawMessage `json:"exit_code"`
+	}
+	if json.Unmarshal(raw, &response) != nil {
+		return
+	}
+	switch response.Type {
+	case "message":
+		// shortcut: Unknown future ContentItem fields are ignored; extend this when Codex adds visible content.
+		var content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL string `json:"image_url"`
+			AudioURL string `json:"audio_url"`
+			FileID   string `json:"file_id"`
+			Detail   string `json:"detail"`
+		}
+		if json.Unmarshal(response.Content, &content) != nil {
+			return
+		}
+		response.Content, _ = json.Marshal(content)
+		response.Summary = nil
+	case "agent_message":
+		// AgentMessageInputContent also carries encrypted_content, which never enters progress identity.
+		var content []struct{ Type, Text string }
+		if json.Unmarshal(response.Content, &content) != nil {
+			return
+		}
+		response.Content, _ = json.Marshal(content)
+		response.Summary = nil
+	case "reasoning":
+		response.Content = nil // Never hash raw reasoning.
+		if len(response.Summary) != 0 {
+			var summary []struct{ Type, Text string }
+			if json.Unmarshal(response.Summary, &summary) != nil {
+				return
+			}
+			response.Summary, _ = json.Marshal(summary)
+		}
+	default:
+		response.Summary = nil
+	}
+	snapshot, err := json.Marshal(response)
+	if err != nil {
+		return
+	}
+	a.newProgress(id, rolloutEvent{Type: "response_item", Payload: snapshot}, 0, progressed)
 }
 
 func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int64, progressed *bool) {

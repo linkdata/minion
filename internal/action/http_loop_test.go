@@ -233,6 +233,147 @@ func TestRunHTTPLoopContinuesAfterAcknowledgedWatchInactivity(t *testing.T) {
 	})
 }
 
+func TestRunHTTPLoopContinuesAfterAcknowledgedModelInactivity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		jobs := [2]Job{testJob(command.Comment), testJob(command.Comment)}
+		jobs[1].Identity.JobID, jobs[1].Identity.AttemptID = "second-job", "second-attempt"
+		for i := range jobs {
+			jobs[i].InactivityTimeout = 5 * time.Second
+		}
+		ctx, cancel := context.WithCancelCause(t.Context())
+		defer cancel(context.Canceled)
+		watchAdmitted := make(chan string, len(jobs))
+		modelStarted := make(chan int, len(jobs))
+		modelStopped := make(chan error, len(jobs))
+		outcomes := make(chan httpOutcome, len(jobs))
+		var pulls, acknowledged, watchReads, models atomic.Int32
+		response := func(value any) (*http.Response, error) {
+			data, err := httpEncode(value, httpJobBytes)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				ContentLength: int64(len(data)), Body: io.NopCloser(bytes.NewReader(data))}, nil
+		}
+		client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/next":
+				n := int(pulls.Add(1))
+				if n > len(jobs) || n == 2 && acknowledged.Load() != 1 {
+					return nil, errors.New("assignment pulled before prior outcome acknowledgement")
+				}
+				return response(httpAssignment{Job: jobs[n-1], StopGrace: httpControlTimeout})
+			case "/cancel":
+				var binding httpBinding
+				if err := httpDecode(r.Body, httpControlBytes, &binding); err != nil {
+					return nil, err
+				}
+				watchAdmitted <- binding.Identity.JobID
+				var body io.ReadCloser = httpClientPipeBody{ReadCloser: io.NopCloser(bytes.NewReader(nil)),
+					trigger: r.Context().Done(), reads: &watchReads}
+				if binding.Identity.JobID == jobs[1].Identity.JobID {
+					body = httpClientCancelOnCloseBody{ReadCloser: body, cancel: cancel, cause: context.Canceled}
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: body}, nil
+			case "/before", "/after":
+				var call httpCall
+				if err := httpDecode(r.Body, httpControlBytes, &call); err != nil {
+					return nil, err
+				}
+				return response(httpAcknowledgement{httpBinding: httpBinding{Version: call.Checkpoint.Version,
+					Identity: call.Checkpoint.Identity, SourceRef: call.Checkpoint.SourceRef},
+					Kind: strings.TrimPrefix(r.URL.Path, "/"), Sequence: call.Sequence})
+			case "/status":
+				var observation httpObservation
+				if err := httpDecode(r.Body, httpControlBytes, &observation); err != nil {
+					return nil, err
+				}
+				return response(httpAcknowledgement{httpBinding: httpBinding{Version: observation.Status.Version,
+					Identity: observation.Status.Identity, SourceRef: observation.Status.SourceRef},
+					Kind: "status", Sequence: observation.Status.Sequence, LogSequence: observation.Status.LogSequence})
+			case "/outcome":
+				var outcome httpOutcome
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					return nil, err
+				}
+				outcomes <- outcome
+				n := int(acknowledged.Add(1))
+				if n > len(jobs) {
+					return nil, errors.New("unexpected third outcome")
+				}
+				ack, err := response(httpAcknowledgement{httpBinding: httpJobBinding(jobs[n-1]), Kind: "outcome", Sequence: outcome.Sequence})
+				if err != nil {
+					return nil, err
+				}
+				return ack, nil
+			default:
+				return nil, errors.New("unexpected HTTP request")
+			}
+		})}
+		workRoot := t.TempDir()
+		done := make(chan error, 1)
+		go func() {
+			done <- RunHTTPLoop(ctx, client, "http://minion", jobs[0].Identity.ExecutorID,
+				&Runner{WorkRoot: workRoot, runModel: func(ctx context.Context, _ modelRun) (aicli.Result, error) {
+					modelStarted <- int(models.Add(1))
+					<-ctx.Done()
+					modelStopped <- context.Cause(ctx)
+					return aicli.Result{}, ctx.Err()
+				}})
+		}()
+		for i, job := range jobs {
+			select {
+			case got := <-watchAdmitted:
+				if got != job.Identity.JobID {
+					t.Fatalf("watch assignment = %q, want %q", got, job.Identity.JobID)
+				}
+			case err := <-done:
+				t.Fatalf("worker ended before %s watch admission: %v", job.Identity.JobID, err)
+			}
+			select {
+			case got := <-modelStarted:
+				if got != i+1 {
+					t.Fatalf("model call = %d, want %d", got, i+1)
+				}
+			case err := <-done:
+				t.Fatalf("worker ended before %s model call: %v", job.Identity.JobID, err)
+			}
+			synctest.Wait()
+			if watchReads.Load() != int32(i) {
+				t.Fatalf("watch body completed before model inactivity: reads=%d", watchReads.Load())
+			}
+			time.Sleep(job.InactivityTimeout)
+			synctest.Wait()
+			select {
+			case cause := <-modelStopped:
+				if !errors.Is(cause, errExecutorInactivity) || !errors.Is(cause, monitor.ErrTerminalJob) || errors.Is(cause, context.DeadlineExceeded) {
+					t.Fatalf("model stopped for wrong cause: %v", cause)
+				}
+			default:
+				t.Fatal("idle model did not stop at inactivity deadline")
+			}
+		}
+		select {
+		case err := <-done:
+			if err != nil || pulls.Load() != int32(len(jobs)) || acknowledged.Load() != int32(len(jobs)) ||
+				models.Load() != int32(len(jobs)) || watchReads.Load() != int32(len(jobs)) {
+				t.Fatalf("worker stopped before two acknowledged model timeouts: pulls=%d ACKs=%d models=%d watch reads=%d error=%v",
+					pulls.Load(), acknowledged.Load(), models.Load(), watchReads.Load(), err)
+			}
+		default:
+			t.Fatal("worker did not stop after the second acknowledged outcome")
+		}
+		for _, job := range jobs {
+			outcome := <-outcomes
+			if outcome.Result.Identity != job.Identity || outcome.Failure == nil || !outcome.Failure.Terminal ||
+				outcome.Failure.Deadline || outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown ||
+				len(outcome.Result.Calls) != 1 || outcome.Result.Answer != "" {
+				t.Fatalf("wrong acknowledged model inactivity outcome for %s: %+v", job.Identity.JobID, outcome)
+			}
+		}
+	})
+}
+
 func TestRunHTTPLoopStopsAfterWatchAdmissionFailureWithOutcomeACK(t *testing.T) {
 	job := testJob(command.Comment)
 	binding := httpJobBinding(job)
