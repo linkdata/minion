@@ -330,7 +330,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 		o.startFailureGrace()
 	}
-	if e.Type == "system" && e.Subtype == "background_tasks_changed" && o.acceptsSession(e.SessionID) {
+	if e.Type == "system" && e.Subtype == "background_tasks_changed" && !e.Ambient && o.acceptsSession(e.SessionID) {
 		var tasks []struct {
 			TaskID  string `json:"task_id"`
 			RunID   string `json:"run_id"`
@@ -739,7 +739,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 // result-only usage, result waiting, or repeated snapshots. The callback is
 // separate from transcript capture and sends no text.
 func (o *jsonlOutput) recordProgress(e event) {
-	if !o.acceptsSession(e.SessionID) {
+	if e.Ambient || !o.acceptsSession(e.SessionID) {
 		return
 	}
 	if e.Type == "stream_event" {
@@ -794,9 +794,6 @@ func (o *jsonlOutput) recordProgress(e event) {
 			}
 		}
 	case "system":
-		if e.Ambient {
-			return
-		}
 		switch e.Subtype {
 		case "task_started":
 			o.recordTaskProgress(e.TaskID, e.RunID, "started")

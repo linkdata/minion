@@ -216,6 +216,47 @@ func TestProgressFollowsFreshExecutionEvents(t *testing.T) {
 	}
 }
 
+func TestProgressIgnoresAmbientFrames(t *testing.T) {
+	var got int
+	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"assistant","session_id":"native-id","ambient":true,"message":{"id":"ambient-assistant","content":[{"type":"text","text":"cleanup"}]}}`, 0},
+		{`{"type":"user","session_id":"native-id","ambient":true,"message":{"content":[{"type":"tool_result","tool_use_id":"ambient-tool","content":"done"}]}}`, 0},
+		{`{"type":"stream_event","session_id":"native-id","ambient":true,"event":{"type":"message_start","message":{"id":"ambient-stream"}}}`, 0},
+		{`{"type":"stream_event","session_id":"native-id","ambient":true,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cleanup"}}}`, 0},
+		{`{"type":"stream_event","session_id":"native-id","ambient":true,"event":{"type":"message_stop"}}`, 0},
+		{`{"type":"system","subtype":"background_tasks_changed","session_id":"native-id","ambient":true,"tasks":[{"task_id":"ambient-list"}]}`, 0},
+		{`{"type":"assistant","session_id":"native-id","message":{"id":"ambient-assistant","content":[{"type":"text","text":"current work"}]}}`, 1},
+		{`{"type":"user","session_id":"native-id","message":{"content":[{"type":"tool_result","tool_use_id":"ambient-tool","content":"current result"}]}}`, 2},
+		{`{"type":"stream_event","session_id":"native-id","event":{"type":"message_start","message":{"id":"ambient-stream"}}}`, 2},
+		{`{"type":"stream_event","session_id":"native-id","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"current work"}}}`, 3},
+		{`{"type":"system","subtype":"background_tasks_changed","session_id":"native-id","tasks":[{"task_id":"ambient-list"}]}`, 4},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, o.err)
+		}
+	}
+}
+
+func TestAmbientStreamStartDoesNotReopenCompletedResult(t *testing.T) {
+	o := jsonlOutput{sessionID: "native-id", completed: true, results: 1}
+	o.result.Answer = "done"
+	const ambient = `{"type":"stream_event","session_id":"native-id","ambient":true,"event":{"type":"message_start","message":{"id":"cleanup"}}}`
+	writeChunks(t, &o, ambient+"\n")
+	if o.err != nil || !o.completed || o.result.Answer != "done" {
+		t.Fatalf("ambient stream reopened result: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+	}
+	const current = `{"type":"stream_event","session_id":"native-id","event":{"type":"message_start","message":{"id":"next-turn"}}}`
+	writeChunks(t, &o, current+"\n")
+	if o.err != nil || o.completed || o.result.Answer != "" {
+		t.Fatalf("current stream did not reopen result: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+	}
+}
+
 func TestProgressThinkingTokensFrames(t *testing.T) {
 	var got int
 	first := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}

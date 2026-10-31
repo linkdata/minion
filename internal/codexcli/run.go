@@ -638,8 +638,8 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 	}
 }
 
-// A JSONL item snapshot can be repeated without any new work. Only changed
-// root output or tool lifecycle events renew the executor's inactivity timer.
+// A JSONL item snapshot can be repeated without any new work. Changed root
+// output, completed reasoning, and tool lifecycle renew the inactivity timer.
 func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if o.onProgress == nil || o.threadID == "" || event.Item == nil ||
 		(event.ThreadID != "" && event.ThreadID != o.threadID) {
@@ -649,7 +649,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	tool := codexToolItem(item.Type) && item.Type != "error" &&
 		!(item.Type == "collab_tool_call" && (item.Tool == "wait" || item.Tool == "close_agent"))
 	output := (item.Type == "agent_message" || item.Type == "reasoning") && item.Text != ""
-	if !tool && !output {
+	if !tool && !output && !(item.Type == "reasoning" && event.Type == "item.completed") {
 		return
 	}
 	if len(item.ID) > maxItemIDBytes {

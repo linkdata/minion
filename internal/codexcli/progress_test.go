@@ -25,6 +25,49 @@ func TestJSONLOutputProgressRejectsOversizedCompletedItemID(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputCompletedHiddenReasoningRenewsProgressOnce(t *testing.T) {
+	progress := 0
+	var events []aicli.StreamEvent
+	output := jsonlOutput{
+		onEvent:    func(event aicli.StreamEvent) { events = append(events, event) },
+		onProgress: func() { progress++ },
+	}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"reason","type":"reasoning","content":"hidden one"}}`, 0},
+		{`{"type":"item.updated","item":{"id":"reason","type":"reasoning","content":"hidden one"}}`, 0},
+		{`{"type":"item.completed","item":{"id":"reason","type":"reasoning","content":"hidden one"}}`, 1},
+		{`{"type":"item.completed","item":{"id":"reason","type":"reasoning","content":"hidden replay"}}`, 1},
+		{`{"type":"item.completed","item":{"id":"next","type":"reasoning","content":"hidden one"}}`, 2},
+		{`{"type":"item.completed","item":{"type":"reasoning","content":"legacy one"}}`, 3},
+		{`{"type":"item.completed","item":{"type":"reasoning","content":"legacy one","elapsed_time_ms":100}}`, 3},
+		{`{"type":"item.completed","item":{"type":"reasoning","content":"legacy two"}}`, 3},
+		{`{"type":"turn.completed"}`, 3},
+		{`{"type":"item.completed","item":{"id":"late","type":"reasoning","content":"hidden late"}}`, 3},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, progress, step.want)
+		}
+	}
+	if len(output.progressItems) != 3 {
+		t.Fatalf("hidden reasoning changed progress identities: %d", len(output.progressItems))
+	}
+	for key := range output.progressItems {
+		if strings.Contains(key, "hidden") || strings.Contains(key, "legacy one") || strings.Contains(key, "legacy two") {
+			t.Fatal("hidden reasoning entered a progress identity")
+		}
+	}
+	for _, event := range events {
+		if strings.Contains(event.Text, "hidden") || strings.Contains(event.Text, "legacy") {
+			t.Fatal("hidden reasoning entered provider discussion")
+		}
+	}
+}
+
 func TestJSONLOutputProgressRequiresNewRootWork(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}
