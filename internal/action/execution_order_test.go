@@ -252,6 +252,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		}
 		lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
 		seen := make(map[string]map[string]attemptRecord)
+		covered := false
 		var lastSequence uint64
 		for _, line := range lines {
 			var saved attemptRecord
@@ -262,13 +263,22 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 				t.Fatalf("attempt record sequence %d after %d", saved.Sequence, lastSequence)
 			}
 			lastSequence = saved.Sequence
+			if saved.Kind == attemptRecordCoverage {
+				covered = true
+			}
 			if saved.Call != "" {
 				ordinal, err := strconv.Atoi(saved.Call)
 				observedAt, timeErr := time.Parse(time.RFC3339Nano, saved.ObservedAt)
 				if err != nil || ordinal < 1 || ordinal > len(expected) ||
 					timeErr != nil || observedAt.IsZero() || !strings.HasSuffix(saved.ObservedAt, "Z") ||
-					saved.Provider != expected[ordinal-1].Provider || saved.Model != expected[ordinal-1].Model {
-					t.Fatalf("call record lost selected provider, model or worker observation time: %+v", saved)
+					saved.Provider != expected[ordinal-1].Provider || saved.Model != expected[ordinal-1].Model ||
+					saved.Role != expected[ordinal-1].Role || saved.Round != expected[ordinal-1].Round ||
+					saved.ReviewPhase != expected[ordinal-1].ReviewPhase {
+					t.Fatalf("call record lost its selected binding or worker observation time: %+v", saved)
+				}
+				if saved.EventSource == saved.Provider+".final" &&
+					(saved.Kind != attemptRecordDiscussion || saved.Text != responses[ordinal-1] || saved.Agent != agents[ordinal-1]) {
+					t.Fatalf("received final event lost its private binding: %+v", saved)
 				}
 				if seen[saved.Call] == nil {
 					seen[saved.Call] = make(map[string]attemptRecord)
@@ -279,6 +289,9 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		for index, want := range expected {
 			call := fmt.Sprint(index + 1)
 			input, ok := seen[call][want.Provider+".input.prepared"]
+			if !ok && !covered {
+				continue // The required Result can win before optional Status logs finish.
+			}
 			if !ok || input.Kind != attemptRecordInput || input.Call != call ||
 				input.Role != want.Role || input.Round != want.Round || input.ReviewPhase != want.ReviewPhase {
 				t.Fatalf("call %s lost its prepared input binding: %+v", call, input)
@@ -306,6 +319,9 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 				t.Fatalf("call %s prepared input was not preserved: %+v", call, prepared)
 			}
 			saved, ok := seen[call][want.Provider+".final"]
+			if !ok && !covered {
+				continue
+			}
 			if !ok {
 				t.Fatalf("call %s lost its final provider event", call)
 			}

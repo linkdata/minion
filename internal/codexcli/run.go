@@ -283,6 +283,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		output.gap("pipe_drain_incomplete")
 	}
+	result.Diagnostics = append(result.Diagnostics, output.diagnostics...)
+	if detail := redactCodexTail(&stderr, settings); detail != "" {
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: aicli.DiagnosticText(detail)})
+	} else if strings.TrimSpace(stderr.String()) != "" {
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"})
+	}
 	if s.threadID == "" && output.stopErr == nil {
 		s.threadID = output.threadID
 	}
@@ -483,6 +489,7 @@ type jsonlOutput struct {
 	completed       bool
 	failed          bool
 	failureReason   string
+	diagnostics     []aicli.ProviderDiagnostic
 	pending         map[string]pendingCodexItem
 	pendingBytes    int
 	nextPending     int
@@ -508,6 +515,13 @@ func (o *jsonlOutput) stop(err error) {
 	if o.cancel != nil {
 		o.cancel()
 	}
+}
+
+func (o *jsonlOutput) observe(code, message string) {
+	if o.redact != nil {
+		message = o.redact(message)
+	}
+	o.diagnostics = aicli.AppendNativeDiagnostic(o.diagnostics, code, message)
 }
 
 func (o *jsonlOutput) acceptLine(line []byte) {
@@ -819,7 +833,9 @@ func (o *jsonlOutput) accept(event codexEvent) {
 	case "turn.failed":
 		o.failed = true
 		o.failureReason = eventReason(event)
+		o.observe("turn_failed", o.failureReason)
 	case "error":
+		o.observe("native_error", eventReason(event))
 		if o.failureReason == "" {
 			o.failureReason = eventReason(event)
 		}

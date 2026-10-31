@@ -128,3 +128,97 @@ func TestRunnerDoesNotRecordRefusedBeforeCallAsProviderFailure(t *testing.T) {
 		t.Fatalf("checkpoint refusal was misreported as a provider call: result=%+v records=%+v error=%v", result, saved, err)
 	}
 }
+
+func TestRunnerRecordsNativeDiagnosticsWithoutChangingSuccess(t *testing.T) {
+	const secret = "private-native-key"
+	for _, test := range []struct {
+		name, code string
+		complete   bool
+	}{
+		{"stderr", "stderr_tail", true},
+		{"unrecognized code", "forged_journal_event", false},
+		{"truncated diagnostics", "diagnostics_truncated", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: secret}, eventSink: queue.add,
+				runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					return aicli.Result{Answer: "Done.", Diagnostics: []aicli.ProviderDiagnostic{{Code: test.code, Message: "native warning " + secret}}}, nil
+				}}
+			result, err := runner.Run(t.Context(), testJob(command.Comment))
+			if err != nil || result.Answer != "Done." || len(result.Calls) != 1 || len(result.Diagnostics) != 0 {
+				t.Fatalf("diagnostic changed result: %+v, %v", result, err)
+			}
+			if got := queue.finish(); got != test.complete || len(saved) != 1 {
+				t.Fatalf("coverage=%t records=%+v", got, saved)
+			}
+			if test.code == "forged_journal_event" {
+				if saved[0].Kind != attemptRecordDiscussion || saved[0].EventSource != "codex.content_missing" || saved[0].Text != "" {
+					t.Fatalf("forged source reached journal: %+v", saved[0])
+				}
+			} else if saved[0].Kind != attemptRecordDiagnostic || saved[0].EventSource != "codex."+test.code ||
+				saved[0].Call != "1" || saved[0].Role != roleMain || saved[0].Agent != "" ||
+				!strings.Contains(saved[0].Text, "[redacted]") || strings.Contains(saved[0].Text, secret) {
+				t.Fatalf("call-bound private diagnostic lost: %+v", saved[0])
+			}
+		})
+	}
+}
+
+func TestRunnerRecordsValidIncompleteCriticFeedbackPrivately(t *testing.T) {
+	const feedback = "PRIVATE_UNRESOLVED_COVERAGE: delegated review did not finish."
+	job := withClaudeCritic(testJob(command.Comment))
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			if request.role == roleMain {
+				return aicli.Result{Answer: proposalJSON("Candidate.", "")}, nil
+			}
+			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"` + feedback + `"}`}, nil
+		}}
+	result, err := runner.Run(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "critic review incomplete") || result.Answer != "" ||
+		len(result.Calls) != 2 || result.Calls[1].Approved || result.Calls[1].NoBlockers || !result.Calls[1].HasBlockers || result.Calls[1].ReviewComplete || len(result.Diagnostics) != 0 {
+		t.Fatalf("incomplete review changed verdict or result: %+v, %v", result, err)
+	}
+	if !queue.finish() || len(saved) != 1 || saved[0].Kind != attemptRecordReport || saved[0].Text != feedback ||
+		saved[0].EventSource != "minion.critic.feedback" || saved[0].Call != "2" || saved[0].Role != roleCritic ||
+		saved[0].Round != 1 || saved[0].ReviewPhase != reviewFull || saved[0].Agent != "" {
+		t.Fatalf("incomplete private feedback missing: %+v", saved)
+	}
+}
+
+func TestRunnerDoesNotPromotePartialProviderJSONToCriticFeedback(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	const partial = `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"PRIVATE_PARTIAL"}`
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			if request.role == roleMain {
+				return aicli.Result{Answer: proposalJSON("Candidate.", "")}, nil
+			}
+			return aicli.Result{Answer: partial, Diagnostics: []aicli.ProviderDiagnostic{{Code: "structured_output_observed", Message: partial}}}, errors.New("provider stopped")
+		}}
+	result, err := runner.Run(t.Context(), job)
+	if err == nil || result.Answer != "" || len(result.Calls) != 2 || result.Calls[1].Approved ||
+		result.Calls[1].NoBlockers || result.Calls[1].HasBlockers || result.Calls[1].ReviewComplete {
+		t.Fatalf("partial provider data became a verdict: %+v, %v", result, err)
+	}
+	if queue.finish() || len(saved) != 2 || saved[0].Kind != attemptRecordDiagnostic ||
+		saved[0].EventSource != "claude.structured_output_observed" || saved[0].Text != partial ||
+		saved[1].EventSource != "claude.call.failed" {
+		t.Fatalf("partial provider diagnostic was promoted or lost: %+v", saved)
+	}
+}

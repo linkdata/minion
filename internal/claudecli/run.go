@@ -164,10 +164,16 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		err = fmt.Errorf("%w: %q", err, cmp.Or(aicli.RedactTail(&diagnostics, settings.APIKey), "no further diagnostics"))
 	}
 	output.finish()
+	if ceilingMatched {
+		output.observe("wait_ceiling", "background tasks stopped by Claude's wait ceiling")
+	}
 	if failureTimer != nil {
 		failureTimer.Stop()
 	}
 	result = output.result
+	if detail := aicli.RedactTail(&diagnostics, settings.APIKey); detail != "" {
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: aicli.DiagnosticText(detail)})
+	}
 	s.usageGap = !output.hasCumulative || output.err != nil
 	if output.hasCumulative {
 		s.baseline = output.cumulative
@@ -186,6 +192,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		err = errors.Join(output.err, err)
 	}
 	if err != nil {
+		if output.observedStructured != "" {
+			result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: output.observedStructured})
+		}
 		result.Answer = ""
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false

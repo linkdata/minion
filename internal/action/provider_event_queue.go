@@ -1,6 +1,7 @@
 package action
 
 import (
+	"strings"
 	"sync/atomic"
 )
 
@@ -40,17 +41,22 @@ func (q *providerEventQueue) add(event attemptRecord) {
 		(event.EventSource == event.Provider+".call.failed" || event.EventSource == event.Provider+".call.diagnostic_unavailable")
 	missing := event.Kind == attemptRecordDiscussion && event.Provider != "" &&
 		event.EventSource == event.Provider+".content_missing"
+	diagnosticCode, providerSource := strings.CutPrefix(event.EventSource, event.Provider+".")
+	providerDiagnostic := event.Kind == attemptRecordDiagnostic && event.Call != "" && providerSource &&
+		validProviderDiagnosticCode(event.Provider, diagnosticCode)
+	criticFeedback := event.Kind == attemptRecordReport && event.Role == roleCritic && event.Call != "" &&
+		event.EventSource == "minion.critic.feedback"
 	incomplete := event.Kind == attemptRecordDiscussion && event.Provider != "" &&
 		(event.EventSource == event.Provider+".assistant_incomplete" || event.EventSource == event.Provider+".tool_incomplete")
 	if missing && event.Text != "" {
 		q.failed.Store(true)
 		return
 	}
-	if event.Agent == "" && event.Kind != attemptRecordInput && !failure && !missing {
+	if event.Agent == "" && event.Kind != attemptRecordInput && !failure && !missing && !providerDiagnostic && !criticFeedback {
 		q.failed.Store(true)
 		return
 	}
-	if failure || missing || incomplete {
+	if failure || missing || incomplete || providerDiagnostic && (diagnosticCode == "diagnostics_truncated" || diagnosticCode == "stderr_unavailable") {
 		q.failed.Store(true)
 	}
 	size := int64(len(event.Text))

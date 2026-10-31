@@ -69,6 +69,41 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 	}
 }
 
+func TestOutputRecordsNativeStopSignalsWithoutChangingRecovery(t *testing.T) {
+	const quota = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
+	const overage = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true}}`
+	const stopped = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"worker stopped"}`
+	const root = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	const failed = `{"type":"result","subtype":"error_during_execution","is_error":true,"permission_denials":[{}],"terminal_reason":"aborted_tools","api_error":"usage_limit_reached","api_error_status":429}`
+	for _, tc := range []struct {
+		name, events string
+		codes        []string
+		fails        bool
+	}{
+		{"rejected quota and failed result", quota + "\n" + failed, []string{"rate_limit_rejected", "permission_denied", "terminal_reason", "result_error"}, true},
+		{"paid overage", overage + "\n" + successfulResult, nil, false},
+		{"stopped task assessed by fresh root", stopped + "\n" + root + "\n" + successfulResult, []string{"task_stopped"}, false},
+		{"terminal reason abort", strings.TrimSuffix(successfulResult, "}") + `,"terminal_reason":"aborted_tools"}`, []string{"terminal_reason"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.events+"\n")
+			o.finish()
+			if (o.err != nil) != tc.fails || len(o.result.Diagnostics) != len(tc.codes) {
+				t.Fatalf("result=%+v error=%v", o.result, o.err)
+			}
+			for i, code := range tc.codes {
+				if got := o.result.Diagnostics[i]; got.Code != code || got.Message == "" {
+					t.Fatalf("diagnostic %d=%+v, want %q", i, got, code)
+				}
+			}
+			if tc.name == "rejected quota and failed result" && (!strings.Contains(o.result.Diagnostics[0].Message, "resets at 2026-10-17T01:20:00Z") || !strings.Contains(o.result.Diagnostics[3].Message, "HTTP status=429")) {
+				t.Fatalf("native quota fields lost: %+v", o.result.Diagnostics)
+			}
+		})
+	}
+}
+
 func TestOutputKeepsAllStructuredFailuresAfterAnotherFailure(t *testing.T) {
 	quota := errors.New("provider usage limit reached")
 	pressure := errors.New("background work stopped under provider memory pressure")

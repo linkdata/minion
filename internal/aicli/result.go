@@ -3,7 +3,10 @@ package aicli
 
 import (
 	"errors"
+	"strings"
+	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -15,6 +18,43 @@ type Result struct {
 	Answer        string
 	Tokens        usage.Tokens
 	UsageComplete bool
+	Diagnostics   []ProviderDiagnostic
+}
+
+// ProviderDiagnostic records a private native observation, not a completion verdict.
+type ProviderDiagnostic struct {
+	Code    string
+	Message string
+}
+
+// AppendNativeDiagnostic retains recent native observations and marks lost ones.
+// Two slots remain available for the final stderr tail and observed structured output.
+func AppendNativeDiagnostic(diagnostics []ProviderDiagnostic, code, message string) []ProviderDiagnostic {
+	const nativeLimit = 61
+	entry := ProviderDiagnostic{Code: code, Message: DiagnosticText(message)}
+	if len(diagnostics) < nativeLimit {
+		return append(diagnostics, entry)
+	}
+	if len(diagnostics) == nativeLimit {
+		diagnostics = append([]ProviderDiagnostic{{Code: "diagnostics_truncated"}}, diagnostics[1:]...)
+		return append(diagnostics, entry)
+	}
+	copy(diagnostics[1:], diagnostics[2:])
+	diagnostics[len(diagnostics)-1] = entry
+	return diagnostics
+}
+
+// DiagnosticText bounds a redacted observation and keeps it valid UTF-8.
+func DiagnosticText(text string) string {
+	text = strings.ToValidUTF8(text, "�")
+	if len(text) <= bounded.DiagnosticBytes {
+		return text
+	}
+	cut := bounded.DiagnosticBytes - len("...")
+	for !utf8.ValidString(text[:cut]) {
+		cut--
+	}
+	return text[:cut] + "..."
 }
 
 // StreamEvent is one provider event or a metadata-only content_missing marker.

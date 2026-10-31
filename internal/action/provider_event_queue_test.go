@@ -85,6 +85,36 @@ func TestProviderEventQueueRetainsCallFailureWithoutClaimingCoverage(t *testing.
 	}
 }
 
+func TestProviderEventQueueAcceptsCallBoundDiagnosticsAndFeedback(t *testing.T) {
+	for _, test := range []struct {
+		name, source, kind, role string
+		complete, retained       bool
+	}{
+		{"successful stderr", "codex.stderr_tail", attemptRecordDiagnostic, roleMain, true, true},
+		{"critic feedback", "minion.critic.feedback", attemptRecordReport, roleCritic, true, true},
+		{"truncated diagnostics", "codex.diagnostics_truncated", attemptRecordDiagnostic, roleMain, false, true},
+		{"unavailable stderr", "codex.stderr_unavailable", attemptRecordDiagnostic, roleMain, false, true},
+		{"forged diagnostic", "codex.other", attemptRecordDiagnostic, roleMain, false, false},
+		{"forged feedback", "minion.critic.feedback", attemptRecordReport, roleMain, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			event := attemptRecord{Kind: test.kind, Provider: "codex", Role: test.role, Call: "2", EventSource: test.source, Text: "private detail"}
+			queue.add(event)
+			if got := queue.finish(); got != test.complete {
+				t.Fatalf("coverage=%t want=%t", got, test.complete)
+			}
+			if (len(saved) == 1) != test.retained {
+				t.Fatalf("record retention=%+v wantSaved=%t", saved, test.retained)
+			}
+		})
+	}
+}
+
 func TestProviderEventQueueRetainsPartialContentGapsWithoutCoverage(t *testing.T) {
 	for _, event := range []attemptRecord{
 		{Kind: attemptRecordDiscussion, Provider: "codex", EventSource: "codex.content_missing"},

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/bounded"
@@ -567,6 +568,48 @@ func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
 				t.Fatalf("result=%+v error=%v", result, err)
 			}
 		})
+	}
+}
+
+func TestRunRetainsPrivateStderrAndFailedStructuredResult(t *testing.T) {
+	const schema = `{"type":"object"}`
+	const partial = `{"approved":true,"note":"configured-secret"}`
+	failed := `{"type":"result","subtype":"error_during_execution","is_error":true,"permission_denials":[{}],"api_error":"usage_limit_reached","api_error_status":429,"structured_output":` + partial + `}`
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(failed)+"\nprintf '%s\\n' 'stream FD failure configured-secret' >&2\nexit 7\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: schema, APIKey: "configured-secret"})
+	if err == nil || result.Answer != "" || result.UsageComplete || len(result.Diagnostics) != 4 {
+		t.Fatalf("failed structured result=%+v error=%v", result, err)
+	}
+	want := []string{"permission_denied", "result_error", "stderr_tail", "structured_output_observed"}
+	for i, code := range want {
+		if result.Diagnostics[i].Code != code || strings.Contains(result.Diagnostics[i].Message, "configured-secret") {
+			t.Fatalf("diagnostic %d=%+v, want %q without secret", i, result.Diagnostics[i], code)
+		}
+	}
+	if !strings.Contains(result.Diagnostics[1].Message, "HTTP status=429") || !strings.Contains(result.Diagnostics[2].Message, "[redacted]") || !strings.Contains(result.Diagnostics[3].Message, `"approved":true`) || !strings.Contains(result.Diagnostics[3].Message, "[redacted]") {
+		t.Fatalf("native evidence lost: %+v", result.Diagnostics)
+	}
+}
+
+func TestRunSuccessfulStructuredResultRetainsUtf8StderrTail(t *testing.T) {
+	const structured = `{"approved":true}`
+	completed := strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`
+	stderr := "€\n" + strings.Repeat("x", bounded.DiagnosticBytes-2)
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(completed)+"\nprintf '%s' "+aicli.ShellQuote(stderr)+" >&2\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
+	if err != nil || result.Answer != structured || !result.UsageComplete || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "stderr_tail" || !utf8.ValidString(result.Diagnostics[0].Message) || len(result.Diagnostics[0].Message) > bounded.DiagnosticBytes {
+		t.Fatalf("successful result or bounded stderr tail lost: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunFailureRetainsEarlierProvisionalStructuredOutput(t *testing.T) {
+	const structured = `{"approved":false,"findings":["capacity issue"]}`
+	provisional := strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`
+	quota := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(provisional)+" "+aicli.ShellQuote(quota)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "rate_limit_rejected" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) {
+		t.Fatalf("provisional output promoted or lost: result=%+v error=%v", result, err)
 	}
 }
 

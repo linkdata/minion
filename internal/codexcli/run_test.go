@@ -779,9 +779,12 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 func TestRunDiscardsTruncatedMultiCredentialDiagnostic(t *testing.T) {
 	settings := config.CodexConfig{NativeAPIKey: "native-api-secret", NativeAccessToken: "native-access-secret"}
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s' "+aicli.ShellQuote(strings.Repeat("x", bounded.DiagnosticBytes)+"native-api-secret native-access-secret")+" >&2\nexit 1\n")
-	_, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
 	if err == nil || !strings.Contains(err.Error(), "no further diagnostics") || strings.Contains(err.Error(), "native-api-secret") || strings.Contains(err.Error(), "native-access-secret") {
 		t.Fatalf("truncated multi-credential diagnostic escaped: %v", err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"}) {
+		t.Fatalf("unsafe stderr gap was not recorded: %+v", result.Diagnostics)
 	}
 }
 
@@ -903,6 +906,49 @@ exit 7
 	_, err := Run(t.Context(), t.TempDir(), "Review", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "model request failed") || !strings.Contains(err.Error(), "exit status 7") {
 		t.Fatalf("Run() error = %v, want Codex failure and exit code", err)
+	}
+}
+
+func TestRunRetainsNativeAndStderrDiagnosticsWithoutChangingCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name, events, stderr string
+		codes                []string
+		fails                bool
+	}{
+		{
+			name: "recoverable native error and successful report",
+			events: `{"type":"thread.started","thread_id":"root"}` + "\n" +
+				`{"type":"error","message":"temporary stream error"}` + "\n" +
+				`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}` + "\n" +
+				`{"type":"turn.completed"}`,
+			stderr: "session quota reset at 12:00",
+			codes:  []string{"native_error", "stderr_tail"},
+		},
+		{
+			name: "failed after observed report",
+			events: `{"type":"thread.started","thread_id":"root"}` + "\n" +
+				`{"type":"item.completed","item":{"type":"agent_message","text":"partial report"}}` + "\n" +
+				`{"type":"turn.failed","error":{"message":"provider refused capacity"}}`,
+			stderr: "Failed to create stream fd",
+			codes:  []string{"turn_failed", "stderr_tail"},
+			fails:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(tc.events)+"\nprintf '%s\\n' "+aicli.ShellQuote(tc.stderr)+" >&2\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if (err != nil) != tc.fails || !tc.fails && result.Answer != "report" || tc.fails && result.Answer != "" || len(result.Diagnostics) != len(tc.codes) {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			for i, code := range tc.codes {
+				if result.Diagnostics[i].Code != code || result.Diagnostics[i].Message == "" {
+					t.Fatalf("diagnostic %d=%+v, want %s", i, result.Diagnostics[i], code)
+				}
+			}
+			if result.Diagnostics[len(result.Diagnostics)-1].Message != tc.stderr {
+				t.Fatalf("stderr tail=%+v", result.Diagnostics)
+			}
+		})
 	}
 }
 

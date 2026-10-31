@@ -88,6 +88,19 @@ func providerCallFailureText(err error, secrets ...string) string {
 	return text
 }
 
+func validProviderDiagnosticCode(provider, code string) bool {
+	switch provider {
+	case "codex":
+		return code == "native_error" || code == "turn_failed" || code == "stderr_tail" || code == "stderr_unavailable" || code == "diagnostics_truncated"
+	case "claude":
+		switch code {
+		case "rate_limit_rejected", "result_error", "permission_denied", "terminal_reason", "task_stopped", "wait_ceiling", "stderr_tail", "structured_output_observed", "diagnostics_truncated":
+			return true
+		}
+	}
+	return false
+}
+
 // Run uses supplied complete Git history without fetching or publication rights.
 // Fix exports use a separate private index. Failed calls still return accounted usage.
 func (r *Runner) Run(ctx context.Context, job Job) (Result, error) {
@@ -389,9 +402,31 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
+			secrets := configured.secretValues()
+			if configured.eventSink != nil {
+				for _, diagnostic := range call.Diagnostics {
+					event := record
+					event.Kind, event.ObservedAt = attemptRecordDiagnostic, time.Now().UTC().Format(time.RFC3339Nano)
+					if validProviderDiagnosticCode(request.provider, diagnostic.Code) && utf8.ValidString(diagnostic.Message) && !strings.ContainsRune(diagnostic.Message, 0) {
+						event.EventSource = request.provider + "." + diagnostic.Code
+						event.Text = httpFailureDiagnostic(redactActionText(diagnostic.Message, secrets...))
+						encoded, _ := json.Marshal(event.Text)
+						for _, secret := range secrets {
+							if secret != "" && containsConfiguredKey(encoded, secret) {
+								event.Text = ""
+								break
+							}
+						}
+					}
+					if event.EventSource == "" || diagnostic.Message != "" && event.Text == "" {
+						event.Kind, event.EventSource, event.Text = attemptRecordDiscussion, request.provider+".content_missing", ""
+					}
+					configured.eventSink(event)
+				}
+			}
 			if err != nil && configured.eventSink != nil {
 				failure := record
-				failure.Kind, failure.Text = attemptRecordDiagnostic, providerCallFailureText(err, configured.secretValues()...)
+				failure.Kind, failure.Text = attemptRecordDiagnostic, providerCallFailureText(err, secrets...)
 				failure.EventSource = request.provider + ".call.failed"
 				if failure.Text == "" {
 					failure.EventSource = request.provider + ".call.diagnostic_unavailable"
@@ -401,11 +436,17 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
 			if err == nil && request.role == roleCritic {
-				approved, hasBlockers, reviewComplete, _, parseErr := parseCritique(call.Answer, configured.secretValues()...)
+				approved, hasBlockers, reviewComplete, feedback, parseErr := parseCritique(call.Answer, secrets...)
 				entry.Approved = parseErr == nil && approved
 				entry.NoBlockers = parseErr == nil && !hasBlockers
 				entry.HasBlockers = parseErr == nil && hasBlockers
 				entry.ReviewComplete = parseErr == nil && reviewComplete
+				if parseErr == nil && feedback != "" && configured.eventSink != nil {
+					report := record
+					report.Kind, report.Text, report.EventSource = attemptRecordReport, feedback, "minion.critic.feedback"
+					report.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					configured.eventSink(report)
+				}
 			}
 			result.Calls = append(result.Calls, entry)
 			if checkpoints != nil {
