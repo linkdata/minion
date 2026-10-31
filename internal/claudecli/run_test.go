@@ -624,6 +624,19 @@ func TestRunFailureRetainsEarlierProvisionalStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestRunFailedResultRetainsEarlierNonemptyDetails(t *testing.T) {
+	const first = `{"type":"result","subtype":"success","result_index":0,"result":"Agent capacity reached; session resets at midnight","errors":["Session quota resets at midnight"],"modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+	const failed = `{"type":"result","subtype":"error_during_execution","is_error":true,"result_index":1,"result":"","errors":[],"modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(first)+" "+aicli.ShellQuote(failed)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+		len(result.Diagnostics) != 3 || result.Diagnostics[0].Code != "result_error" ||
+		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "Agent capacity reached; session resets at midnight"}) ||
+		result.Diagnostics[2] != (aicli.ProviderDiagnostic{Code: "result_errors", Message: `["Session quota resets at midnight"]`}) {
+		t.Fatalf("empty final result erased earlier native evidence or changed failure: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunFailedResultRetainsNativeCapacityAndResetFields(t *testing.T) {
 	key := `capacity"secret`
 	resultText := "Agent capacity reached; session resets at 2026-11-01T00:00:00Z " + key
@@ -688,6 +701,47 @@ func TestRunFailedResultOmitsEmptyErrors(t *testing.T) {
 			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
 				len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "result_error" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "capacity reached"}) {
 				t.Fatalf("empty native errors produced false detail or changed failure: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestRunPermissionDenialsRetainOnlyBoundedRedactedToolNames(t *testing.T) {
+	const key = "credential-secret"
+	const input = "PRIVATE_TOOL_INPUT"
+	event := map[string]any{"type": "result", "subtype": "success", "result": "blocked",
+		"permission_denials": []map[string]any{
+			{"tool_name": "Bash", "tool_input": input},
+			{"tool_name": strings.Repeat("x", bounded.DiagnosticBytes), "tool_input": input},
+			{"tool_name": "WebFetch " + key, "tool_input": input},
+		},
+		"modelUsage": map[string]any{"main": map[string]int{"inputTokens": 3, "cacheCreationInputTokens": 5, "cacheReadInputTokens": 7, "outputTokens": 11}}}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(encoded))+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "permission_denied" {
+		t.Fatalf("permission denial result changed: result=%+v error=%v", result, err)
+	}
+	message := result.Diagnostics[0].Message
+	if !strings.Contains(message, "3 native permission denials") || !strings.Contains(message, "Bash") || !strings.Contains(message, "WebFetch") ||
+		!strings.Contains(message, "[redacted]") || strings.Contains(message, key) || strings.Contains(message, input) || len(message) > bounded.DiagnosticBytes {
+		t.Fatalf("permission denial lost safe tool names or exposed input: %q", message)
+	}
+}
+
+func TestRunNullTerminalReasonReportsLiteralWithoutGap(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{{"null", "null"}, {`""`, `""`}} {
+		t.Run(tc.raw, func(t *testing.T) {
+			terminal := strings.TrimSuffix(successfulResult, "}") + `,"terminal_reason":` + tc.raw + `}`
+			fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(terminal)+"\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+				len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "terminal_reason", Message: tc.want}) ||
+				result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) {
+				t.Fatalf("explicit empty terminal reason made a false gap or changed failure: result=%+v error=%v", result, err)
 			}
 		})
 	}

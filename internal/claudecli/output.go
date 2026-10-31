@@ -335,8 +335,9 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type != "result" {
 		return
 	}
-	o.observedResultText = o.safeResultDetail(e.Result)
-	o.observedResultErrors = ""
+	if e.Result != "" {
+		o.observedResultText = o.safeResultDetail(e.Result)
+	}
 	if raw := bytes.TrimSpace(e.Errors); len(raw) > 2 && raw[0] == '[' && len(bytes.TrimSpace(raw[1:len(raw)-1])) != 0 {
 		o.observedResultErrors = o.safeResultDetail(string(raw))
 	}
@@ -393,7 +394,20 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	}
 	o.result.UsageComplete = complete && o.usageLimit == nil && o.taskFailure == nil
 	if len(e.PermissionDenials) != 0 {
-		o.observe("permission_denied", fmt.Sprintf("%d native permission denials", len(e.PermissionDenials)))
+		message := fmt.Sprintf("%d native permission denials", len(e.PermissionDenials))
+		var names []string
+		for _, raw := range e.PermissionDenials {
+			var denial struct {
+				ToolName string `json:"tool_name"`
+			}
+			if json.Unmarshal(raw, &denial) == nil && denial.ToolName != "" {
+				names = append(names, denial.ToolName)
+			}
+		}
+		if len(names) != 0 {
+			message += ": " + strings.Join(names, ", ")
+		}
+		o.observe("permission_denied", message)
 	}
 	var terminalReason string
 	terminalValid := true
@@ -401,6 +415,8 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		terminalValid = json.Unmarshal(e.TerminalReason, &terminalReason) == nil
 		if !terminalValid {
 			terminalReason = "invalid"
+		} else if terminalReason == "" {
+			terminalReason = string(bytes.TrimSpace(e.TerminalReason))
 		}
 		o.observe("terminal_reason", terminalReason)
 	}

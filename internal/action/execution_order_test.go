@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,7 +211,30 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		if err := remote.SetWorkRoot(work); err != nil {
 			t.Fatal(err)
 		}
-		transport := httptest.NewServer(remote)
+		coveragePersisted := make(chan struct{})
+		var coverageOnce sync.Once
+		recordsPath := filepath.Join(work, "attempt-records", request.AttemptID+".jsonl")
+		transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" {
+				select {
+				case <-coveragePersisted:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			remote.ServeHTTP(w, r)
+			if r.URL.Path == "/status" {
+				data, err := os.ReadFile(recordsPath)
+				if err != nil {
+					return
+				}
+				lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+				var last attemptRecord
+				if json.Unmarshal(lines[len(lines)-1], &last) == nil && last.Kind == attemptRecordCoverage {
+					coverageOnce.Do(func() { close(coveragePersisted) })
+				}
+			}
+		}))
 		t.Cleanup(transport.Close)
 		workerCtx, cancelWorker := context.WithCancel(t.Context())
 		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })
@@ -286,12 +310,12 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 				seen[saved.Call][saved.EventSource] = saved
 			}
 		}
+		if !covered {
+			t.Fatal("HTTP coverage marker missing")
+		}
 		for index, want := range expected {
 			call := fmt.Sprint(index + 1)
 			input, ok := seen[call][want.Provider+".input.prepared"]
-			if !ok && !covered {
-				continue // The required Result can win before optional Status logs finish.
-			}
 			if !ok || input.Kind != attemptRecordInput || input.Call != call ||
 				input.Role != want.Role || input.Round != want.Round || input.ReviewPhase != want.ReviewPhase {
 				t.Fatalf("call %s lost its prepared input binding: %+v", call, input)
@@ -319,9 +343,6 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 				t.Fatalf("call %s prepared input was not preserved: %+v", call, prepared)
 			}
 			saved, ok := seen[call][want.Provider+".final"]
-			if !ok && !covered {
-				continue
-			}
 			if !ok {
 				t.Fatalf("call %s lost its final provider event", call)
 			}

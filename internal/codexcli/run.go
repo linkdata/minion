@@ -529,8 +529,12 @@ func (o *jsonlOutput) stop(err error) {
 }
 
 func (o *jsonlOutput) observe(code, message string) {
+	original := message
 	if o.redact != nil {
 		message = o.redact(message)
+	}
+	if original != "" && message == "" {
+		code, message = "diagnostics_truncated", "native diagnostic could not be safely displayed"
 	}
 	o.diagnostics = aicli.AppendNativeDiagnostic(o.diagnostics, code, message)
 }

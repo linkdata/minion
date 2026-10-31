@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
@@ -78,7 +79,11 @@ func providerCallFailureText(err error, secrets ...string) string {
 		!utf8.ValidString(message) || strings.ContainsRune(message, 0) {
 		return ""
 	}
-	text := "provider call failed; provider content may be incomplete: " + httpFailureDiagnostic(message)
+	detail := redactActionText(aicli.DiagnosticText(message), secrets...)
+	if detail == "" {
+		return ""
+	}
+	text := "provider call failed; provider content may be incomplete: " + detail
 	encoded, _ := json.Marshal(text)
 	for _, secret := range secrets {
 		if secret != "" && containsConfiguredKey(encoded, secret) {
@@ -409,7 +414,10 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					event.Kind, event.ObservedAt = attemptRecordDiagnostic, time.Now().UTC().Format(time.RFC3339Nano)
 					if validProviderDiagnosticCode(request.provider, diagnostic.Code) && utf8.ValidString(diagnostic.Message) && !strings.ContainsRune(diagnostic.Message, 0) {
 						event.EventSource = request.provider + "." + diagnostic.Code
-						event.Text = httpFailureDiagnostic(redactActionText(diagnostic.Message, secrets...))
+						redacted := redactActionText(diagnostic.Message, secrets...)
+						boundedText := aicli.DiagnosticText(redacted)
+						dropped := len(boundedText) < len(redacted)
+						event.Text = redactActionText(boundedText, secrets...)
 						encoded, _ := json.Marshal(event.Text)
 						for _, secret := range secrets {
 							if secret != "" && containsConfiguredKey(encoded, secret) {
@@ -417,10 +425,19 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 								break
 							}
 						}
+						if len(event.Text) > bounded.DiagnosticBytes || diagnostic.Message != "" && event.Text == "" {
+							event.Text = ""
+							dropped = true
+						}
+						configured.eventSink(event)
+						if dropped && diagnostic.Code != "diagnostics_truncated" {
+							gap := event
+							gap.EventSource, gap.Text = request.provider+".diagnostics_truncated", ""
+							configured.eventSink(gap)
+						}
+						continue
 					}
-					if event.EventSource == "" || diagnostic.Message != "" && event.Text == "" {
-						event.Kind, event.EventSource, event.Text = attemptRecordDiscussion, request.provider+".content_missing", ""
-					}
+					event.Kind, event.EventSource, event.Text = attemptRecordDiscussion, request.provider+".content_missing", ""
 					configured.eventSink(event)
 				}
 			}

@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 )
@@ -91,8 +93,19 @@ func TestProviderCallFailureTextFallsBackOnUnsafeOrMissingDetail(t *testing.T) {
 	}
 	const secret = "fixture-call-secret"
 	text := providerCallFailureText(errors.New(strings.Repeat("x", httpFailureMessageLimit-2)+secret+" stderr tail"), secret)
-	if len(text) > maxAttemptRecordTextBytes || !utf8.ValidString(text) || strings.Contains(text, secret) || !strings.Contains(text, "[truncated]") {
+	if len(text) > maxAttemptRecordTextBytes || !utf8.ValidString(text) || strings.Contains(text, secret) ||
+		!strings.Contains(text, "...") || !strings.HasSuffix(text, " stderr tail") {
 		t.Fatalf("long failure was not bounded after whole-error redaction: %q", text)
+	}
+}
+
+func TestProviderCallFailureTextKeepsTrailingResetAfterRedactionExpansion(t *testing.T) {
+	const secret, reset = "Z", " quota resets in 17 minutes"
+	text := providerCallFailureText(errors.New(strings.Repeat(secret, bounded.DiagnosticBytes-len(reset))+reset), secret)
+	encoded, err := json.Marshal(text)
+	if err != nil || len(text) > maxAttemptRecordTextBytes || !utf8.ValidString(text) ||
+		!strings.Contains(text, "...") || !strings.HasSuffix(text, reset) || containsConfiguredKey(encoded, secret) {
+		t.Fatalf("fallback diagnostic lost trailing reset or exposed key: %q, %v", text, err)
 	}
 }
 
@@ -164,6 +177,46 @@ func TestRunnerRecordsNativeDiagnosticsWithoutChangingSuccess(t *testing.T) {
 				saved[0].Call != "1" || saved[0].Role != roleMain || saved[0].Agent != "" ||
 				!strings.Contains(saved[0].Text, "[redacted]") || strings.Contains(saved[0].Text, secret) {
 				t.Fatalf("call-bound private diagnostic lost: %+v", saved[0])
+			}
+		})
+	}
+}
+
+func TestRunnerMarksActionTruncatedDiagnosticsWithoutLosingNativeCode(t *testing.T) {
+	const reset = " quota resets in 17 minutes"
+	const marker = "..."
+	head := (bounded.DiagnosticBytes - len(marker)) / 2
+	tail := bounded.DiagnosticBytes - len(marker) - head
+	for _, test := range []struct {
+		name, secret, message, want string
+	}{
+		{"cross-provider redaction expands", "Z", strings.Repeat("Z", bounded.DiagnosticBytes-len(reset)) + reset, reset},
+		{"head and tail join a secret", "left...right", strings.Repeat("a", head-len("left")) + "left" + strings.Repeat("b", 100) + "right" + strings.Repeat("c", tail-len("right")), "[redacted]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			runner := Runner{WorkRoot: t.TempDir(), Claude: config.ClaudeConfig{APIKey: test.secret}, eventSink: queue.add,
+				runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					return aicli.Result{Answer: "Done.", Diagnostics: []aicli.ProviderDiagnostic{{Code: "stderr_tail", Message: test.message}}}, nil
+				}}
+			result, err := runner.Run(t.Context(), testJob(command.Comment))
+			if err != nil || result.Answer != "Done." || len(result.Calls) != 1 {
+				t.Fatalf("diagnostic changed result: %+v, %v", result, err)
+			}
+			if queue.finish() || len(saved) != 2 || saved[0].Kind != attemptRecordDiagnostic ||
+				saved[0].EventSource != "codex.stderr_tail" || saved[0].Call != "1" ||
+				saved[1].Kind != attemptRecordDiagnostic || saved[1].EventSource != "codex.diagnostics_truncated" ||
+				saved[1].Call != "1" || saved[1].Text != "" {
+				t.Fatalf("action truncation lost native code or claimed coverage: %+v", saved)
+			}
+			encoded, err := json.Marshal(saved[0].Text)
+			if err != nil || len(saved[0].Text) > bounded.DiagnosticBytes || !utf8.ValidString(saved[0].Text) ||
+				!strings.Contains(saved[0].Text, test.want) || containsConfiguredKey(encoded, test.secret) {
+				t.Fatalf("diagnostic lost tail or exposed configured key: %+v, %v", saved[0], err)
 			}
 		})
 	}
