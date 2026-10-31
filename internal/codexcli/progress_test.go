@@ -148,6 +148,34 @@ func TestRolloutActivityProgressCountsRepeatedOutputAtDistinctOrdinals(t *testin
 	}
 }
 
+func TestRolloutActivityProgressCountsDistinctIdenticalHelperMessages(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	message := func(ordinal int) string {
+		return fmt.Sprintf(`{"ordinal":%d,"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"still working"}}`, ordinal)
+	}
+	first, second := message(9), message(10)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, first)
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("first helper message progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child, second)
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("second distinct helper message progress=%d, want 2", *progress)
+	}
+	appendUsageEvents(t, child, second)
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("replayed helper message renewed progress: %d", *progress)
+	}
+}
+
 func TestRolloutActivityProgressWithoutOrdinalDedupesPayload(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))

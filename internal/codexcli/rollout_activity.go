@@ -503,7 +503,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		}
 		if !uncertainOrdinal && a.helperProgressProven(meta, message.Author, message.Metadata.TurnID) &&
 			(message.Content != "" || message.EncryptedContent != "") {
-			a.newProgress(meta.ID, event, 0, progressed)
+			a.newProgress(meta.ID, event, event.Ordinal, progressed)
 		}
 		return
 	}
