@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -62,13 +63,22 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 		name     string
 		approved bool
 		status   int
-	}{{"approved", true, http.StatusCreated}, {"nonblocking", false, http.StatusCreated}, {"publication failure", true, http.StatusBadGateway}} {
+	}{{"approved", true, http.StatusCreated}, {"nonblocking", false, http.StatusCreated},
+		{"round cap", false, http.StatusCreated}, {"incomplete", false, 0}, {"publication failure", true, http.StatusBadGateway}} {
 		t.Run(test.name, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			job.Identity.Repository = "o/r"
 			job.CriticNonblockingRounds = 1
 			result := privateReviewResult(job)
-			if !test.approved {
+			if test.name == "round cap" {
+				job.CriticMaxRounds = 2
+				result = cappedResultFixture(job)
+				result.Refutations = []Refutation{{Round: 2, Text: "PRIVATE_MAIN_REFUTATION"}}
+			} else if test.name == "incomplete" {
+				last := &result.Calls[len(result.Calls)-1]
+				last.Approved, last.NoBlockers, last.HasBlockers, last.ReviewComplete = false, false, true, false
+				result.Answer, result.CriticStopReason = "", ""
+			} else if !test.approved {
 				result.Calls[len(result.Calls)-1].Approved = false
 				result.CriticStopReason = "nonblocking"
 			}
@@ -82,7 +92,7 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 					http.Error(w, "private review unavailable", http.StatusInternalServerError)
 					return
 				}
-				if record.ReviewClaimOrigin != "executor_reported" || len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || !record.Calls[len(record.Calls)-1].ReviewComplete || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
+				if record.ReviewClaimOrigin != "executor_reported" || record.Identity != job.Identity || len(record.Refutations) != 1 || len(record.Calls) == 0 || record.Calls[len(record.Calls)-1].Approved != test.approved || !record.Calls[len(record.Calls)-1].ReviewComplete || record.CriticStopReason != result.CriticStopReason || record.CriticNonblockingRounds != 1 || record.CriticConsecutiveNoBlockerRounds != job.CriticConsecutiveNoBlockerRounds || record.SourceRef != job.Source.Head {
 					t.Errorf("private evidence/policy lost: %+v", record)
 				}
 				if r.Method == http.MethodGet && r.URL.Path == "/repos/o/r" {
@@ -105,18 +115,41 @@ func TestPublishRetainsPrivateReviewBeforeGitHubWrites(t *testing.T) {
 			}))
 			defer server.Close()
 			e := Orchestrator{WorkRoot: root, GitHub: testGitHub(server, "fixture"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
-			request := monitor.Job{ID: job.Identity.JobID, Number: 7, SubjectType: "Issue", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
+			request := monitor.Job{ID: job.Identity.JobID, AttemptID: job.Identity.AttemptID, Number: 7, SubjectType: "Issue", Repository: config.Repository{Name: "o/r", ID: 1, OwnerID: 2}, Source: github.Item{Author: github.User{ID: 3, Login: "writer"}}, Command: command.Command{Name: "comment", Action: command.Comment}}
 			reserveActionRequest(t, e.Store, &request, true)
 			publishErr := e.publish(t.Context(), &preparedAction{job: job, request: request}, result)
-			if test.status == http.StatusCreated {
+			if test.name == "incomplete" {
+				if !errors.Is(publishErr, monitor.ErrTerminalJob) || errors.Is(publishErr, monitor.ErrPostModelPublication) {
+					t.Fatalf("incomplete review changed publication failure class: %v", publishErr)
+				}
+			} else if test.status == http.StatusCreated {
 				if publishErr != nil {
 					t.Fatal(publishErr)
+				}
+				if err := e.recordPublishedOutcome(request); err != nil {
+					t.Fatal(err)
 				}
 			} else if !errors.Is(publishErr, monitor.ErrPostModelPublication) {
 				t.Fatalf("publication failure cause lost: %v", publishErr)
 			}
-			if writes != 1 || !strings.Contains(body.String(), result.Answer) || !strings.Contains(journal.String(), "call_claim_origin=executor_reported") || strings.Contains(body.String(), "PRIVATE") || strings.Contains(journal.String(), "PRIVATE") {
+			wantWrites := 1
+			if test.name == "incomplete" {
+				wantWrites = 0
+			}
+			if writes != wantWrites || wantWrites == 1 && !strings.Contains(body.String(), result.Answer) || !strings.Contains(journal.String(), "call_claim_origin=executor_reported") || !strings.Contains(journal.String(), fmt.Sprintf("stop_reason=%q", result.CriticStopReason)) || strings.Contains(body.String(), "PRIVATE") || strings.Contains(journal.String(), "PRIVATE") {
 				t.Fatalf("private evidence leaked or publication lost: writes=%d body=%s journal=%s", writes, &body, &journal)
+			}
+			review := readPrivateReview(t, root)
+			if review.Identity != job.Identity || review.CriticStopReason != result.CriticStopReason || review.Calls[len(review.Calls)-1].ReviewComplete == (test.name == "incomplete") {
+				t.Fatalf("retained review changed actual verdict or attempt: %+v", review)
+			}
+			write, issued := e.Store.Data.PublicationWrites[request.ID]
+			decision, terminal := e.Store.Data.TerminalDecisions[request.ID]
+			if issued != (wantWrites == 1) || issued && (write.AttemptID != request.AttemptID || write.Kind != "comment" || write.Status != map[bool]string{true: state.PublicationWriteObserved, false: state.PublicationWritePending}[test.status == http.StatusCreated]) || terminal != (test.status == http.StatusCreated) || e.Store.Data.Accepted.Terminal != terminal || terminal && (decision.AttemptID != request.AttemptID || decision.Outcome != "succeeded") {
+				t.Fatalf("review stop, publication write, and terminal decision were conflated: review=%+v write=%+v terminal=%+v", review, write, decision)
+			}
+			if strings.Contains(body.String(), "Critic round limit reached") != (test.name == "round cap") {
+				t.Fatalf("public cap caveat differs from actual stop reason: %q", body.String())
 			}
 		})
 	}

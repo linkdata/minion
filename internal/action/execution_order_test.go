@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,7 +211,34 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		if err := remote.SetWorkRoot(work); err != nil {
 			t.Fatal(err)
 		}
-		transport := httptest.NewServer(remote)
+		coveragePersisted := make(chan struct{})
+		var coverageOnce sync.Once
+		recordsPath := filepath.Join(work, "attempt-records", request.AttemptID+".jsonl")
+		transport := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" {
+				select {
+				case <-coveragePersisted:
+				case <-time.After(3 * statusSendTimeout):
+					t.Error("outcome arrived before durable coverage marker")
+					http.Error(w, "coverage marker missing", http.StatusInternalServerError)
+					return
+				case <-r.Context().Done():
+					return
+				}
+			}
+			remote.ServeHTTP(w, r)
+			if r.URL.Path == "/status" {
+				data, err := os.ReadFile(recordsPath)
+				if err != nil {
+					return
+				}
+				lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+				var last attemptRecord
+				if json.Unmarshal(lines[len(lines)-1], &last) == nil && last.Kind == attemptRecordCoverage {
+					coverageOnce.Do(func() { close(coveragePersisted) })
+				}
+			}
+		}))
 		t.Cleanup(transport.Close)
 		workerCtx, cancelWorker := context.WithCancel(t.Context())
 		t.Cleanup(func() { cancelWorker(); _ = remote.Close() })
@@ -252,6 +280,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 		}
 		lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
 		seen := make(map[string]map[string]attemptRecord)
+		covered := false
 		var lastSequence uint64
 		for _, line := range lines {
 			var saved attemptRecord
@@ -262,19 +291,31 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 				t.Fatalf("attempt record sequence %d after %d", saved.Sequence, lastSequence)
 			}
 			lastSequence = saved.Sequence
+			if saved.Kind == attemptRecordCoverage {
+				covered = true
+			}
 			if saved.Call != "" {
 				ordinal, err := strconv.Atoi(saved.Call)
 				observedAt, timeErr := time.Parse(time.RFC3339Nano, saved.ObservedAt)
 				if err != nil || ordinal < 1 || ordinal > len(expected) ||
 					timeErr != nil || observedAt.IsZero() || !strings.HasSuffix(saved.ObservedAt, "Z") ||
-					saved.Provider != expected[ordinal-1].Provider || saved.Model != expected[ordinal-1].Model {
-					t.Fatalf("call record lost selected provider, model or worker observation time: %+v", saved)
+					saved.Provider != expected[ordinal-1].Provider || saved.Model != expected[ordinal-1].Model ||
+					saved.Role != expected[ordinal-1].Role || saved.Round != expected[ordinal-1].Round ||
+					saved.ReviewPhase != expected[ordinal-1].ReviewPhase {
+					t.Fatalf("call record lost its selected binding or worker observation time: %+v", saved)
+				}
+				if saved.EventSource == saved.Provider+".final" &&
+					(saved.Kind != attemptRecordDiscussion || saved.Text != responses[ordinal-1] || saved.Agent != agents[ordinal-1]) {
+					t.Fatalf("received final event lost its private binding: %+v", saved)
 				}
 				if seen[saved.Call] == nil {
 					seen[saved.Call] = make(map[string]attemptRecord)
 				}
 				seen[saved.Call][saved.EventSource] = saved
 			}
+		}
+		if !covered {
+			t.Fatal("HTTP coverage marker missing")
 		}
 		for index, want := range expected {
 			call := fmt.Sprint(index + 1)

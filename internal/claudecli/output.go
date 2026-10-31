@@ -52,6 +52,7 @@ type event struct {
 	Tasks             json.RawMessage   `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
+	Errors            json.RawMessage   `json:"errors"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
 	Usage             json.RawMessage   `json:"usage"`
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
@@ -173,6 +174,42 @@ func (o *jsonlOutput) markFatalGap(kind string) {
 	}
 }
 
+func (o *jsonlOutput) observe(code, message string) {
+	safe := o.safeDiagnosticText(message)
+	if safe == "" {
+		o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, "diagnostics_truncated", "")
+		safe = "native diagnostic could not be safely displayed"
+	}
+	o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, code, safe)
+}
+
+func (o *jsonlOutput) safeResultDetail(detail string) string {
+	if detail == "" {
+		return ""
+	}
+	safe := o.safeDiagnosticText(detail)
+	if safe == "" {
+		o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, "diagnostics_truncated", "")
+		return "native result detail could not be safely displayed"
+	}
+	return safe
+}
+
+func (o *jsonlOutput) observeResultDetail(code, detail string) {
+	if detail != "" {
+		o.result.Diagnostics = aicli.AppendNativeDiagnostic(o.result.Diagnostics, code, o.safeResultDetail(detail))
+	}
+}
+
+func (o *jsonlOutput) safeDiagnosticText(detail string) string {
+	redacted := aicli.RedactText(detail, o.apiKey)
+	safe := aicli.RedactText(aicli.DiagnosticText(redacted), o.apiKey)
+	if len(safe) > bounded.DiagnosticBytes {
+		return ""
+	}
+	return safe
+}
+
 func (o *jsonlOutput) finish() {
 	o.stream.Finish()
 	lower, valid := o.assistantLowerBound()
@@ -236,7 +273,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
 	}
 	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient {
-		o.recordTaskStop(e.Summary)
+		o.recordTaskStop(e.Status, e.Summary)
 	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
 		o.usageLimit = errors.New("provider usage limit reached")
@@ -245,6 +282,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		if json.Unmarshal(e.RateLimitInfo.ResetsAt, &reset) == nil && reset > 0 && reset <= maxResetTimestamp {
 			o.usageLimit = fmt.Errorf("provider usage limit reached; resets at %s", time.Unix(reset, 0).UTC().Format(time.RFC3339))
 		}
+		o.observe("rate_limit_rejected", o.usageLimit.Error())
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 		o.startFailureGrace()
 	}
@@ -346,21 +384,62 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.rootTokens, o.uncovered = usage.Tokens{}, false
 	}
 	o.result.UsageComplete = complete && o.usageLimit == nil && o.taskFailure == nil
+	if len(e.PermissionDenials) != 0 {
+		message := fmt.Sprintf("%d native permission denials", len(e.PermissionDenials))
+		var names []string
+		for _, raw := range e.PermissionDenials {
+			var denial struct {
+				ToolName string `json:"tool_name"`
+			}
+			if json.Unmarshal(raw, &denial) == nil && denial.ToolName != "" {
+				names = append(names, denial.ToolName)
+			}
+		}
+		if len(names) != 0 {
+			message += ": " + strings.Join(names, ", ")
+		}
+		o.observe("permission_denied", message)
+	}
+	var terminalReason string
+	terminalValid := true
+	if len(e.TerminalReason) != 0 {
+		terminalValid = json.Unmarshal(e.TerminalReason, &terminalReason) == nil
+		if !terminalValid {
+			terminalReason = "invalid"
+		} else if terminalReason == "" {
+			terminalReason = string(bytes.TrimSpace(e.TerminalReason))
+		}
+		o.observe("terminal_reason", terminalReason)
+	}
+	var resultFailure string
+	if e.IsError || e.Subtype != "success" {
+		resultFailure = fmt.Sprintf("result failed: %q", bounded.Text(aicli.RedactText(e.Subtype, o.apiKey)))
+		switch e.APIError {
+		case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
+			resultFailure += "; API error=" + e.APIError
+		}
+		var status int
+		if json.Unmarshal(e.APIErrorStatus, &status) == nil && status >= 100 && status <= 599 {
+			resultFailure += fmt.Sprintf("; HTTP status=%d", status)
+		}
+		o.observe("result_error", resultFailure)
+	}
+	o.observeResultDetail("result_detail", e.Result)
+	if raw := bytes.TrimSpace(e.Errors); len(raw) > 2 && raw[0] == '[' && len(bytes.TrimSpace(raw[1:len(raw)-1])) != 0 {
+		o.observeResultDetail("result_errors", string(raw))
+	}
+	if o.structured {
+		structured := bytes.TrimSpace(e.StructuredOutput)
+		if len(structured) != 0 && !bytes.Equal(structured, []byte("null")) {
+			o.observeResultDetail("structured_output_observed", string(structured))
+		}
+	}
 	if failure := errors.Join(o.usageLimit, o.taskFailure); failure != nil {
 		o.fail(failure)
 		return
 	}
-	if e.IsError || e.Subtype != "success" {
-		reason := fmt.Sprintf("result failed: %q", bounded.Text(aicli.RedactText(e.Subtype, o.apiKey)))
-		switch e.APIError {
-		case "usage_limit_reached", "model_requires_usage_credits", "long_context_credits_required", "provider_credentials":
-			reason += "; API error=" + e.APIError
-		}
-		var status int
-		if json.Unmarshal(e.APIErrorStatus, &status) == nil && status >= 100 && status <= 599 {
-			reason += fmt.Sprintf("; HTTP status=%d", status)
-		}
-		o.fail(errors.New(reason))
+	if resultFailure != "" {
+		o.fail(errors.New(resultFailure))
 		return
 	}
 	if len(e.PermissionDenials) != 0 {
@@ -378,8 +457,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	o.indexed = e.ResultIndex != nil
 	o.results++
 	if len(e.TerminalReason) != 0 {
-		var reason string
-		if json.Unmarshal(e.TerminalReason, &reason) != nil || reason != "completed" {
+		if !terminalValid || terminalReason != "completed" {
 			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 			return
 		}
@@ -492,9 +570,10 @@ func (o *jsonlOutput) emitEventWithID(id, kind, text string) {
 	o.onEvent(aicli.StreamEvent{NativeID: id, Kind: kind, Text: redacted})
 }
 
-func (o *jsonlOutput) recordTaskStop(summary string) {
+func (o *jsonlOutput) recordTaskStop(status, summary string) {
 	// A new root response must assess an interrupted task before a later
 	// successful result can certify completion. Ambient cleanup is ignored.
+	o.observe("task_stopped", strings.TrimSpace(status+": "+summary))
 	o.stopped = true
 	o.completed, o.result.Answer = false, ""
 	if pressureStopSummary(summary) {
@@ -534,7 +613,7 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	if end := strings.LastIndex(summary, "</summary>"); end >= 0 {
 		summary = summary[:end]
 	}
-	o.recordTaskStop(html.UnescapeString(summary))
+	o.recordTaskStop(status, html.UnescapeString(summary))
 }
 
 func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {

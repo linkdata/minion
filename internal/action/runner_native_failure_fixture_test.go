@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -177,5 +178,103 @@ func TestRunnerNativeAdaptersRetainFailedCallRecords(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRunnerNativePartialCriticVerdictStaysPrivateOnFailure(t *testing.T) {
+	const partial = `{"review_complete":true,"approved":false,"has_blockers":true,"feedback":"PRIVATE_PARTIAL"}`
+	const mainProposal = `{"answer":"Candidate.","refutations":""}`
+	if _, _, _, _, err := parseCritique(partial); err != nil {
+		t.Fatalf("fixture is not a valid critic report: %v", err)
+	}
+	for _, critic := range []string{"codex", "claude"} {
+		t.Run(critic, func(t *testing.T) {
+			installActionTestSkills(t)
+			t.Setenv("CODEX_HOME", t.TempDir())
+			for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+				t.Setenv(key, "")
+			}
+			job := withClaudeCritic(testJob(command.Comment))
+			job.Critic.Provider = critic
+			if critic == "codex" {
+				job.Main.Provider = "claude"
+			}
+			for _, provider := range []string{"codex", "claude"} {
+				answer := mainProposal
+				if provider == critic {
+					answer = partial
+				}
+				script := "#!/bin/sh\ncat >/dev/null\n"
+				if provider == "codex" {
+					const id = "11111111-1111-4111-8111-000000000001"
+					if provider != critic {
+						script += `dir="$CODEX_HOME/sessions/fixture"
+mkdir -p "$dir"
+printf '%s\n' '{"type":"session_meta","payload":{"id":"` + id + `","session_id":"` + id + `","source":"exec"}}' '{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}' '{"type":"token_usage_record","payload":{"thread_id":"` + id + `","session_id":"` + id + `","turn_id":"turn-1","response_id":"response-1","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}}' '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}' > "$dir/rollout-` + id + `.jsonl"
+`
+					}
+					script += "printf '%s\\n' " + shellQuote(`{"type":"thread.started","thread_id":"`+id+`"}`) + " " + shellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":`+strconv.Quote(answer)+`}}`) + "\n"
+					if provider == critic {
+						script += `printf '%s\n' '{"type":"turn.failed","error":{"message":"critic stopped"}}'
+exit 7
+`
+					} else {
+						script += `printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}'
+`
+					}
+				} else {
+					script += `next=false
+for arg do
+  if $next; then printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$arg"; break; fi
+  [ "$arg" != --session-id ] || next=true
+done
+`
+					result := `{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","structured_output":` + answer + `,"usage":{"input_tokens":3,"output_tokens":2},"modelUsage":{"fixture":{"inputTokens":3,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}`
+					script += "printf '%s\\n' " + shellQuote(result) + "\n"
+					if provider == critic {
+						script += `printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}'
+exit 7
+`
+					}
+				}
+				fakeOnPath(t, provider, script)
+			}
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			runner := Runner{WorkRoot: t.TempDir(), eventSink: queue.add,
+				Codex: config.CodexConfig{APIKey: "fixture-codex-key"}, Claude: config.ClaudeConfig{APIKey: "fixture-claude-key"}}
+			result, err := runner.Run(t.Context(), job)
+			if err == nil || result.Answer != "" || result.CriticStopReason != "" || len(result.Calls) != 2 ||
+				!result.Calls[0].Complete || result.Calls[1].Complete || result.Calls[1].Approved || result.Calls[1].NoBlockers ||
+				result.Calls[1].HasBlockers || result.Calls[1].ReviewComplete || result.Validate(job) == nil {
+				t.Fatalf("partial native critic result became publishable: result=%+v error=%v", result, err)
+			}
+			if queue.finish() {
+				t.Fatal("failed native critic falsely proved record coverage")
+			}
+			observed, failed := false, false
+			for _, record := range saved {
+				if record.Role != roleCritic {
+					continue
+				}
+				if record.Kind == attemptRecordReport || record.EventSource == critic+".final" {
+					t.Fatalf("failed critic emitted a final report: %+v", record)
+				}
+				if record.Text == partial && record.Call == "2" && record.Round == 1 && record.ReviewPhase == reviewFull &&
+					((critic == "codex" && record.Kind == attemptRecordDiscussion && record.EventSource == "codex.assistant") ||
+						(critic == "claude" && record.Kind == attemptRecordDiagnostic && record.EventSource == "claude.structured_output_observed")) {
+					observed = true
+				}
+				if record.Kind == attemptRecordDiagnostic && record.EventSource == critic+".call.failed" && record.Call == "2" {
+					failed = true
+				}
+			}
+			if !observed || !failed {
+				t.Fatalf("partial private observation or native failure missing: %+v", saved)
+			}
+		})
 	}
 }

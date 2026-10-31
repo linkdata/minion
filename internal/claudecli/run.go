@@ -164,6 +164,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		err = fmt.Errorf("%w: %q", err, cmp.Or(aicli.RedactTail(&diagnostics, settings.APIKey), "no further diagnostics"))
 	}
 	output.finish()
+	if ceilingMatched {
+		output.observe("wait_ceiling", "background tasks stopped by Claude's wait ceiling")
+	}
 	if failureTimer != nil {
 		failureTimer.Stop()
 	}
@@ -184,6 +187,11 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		err = errors.Join(errors.New("stderr line exceeded diagnostic limit; background task wait ceiling cannot be ruled out"), output.err, err)
 	} else if output.err != nil {
 		err = errors.Join(output.err, err)
+	}
+	if detail := output.safeDiagnosticText(aicli.RedactTail(&diagnostics, settings.APIKey)); detail != "" {
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_tail", Message: detail})
+	} else if strings.TrimSpace(diagnostics.String()) != "" {
+		result.Diagnostics = append(result.Diagnostics, aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"})
 	}
 	if err != nil {
 		result.Answer = ""

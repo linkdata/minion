@@ -718,6 +718,125 @@ func TestRunRedactsExplicitNativeCredentials(t *testing.T) {
 	}
 }
 
+func TestRunRedactsConfiguredAndNativeCredentialsFromDiagnostics(t *testing.T) {
+	settings := config.CodexConfig{
+		APIKey:            `configured"secret`,
+		NativeAPIKey:      `native-api"secret`,
+		NativeAccessToken: `native-access"secret`,
+	}
+	secrets := []string{settings.APIKey, settings.NativeAPIKey, settings.NativeAccessToken}
+	var parts []string
+	for _, secret := range secrets {
+		encoded, err := json.Marshal(secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts = append(parts, secret, string(encoded[1:len(encoded)-1]))
+	}
+	message := strings.Join(parts, " ")
+	event, err := json.Marshal(map[string]any{"type": "error", "message": message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := json.Marshal(map[string]any{"type": "turn.failed", "error": map[string]string{"message": message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(`{"type":"thread.started","thread_id":"root"}`)+" "+aicli.ShellQuote(string(event))+" "+aicli.ShellQuote(string(failed))+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+	if err == nil || len(result.Diagnostics) != 2 {
+		t.Fatalf("native failure diagnostics missing: result=%+v error=%v", result, err)
+	}
+	for i, code := range []string{"native_error", "turn_failed"} {
+		diagnostic := result.Diagnostics[i]
+		if diagnostic.Code != code || !strings.Contains(diagnostic.Message, "[redacted]") {
+			t.Fatalf("native diagnostic %d was not redacted: %+v", i, diagnostic)
+		}
+		for _, part := range parts {
+			if strings.Contains(diagnostic.Message, part) {
+				t.Fatalf("native diagnostic %d exposed credential form %q: %+v", i, part, diagnostic)
+			}
+		}
+	}
+}
+
+func TestRunMarksNativeDiagnosticGapWhenRedactionDiscardsMessage(t *testing.T) {
+	settings := config.CodexConfig{APIKey: `"x"`}
+	message := `{"x":1}`
+	if got := redactCodexText(message, settings); got != "" {
+		t.Fatalf("fixture was not discarded by redaction: %q", got)
+	}
+	for _, tc := range []struct {
+		name, event, completion, answer, code string
+		wantError                             bool
+		wantTokens                            usage.Tokens
+	}{
+		{
+			name:  "recoverable native error",
+			event: `{"type":"error","message":"{\"x\":1}"}`,
+			completion: `{"type":"item.completed","item":{"type":"agent_message","text":"report"}}` + "\n" +
+				`{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":2,"output_tokens":3}}`,
+			answer: "report", code: "native_error", wantTokens: usage.Tokens{Input: 5, CachedInput: 2, Output: 3},
+		},
+		{
+			name:      "failed turn",
+			event:     `{"type":"turn.failed","error":{"message":"{\"x\":1}"}}`,
+			code:      "turn_failed",
+			wantError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := `{"type":"thread.started","thread_id":"root"}` + "\n" + tc.event
+			if tc.completion != "" {
+				events += "\n" + tc.completion
+			}
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(events)+"\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+			if (err != nil) != tc.wantError || result.Answer != tc.answer || result.Tokens != tc.wantTokens || result.UsageComplete ||
+				len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: tc.code}) || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated"}) {
+				t.Fatalf("redaction gap changed call result or hid coverage loss: result=%+v error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestRunRedactsCredentialFormedByDiagnosticTruncation(t *testing.T) {
+	const secret = "head...tail"
+	const marker = "..."
+	head := (bounded.DiagnosticBytes - len(marker)) / 2
+	tail := bounded.DiagnosticBytes - len(marker) - head
+	message := strings.Repeat("x", head-len("head")) + "head" + "omitted" + "tail" + strings.Repeat("y", tail-len("tail"))
+	if !strings.Contains(aicli.DiagnosticText(message), secret) {
+		t.Fatal("fixture did not form a credential across the diagnostic marker")
+	}
+	event, err := json.Marshal(map[string]any{"type": "error", "message": message})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(`{"type":"thread.started","thread_id":"root"}`)+" "+aicli.ShellQuote(string(event))+" "+aicli.ShellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}`)+" "+aicli.ShellQuote(`{"type":"turn.completed"}`)+"\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: secret})
+	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "native_error" || strings.Contains(result.Diagnostics[0].Message, secret) || !strings.Contains(result.Diagnostics[0].Message, "[redacted]") {
+		t.Fatalf("diagnostic truncation formed a credential: result=%+v error=%v", result, err)
+	}
+}
+
+func TestRunMarksDiagnosticUnavailableWhenPostRedactionExceedsBound(t *testing.T) {
+	message := strings.Repeat("x", bounded.DiagnosticBytes+1)
+	events := `{"type":"thread.started","thread_id":"root"}` + "\n" +
+		strings.Repeat(`{"type":"error","message":"ordinary"}`+"\n", 100) +
+		`{"type":"error","message":"` + message + `"}` + "\n" +
+		`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}` + "\n" + `{"type":"turn.completed"}`
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(events)+"\nprintf '%s\\n' 'stderr note' >&2\n")
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{APIKey: "..."})
+	if err != nil || result.Answer != "report" || len(result.Diagnostics) != 64 ||
+		result.Diagnostics[0].Code != "diagnostics_truncated" ||
+		result.Diagnostics[61] != (aicli.ProviderDiagnostic{Code: "native_error"}) ||
+		result.Diagnostics[62] != (aicli.ProviderDiagnostic{Code: "stderr_tail", Message: "stderr note"}) ||
+		result.Diagnostics[63] != (aicli.ProviderDiagnostic{Code: "diagnostics_truncated"}) {
+		t.Fatalf("unsafe expanded diagnostic was retained: result=%+v error=%v", result, err)
+	}
+}
+
 func TestRunRedactsAmbientNativeCredentials(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "ambient-api-secret")
 	t.Setenv("CODEX_ACCESS_TOKEN", "ambient-access-secret")
@@ -779,9 +898,12 @@ printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.comp
 func TestRunDiscardsTruncatedMultiCredentialDiagnostic(t *testing.T) {
 	settings := config.CodexConfig{NativeAPIKey: "native-api-secret", NativeAccessToken: "native-access-secret"}
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s' "+aicli.ShellQuote(strings.Repeat("x", bounded.DiagnosticBytes)+"native-api-secret native-access-secret")+" >&2\nexit 1\n")
-	_, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", settings)
 	if err == nil || !strings.Contains(err.Error(), "no further diagnostics") || strings.Contains(err.Error(), "native-api-secret") || strings.Contains(err.Error(), "native-access-secret") {
 		t.Fatalf("truncated multi-credential diagnostic escaped: %v", err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"}) {
+		t.Fatalf("unsafe stderr gap was not recorded: %+v", result.Diagnostics)
 	}
 }
 
@@ -903,6 +1025,49 @@ exit 7
 	_, err := Run(t.Context(), t.TempDir(), "Review", false, "", config.CodexConfig{})
 	if err == nil || !strings.Contains(err.Error(), "model request failed") || !strings.Contains(err.Error(), "exit status 7") {
 		t.Fatalf("Run() error = %v, want Codex failure and exit code", err)
+	}
+}
+
+func TestRunRetainsNativeAndStderrDiagnosticsWithoutChangingCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name, events, stderr string
+		codes                []string
+		fails                bool
+	}{
+		{
+			name: "recoverable native error and successful report",
+			events: `{"type":"thread.started","thread_id":"root"}` + "\n" +
+				`{"type":"error","message":"temporary stream error"}` + "\n" +
+				`{"type":"item.completed","item":{"type":"agent_message","text":"report"}}` + "\n" +
+				`{"type":"turn.completed"}`,
+			stderr: "session quota reset at 12:00",
+			codes:  []string{"native_error", "stderr_tail"},
+		},
+		{
+			name: "failed after observed report",
+			events: `{"type":"thread.started","thread_id":"root"}` + "\n" +
+				`{"type":"item.completed","item":{"type":"agent_message","text":"partial report"}}` + "\n" +
+				`{"type":"turn.failed","error":{"message":"provider refused capacity"}}`,
+			stderr: "Failed to create stream fd",
+			codes:  []string{"turn_failed", "stderr_tail"},
+			fails:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(tc.events)+"\nprintf '%s\\n' "+aicli.ShellQuote(tc.stderr)+" >&2\n")
+			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+			if (err != nil) != tc.fails || !tc.fails && result.Answer != "report" || tc.fails && result.Answer != "" || len(result.Diagnostics) != len(tc.codes) {
+				t.Fatalf("result=%+v error=%v", result, err)
+			}
+			for i, code := range tc.codes {
+				if result.Diagnostics[i].Code != code || result.Diagnostics[i].Message == "" {
+					t.Fatalf("diagnostic %d=%+v, want %s", i, result.Diagnostics[i], code)
+				}
+			}
+			if result.Diagnostics[len(result.Diagnostics)-1].Message != tc.stderr {
+				t.Fatalf("stderr tail=%+v", result.Diagnostics)
+			}
+		})
 	}
 }
 

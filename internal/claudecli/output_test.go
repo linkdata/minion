@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -20,6 +21,43 @@ func writeChunks(t *testing.T, output *jsonlOutput, data string) {
 			t.Fatalf("Write=%d,%v; want %d bytes", wrote, err, n)
 		}
 		data = data[n:]
+	}
+}
+
+func TestDiagnosticRedactionAfterBounding(t *testing.T) {
+	raw := "capacity reached " + strings.Repeat("A", 8192) + strings.Repeat("B", 8192) + " session resets"
+	boundedText := aicli.DiagnosticText(raw)
+	join := strings.Index(boundedText, "...")
+	if join < 7 || join+10 > len(boundedText) {
+		t.Fatalf("bounded diagnostic has no head/tail join: length=%d", len(boundedText))
+	}
+	key := boundedText[join-7 : join+10]
+	if strings.Contains(raw, key) {
+		t.Fatalf("test key already appears before bounding: %q", key)
+	}
+	o := jsonlOutput{apiKey: key}
+	o.observe("task_stopped", raw)
+	if len(o.result.Diagnostics) != 1 || o.result.Diagnostics[0].Code != "task_stopped" || strings.Contains(o.result.Diagnostics[0].Message, key) ||
+		!strings.Contains(o.result.Diagnostics[0].Message, "capacity reached") || !strings.Contains(o.result.Diagnostics[0].Message, "session resets") || len(o.result.Diagnostics[0].Message) > bounded.DiagnosticBytes {
+		t.Fatalf("bounded native observation exposed key or lost evidence: %+v", o.result.Diagnostics)
+	}
+	detail := o.safeResultDetail(raw)
+	if strings.Contains(detail, key) || !strings.Contains(detail, "capacity reached") || !strings.Contains(detail, "session resets") || len(detail) > bounded.DiagnosticBytes || len(o.result.Diagnostics) != 1 {
+		t.Fatalf("bounded result detail exposed key or lost evidence: detail=%q diagnostics=%+v", detail, o.result.Diagnostics)
+	}
+}
+
+func TestUnsafeResultDetailMarksDiagnosticGap(t *testing.T) {
+	o := jsonlOutput{apiKey: `"x"`}
+	if detail := o.safeResultDetail(`{"x":1}`); detail != "native result detail could not be safely displayed" ||
+		len(o.result.Diagnostics) != 1 || o.result.Diagnostics[0].Code != "diagnostics_truncated" {
+		t.Fatalf("discarded result detail failed to mark incomplete diagnostics: detail=%q diagnostics=%+v", detail, o.result.Diagnostics)
+	}
+	o = jsonlOutput{apiKey: `"x"`}
+	o.observe("task_stopped", `{"x":1}`)
+	if len(o.result.Diagnostics) != 2 || o.result.Diagnostics[0].Code != "diagnostics_truncated" ||
+		o.result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "task_stopped", Message: "native diagnostic could not be safely displayed"}) {
+		t.Fatalf("discarded native observation failed to mark incomplete diagnostics: %+v", o.result.Diagnostics)
 	}
 }
 
@@ -64,6 +102,41 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 				}
 			} else if o.err == nil || o.err.Error() != test.failure || !cancelled || o.result.UsageComplete || o.result.Answer != "" {
 				t.Fatalf("unsafe or missing usage limit failure: tokens=%+v error=%v complete=%t answer=%q", o.result.Tokens, o.err, o.result.UsageComplete, o.result.Answer)
+			}
+		})
+	}
+}
+
+func TestOutputRecordsNativeStopSignalsWithoutChangingRecovery(t *testing.T) {
+	const quota = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
+	const overage = `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true}}`
+	const stopped = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"worker stopped"}`
+	const root = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	const failed = `{"type":"result","subtype":"error_during_execution","is_error":true,"permission_denials":[{}],"terminal_reason":"aborted_tools","api_error":"usage_limit_reached","api_error_status":429}`
+	for _, tc := range []struct {
+		name, events string
+		codes        []string
+		fails        bool
+	}{
+		{"rejected quota and failed result", quota + "\n" + failed, []string{"rate_limit_rejected", "permission_denied", "terminal_reason", "result_error"}, true},
+		{"paid overage", overage + "\n" + successfulResult, []string{"result_detail"}, false},
+		{"stopped task assessed by fresh root", stopped + "\n" + root + "\n" + successfulResult, []string{"task_stopped", "result_detail"}, false},
+		{"terminal reason abort", strings.TrimSuffix(successfulResult, "}") + `,"terminal_reason":"aborted_tools"}`, []string{"terminal_reason", "result_detail"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.events+"\n")
+			o.finish()
+			if (o.err != nil) != tc.fails || len(o.result.Diagnostics) != len(tc.codes) {
+				t.Fatalf("result=%+v error=%v", o.result, o.err)
+			}
+			for i, code := range tc.codes {
+				if got := o.result.Diagnostics[i]; got.Code != code || got.Message == "" {
+					t.Fatalf("diagnostic %d=%+v, want %q", i, got, code)
+				}
+			}
+			if tc.name == "rejected quota and failed result" && (!strings.Contains(o.result.Diagnostics[0].Message, "resets at 2026-10-17T01:20:00Z") || !strings.Contains(o.result.Diagnostics[3].Message, "HTTP status=429")) {
+				t.Fatalf("native quota fields lost: %+v", o.result.Diagnostics)
 			}
 		})
 	}

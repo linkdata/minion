@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
@@ -78,7 +79,11 @@ func providerCallFailureText(err error, secrets ...string) string {
 		!utf8.ValidString(message) || strings.ContainsRune(message, 0) {
 		return ""
 	}
-	text := "provider call failed; provider content may be incomplete: " + httpFailureDiagnostic(message)
+	detail := redactActionText(aicli.DiagnosticText(message), secrets...)
+	if detail == "" {
+		return ""
+	}
+	text := "provider call failed; provider content may be incomplete: " + detail
 	encoded, _ := json.Marshal(text)
 	for _, secret := range secrets {
 		if secret != "" && containsConfiguredKey(encoded, secret) {
@@ -86,6 +91,129 @@ func providerCallFailureText(err error, secrets ...string) string {
 		}
 	}
 	return text
+}
+
+func validProviderDiagnosticCode(provider, code string) bool {
+	switch provider {
+	case "codex":
+		return code == "native_error" || code == "turn_failed" || code == "stderr_tail" || code == "stderr_unavailable" || code == "diagnostics_truncated"
+	case "claude":
+		switch code {
+		case "rate_limit_rejected", "result_error", "result_detail", "result_errors", "permission_denied", "terminal_reason", "task_stopped", "wait_ceiling", "stderr_tail", "stderr_unavailable", "structured_output_observed", "diagnostics_truncated":
+			return true
+		}
+	}
+	return false
+}
+
+// guardAttemptRecordText checks the ordered text retained by one Runner attempt.
+func guardAttemptRecordText(sink func(attemptRecord), secrets []string) func(attemptRecord) {
+	return guardAttemptRecordTextWithLimits(sink, secrets, int(maxAttemptRecordBytes), 2<<30)
+}
+
+func guardAttemptRecordTextWithLimits(sink func(attemptRecord), secrets []string, historyLimit int, scanLimit int64) func(attemptRecord) {
+	maxKeyBytes := 0
+	keyCount := int64(0)
+	for _, secret := range secrets {
+		maxKeyBytes = max(maxKeyBytes, len(secret))
+		if secret != "" {
+			keyCount++
+		}
+	}
+	if maxKeyBytes == 0 {
+		return sink
+	}
+	// Go named HTML entities use at most 33 bytes per decoded byte; allow one byte of margin.
+	lookback := historyLimit
+	if maxKeyBytes <= lookback/34 {
+		lookback = 34 * maxKeyBytes
+	}
+	var mu sync.Mutex
+	var prior string
+	numericHistory, exhausted := false, false
+	emitGap := func(event attemptRecord) {
+		event.Text = ""
+		sink(event)
+		gap := event
+		if event.Kind == attemptRecordDiagnostic {
+			if event.EventSource == event.Provider+".diagnostics_truncated" {
+				return
+			}
+			gap.EventSource = event.Provider + ".diagnostics_truncated"
+		} else {
+			if event.EventSource == event.Provider+".content_missing" {
+				return
+			}
+			gap.Kind, gap.EventSource = attemptRecordDiscussion, event.Provider+".content_missing"
+		}
+		sink(gap)
+	}
+	return func(event attemptRecord) {
+		mu.Lock()
+		defer mu.Unlock()
+		if event.Text != "" {
+			if exhausted {
+				event.Text = ""
+				sink(event)
+				return
+			}
+			if len(event.Text) > maxAttemptEventBytes {
+				emitGap(event)
+				return
+			}
+			rawBytes := int64(len(event.Text))
+			if numericHistory && rawBytes > scanLimit {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			// Use the text Status will retain for this and later join checks.
+			event.Text = redactActionText(event.Text, secrets...)
+			if event.Text == "" || len(event.Text) > maxAttemptEventBytes {
+				emitGap(event)
+				return
+			}
+			if numericHistory && len(prior)+len(event.Text) > historyLimit {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			joined := prior + event.Text
+			// Stay in full mode after an introducer, even if that entity later closes.
+			numeric := numericHistory || strings.Contains(joined, "&#")
+			// Only numeric history grows across the attempt; ordinary checks keep a short tail.
+			if numeric && (len(joined) > historyLimit || rawBytes+int64(len(joined))*keyCount > scanLimit) {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			encoded, _ := json.Marshal(joined)
+			cost := rawBytes + int64(len(joined)+len(encoded))*keyCount
+			if numeric && cost > scanLimit {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			if numeric {
+				scanLimit -= cost
+			}
+			for _, secret := range secrets {
+				if secret != "" && (containsConfiguredKey([]byte(joined), secret) || containsConfiguredKey(encoded, secret)) {
+					emitGap(event)
+					return
+				}
+			}
+			numericHistory = numeric
+			if numeric {
+				prior = joined
+			} else if len(joined) > lookback {
+				prior = joined[len(joined)-lookback:]
+			} else {
+				prior = joined
+			}
+		}
+		sink(event)
+	}
 }
 
 // Run uses supplied complete Git history without fetching or publication rights.
@@ -153,6 +281,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if err := configured.ConfigureRole(*job.Critic); err != nil {
 			return result, err
 		}
+	}
+	if configured.eventSink != nil {
+		configured.eventSink = guardAttemptRecordText(configured.eventSink, configured.secretValues())
 	}
 	auditSkill := configured.Codex.SecurityAuditSkill()
 	workRoot := r.WorkRoot
@@ -389,9 +520,36 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
+			secrets := configured.secretValues()
+			if configured.eventSink != nil {
+				for _, diagnostic := range call.Diagnostics {
+					event := record
+					event.Kind, event.ObservedAt = attemptRecordDiagnostic, time.Now().UTC().Format(time.RFC3339Nano)
+					if validProviderDiagnosticCode(request.provider, diagnostic.Code) && utf8.ValidString(diagnostic.Message) && !strings.ContainsRune(diagnostic.Message, 0) {
+						event.EventSource = request.provider + "." + diagnostic.Code
+						redacted := redactActionText(diagnostic.Message, secrets...)
+						boundedText := aicli.DiagnosticText(redacted)
+						dropped := len(boundedText) < len(redacted)
+						event.Text = redactActionText(boundedText, secrets...)
+						if len(event.Text) > bounded.DiagnosticBytes || diagnostic.Message != "" && event.Text == "" {
+							event.Text = ""
+							dropped = true
+						}
+						configured.eventSink(event)
+						if dropped && diagnostic.Code != "diagnostics_truncated" {
+							gap := event
+							gap.EventSource, gap.Text = request.provider+".diagnostics_truncated", ""
+							configured.eventSink(gap)
+						}
+						continue
+					}
+					event.Kind, event.EventSource, event.Text = attemptRecordDiscussion, request.provider+".content_missing", ""
+					configured.eventSink(event)
+				}
+			}
 			if err != nil && configured.eventSink != nil {
 				failure := record
-				failure.Kind, failure.Text = attemptRecordDiagnostic, providerCallFailureText(err, configured.secretValues()...)
+				failure.Kind, failure.Text = attemptRecordDiagnostic, providerCallFailureText(err, secrets...)
 				failure.EventSource = request.provider + ".call.failed"
 				if failure.Text == "" {
 					failure.EventSource = request.provider + ".call.diagnostic_unavailable"
@@ -401,11 +559,17 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
 			if err == nil && request.role == roleCritic {
-				approved, hasBlockers, reviewComplete, _, parseErr := parseCritique(call.Answer, configured.secretValues()...)
+				approved, hasBlockers, reviewComplete, feedback, parseErr := parseCritique(call.Answer, secrets...)
 				entry.Approved = parseErr == nil && approved
 				entry.NoBlockers = parseErr == nil && !hasBlockers
 				entry.HasBlockers = parseErr == nil && hasBlockers
 				entry.ReviewComplete = parseErr == nil && reviewComplete
+				if parseErr == nil && feedback != "" && configured.eventSink != nil {
+					report := record
+					report.Kind, report.Text, report.EventSource = attemptRecordReport, feedback, "minion.critic.feedback"
+					report.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					configured.eventSink(report)
+				}
 			}
 			result.Calls = append(result.Calls, entry)
 			if checkpoints != nil {
