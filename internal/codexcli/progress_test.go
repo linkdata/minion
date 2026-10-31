@@ -1,10 +1,13 @@
 package codexcli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/aicli"
 )
 
 func TestJSONLOutputProgressRejectsOversizedCompletedItemID(t *testing.T) {
@@ -89,6 +92,45 @@ func TestJSONLOutputMetadataOnlyUpdatesDoNotRenewProgress(t *testing.T) {
 		if progress != step.want {
 			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
 		}
+	}
+}
+
+func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 1},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 2},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 3},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 3},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 4},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 5},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 6},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 6},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
+func TestJSONLOutputProgressIdentityCapStopsRun(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }, progressItemLimit: 1}
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"root"}`,
+		`{"type":"item.started","item":{"id":"first","type":"command_execution"}}`,
+		`{"type":"item.started","item":{"id":"second","type":"command_execution"}}`,
+	} {
+		_, _ = output.Write([]byte(line + "\n"))
+	}
+	if progress != 1 || !errors.Is(output.stopErr, aicli.ErrOutputLimit) {
+		t.Fatalf("identity cap: progress=%d stop=%v", progress, output.stopErr)
 	}
 }
 

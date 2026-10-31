@@ -495,34 +495,35 @@ type progressCodexItem struct {
 }
 
 type jsonlOutput struct {
-	cancel          context.CancelFunc
-	onEvent         func(aicli.StreamEvent)
-	onChild         func([]string, bool)
-	onProgress      func()
-	redact          func(string) string
-	allowIncomplete bool
-	gapSent         bool
-	missingSent     bool
-	threadID        string
-	expectedID      string
-	conflictingID   string
-	tokens          *usage.Tokens
-	children        []string
-	observationOnly map[string]bool
-	spawns          map[string]bool
-	stopErr         error
-	stream          aicli.JSONL
-	parseErr        error
-	finalMessage    string
-	completed       bool
-	failed          bool
-	failureReason   string
-	diagnostics     []aicli.ProviderDiagnostic
-	pending         map[string]pendingCodexItem
-	pendingBytes    int
-	nextPending     int
-	completedItems  map[string]bool
-	progressItems   map[string]progressCodexItem
+	cancel            context.CancelFunc
+	onEvent           func(aicli.StreamEvent)
+	onChild           func([]string, bool)
+	onProgress        func()
+	redact            func(string) string
+	allowIncomplete   bool
+	gapSent           bool
+	missingSent       bool
+	threadID          string
+	expectedID        string
+	conflictingID     string
+	tokens            *usage.Tokens
+	children          []string
+	observationOnly   map[string]bool
+	spawns            map[string]bool
+	stopErr           error
+	stream            aicli.JSONL
+	parseErr          error
+	finalMessage      string
+	completed         bool
+	failed            bool
+	failureReason     string
+	diagnostics       []aicli.ProviderDiagnostic
+	pending           map[string]pendingCodexItem
+	pendingBytes      int
+	nextPending       int
+	completedItems    map[string]bool
+	progressItems     map[string]progressCodexItem
+	progressItemLimit int // Tests lower the cap; zero uses maxUsageRecords.
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -675,29 +676,47 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if json.Unmarshal(selected.Item, &visible) != nil {
 		return
 	}
-	if item.ID != "" {
-		// A native ID already identifies the item. Command and tool metadata
-		// may change without any new output or execution.
-		visible.Type, visible.Tool, visible.Command = "", "", nil
+	key := "id:" + item.ID
+	if item.ID == "" {
+		identity, err := json.Marshal(struct {
+			Type    string          `json:"type"`
+			Tool    string          `json:"tool"`
+			Command json.RawMessage `json:"command"`
+		}{visible.Type, visible.Tool, visible.Command})
+		if err != nil {
+			return
+		}
+		digest := sha256.Sum256(identity)
+		key = "legacy:" + string(digest[:])
 	}
+	// Native IDs or the stable legacy signature identify the item. Metadata
+	// changes are not evidence of new output or execution.
+	visible.Type, visible.Tool, visible.Command = "", "", nil
 	content, err := json.Marshal(visible)
 	if err != nil {
 		return
 	}
 	snapshot := sha256.Sum256(content)
-	key := "id:" + item.ID
-	if item.ID == "" {
-		key = "hash:" + string(snapshot[:]) // Old Codex items may lack IDs.
-	}
 	prior, seen := o.progressItems[key]
-	if seen && (prior.completed || event.Type != "item.completed" && prior.snapshot == snapshot) {
-		return
+	if seen {
+		if item.ID != "" && prior.completed {
+			return
+		}
+		freshCycle := item.ID == "" && prior.completed && event.Type == "item.started"
+		if !freshCycle && prior.snapshot == snapshot && (event.Type != "item.completed" || prior.completed) {
+			return
+		}
 	}
 	if o.progressItems == nil {
 		o.progressItems = make(map[string]progressCodexItem)
 	}
-	if _, exists := o.progressItems[key]; !exists && len(o.progressItems) >= maxUsageRecords {
-		return // shortcut: Stop at the evidence cap; raise it if real sessions need more item identities.
+	limit := maxUsageRecords
+	if o.progressItemLimit > 0 {
+		limit = min(limit, o.progressItemLimit)
+	}
+	if _, exists := o.progressItems[key]; !exists && len(o.progressItems) >= limit {
+		o.stop(fmt.Errorf("%w: Codex progress identity limit reached", aicli.ErrOutputLimit))
+		return
 	}
 	o.progressItems[key] = progressCodexItem{snapshot: snapshot, completed: event.Type == "item.completed"}
 	o.onProgress()
