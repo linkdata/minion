@@ -436,6 +436,114 @@ func TestRunnerRetainsRedactedStreamDiscussionAndCoverage(t *testing.T) {
 	assertNoConfiguredKeyInOrderedText(t, saved, secret)
 }
 
+func TestRunnerWithholdsLongHTMLNumericKeyAcrossEvents(t *testing.T) {
+	const secret = "xA"
+	zeros := strings.Repeat("0", 300)
+	for _, test := range []struct {
+		name   string
+		pieces []string
+	}{
+		{"entity split", []string{"x", "&#" + zeros[:100], zeros[100:200], zeros[200:] + "65;"}},
+		{"introducer split", []string{"x&", "#" + zeros[:100], zeros[100:200], zeros[200:] + "65;"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: secret}, eventSink: queue.add,
+				runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+					for i, piece := range test.pieces {
+						kind := "assistant"
+						if i == len(test.pieces)-1 {
+							kind = "final"
+						}
+						request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: kind, Text: piece})
+					}
+					request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "safe later text"})
+					return aicli.Result{Answer: "Done."}, nil
+				}}
+			result, err := runner.Run(t.Context(), testJob(command.Comment))
+			if err != nil || result.Answer != "Done." || queue.finish() || len(saved) != len(test.pieces)+2 {
+				t.Fatalf("long numeric entity changed answer or coverage: result=%+v records=%+v error=%v", result, saved, err)
+			}
+			for i, piece := range test.pieces[:len(test.pieces)-1] {
+				if saved[i].Text != piece {
+					t.Fatalf("earlier safe text %d lost: %+v", i, saved)
+				}
+			}
+			last := len(test.pieces) - 1
+			if saved[last].EventSource != "codex.final" || saved[last].Text != "" ||
+				saved[last+1].EventSource != "codex.content_missing" || saved[last+1].Text != "" ||
+				saved[last+2].Text != "safe later text" {
+				t.Fatalf("long numeric entity gap or later safe text lost: %+v", saved)
+			}
+			assertNoConfiguredKeyInOrderedText(t, saved, secret)
+		})
+	}
+}
+
+func TestRunnerPreservesSafeHTMLNumericDiscussion(t *testing.T) {
+	var saved []attemptRecord
+	queue := newProviderEventQueue(func(event attemptRecord) error {
+		saved = append(saved, event)
+		return nil
+	})
+	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: "xA"}, eventSink: queue.add,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "ordinary &#00066; discussion"})
+			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "final", Text: " still safe"})
+			return aicli.Result{Answer: "Done."}, nil
+		}}
+	result, err := runner.Run(t.Context(), testJob(command.Comment))
+	if err != nil || result.Answer != "Done." || !queue.finish() || len(saved) != 2 ||
+		saved[0].Text != "ordinary &#00066; discussion" || saved[1].Text != " still safe" {
+		t.Fatalf("safe numeric discussion was lost: result=%+v records=%+v error=%v", result, saved, err)
+	}
+}
+
+func TestGuardAttemptRecordTextStopsAfterHistoryOrScanExhaustion(t *testing.T) {
+	for _, test := range []struct {
+		name, first, second string
+		historyLimit        int
+		scanLimit           int64
+	}{
+		{"history", "x&#", strings.Repeat("0", 10), 12, 1000},
+		{"scan after completed entity", "safe &#66;", "more", 100, 40},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var saved []attemptRecord
+			queue := newProviderEventQueue(func(event attemptRecord) error {
+				saved = append(saved, event)
+				return nil
+			})
+			guard := guardAttemptRecordTextWithLimits(queue.add, []string{"xA"}, test.historyLimit, test.scanLimit)
+			guard(attemptRecord{Kind: attemptRecordDiscussion, Call: "1", Provider: "codex", Agent: "native", EventSource: "codex.assistant", Text: test.first})
+			guard(attemptRecord{Kind: attemptRecordDiscussion, Call: "1", Provider: "codex", Agent: "native", EventSource: "codex.final", Text: test.second})
+			guard(attemptRecord{Kind: attemptRecordDiagnostic, Call: "1", Provider: "codex", EventSource: "codex.native_error", Text: "safe later diagnostic"})
+			if queue.finish() || len(saved) != 4 || saved[0].Text != test.first ||
+				saved[1].EventSource != "codex.final" || saved[1].Text != "" ||
+				saved[2].EventSource != "codex.content_missing" || saved[2].Text != "" ||
+				saved[3].EventSource != "codex.native_error" || saved[3].Text != "" {
+				t.Fatalf("text resumed or native code/gap lost after %s exhaustion: %+v", test.name, saved)
+			}
+		})
+	}
+}
+
+func TestGuardAttemptRecordTextKeepsOrdinaryEventsOutsideScanBudget(t *testing.T) {
+	var saved []attemptRecord
+	guard := guardAttemptRecordTextWithLimits(func(event attemptRecord) { saved = append(saved, event) },
+		[]string{strings.Repeat("x", maxWorkerCredentialBytes)}, int(maxAttemptRecordBytes), 1)
+	for _, value := range []string{"ordinary first", "ordinary second"} {
+		guard(attemptRecord{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.assistant", Text: value})
+	}
+	if len(saved) != 2 || saved[0].Text != "ordinary first" || saved[1].Text != "ordinary second" {
+		t.Fatalf("ordinary rolling-window text spent numeric scan budget: %+v", saved)
+	}
+}
+
 func TestRunnerWithholdsPreparedInputAndCallFailureJoins(t *testing.T) {
 	for _, test := range []struct {
 		name, secret, first, second, gap string

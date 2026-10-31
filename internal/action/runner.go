@@ -108,58 +108,105 @@ func validProviderDiagnosticCode(provider, code string) bool {
 
 // guardAttemptRecordText checks the ordered text retained by one Runner attempt.
 func guardAttemptRecordText(sink func(attemptRecord), secrets []string) func(attemptRecord) {
+	return guardAttemptRecordTextWithLimits(sink, secrets, int(maxAttemptRecordBytes), 2<<30)
+}
+
+func guardAttemptRecordTextWithLimits(sink func(attemptRecord), secrets []string, historyLimit int, scanLimit int64) func(attemptRecord) {
 	maxKeyBytes := 0
+	keyCount := int64(0)
 	for _, secret := range secrets {
 		maxKeyBytes = max(maxKeyBytes, len(secret))
+		if secret != "" {
+			keyCount++
+		}
 	}
 	if maxKeyBytes == 0 {
 		return sink
 	}
 	// JSON and Go quoting need at most twelve source bytes per key byte.
-	// shortcut: Zero-padded HTML numeric entities can exceed this finite lookback; a streaming decoder would cover them.
-	lookback := int(maxAttemptRecordBytes)
+	lookback := historyLimit
 	if maxKeyBytes <= lookback/12 {
 		lookback = 12 * maxKeyBytes
 	}
 	var mu sync.Mutex
 	var prior string
+	numericHistory, exhausted := false, false
+	emitGap := func(event attemptRecord) {
+		event.Text = ""
+		sink(event)
+		gap := event
+		if event.Kind == attemptRecordDiagnostic {
+			if event.EventSource == event.Provider+".diagnostics_truncated" {
+				return
+			}
+			gap.EventSource = event.Provider + ".diagnostics_truncated"
+		} else {
+			if event.EventSource == event.Provider+".content_missing" {
+				return
+			}
+			gap.Kind, gap.EventSource = attemptRecordDiscussion, event.Provider+".content_missing"
+		}
+		sink(gap)
+	}
 	return func(event attemptRecord) {
 		mu.Lock()
 		defer mu.Unlock()
 		if event.Text != "" {
-			unsafe := len(event.Text) > maxAttemptEventBytes
-			if !unsafe {
-				// Use the text Status will retain for this and later join checks.
-				event.Text = redactActionText(event.Text, secrets...)
-				unsafe = event.Text == "" || len(event.Text) > maxAttemptEventBytes
-			}
-			var joined string
-			if !unsafe {
-				joined = prior + event.Text
-				encoded, _ := json.Marshal(joined)
-				for _, secret := range secrets {
-					if secret != "" && (containsConfiguredKey([]byte(joined), secret) || containsConfiguredKey(encoded, secret)) {
-						unsafe = true
-						break
-					}
-				}
-			}
-			if unsafe {
+			if exhausted {
 				event.Text = ""
 				sink(event)
-				gap := event
-				if event.Kind == attemptRecordDiagnostic {
-					if event.EventSource == event.Provider+".diagnostics_truncated" {
-						return
-					}
-					gap.EventSource = event.Provider + ".diagnostics_truncated"
-				} else {
-					gap.Kind, gap.EventSource = attemptRecordDiscussion, event.Provider+".content_missing"
-				}
-				sink(gap)
 				return
 			}
-			if len(joined) > lookback {
+			if len(event.Text) > maxAttemptEventBytes {
+				emitGap(event)
+				return
+			}
+			rawBytes := int64(len(event.Text))
+			if numericHistory && rawBytes > scanLimit {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			// Use the text Status will retain for this and later join checks.
+			event.Text = redactActionText(event.Text, secrets...)
+			if event.Text == "" || len(event.Text) > maxAttemptEventBytes {
+				emitGap(event)
+				return
+			}
+			if numericHistory && len(prior)+len(event.Text) > historyLimit {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			joined := prior + event.Text
+			// Stay in full mode after an introducer, even if that entity later closes.
+			numeric := numericHistory || strings.Contains(joined, "&#")
+			// Only numeric history grows across the attempt; ordinary checks keep a short tail.
+			if numeric && (len(joined) > historyLimit || rawBytes+int64(len(joined))*keyCount > scanLimit) {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			encoded, _ := json.Marshal(joined)
+			cost := rawBytes + int64(len(joined)+len(encoded))*keyCount
+			if numeric && cost > scanLimit {
+				exhausted = true
+				emitGap(event)
+				return
+			}
+			if numeric {
+				scanLimit -= cost
+			}
+			for _, secret := range secrets {
+				if secret != "" && (containsConfiguredKey([]byte(joined), secret) || containsConfiguredKey(encoded, secret)) {
+					emitGap(event)
+					return
+				}
+			}
+			numericHistory = numeric
+			if numeric {
+				prior = joined
+			} else if len(joined) > lookback {
 				prior = joined[len(joined)-lookback:]
 			} else {
 				prior = joined
