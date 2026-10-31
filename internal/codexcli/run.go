@@ -657,10 +657,32 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if json.Unmarshal(line, &selected) != nil || len(selected.Item) == 0 {
 		return
 	}
-	snapshot := sha256.Sum256(selected.Item)
+	var visible struct {
+		Type             string          `json:"type"`
+		Tool             string          `json:"tool"`
+		Command          json.RawMessage `json:"command"`
+		Text             string          `json:"text"`
+		AggregatedOutput string          `json:"aggregated_output"`
+		Output           json.RawMessage `json:"output"`
+		Result           json.RawMessage `json:"result"`
+		Changes          json.RawMessage `json:"changes"`
+	}
+	if json.Unmarshal(selected.Item, &visible) != nil {
+		return
+	}
+	if item.ID != "" {
+		// A native ID already identifies the item. Command and tool metadata
+		// may change without any new output or execution.
+		visible.Type, visible.Tool, visible.Command = "", "", nil
+	}
+	content, err := json.Marshal(visible)
+	if err != nil {
+		return
+	}
+	snapshot := sha256.Sum256(content)
 	key := "id:" + item.ID
 	if item.ID == "" {
-		key = "hash:" + string(snapshot[:]) // Old Codex completed items may lack IDs.
+		key = "hash:" + string(snapshot[:]) // Old Codex items may lack IDs.
 	}
 	prior, seen := o.progressItems[key]
 	if seen && (prior.completed || event.Type != "item.completed" && prior.snapshot == snapshot) {

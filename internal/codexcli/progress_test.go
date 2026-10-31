@@ -67,6 +67,31 @@ func TestJSONLOutputProgressRequiresNewRootWork(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputMetadataOnlyUpdatesDoNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"tool","type":"command_execution","command":"go test"}}`, 1},
+		{`{"type":"item.updated","item":{"id":"tool","type":"command_execution","command":"go test","elapsed_time_ms":100}}`, 1},
+		{`{"type":"item.updated","item":{"id":"tool","type":"command_execution","command":"go test","elapsed_time_ms":200}}`, 1},
+		{`{"type":"item.updated","item":{"id":"tool","type":"command_execution","command":"go test","aggregated_output":"PASS"}}`, 2},
+		{`{"type":"item.updated","item":{"id":"tool","type":"command_execution","command":"go test","aggregated_output":"PASS","elapsed_time_ms":300}}`, 2},
+		{`{"type":"item.completed","item":{"id":"tool","type":"command_execution","command":"go test","aggregated_output":"PASS"}}`, 3},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"legacy tool"}}`, 4},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"legacy tool","elapsed_time_ms":100}}`, 4},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"legacy tool","aggregated_output":"done"}}`, 5},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
 func TestRolloutActivityProgressRequiresNewHelperWork(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	root := writeUsageRollout(t, home, "root", "", usageEventAt(9, "task_started", "root-turn"))
@@ -269,6 +294,18 @@ func TestRolloutActivityFreshHelperResponseRequiresProvenTurn(t *testing.T) {
 	activity.poll()
 	if *progress != 3 {
 		t.Fatalf("own-thread usage did not prove the helper response turn: %d", *progress)
+	}
+	appendUsageEvents(t, child, `{"ordinal":21,"type":"event_msg","payload":{"type":"exec_command_output","turn_id":"usage-turn","chunk":"more output"}}`)
+	activity.poll()
+	if *progress != 4 {
+		t.Fatalf("proved helper output without thread ID did not renew progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":22,"type":"event_msg","payload":{"type":"exec_command_output","turn_id":"usage-turn","chunk":""}}`,
+		`{"ordinal":23,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"usage-turn","chunk":""}}`)
+	activity.poll()
+	if *progress != 4 {
+		t.Fatalf("empty helper output renewed progress: %d", *progress)
 	}
 }
 

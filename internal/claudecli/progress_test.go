@@ -392,3 +392,31 @@ func TestSessionRunDeliversNativeProgress(t *testing.T) {
 		t.Fatalf("Run=%+v, %v; progress=%d, want 1", result, err, progress)
 	}
 }
+
+func TestSessionRunResumeKeepsProgressIdentity(t *testing.T) {
+	const oldMessage = `{"type":"assistant","message":{"id":"old","content":[{"type":"text","text":"old work"}]}}`
+	const newMessage = `{"type":"assistant","message":{"id":"new","content":[{"type":"text","text":"new work"}]}}`
+	fakeExecutable(t, "claude", `n=0
+[ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+printf '%s\n' '`+oldMessage+`'
+if [ "$n" -eq 2 ]; then printf '%s\n' '`+newMessage+`'; fi
+printf '%s\n' '`+successfulResult+`'
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	progress := 0
+	session.OnProgress = func() { progress++ }
+	workspace := t.TempDir()
+	for call := 1; call <= 2; call++ {
+		result, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{})
+		if err != nil || result.Answer != "final answer" || progress != call {
+			t.Fatalf("call %d: result=%+v error=%v progress=%d", call, result, err, progress)
+		}
+	}
+}

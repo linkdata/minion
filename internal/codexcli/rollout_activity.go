@@ -538,6 +538,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		Kind        string          `json:"kind"`
 		Message     string          `json:"message"`
 		Text        string          `json:"text"`
+		Chunk       string          `json:"chunk"`
 		Item        json.RawMessage `json:"item"`
 	}
 	if json.Unmarshal(event.Payload, &payload) != nil {
@@ -551,10 +552,13 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		return
 	}
 	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
-	if meta.ID != rootID && !uncertainOrdinal && a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) {
+	if meta.ID != rootID && !uncertainOrdinal &&
+		(a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]) {
 		switch payload.Type {
 		case "exec_command_output":
-			a.newProgress(meta.ID, event, event.Ordinal, progressed)
+			if payload.Chunk != "" {
+				a.newProgress(meta.ID, event, event.Ordinal, progressed)
+			}
 		case "task_started", "task_complete", "turn_aborted",
 			"patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
 			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",

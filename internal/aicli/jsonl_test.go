@@ -102,14 +102,13 @@ func TestJSONLPartialFramesReachByteLimitBeforeEventLimit(t *testing.T) {
 	}
 	const previousLimit = 100000
 	var dispatched int
-	output := JSONL{Line: func([]byte) { dispatched++ }, Fail: func(err error) { t.Fatal(err) }}
-	for range previousLimit + 1 {
-		if _, err := output.Write(frame); err != nil {
-			t.Fatal(err)
-		}
+	output := JSONL{events: previousLimit, total: int64(previousLimit * len(frame)),
+		Line: func([]byte) { dispatched++ }, Fail: func(err error) { t.Fatal(err) }}
+	if _, err := output.Write(frame); err != nil {
+		t.Fatal(err)
 	}
-	if dispatched != previousLimit+1 {
-		t.Fatalf("dispatched %d partial frames, want %d", dispatched, previousLimit+1)
+	if dispatched != 1 || output.events != previousLimit+1 {
+		t.Fatalf("dispatched %d frames at event %d", dispatched, output.events)
 	}
 }
 
