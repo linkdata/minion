@@ -3,6 +3,7 @@ package codexcli
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -198,7 +199,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent,
+	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent, onProgress: s.OnProgress,
 		redact:          func(text string) string { return redactCodexText(text, settings) },
 		allowIncomplete: !slices.ContainsFunc(codexSecrets(settings), func(secret string) bool { return secret != "" }),
 	}
@@ -483,10 +484,16 @@ type pendingCodexItem struct {
 	order int
 }
 
+type progressCodexItem struct {
+	snapshot  [sha256.Size]byte
+	completed bool
+}
+
 type jsonlOutput struct {
 	cancel          context.CancelFunc
 	onEvent         func(aicli.StreamEvent)
 	onChild         func([]string, bool)
+	onProgress      func()
 	redact          func(string) string
 	allowIncomplete bool
 	gapSent         bool
@@ -510,6 +517,7 @@ type jsonlOutput struct {
 	pendingBytes    int
 	nextPending     int
 	completedItems  map[string]bool
+	progressItems   map[string]progressCodexItem
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -575,9 +583,13 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 			}
 			capture = selected
 		}
+		turnCompleted := o.completed
 		o.accept(event)
 		if o.stopErr != nil {
 			return
+		}
+		if !turnCompleted {
+			o.recordExecutionProgress(event, line)
 		}
 		if event.Type == "item.started" || event.Type == "item.updated" {
 			o.recordProgress(event, line)
@@ -615,6 +627,54 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 			o.gap("unknown_item")
 		}
 	}
+}
+
+// A JSONL item snapshot can be repeated without any new work. Only changed
+// root output or tool lifecycle events renew the executor's inactivity timer.
+func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
+	if o.onProgress == nil || o.threadID == "" || event.Item == nil ||
+		(event.ThreadID != "" && event.ThreadID != o.threadID) {
+		return
+	}
+	item := event.Item
+	tool := codexToolItem(item.Type) && item.Type != "error" &&
+		!(item.Type == "collab_tool_call" && (item.Tool == "wait" || item.Tool == "close_agent"))
+	output := (item.Type == "agent_message" || item.Type == "reasoning") && item.Text != ""
+	if !tool && !output {
+		return
+	}
+	switch event.Type {
+	case "item.started", "item.updated":
+		if len(item.ID) > maxItemIDBytes {
+			return
+		}
+	case "item.completed":
+	default:
+		return
+	}
+	var selected struct {
+		Item json.RawMessage `json:"item"`
+	}
+	if json.Unmarshal(line, &selected) != nil || len(selected.Item) == 0 {
+		return
+	}
+	snapshot := sha256.Sum256(selected.Item)
+	key := "id:" + item.ID
+	if item.ID == "" {
+		key = "hash:" + string(snapshot[:]) // Old Codex completed items may lack IDs.
+	}
+	prior, seen := o.progressItems[key]
+	if seen && (prior.completed || event.Type != "item.completed" && prior.snapshot == snapshot) {
+		return
+	}
+	if o.progressItems == nil {
+		o.progressItems = make(map[string]progressCodexItem)
+	}
+	if _, exists := o.progressItems[key]; !exists && len(o.progressItems) >= maxUsageRecords {
+		return // shortcut: Stop at the evidence cap; raise it if real sessions need more item identities.
+	}
+	o.progressItems[key] = progressCodexItem{snapshot: snapshot, completed: event.Type == "item.completed"}
+	o.onProgress()
 }
 
 // Progress events contain full snapshots. Keep only the latest bounded item.

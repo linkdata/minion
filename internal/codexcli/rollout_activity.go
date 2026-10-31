@@ -22,15 +22,16 @@ import (
 // remains the source of root discussion; rollout cursors supply helper content
 // and progress when the root stream is quiet.
 type rolloutActivity struct {
-	ctx         context.Context
-	home        string
-	started     time.Time
-	known       map[string]rolloutMeta
-	provedKnown map[string]bool
-	before      map[string]*usageBoundary
-	excluded    map[string]bool
-	emit        func(aicli.StreamEvent)
-	progress    func()
+	ctx            context.Context
+	home           string
+	started        time.Time
+	known          map[string]rolloutMeta
+	provedKnown    map[string]bool
+	before         map[string]*usageBoundary
+	excluded       map[string]bool
+	emit           func(aicli.StreamEvent)
+	progress       func()
+	progressEvents map[[sha256.Size]byte]bool
 
 	mu        sync.Mutex // stdout announcements may arrive while a scan runs
 	rootID    string
@@ -462,8 +463,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		if meta.ID == rootID {
 			return // Root stdout supplies discussion.
 		}
-		if a.consumeResponse(meta, event.Payload, uncertainOrdinal) && !uncertainOrdinal {
-			*progressed = true
+		if a.consumeResponse(meta, event.Payload, uncertainOrdinal) && !uncertainOrdinal &&
+			(meta.HistoryStart != nil || a.before[meta.ID] != nil) {
+			a.newProgress(meta.ID, event, progressed)
 		}
 		return
 	}
@@ -496,8 +498,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			uncertain := uncertainOrdinal || before != nil && message.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 			a.emitVisible(meta.ID, "inter_agent_communication", message.Author+" -> "+message.Recipient+"\n"+message.Content, uncertain)
 		}
-		if !uncertainOrdinal && (message.Content != "" || message.EncryptedContent != "") {
-			*progressed = true
+		if !uncertainOrdinal && a.helperProgressProven(meta, message.Author, message.Metadata.TurnID) &&
+			(message.Content != "" || message.EncryptedContent != "") {
+			a.newProgress(meta.ID, event, progressed)
 		}
 		return
 	}
@@ -533,8 +536,22 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if b := a.before[meta.ID]; b != nil && payload.TurnID != "" && b.turns[payload.TurnID] {
 		return
 	}
-	if !uncertainOrdinal && (a.before[meta.ID] == nil || payload.TurnID != "" || meta.ID == rootID && payload.Type == "task_started") {
-		*progressed = true
+	if meta.ID != rootID && !uncertainOrdinal && a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) {
+		switch payload.Type {
+		case "task_started", "task_complete", "turn_aborted",
+			"patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
+			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",
+			"exec_command_begin", "exec_command_end", "exec_command_output":
+			a.newProgress(meta.ID, event, progressed)
+		case "user_message", "agent_message":
+			if payload.Message != "" {
+				a.newProgress(meta.ID, event, progressed)
+			}
+		case "agent_reasoning", "agent_reasoning_raw_content":
+			if payload.Text != "" {
+				a.newProgress(meta.ID, event, progressed)
+			}
+		}
 	}
 	if payload.Type == "collab_agent_spawn_end" {
 		if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
@@ -621,6 +638,22 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		a.contentMissing(meta.ID)
 		return
 	}
+	if meta.ID != rootID && payload.Type == "item_completed" && !uncertainOrdinal &&
+		a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) {
+		switch item.Type {
+		case "Plan", "UserMessage", "AgentMessage":
+			if item.Text != "" || len(item.Content) != 0 {
+				a.newProgress(meta.ID, event, progressed)
+			}
+		case "Reasoning", "CommandExecution", "DynamicToolCall", "WebSearch",
+			"FileChange", "McpToolCall", "FunctionCallOutput", "ImageGeneration", "Extension", "ImageView":
+			a.newProgress(meta.ID, event, progressed)
+		case "CollabAgentToolCall":
+			if item.Tool != "wait" && item.Tool != "close_agent" {
+				a.newProgress(meta.ID, event, progressed)
+			}
+		}
+	}
 	if meta.ID != rootID && (payload.Type == "item_started" || payload.Type == "item_updated") {
 		a.contentMissing(meta.ID) // Native persistence does not include partial item events.
 		return
@@ -701,6 +734,40 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		return
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
+}
+
+func (a *rolloutActivity) newProgress(id string, event rolloutEvent, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(id))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(event.Type))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(event.Payload)
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	if a.progressEvents[digest] || len(a.progressEvents) >= maxUsageRecords {
+		return // shortcut: Stop at the evidence cap; raise it if real sessions need more helper events.
+	}
+	if a.progressEvents == nil {
+		a.progressEvents = make(map[[sha256.Size]byte]bool)
+	}
+	a.progressEvents[digest] = true
+	*progressed = true
+}
+
+// An unbounded fresh helper file may begin with copied parent history. Its
+// own thread and turn identify fresh work when no fork ordinal or prefix does.
+func (a *rolloutActivity) helperProgressProven(meta rolloutMeta, threadID, turnID string) bool {
+	if meta.HistoryStart != nil {
+		return true
+	}
+	if a.before[meta.ID] != nil {
+		return turnID != ""
+	}
+	return threadID == meta.ID && turnID != ""
 }
 
 func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, uncertainOrdinal bool, threadID, turnID string) bool {
@@ -806,7 +873,7 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		kind += "_response_item"
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
-	return true
+	return (before == nil || item.Metadata.TurnID != "") && (text != "" || item.Type == "reasoning")
 }
 
 func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {

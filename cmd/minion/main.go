@@ -350,6 +350,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		Usage:                 &usage.Store{Dir: filepath.Join(filepath.Dir(cfg.StatePath), "usage")},
 		CheckWorkRoot:         checkWorkRoot,
 		MaxRuntime:            time.Duration(cfg.MaxRuntimeMinutes) * time.Minute,
+		InactivityTimeout:     time.Duration(cfg.InactivityTimeoutMinutes) * time.Minute,
 		PublicationGrace:      time.Duration(cfg.PublicationGraceSeconds) * time.Second,
 		MaxGitHubContextBytes: cfg.MaxGitHubContextBytes,
 		Commands:              cfg.Commands,

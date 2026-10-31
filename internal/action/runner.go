@@ -46,9 +46,12 @@ type Runner struct {
 	Logger      *log.Logger
 	WorkRoot    string
 	// recordReview synchronously persists borrowed evidence without mutating it.
-	recordReview func([]CallUsage, []Refutation, string) error
-	statusUpdate func(string, int, string)
-	eventSink    func(attemptRecord)
+	recordReview      func([]CallUsage, []Refutation, string) error
+	statusUpdate      func(string, int, string)
+	phaseUpdate       func(string, int, string)
+	statusActivity    func()
+	executionProgress func()
+	eventSink         func(attemptRecord)
 }
 
 // NewRemoteRunner validates each assignment's CLI after its credentials arrive.
@@ -261,6 +264,21 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 	}()
 	configured := *r
+	noteProgress := func() bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		if configured.executionProgress != nil {
+			configured.executionProgress()
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if configured.statusActivity != nil {
+			configured.statusActivity()
+		}
+		return true
+	}
 	checkpointReview := func(history []Refutation) error {
 		result.Refutations = history
 		if checkpoints != nil {
@@ -303,7 +321,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			roles = append(roles, *job.Critic)
 		}
 		for _, role := range roles {
+			noteProgress() // Selected CLI validation is starting.
 			message, err := checkSelectedRoleCLI(ctx, &configured, role, true)
+			noteProgress()
 			if err != nil {
 				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
 			}
@@ -323,7 +343,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	cleanupFailed := false
 	var cleanupDetail string
 	markCleanup := sync.OnceFunc(func() {
-		if r.statusUpdate != nil {
+		if r.phaseUpdate != nil {
+			r.phaseUpdate("cleanup", 0, "")
+		} else if r.statusUpdate != nil {
 			r.statusUpdate("cleanup", 0, "")
 		}
 	})
@@ -361,13 +383,16 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := workspace.Materialize(source, job.Source.Files); err != nil {
 		return result, preparationFailure("materialize source", err)
 	}
+	noteProgress()
 	repository, err := gitwork.MaterializeRepository(ctx, source, job.Source)
 	if err != nil {
 		return result, preparationFailure("materialize repository", err)
 	}
+	noteProgress()
 	if err := materializeContext(contextDir, job.Source); err != nil {
 		return result, preparationFailure("materialize context", err)
 	}
+	noteProgress()
 	var index *gitwork.OfflineIndex
 	if job.Action == command.Fix {
 		metadataDir, err := os.MkdirTemp(workRoot, ".minion-index-")
@@ -383,6 +408,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			return result, preparationFailure("prepare private index", err)
 		}
+		noteProgress()
 	}
 	outputDir := ""
 	if job.Action == command.SecurityAudit {
@@ -484,6 +510,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			if configured.eventSink != nil {
 				hasConfiguredSecret := slices.ContainsFunc(configured.secretValues(), func(secret string) bool { return secret != "" })
 				request.onInput = func(input aicli.PreparedInput) {
+					noteProgress()
 					text, unavailable := preparedInputText(input, configured.secretValues()...)
 					if unavailable != "" {
 						text = unavailableInputText(unavailable)
@@ -515,11 +542,22 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					configured.eventSink(streamRecord)
 				}
 			}
-			if r.statusUpdate != nil {
-				request.onProgress = func() { r.statusUpdate(request.role, request.round, request.reviewPhase) }
-				r.statusUpdate(request.role, request.round, request.reviewPhase)
+			if configured.executionProgress != nil || r.statusUpdate != nil || configured.statusActivity != nil {
+				request.onProgress = func() {
+					if !noteProgress() || ctx.Err() != nil {
+						return
+					}
+					if configured.statusActivity != nil && r.phaseUpdate != nil {
+						r.phaseUpdate(request.role, request.round, request.reviewPhase)
+					}
+					if configured.statusActivity == nil && r.statusUpdate != nil {
+						r.statusUpdate(request.role, request.round, request.reviewPhase)
+					}
+				}
+				request.onProgress() // A real main or critic invocation is starting.
 			}
 			call, err := next(ctx, request)
+			noteProgress() // The invocation finished, even if it returned an error.
 			secrets := configured.secretValues()
 			if configured.eventSink != nil {
 				for _, diagnostic := range call.Diagnostics {
@@ -578,7 +616,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					err = errors.Join(err, fmt.Errorf("%w: checkpoint model usage: %w", monitor.ErrTerminalJob, checkpointErr))
 				}
 			}
-			if r.statusUpdate != nil {
+			if r.statusUpdate != nil && configured.statusActivity == nil && ctx.Err() == nil {
 				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			return call, err
@@ -679,7 +717,10 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
 		}
 		owned = append(owned, validationDir)
-		if err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
+		noteProgress() // The audit validator is starting.
+		err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head)
+		noteProgress()
+		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill, configured.secretValues()...); err != nil {

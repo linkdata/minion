@@ -23,7 +23,9 @@ type Session struct {
 	// OnEvent receives redacted, fully emitted events; final follows validation.
 	OnEvent func(aicli.StreamEvent)
 	// OnInput receives prepared stdin and command metadata before the CLI starts.
-	OnInput                      func(aicli.PreparedInput)
+	OnInput func(aicli.PreparedInput)
+	// OnProgress receives fresh native execution activity while Run is active.
+	OnProgress                   func()
 	workspace, binary, outputDir string
 	writable                     bool
 	settings                     config.ClaudeConfig
@@ -36,6 +38,7 @@ type Session struct {
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
 	baseline       usage.Tokens
 	usageGap       bool
+	progressSeen   map[string]bool
 	started, reset bool
 	closed         bool
 	initErr        error
@@ -45,6 +48,7 @@ type Session struct {
 // Run clears model-writable scratch before starting the independent conversation.
 func (s *Session) NewConversation() {
 	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
+	s.progressSeen = nil
 	s.reset = s.runtimeDir != ""
 }
 

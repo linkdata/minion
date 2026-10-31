@@ -528,9 +528,10 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 						Number: accepted.SubjectNumber, SubjectType: accepted.SubjectType,
 					},
 					Command: accepted.CommandName, Action: command.Comment,
-					Source:        workspace.Snapshot{Head: strings.Repeat("c", 40), Repository: []byte("saved source bundle")},
-					Main:          action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}},
-					RuntimeBudget: time.Minute,
+					Source:            workspace.Snapshot{Head: strings.Repeat("c", 40), Repository: []byte("saved source bundle")},
+					Main:              action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}},
+					RuntimeBudget:     time.Minute,
+					InactivityTimeout: config.DefaultInactivityTimeout,
 				}
 				record := action.AcceptedResultRecord{
 					Accepted: accepted, Job: job,

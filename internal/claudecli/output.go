@@ -58,7 +58,9 @@ type event struct {
 	ModelUsage        json.RawMessage   `json:"modelUsage"`
 	PermissionDenials []json.RawMessage `json:"permission_denials"`
 	Message           json.RawMessage   `json:"message"`
+	StreamEvent       json.RawMessage   `json:"event"`
 	ParentToolUseID   json.RawMessage   `json:"parent_tool_use_id"`
+	TaskID            string            `json:"task_id"`
 	Status            string            `json:"status"`
 	Ambient           bool              `json:"ambient"`
 	Summary           string            `json:"summary"`
@@ -114,10 +116,20 @@ type messageUsage struct {
 	root       bool
 }
 
+type progressStream struct {
+	messageID string
+	replay    bool
+	tools     map[int]uint8 // 1 started, 2 stopped.
+}
+
 type jsonlOutput struct {
 	sessionID           string
 	apiKey              string
 	onEvent             func(aicli.StreamEvent)
+	onProgress          func()
+	progressSeen        map[string]bool
+	progressStreams     map[string]*progressStream
+	progressTasks       map[string]bool
 	identitySeen        bool
 	baseline            usage.Tokens
 	baselineUnknown     bool
@@ -272,6 +284,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type == "assistant" {
 		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
 	}
+	o.recordProgress(e)
 	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient {
 		o.recordTaskStop(e.Status, e.Summary)
 	}
@@ -288,18 +301,24 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	}
 	if e.Type == "system" && e.Subtype == "background_tasks_changed" {
 		var tasks []struct {
-			Ambient bool `json:"ambient"`
+			TaskID  string `json:"task_id"`
+			Ambient bool   `json:"ambient"`
 		}
 		if json.Unmarshal(e.Tasks, &tasks) != nil || tasks == nil {
 			o.fail(errors.New("invalid Claude background task list"))
 			return
 		}
 		o.pending = 0
+		active := make(map[string]bool)
 		for _, task := range tasks {
 			if !task.Ambient {
 				o.pending++
+				if task.TaskID != "" {
+					active[task.TaskID] = true
+				}
 			}
 		}
+		o.recordTaskListProgress(active)
 		if o.pending != 0 {
 			o.completed = false
 			o.result.Answer = ""
@@ -606,6 +625,11 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 	}
 	status, _, found = strings.Cut(status, "</status>")
 	status = strings.TrimSpace(html.UnescapeString(status))
+	if _, taskID, ok := strings.Cut(text, "<task-id>"); found && ok {
+		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
+			o.recordTaskProgress(strings.TrimSpace(html.UnescapeString(taskID[:end])), status)
+		}
+	}
 	if !found || status != "killed" && status != "stopped" {
 		return
 	}
@@ -614,6 +638,196 @@ func (o *jsonlOutput) recordTaskNotice(text string) {
 		summary = summary[:end]
 	}
 	o.recordTaskStop(status, html.UnescapeString(summary))
+}
+
+// Progress is only native execution, never usage, result waiting, or repeated
+// snapshots. The callback is separate from transcript capture and sends no text.
+func (o *jsonlOutput) recordProgress(e event) {
+	if o.onProgress == nil || e.SessionID != "" && e.SessionID != o.sessionID {
+		return
+	}
+	switch e.Type {
+	case "stream_event":
+		o.recordStreamProgress(e)
+	case "assistant":
+		var message struct {
+			ID      string          `json:"id"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(e.Message, &message) != nil || message.ID == "" {
+			return
+		}
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+			ID   string `json:"id"`
+		}
+		var text string
+		if json.Unmarshal(message.Content, &text) == nil && text != "" {
+			o.recordUniqueProgress("assistant:" + message.ID)
+			return
+		}
+		if json.Unmarshal(message.Content, &blocks) == nil {
+			for _, block := range blocks {
+				if block.Type == "text" && block.Text != "" || block.Type == "tool_use" && block.ID != "" {
+					o.recordUniqueProgress("assistant:" + message.ID)
+					return
+				}
+			}
+		}
+	case "user":
+		if e.IsSynthetic {
+			return
+		}
+		var message struct {
+			Content []struct {
+				Type      string `json:"type"`
+				ToolUseID string `json:"tool_use_id"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(e.Message, &message) == nil {
+			for _, block := range message.Content {
+				if block.Type == "tool_result" && block.ToolUseID != "" {
+					o.recordUniqueProgress("tool_result:" + block.ToolUseID)
+				}
+			}
+		}
+	case "system":
+		if e.Subtype == "task_notification" && !e.Ambient {
+			o.recordTaskProgress(e.TaskID, e.Status)
+		}
+	}
+}
+
+func (o *jsonlOutput) recordStreamProgress(e event) {
+	var native struct {
+		Type    string `json:"type"`
+		Index   *int   `json:"index"`
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+		ContentBlock struct {
+			Type string `json:"type"`
+		} `json:"content_block"`
+		Delta struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
+	}
+	if json.Unmarshal(e.StreamEvent, &native) != nil {
+		return
+	}
+	key := "root"
+	if e.AgentID != "" {
+		key = "agent:" + e.AgentID
+	} else if parent := bytes.TrimSpace(e.ParentToolUseID); len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
+		key = "parent:" + string(parent)
+	}
+	if o.progressStreams == nil {
+		o.progressStreams = make(map[string]*progressStream)
+	}
+	state := o.progressStreams[key]
+	if native.Type == "message_start" {
+		if native.Message.ID == "" {
+			delete(o.progressStreams, key)
+			return
+		}
+		state = &progressStream{messageID: native.Message.ID, replay: o.progressSeen["assistant:"+native.Message.ID]}
+		o.progressStreams[key] = state
+		return
+	}
+	if native.Type == "message_stop" {
+		delete(o.progressStreams, key)
+		return
+	}
+	if state == nil {
+		return // A delta without a native message identity could be replayed.
+	}
+	if state.replay {
+		return
+	}
+	switch native.Type {
+	case "content_block_start":
+		if native.Index == nil || native.ContentBlock.Type != "tool_use" {
+			return
+		}
+		if state.tools[*native.Index] != 0 {
+			return
+		}
+		if state.tools == nil {
+			state.tools = make(map[int]uint8)
+		}
+		state.tools[*native.Index] = 1
+		o.markStreamProgress(state)
+	case "content_block_delta":
+		switch native.Delta.Type {
+		case "text_delta":
+			if native.Delta.Text != "" {
+				o.markStreamProgress(state)
+			}
+		case "thinking_delta":
+			if native.Delta.Thinking != "" {
+				o.markStreamProgress(state)
+			}
+		case "input_json_delta":
+			if native.Delta.PartialJSON != "" {
+				o.markStreamProgress(state)
+			}
+		}
+	case "content_block_stop":
+		if native.Index != nil && state.tools[*native.Index] == 1 {
+			state.tools[*native.Index] = 2
+			o.markStreamProgress(state)
+		}
+	}
+}
+
+func (o *jsonlOutput) markStreamProgress(state *progressStream) {
+	if o.progressSeen == nil {
+		o.progressSeen = make(map[string]bool)
+	}
+	o.progressSeen["assistant:"+state.messageID] = true
+	o.onProgress()
+}
+
+func (o *jsonlOutput) recordUniqueProgress(key string) {
+	if o.progressSeen[key] {
+		return
+	}
+	if o.progressSeen == nil {
+		o.progressSeen = make(map[string]bool)
+	}
+	o.progressSeen[key] = true
+	o.onProgress()
+}
+
+func (o *jsonlOutput) recordTaskProgress(id, status string) {
+	if o.onProgress == nil || id == "" {
+		return
+	}
+	switch status {
+	case "started", "running", "completed", "failed", "stopped", "killed":
+		o.recordUniqueProgress("task:" + id + ":" + status)
+	}
+}
+
+func (o *jsonlOutput) recordTaskListProgress(active map[string]bool) {
+	if o.onProgress == nil {
+		return
+	}
+	for id := range active {
+		if !o.progressTasks[id] {
+			o.recordUniqueProgress("task_start:" + id)
+		}
+	}
+	for id := range o.progressTasks {
+		if !active[id] {
+			o.recordUniqueProgress("task_finish:" + id)
+		}
+	}
+	o.progressTasks = active
 }
 
 func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {

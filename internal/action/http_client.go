@@ -185,6 +185,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	defer stopDeadline()
 	actionCtx, cancelAction := context.WithCancelCause(deadlineCtx)
 	defer cancelAction(context.Canceled)
+	inactivity := startInactivityTimer(started, job.InactivityTimeout, cancelAction)
+	defer inactivity.stop()
+	jobRunner.executionProgress = inactivity.progress
 	startStop := sync.OnceFunc(func() { shortenControl(assignment.StopGrace) })
 	stopOnAction := context.AfterFunc(actionCtx, startStop)
 	defer stopOnAction()
@@ -225,6 +228,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
+		inactivity.stop() // Outcome upload is governed by transport and hard-runtime limits.
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
@@ -247,12 +251,14 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 		watchDone <- err
 	}()
-	statusFeed := newWorkerStatus(job)
+	statusFeed := newWorkerStatus(job, started)
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
 	eventCtx, cancelEvents := context.WithCancel(controlCtx)
 	defer cancelEvents()
 	jobRunner.statusUpdate = statusFeed.progress
+	jobRunner.phaseUpdate = statusFeed.phase
+	jobRunner.statusActivity = statusFeed.activity
 	events := newProviderEventQueue(func(event attemptRecord) error {
 		return statusFeed.emit(eventCtx, transport, event, assignedSecrets...)
 	})
@@ -284,21 +290,22 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			break
 		}
 	}
-	cause := context.Cause(actionCtx)
-	if runErr == nil && httpWatchUncertainty(cause) {
-		// A completed result can resolve independent watch uncertainty through its receipt.
-		cause = nil
-	}
-	// A watch can cancel the child first; retain independent caller and budget failures.
-	cause = errors.Join(cause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
-	if errors.Is(cause, context.DeadlineExceeded) {
-		cause = errors.Join(cause, monitor.ErrTerminalJob)
-	}
-	runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
 	if checkpoints.failure == nil && (job.Critic == nil && len(result.Calls) != 0 || job.Critic != nil && result.CriticStopReason != "") {
-		jobRunner.statusUpdate("upload", 0, "")
+		jobRunner.phaseUpdate("upload", 0, "")
 	}
 	outcomeErr := statusFeed.finish(actionCtx, transport, func() error {
+		inactivity.stop() // Final upload no longer renews or observes inactivity.
+		cause := context.Cause(actionCtx)
+		if runErr == nil && httpWatchUncertainty(cause) {
+			// A completed result can resolve independent watch uncertainty through its receipt.
+			cause = nil
+		}
+		// A watch can cancel the child first; retain independent caller and budget failures.
+		cause = errors.Join(cause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
+		if errors.Is(cause, context.DeadlineExceeded) {
+			cause = errors.Join(cause, monitor.ErrTerminalJob)
+		}
+		runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
 		err := checkpoints.outcome(result, runErr)
 		cancelStatus() // Keep heartbeats available throughout the final Result upload.
 		cancelEvents() // Optional logs cannot hold the worker after the required outcome.

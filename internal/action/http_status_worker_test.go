@@ -38,7 +38,7 @@ func TestWorkerStatusHeartbeatsKeepProgressAgeAndSequenceIndependent(t *testing.
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
 		})}
 		base, _ := url.Parse("http://worker.test")
-		status := newWorkerStatus(job)
+		status := newWorkerStatus(job, time.Now())
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() {
@@ -68,14 +68,65 @@ func TestWorkerStatusHeartbeatsKeepProgressAgeAndSequenceIndependent(t *testing.
 		if fourth.Sequence != 4 || fourth.ProgressSequence != third.ProgressSequence || fourth.ProgressAge != statusHeartbeatInterval {
 			t.Fatalf("heartbeat reset progress age: %+v", fourth)
 		}
-		status.progress("cleanup", 0, "")
+		status.phase("cleanup", 0, "")
 		synctest.Wait()
 		last := <-observed
-		if last.Sequence != 5 || last.ProgressSequence != 3 || last.Phase != "cleanup" {
+		if last.Sequence != 5 || last.ProgressSequence != 2 || last.ProgressAge != statusHeartbeatInterval || last.Phase != "cleanup" {
 			t.Fatalf("cleanup progress = %+v", last)
 		}
 		cancel()
 		<-done
+	})
+}
+
+func TestWorkerStatusCoalescesStreamingProgressNotifications(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		status := newWorkerStatus(testJob(command.Comment), time.Now())
+		<-status.changed // Initial prepare observation.
+		status.phase("main", 1, "")
+		<-status.changed // Phase changes are immediate.
+		status.activity()
+		for range 100 {
+			status.activity()
+		}
+		select {
+		case <-status.changed:
+			t.Fatal("streaming deltas generated an immediate Status request")
+		default:
+		}
+		if got := status.snapshot(); got.ProgressSequence != 102 || got.ProgressAge != 0 {
+			t.Fatalf("coalesced progress was lost: %+v", got)
+		}
+		time.Sleep(statusProgressNotifyInterval)
+		status.activity()
+		select {
+		case <-status.changed:
+		default:
+			t.Fatal("later progress did not notify Status")
+		}
+	})
+}
+
+func TestWorkerStatusIgnoresProgressAfterStopping(t *testing.T) {
+	status := newWorkerStatus(testJob(command.Comment), time.Now())
+	status.stopping()
+	before := status.snapshot()
+	status.progress("main", 1, "")
+	status.activity()
+	after := status.snapshot()
+	if after.ProgressSequence != before.ProgressSequence || after.Phase != before.Phase {
+		t.Fatalf("stopped worker accepted progress: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestWorkerStatusProgressAgeIncludesWatchAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		time.Sleep(3 * time.Second)
+		status := newWorkerStatus(testJob(command.Comment), started)
+		if got := status.snapshot().ProgressAge; got != 3*time.Second {
+			t.Fatalf("Status age %s omitted assignment-to-watch time", got)
+		}
 	})
 }
 
@@ -100,7 +151,7 @@ func TestWorkerStatusRetriesLostLogAckAndDrainsCoverage(t *testing.T) {
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	event := attemptRecord{Kind: attemptRecordDiscussion, Text: "before secret after", Call: "call-1",
 		Agent: "agent secret", Role: "main", Provider: "claude", Model: "model-secret",
 		ObservedAt: "2026-10-31T12:34:56Z", EventSource: "claude"}
@@ -151,7 +202,7 @@ func TestWorkerStatusRejectsUnsafeCallMetadataBeforeTransport(t *testing.T) {
 		{"time contains credential", func(r *attemptRecord) { r.ObservedAt = "2026-10-31T12:34:56Z" }, "2026"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			status := newWorkerStatus(job)
+			status := newWorkerStatus(job, time.Now())
 			event := attemptRecord{Kind: attemptRecordDiscussion, Text: "safe", Role: roleMain,
 				Provider: "codex", Model: "pinned", ObservedAt: "2026-10-31T12:34:56Z"}
 			test.change(&event)
@@ -181,11 +232,11 @@ func TestWorkerStatusCoverageRequiresSuppliedAndDeliveredEvents(t *testing.T) {
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	if err := status.drain(t.Context(), transport); err != nil || len(received) != 0 {
 		t.Fatalf("zero-event drain sent coverage: error=%v requests=%d", err, len(received))
 	}
-	status = newWorkerStatus(job)
+	status = newWorkerStatus(job, time.Now())
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "first"}); err == nil {
 		t.Fatal("failed event was reported delivered")
 	}
@@ -227,7 +278,7 @@ func TestRunnerUnavailablePreparedInputWithholdsStatusCoverage(t *testing.T) {
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	queue := newProviderEventQueue(func(event attemptRecord) error {
 		return status.emit(t.Context(), transport, event)
 	})
@@ -278,7 +329,7 @@ func TestWorkerStatusSplitsRedactedUTF8BeforeTransit(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
 	})}
 	base, _ := url.Parse("http://worker.test")
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	text := strings.Repeat("x", 9*maxAttemptRecordTextBytes-2) + "🔐secret"
 	if len(text) <= httpControlBytes {
 		t.Fatal("test event does not exceed one Status body")
@@ -336,7 +387,7 @@ func TestWorkerStatusReplaysRedactedRecordAtFragmentBoundary(t *testing.T) {
 			Body: io.NopCloser(strings.NewReader(string(ack)))}, nil
 	})}
 	base, _ := url.Parse("http://worker.test")
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	transport := &httpExecutionClient{client: client, base: base}
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: text}, secret); err != nil {
 		t.Fatal(err)
@@ -376,7 +427,7 @@ func TestWorkerStatusRejectsProducerContinuation(t *testing.T) {
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "partial", More: true}); err == nil {
 		t.Fatal("producer fragment was sent before assembly")
 	}
@@ -396,7 +447,7 @@ func TestWorkerStatusRejectsOversizedEventBeforeSending(t *testing.T) {
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion,
 		Text: strings.Repeat("x", maxAttemptEventBytes+1)}); !errors.Is(err, errAttemptRecordsFull) {
 		t.Fatalf("oversized event error = %v", err)
@@ -409,14 +460,14 @@ func TestWorkerStatusRejectsOversizedEventBeforeSending(t *testing.T) {
 	if len(redactActionText(raw, secret)) >= maxAttemptEventBytes {
 		t.Fatal("test event did not shrink below the cap after redaction")
 	}
-	status = newWorkerStatus(job)
+	status = newWorkerStatus(job, time.Now())
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: raw}, secret); !errors.Is(err, errAttemptRecordsFull) {
 		t.Fatalf("oversized raw event error = %v", err)
 	}
 	if err := status.drain(t.Context(), transport); err == nil {
 		t.Fatal("oversized raw event claimed complete coverage")
 	}
-	status = newWorkerStatus(job)
+	status = newWorkerStatus(job, time.Now())
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion,
 		Text: "received", Call: strings.Repeat("s", 256)}, strings.Repeat("s", 256)); err == nil {
 		t.Fatal("oversized raw metadata was accepted after redaction")
@@ -452,7 +503,7 @@ func TestWorkerStatusCoverageDoesNotDelayOutcome(t *testing.T) {
 		})}
 		base, _ := url.Parse("http://worker.test")
 		transport := &httpExecutionClient{client: client, base: base}
-		status := newWorkerStatus(job)
+		status := newWorkerStatus(job, time.Now())
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 		defer cancel()
 		if err := status.emit(ctx, transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "received"}); err != nil {
@@ -482,7 +533,7 @@ func TestWorkerStatusZeroEventDrainDoesNotWaitForBlockedHeartbeat(t *testing.T) 
 			return nil, r.Context().Err()
 		})}
 		base, _ := url.Parse("http://worker.test")
-		status := newWorkerStatus(job)
+		status := newWorkerStatus(job, time.Now())
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 		go func() { done <- status.send(ctx, &httpExecutionClient{client: client, base: base}) }()
@@ -519,7 +570,7 @@ func TestWorkerStatusTimeoutAfterDurableWriteRetriesWithFreshContext(t *testing.
 		})}
 		base, _ := url.Parse("http://worker.test")
 		transport := &httpExecutionClient{client: client, base: base}
-		status := newWorkerStatus(job)
+		status := newWorkerStatus(job, time.Now())
 		if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "saved"}); err != nil {
 			t.Fatal(err)
 		}
@@ -545,7 +596,7 @@ func TestWorkerStatusRejectsInvalidUTF8BeforeSplitting(t *testing.T) {
 	})}
 	base, _ := url.Parse("http://worker.test")
 	transport := &httpExecutionClient{client: client, base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	invalid := strings.Repeat("\x80", maxAttemptRecordTextBytes+1)
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: invalid}); err == nil {
 		t.Fatal("accepted invalid UTF-8 event")

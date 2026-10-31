@@ -170,8 +170,8 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal("unsafe or incorrect environment reached Claude")
 			}
 			args := strings.Split(strings.TrimSuffix(readFile(t, binary+".args"), "\n"), "\n")
-			if strings.Contains(strings.Join(args, "\n"), "--include-partial-messages") {
-				t.Fatal("unused token deltas consume the bounded event budget")
+			if !slices.Contains(args, "--include-partial-messages") {
+				t.Fatal("live model deltas are unavailable to the progress callback")
 			}
 			if !slices.Contains(args, "--setting-sources=") {
 				t.Fatalf("empty setting-source selection missing: %q", args)

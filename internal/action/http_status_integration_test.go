@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 )
@@ -25,7 +26,7 @@ func TestWorkerStatusPersistsLogBeforeResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := &httpExecutionClient{client: f.server.Client(), base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	const secret = "example-provider-secret"
 	event := attemptRecord{Kind: attemptRecordDiscussion, Text: "saw " + secret,
 		Call: "call-1", Agent: "session-1", Role: "critic", Round: 2,
@@ -77,7 +78,7 @@ func TestWorkerStatusIncompleteKeepsDeliveredLogWithoutCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	transport := &httpExecutionClient{client: f.server.Client(), base: base}
-	status := newWorkerStatus(job)
+	status := newWorkerStatus(job, time.Now())
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion, Text: "delivered"}); err != nil {
 		t.Fatal(err)
 	}

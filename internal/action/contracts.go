@@ -18,7 +18,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 15
+const ProtocolVersion = 16
 
 const (
 	maxDiagnostics            = 100
@@ -69,6 +69,8 @@ type Job struct {
 	CriticConsecutiveNoBlockerRounds int `json:"critic_consecutive_no_blocker_rounds"`
 	// RuntimeBudget is remaining execution time; HTTP subtracts validation and transit time before Runner admission.
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
+	// InactivityTimeout bounds the gap between actual executor progress events.
+	InactivityTimeout time.Duration `json:"inactivity_timeout_ns"`
 }
 
 // CallUsage contains executor claims checked against saved callbacks, not independent model evidence.
@@ -176,6 +178,9 @@ func (j Job) Validate() error {
 	}
 	if j.RuntimeBudget <= 0 || j.RuntimeBudget > config.MaxActionRuntime {
 		return errors.New("invalid action runtime budget")
+	}
+	if j.InactivityTimeout <= 0 || j.InactivityTimeout > config.MaxInactivityTimeout {
+		return errors.New("invalid action inactivity timeout")
 	}
 	if (j.Identity.SubjectType == "PullRequest") != (j.Source.Base != "") {
 		return errors.New("action subject and supplied comparison differ")

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
@@ -190,6 +191,7 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
 		Main: e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills), RuntimeBudget: budget,
+		InactivityTimeout: cmp.Or(e.InactivityTimeout, config.DefaultInactivityTimeout),
 	}
 	if e.Adversarial != "" {
 		critic := e.roleSettings(e.Adversarial, nil)

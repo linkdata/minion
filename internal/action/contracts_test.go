@@ -212,6 +212,9 @@ func TestJobValidate(t *testing.T) {
 		{"subject type", func(j *Job) { j.Identity.SubjectType = "Discussion" }, "action repository or requester identity is invalid"},
 		{"repository shape", func(j *Job) { j.Identity.Repository = "a/b/c" }, "action repository or requester identity is invalid"},
 		{"runtime", func(j *Job) { j.RuntimeBudget = 0 }, "invalid action runtime budget"},
+		{"inactivity zero", func(j *Job) { j.InactivityTimeout = 0 }, "invalid action inactivity timeout"},
+		{"inactivity negative", func(j *Job) { j.InactivityTimeout = -1 }, "invalid action inactivity timeout"},
+		{"inactivity maximum exceeded", func(j *Job) { j.InactivityTimeout = config.MaxInactivityTimeout + time.Nanosecond }, "invalid action inactivity timeout"},
 		{"title bound", func(j *Job) { j.Title = strings.Repeat("x", maxActionTitleBytes+1) }, "action text is invalid or exceeds limits"},
 		{"action", func(j *Job) { j.Action = "unknown" }, "unsupported action"},
 		{"skill path", func(j *Job) { j.Main.Skills = []string{"/tmp/skill/SKILL.md"} }, "skill URL"},
@@ -292,6 +295,7 @@ func TestJobValidate(t *testing.T) {
 		{"maximum settings", func(j *Job) {
 			j.Main.Model, j.Main.Effort = strings.Repeat("m", config.MaxModelSettingBytes), strings.Repeat("e", config.MaxModelSettingBytes)
 			j.RuntimeBudget = config.MaxActionRuntime
+			j.InactivityTimeout = config.MaxInactivityTimeout
 		}},
 	} {
 		t.Run("valid/"+test.name, func(t *testing.T) {
@@ -820,6 +824,7 @@ func TestJobSubjectMatchesComparisonForEveryAction(t *testing.T) {
 
 func TestJobJSONRoundTrip(t *testing.T) {
 	job := testJob(command.Review)
+	job.InactivityTimeout = 37 * time.Second
 	job.Critic = &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "high"}
 	job.CriticMaxRounds = config.DefaultCriticMaxRounds
 	job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = 4, 2
@@ -828,6 +833,9 @@ func TestJobJSONRoundTrip(t *testing.T) {
 	data, err := json.Marshal(job)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte(`"inactivity_timeout_ns":37000000000`)) {
+		t.Fatalf("job omitted portable inactivity timeout: %s", data)
 	}
 	var decoded Job
 	if err := json.Unmarshal(data, &decoded); err != nil {

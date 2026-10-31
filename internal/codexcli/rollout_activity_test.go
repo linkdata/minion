@@ -1206,7 +1206,7 @@ func TestRolloutActivityCancellationAfterCompleteAppendGapsAtFinish(t *testing.T
 func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
-	writeUsageRolloutBoundary(t, home, "child", "root", nil,
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
 		rolloutMessage(8, "uncertain-message", "attribution uncertain"))
 
 	activity, events, progress := newActivityTestRecorder(t, home, started)
@@ -1233,8 +1233,20 @@ func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing
 			t.Fatalf("unexpected event: %+v", event)
 		}
 	}
-	if labeled != 1 || missing != 1 || *progress <= baselineProgress {
-		t.Fatalf("unknown boundary events=%+v progress=%d; want labeled content and one coverage gap", *events, *progress)
+	if labeled != 1 || missing != 1 || *progress != baselineProgress {
+		t.Fatalf("unknown boundary events=%+v progress=%d; copied history must not renew progress", *events, *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":9,"type":"event_msg","payload":{"type":"mcp_tool_call_end","turn_id":"current","call_id":"unattributed"}}`)
+	activity.poll()
+	if *progress != baselineProgress {
+		t.Fatalf("unattributed helper tool renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":10,"type":"event_msg","payload":{"type":"mcp_tool_call_end","thread_id":"child","turn_id":"current","call_id":"owned"}}`)
+	activity.poll()
+	if *progress != baselineProgress+1 {
+		t.Fatalf("current helper tool did not renew progress: %d", *progress)
 	}
 }
 

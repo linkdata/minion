@@ -51,6 +51,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		Command: accepted.CommandName, Action: command.Comment,
 		Source: workspace.Snapshot{Head: strings.Repeat("a", 40), Repository: []byte("saved source bundle")},
 		Main:   action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}}, RuntimeBudget: time.Minute,
+		InactivityTimeout: config.DefaultInactivityTimeout,
 	}
 	result := action.Result{Version: action.ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
 		Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Complete: true}}}

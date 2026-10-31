@@ -46,7 +46,8 @@ func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	defer server.Close()
 	client := testGitHub(server, "github-secret")
 	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: client, Store: openState(t, time.Now()), Main: "claude", ClaudeModel: "portable-claude-model", ClaudeEffort: "high",
-		BotLogin: "linkdataminion", BotID: 8,
+		InactivityTimeout: 37 * time.Second,
+		BotLogin:          "linkdataminion", BotID: 8,
 		Commands: map[string]config.CommandMapping{"audit": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Runner: Runner{
 			WorkRoot: t.TempDir(),
@@ -97,6 +98,9 @@ func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	if prepared.job.RuntimeBudget <= 0 || prepared.job.RuntimeBudget > time.Minute {
 		t.Fatalf("accepted budget %s exceeds context deadline", prepared.job.RuntimeBudget)
 	}
+	if prepared.job.InactivityTimeout != 37*time.Second {
+		t.Fatalf("portableJob lost configured inactivity timeout: %s", prepared.job.InactivityTimeout)
+	}
 	if prepared.job.Main.Provider != "claude" || prepared.job.Main.Model != "portable-claude-model" || prepared.job.Main.Effort != "high" {
 		t.Fatalf("portableJob lost Claude model/effort: %+v", prepared.job.Main)
 	}
@@ -110,6 +114,9 @@ func TestPortableClaudeCommentRoundTripRejectsWrongVersion(t *testing.T) {
 	var portable Job
 	if err := json.Unmarshal(data, &portable); err != nil {
 		t.Fatal(err)
+	}
+	if portable.InactivityTimeout != e.InactivityTimeout {
+		t.Fatalf("portable inactivity timeout changed in JSON: %s", portable.InactivityTimeout)
 	}
 	result, err := e.Runner.Run(ctx, portable)
 	if err != nil {

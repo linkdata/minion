@@ -44,7 +44,7 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		orchestrator.ClaudeModel != cfg.Claude.Model || orchestrator.ClaudeEffort != cfg.Claude.Effort {
 		t.Fatal("service lost pinned provider roles, models, efforts or critic budget")
 	}
-	if orchestrator.MaxRuntime != 7*time.Minute || orchestrator.PublicationGrace != 11*time.Second ||
+	if orchestrator.MaxRuntime != 7*time.Minute || orchestrator.InactivityTimeout != 3*time.Minute || orchestrator.PublicationGrace != 11*time.Second ||
 		orchestrator.MaxGitHubContextBytes != cfg.MaxGitHubContextBytes ||
 		!slices.Equal(orchestrator.AlwaysOnSkills, cfg.AlwaysOnSkills) ||
 		!reflect.DeepEqual(orchestrator.Commands, cfg.Commands) || orchestrator.BotLogin != cfg.BotLogin ||

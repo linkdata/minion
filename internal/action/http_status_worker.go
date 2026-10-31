@@ -11,26 +11,28 @@ import (
 
 const statusHeartbeatInterval = 15 * time.Second
 const statusSendTimeout = 5 * time.Second
+const statusProgressNotifyInterval = time.Second
 
 // workerStatus keeps observations separate from the required checkpoint stream.
 type workerStatus struct {
-	mu         sync.Mutex
-	sendMu     sync.Mutex
-	value      Status
-	progressAt time.Time
-	changed    chan struct{}
-	ack        uint64
-	pending    *attemptRecord
-	supplied   bool
-	incomplete bool
-	closed     bool
+	mu                 sync.Mutex
+	sendMu             sync.Mutex
+	value              Status
+	progressAt         time.Time
+	lastProgressSignal time.Time
+	changed            chan struct{}
+	ack                uint64
+	pending            *attemptRecord
+	supplied           bool
+	incomplete         bool
+	closed             bool
 }
 
-func newWorkerStatus(job Job) *workerStatus {
+func newWorkerStatus(job Job, started time.Time) *workerStatus {
 	status := &workerStatus{
 		value: Status{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
 			ProgressSequence: 1, WorkerState: "busy", Phase: "prepare"},
-		progressAt: time.Now(), changed: make(chan struct{}, 1),
+		progressAt: started, lastProgressSignal: started, changed: make(chan struct{}, 1),
 	}
 	status.changed <- struct{}{}
 	return status
@@ -38,11 +40,53 @@ func newWorkerStatus(job Job) *workerStatus {
 
 func (s *workerStatus) progress(phase string, round int, reviewPhase string) {
 	s.mu.Lock()
+	if s.closed || s.value.WorkerState != "busy" {
+		s.mu.Unlock()
+		return
+	}
+	phaseChanged := s.value.Phase != phase || s.value.Round != round || s.value.ReviewPhase != reviewPhase
 	s.value.Phase, s.value.Round, s.value.ReviewPhase = phase, round, reviewPhase
 	s.value.ProgressSequence++
-	s.progressAt = time.Now()
+	now := time.Now()
+	s.progressAt = now
+	notify := phaseChanged || now.Sub(s.lastProgressSignal) >= statusProgressNotifyInterval
+	if notify {
+		s.lastProgressSignal = now
+	}
 	s.mu.Unlock()
-	s.signal()
+	if notify {
+		s.signal()
+	}
+}
+
+func (s *workerStatus) activity() {
+	s.mu.Lock()
+	if s.closed || s.value.WorkerState != "busy" {
+		s.mu.Unlock()
+		return
+	}
+	now := time.Now()
+	s.value.ProgressSequence++
+	s.progressAt = now
+	notify := now.Sub(s.lastProgressSignal) >= statusProgressNotifyInterval
+	if notify {
+		s.lastProgressSignal = now
+	}
+	s.mu.Unlock()
+	if notify {
+		s.signal()
+	}
+}
+
+// phase reports a phase change without claiming new execution progress.
+func (s *workerStatus) phase(phase string, round int, reviewPhase string) {
+	s.mu.Lock()
+	changed := s.value.Phase != phase || s.value.Round != round || s.value.ReviewPhase != reviewPhase
+	s.value.Phase, s.value.Round, s.value.ReviewPhase = phase, round, reviewPhase
+	s.mu.Unlock()
+	if changed {
+		s.signal()
+	}
 }
 
 func (s *workerStatus) stopping() {
