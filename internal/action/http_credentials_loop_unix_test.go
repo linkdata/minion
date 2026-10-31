@@ -35,16 +35,16 @@ func TestRunHTTPLoopUsesOnlyEachAssignmentsCredentials(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/next" {
 			body, err := io.ReadAll(r.Body)
+			for _, secret := range append(secrets, workerToken) {
+				if bytes.Contains(body, []byte(secret)) {
+					t.Errorf("credential reached %s request", r.URL.Path)
+				}
+			}
 			if err != nil {
 				if r.Context().Err() == nil {
 					t.Error(err)
 				}
 				return
-			}
-			for _, secret := range append(secrets, workerToken) {
-				if bytes.Contains(body, []byte(secret)) {
-					t.Errorf("credential reached %s request", r.URL.Path)
-				}
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
 		}

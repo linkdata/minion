@@ -33,13 +33,24 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 	for _, action := range []command.Action{command.Comment, command.Review, command.SecurityAudit, command.Fix} {
 		t.Run(string(action), func(t *testing.T) {
 			job := testJob(action)
+			root := t.TempDir()
 			if action == command.SecurityAudit {
 				installActionTestSkills(t, testAuditSkillURL)
 				fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			}
 			job.Identity.Repository = "o/r"
-			f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
+			f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
 			f.pull(t)
+			for i, record := range []attemptRecord{
+				{Kind: attemptRecordDiagnostic, Text: "STATUS_DIAGNOSTIC_SENTINEL"},
+				{Kind: attemptRecordReport, Text: "STATUS_REPORT_SENTINEL"},
+			} {
+				sequence := uint64(i + 1)
+				record.Identity, record.SourceRef, record.Sequence = job.Identity, job.Source.Head, sequence
+				status := Status{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+					Sequence: sequence, LogSequence: sequence, WorkerState: "busy", Phase: "prepare"}
+				f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{record}}, http.StatusOK, sequence)
+			}
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
 			paid.Checkpoint.Call.Complete = true
@@ -94,7 +105,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			}))
 			defer githubServer.Close()
 			var journal bytes.Buffer
-			owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
+			owner := Orchestrator{WorkRoot: root, GitHub: testGitHub(githubServer, "fixture-token"), BotLogin: "linkdataminion", BotID: 8, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0), ValidatePublication: permitSelectedPublication}
 			request := usageJob()
 			request.SubjectType = job.Identity.SubjectType
 			request.Source.Author = github.User{ID: job.Identity.RequesterID, Login: job.Identity.Requester}
@@ -103,6 +114,12 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			reserveActionRequest(t, owner.Store, &request, true)
 			if err := owner.publish(t.Context(), &preparedAction{job: job, request: request, issueNodeID: "issue-node"}, got.result); err != nil {
 				t.Fatal(err)
+			}
+			statusRecords := httpTestRecords(t, root, job)
+			if bytes.Count(statusRecords, []byte{'\n'}) != 2 ||
+				!bytes.Contains(statusRecords, []byte(`"kind":"diagnostic","text":"STATUS_DIAGNOSTIC_SENTINEL"`)) ||
+				!bytes.Contains(statusRecords, []byte(`"kind":"report","text":"STATUS_REPORT_SENTINEL"`)) {
+				t.Fatalf("private Status records were lost: %q", statusRecords)
 			}
 			_, parseErr := command.ParseForLoginCommands(posted, "linkdataminion", defaultActionTestCommands)
 			answerOK := strings.Contains(posted, "```text\n> @linkdataminion fix") &&
@@ -114,6 +131,7 @@ func TestHTTPWorkerDiagnosticsRemainPrivateThroughPublication(t *testing.T) {
 			}
 			if writes != 1 || !answerOK || strings.ContainsRune(posted, '\x1b') || strings.ContainsRune(posted, '\u202e') ||
 				!errors.Is(parseErr, command.ErrNoCommand) ||
+				strings.Contains(posted, "STATUS_DIAGNOSTIC_SENTINEL") || strings.Contains(posted, "STATUS_REPORT_SENTINEL") ||
 				strings.Contains(posted, "PRIVATE") || strings.Contains(posted, "SECRET_CODE_123") || strings.Contains(posted, "FORGED JOURNAL ENTRY") ||
 				strings.Contains(journal.String(), "PRIVATE") || strings.Contains(journal.String(), "SECRET_CODE_123") ||
 				strings.Contains(journal.String(), "FORGED JOURNAL ENTRY") || strings.ContainsRune(journal.String(), '\x1b') {

@@ -342,7 +342,7 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 		// The marker remains durable even when its details cannot be retained safely.
 		record.Text = ""
 	} else if unsafeText {
-		return 0, errors.New("attempt record text retains a configured credential")
+		return 0, fmt.Errorf("%w: text retains a configured credential", errAttemptRecordConflict)
 	}
 	if err := record.validateShape(); err != nil {
 		return 0, err
@@ -353,7 +353,7 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 	}
 	for _, secret := range secrets {
 		if secret != "" && containsConfiguredKey(data, secret) {
-			return 0, errors.New("attempt record retains a configured credential")
+			return 0, fmt.Errorf("%w: record retains a configured credential", errAttemptRecordConflict)
 		}
 	}
 	data = append(data, '\n')
@@ -386,7 +386,7 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 		}
 		for _, secret := range secrets {
 			if secret != "" && (containsConfiguredKey([]byte(joinedText), secret) || containsConfiguredKey(joinedJSON, secret)) {
-				return 0, errors.New("attempt record continuation retains a configured credential")
+				return 0, fmt.Errorf("%w: continuation retains a configured credential", errAttemptRecordConflict)
 			}
 		}
 	}
