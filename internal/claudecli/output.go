@@ -322,12 +322,11 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.identitySeen = true
 		}
 	}
-	freshAssistantContent, streamedAssistant := false, false
+	freshAssistantContent, streamedAssistant, assistantID := false, false, ""
 	if e.Type == "assistant" && !e.Ambient && o.acceptsSession(e.SessionID) {
-		var id string
-		freshAssistantContent, id = o.recordAssistantUsage(e.Message, e.ParentToolUseID)
-		streamedAssistant = o.streamedSinceAssistant[id]
-		delete(o.streamedSinceAssistant, id)
+		freshAssistantContent, assistantID = o.recordAssistantUsage(e.Message, e.ParentToolUseID)
+		streamedAssistant = o.streamedSinceAssistant[assistantID]
+		delete(o.streamedSinceAssistant, assistantID)
 	}
 	stop := e.Type == "system" && e.Subtype == "task_notification" &&
 		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
@@ -338,7 +337,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		return
 	}
-	o.recordProgress(e, freshAssistantContent, streamedAssistant)
+	o.recordProgress(e, freshAssistantContent, streamedAssistant, assistantID)
 	if stop {
 		o.recordTaskStop(e.Status, e.Summary)
 	}
@@ -803,7 +802,7 @@ func (o *jsonlOutput) recordTaskNotice(text, noticeUUID string) {
 // Progress is native execution, including task usage changes, but never
 // result-only usage, result waiting, or repeated snapshots. The callback is
 // separate from transcript capture and sends no text.
-func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAssistant bool) {
+func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAssistant bool, assistantID string) {
 	if e.Ambient || !o.acceptsSession(e.SessionID) {
 		return
 	}
@@ -829,38 +828,8 @@ func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAss
 	}
 	switch e.Type {
 	case "assistant":
-		if !freshAssistantContent {
-			return
-		}
-		var message struct {
-			ID      string          `json:"id"`
-			Content json.RawMessage `json:"content"`
-		}
-		if json.Unmarshal(e.Message, &message) != nil || message.ID == "" {
-			return
-		}
-		var blocks []struct {
-			Type     string `json:"type"`
-			Text     string `json:"text"`
-			ID       string `json:"id"`
-			Thinking string `json:"thinking"`
-			Data     string `json:"data"`
-		}
-		var text string
-		if json.Unmarshal(message.Content, &text) == nil && text != "" {
-			o.recordAssistantContentProgress(message.ID, streamedAssistant)
-			return
-		}
-		if json.Unmarshal(message.Content, &blocks) == nil {
-			for _, block := range blocks {
-				if block.Type == "text" && block.Text != "" ||
-					block.Type == "tool_use" && block.ID != "" ||
-					block.Type == "thinking" && block.Thinking != "" ||
-					block.Type == "redacted_thinking" && block.Data != "" {
-					o.recordAssistantContentProgress(message.ID, streamedAssistant)
-					return
-				}
-			}
+		if freshAssistantContent {
+			o.recordAssistantContentProgress(assistantID, streamedAssistant)
 		}
 	case "user":
 		if e.IsSynthetic {
@@ -1477,10 +1446,47 @@ func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
 		if len(typed) == 0 {
 			return [32]byte{}, false
 		}
-	case map[string]any:
-		if len(typed) == 0 {
+		// Block metadata can change on replay without new model work.
+		projected := make([]any, 0, len(typed))
+		for _, item := range typed {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			var field string
+			switch block["type"] {
+			case "text":
+				field = "text"
+			case "thinking":
+				field = "thinking"
+			case "redacted_thinking":
+				field = "data"
+			case "tool_use":
+				id, ok := block["id"].(string)
+				if !ok || id == "" {
+					continue
+				}
+				contentBlock := map[string]any{"type": "tool_use", "id": id}
+				for _, key := range []string{"name", "input"} {
+					if value, exists := block[key]; exists {
+						contentBlock[key] = value
+					}
+				}
+				projected = append(projected, contentBlock)
+				continue
+			default:
+				continue
+			}
+			if text, ok := block[field].(string); ok && text != "" {
+				projected = append(projected, map[string]any{"type": block["type"], field: text})
+			}
+		}
+		if len(projected) == 0 {
 			return [32]byte{}, false
 		}
+		value = projected
+	default:
+		return [32]byte{}, false // Native assistant content is a string or list of known blocks.
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {

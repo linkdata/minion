@@ -73,6 +73,10 @@ type rolloutActivityCursor struct {
 	seenHeader  bool
 	untrusted   bool
 	provedTurns map[string]bool
+	// Retain bounded identities until a child-owned event proves the turn;
+	// repeated response items then remain replay-safe without storing text.
+	pendingResponses     map[string][][sha256.Size]byte
+	pendingResponseCount int
 }
 
 const maxActivityPendingBytes = 8 << 20
@@ -489,9 +493,22 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			return // Root stdout supplies discussion.
 		}
 		fresh, turnID := a.consumeResponse(meta, event.Payload, uncertainOrdinal)
-		if fresh && !uncertainOrdinal &&
-			(meta.HistoryStart != nil || a.before[meta.ID] != nil || cursor.provedTurns[turnID]) {
-			a.newResponseProgress(meta.ID, event.Payload, progressed)
+		if fresh && !uncertainOrdinal && a.progress != nil {
+			if meta.HistoryStart != nil || a.before[meta.ID] != nil || cursor.provedTurns[turnID] {
+				a.newResponseProgress(meta.ID, event.Payload, progressed)
+			} else if turnID != "" {
+				if response, ok := responseProgressEvent(event.Payload); ok {
+					if cursor.pendingResponseCount >= maxUsageRecords {
+						a.contentMissing(meta.ID)
+					} else {
+						if cursor.pendingResponses == nil {
+							cursor.pendingResponses = make(map[string][][sha256.Size]byte)
+						}
+						cursor.pendingResponses[turnID] = append(cursor.pendingResponses[turnID], progressIdentity(meta.ID, response))
+						cursor.pendingResponseCount++
+					}
+				}
+			}
 		}
 		return
 	}
@@ -545,7 +562,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 				ResponseID string `json:"response_id"`
 			}
 			if json.Unmarshal(event.Payload, &record) == nil && record.SessionID == rootID && record.ResponseID != "" {
-				a.proveHelperTurn(meta, rootID, cursor, record.ThreadID, record.TurnID, uncertainOrdinal)
+				a.proveHelperTurn(meta, rootID, cursor, record.ThreadID, record.TurnID, uncertainOrdinal, progressed)
 			}
 			return
 		case "turn_context", "world_state", "compacted":
@@ -579,7 +596,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if b := a.before[meta.ID]; b != nil && payload.TurnID != "" && b.turns[payload.TurnID] {
 		return
 	}
-	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
+	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal, progressed)
 	proven := meta.ID == rootID || a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]
 	nativeProgress := func() {
 		fields := struct {
@@ -994,6 +1011,12 @@ func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progre
 }
 
 func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, progressed *bool) {
+	if event, ok := responseProgressEvent(raw); ok {
+		a.newProgress(id, event, 0, progressed)
+	}
+}
+
+func responseProgressEvent(raw json.RawMessage) (rolloutEvent, bool) {
 	var response struct {
 		Type      string `json:"type"`
 		ID        string `json:"id"`
@@ -1022,7 +1045,7 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		ExitCode  json.RawMessage `json:"exit_code"`
 	}
 	if json.Unmarshal(raw, &response) != nil {
-		return
+		return rolloutEvent{}, false
 	}
 	switch response.Type {
 	case "message":
@@ -1036,7 +1059,7 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 			Detail   string `json:"detail"`
 		}
 		if json.Unmarshal(response.Content, &content) != nil {
-			return
+			return rolloutEvent{}, false
 		}
 		stable := content[:0]
 		for _, part := range content {
@@ -1051,7 +1074,7 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		// AgentMessageInputContent also carries encrypted_content, which never enters progress identity.
 		var content []struct{ Type, Text string }
 		if json.Unmarshal(response.Content, &content) != nil {
-			return
+			return rolloutEvent{}, false
 		}
 		response.Content, _ = json.Marshal(content)
 		response.Summary = nil
@@ -1060,7 +1083,7 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		if len(response.Summary) != 0 {
 			var summary []struct{ Type, Text string }
 			if json.Unmarshal(response.Summary, &summary) != nil {
-				return
+				return rolloutEvent{}, false
 			}
 			response.Summary, _ = json.Marshal(summary)
 		}
@@ -1068,20 +1091,20 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		response.Summary = nil
 		var ok bool
 		if response.Output, ok = stableFunctionCallOutput(response.Output); !ok {
-			return
+			return rolloutEvent{}, false
 		}
 	default:
 		response.Summary = nil
 	}
 	snapshot, err := json.Marshal(response)
 	if err != nil {
-		return
+		return rolloutEvent{}, false
 	}
 	snapshot, ok := normalizeProgressJSON(snapshot)
 	if !ok {
-		return
+		return rolloutEvent{}, false
 	}
-	a.newProgress(id, rolloutEvent{Type: "response_item", Payload: snapshot}, 0, progressed)
+	return rolloutEvent{Type: "response_item", Payload: snapshot}, true
 }
 
 func stableFunctionCallOutput(raw json.RawMessage) (json.RawMessage, bool) {
@@ -1209,6 +1232,10 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 		}
 		return
 	}
+	a.newUnorderedProgress(progressIdentity(id, event), suppress, progressed)
+}
+
+func progressIdentity(id string, event rolloutEvent) [sha256.Size]byte {
 	hash := sha256.New()
 	_, _ = hash.Write([]byte(id))
 	_, _ = hash.Write([]byte{0})
@@ -1217,6 +1244,13 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 	_, _ = hash.Write(event.Payload)
 	var digest [sha256.Size]byte
 	copy(digest[:], hash.Sum(nil))
+	return digest
+}
+
+func (a *rolloutActivity) newUnorderedProgress(digest [sha256.Size]byte, suppress bool, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
 	if a.progressEvents[digest] {
 		return
 	}
@@ -1255,7 +1289,7 @@ func (a *rolloutActivity) helperProgressProven(meta rolloutMeta, threadID, turnI
 }
 
 // Response items omit thread_id, so retain turns identified by child-owned native events.
-func (a *rolloutActivity) proveHelperTurn(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, threadID, turnID string, uncertainOrdinal bool) {
+func (a *rolloutActivity) proveHelperTurn(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, threadID, turnID string, uncertainOrdinal bool, progressed *bool) {
 	if meta.ID == rootID || meta.HistoryStart != nil || a.before[meta.ID] != nil ||
 		threadID != meta.ID || turnID == "" || uncertainOrdinal {
 		return
@@ -1265,6 +1299,13 @@ func (a *rolloutActivity) proveHelperTurn(meta rolloutMeta, rootID string, curso
 	}
 	if len(cursor.provedTurns) < maxUsageRecords {
 		cursor.provedTurns[turnID] = true
+	}
+	if digests, pending := cursor.pendingResponses[turnID]; pending {
+		delete(cursor.pendingResponses, turnID)
+		cursor.pendingResponseCount -= len(digests)
+		for _, digest := range digests {
+			a.newUnorderedProgress(digest, false, progressed)
+		}
 	}
 }
 

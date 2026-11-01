@@ -1,6 +1,7 @@
 package claudecli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -12,6 +13,55 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestAssistantContentHashTracksExecutionContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, original, metadataReplay, changed string
+	}{
+		{"text", `[{"type":"text","text":"hello","citations":[1]}]`,
+			`[{"type":"text","text":"hello","citations":[2]}]`, `[{"type":"text","text":"goodbye"}]`},
+		{"thinking", `[{"type":"thinking","thinking":"private","signature":"one"}]`,
+			`[{"type":"thinking","thinking":"private","signature":"two"}]`, `[{"type":"thinking","thinking":"new private"}]`},
+		{"redacted", `[{"type":"redacted_thinking","data":"opaque","metadata":1}]`,
+			`[{"type":"redacted_thinking","data":"opaque","metadata":2}]`, `[{"type":"redacted_thinking","data":"new opaque"}]`},
+		{"tool", `[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"pwd"},"caller":{"type":"direct"}}]`,
+			`[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"pwd"},"caller":{"type":"code"}}]`,
+			`[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"ls"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original, present := assistantContentHash(json.RawMessage(tc.original))
+			replay, replayPresent := assistantContentHash(json.RawMessage(tc.metadataReplay))
+			changed, changedPresent := assistantContentHash(json.RawMessage(tc.changed))
+			if !present || !replayPresent || !changedPresent || original != replay || original == changed {
+				t.Fatalf("metadata must replay; changed content must be fresh: present=%t/%t/%t replay=%t changed=%t",
+					present, replayPresent, changedPresent, original == replay, original != changed)
+			}
+		})
+	}
+	if _, present := assistantContentHash(json.RawMessage(`[{"type":"thinking","thinking":"","signature":"metadata"}]`)); present {
+		t.Fatal("signature-only block was counted as execution content")
+	}
+	for _, raw := range []string{
+		`{"type":"text","text":"unsupported object shape"}`,
+		`[{"type":"unknown","metadata":"changed"}]`,
+		`["metadata"]`,
+		`[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]`,
+		`[{"type":"text","text":42}]`,
+		`[{"type":"thinking","thinking":42}]`,
+		`[{"type":"redacted_thinking","data":42}]`,
+		`42`,
+		`true`,
+	} {
+		if _, present := assistantContentHash(json.RawMessage(raw)); present {
+			t.Fatalf("unsupported content counted as execution: %s", raw)
+		}
+	}
+	text, present := assistantContentHash(json.RawMessage(`"text"`))
+	changedText, changedPresent := assistantContentHash(json.RawMessage(`"changed text"`))
+	if !present || !changedPresent || text == changedText {
+		t.Fatal("native string content change was missed")
+	}
+}
 
 func writeChunks(t *testing.T, output *jsonlOutput, data string) {
 	t.Helper()

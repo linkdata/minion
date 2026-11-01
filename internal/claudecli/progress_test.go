@@ -223,6 +223,52 @@ func TestProgressFromPrivateAssistantBlocks(t *testing.T) {
 	}
 }
 
+func TestThinkingSignatureReplayDoesNotRenewProgressOrRevokeResult(t *testing.T) {
+	var progress int
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	frame := func(thinking, signature string) string {
+		return `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"thought","content":[{"type":"thinking","thinking":` +
+			fmt.Sprintf("%q", thinking) + `,"signature":` + fmt.Sprintf("%q", signature) + `}]}}` + "\n"
+	}
+	writeChunks(t, &o, frame("reasoning", "first")+frame("reasoning", "second"))
+	if o.err != nil || progress != 1 {
+		t.Fatalf("signature-only pre-result replay: progress=%d error=%v", progress, o.err)
+	}
+	writeChunks(t, &o, successfulResult+"\n"+frame("reasoning", "third"))
+	if o.err != nil || !o.completed || o.result.Answer != "final answer" || progress != 1 {
+		t.Fatalf("signature-only post-result replay: progress=%d completed=%t answer=%q error=%v", progress, o.completed, o.result.Answer, o.err)
+	}
+	writeChunks(t, &o, frame("new reasoning", "third"))
+	if o.err != nil || o.completed || o.result.Answer != "" || progress != 2 {
+		t.Fatalf("changed thinking content: progress=%d completed=%t answer=%q error=%v", progress, o.completed, o.result.Answer, o.err)
+	}
+}
+
+func TestMalformedAssistantBlockChangesDoNotRevokeResult(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second, after string
+	}{
+		{"tool without ID", `[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]`,
+			`[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]`,
+			`[{"type":"tool_use","name":"Bash","input":{"command":"date"}}]`},
+		{"numeric text", `[{"type":"text","text":1}]`,
+			`[{"type":"text","text":2}]`, `[{"type":"text","text":3}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			frame := func(content string) string {
+				return `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"bad","content":` + content + `}}` + "\n"
+			}
+			writeChunks(t, &o, frame(tc.first)+frame(tc.second)+successfulResult+"\n"+frame(tc.after))
+			if o.err != nil || !o.completed || o.result.Answer != "final answer" || progress != 0 {
+				t.Fatalf("malformed block changed result/progress: progress=%d completed=%t answer=%q error=%v",
+					progress, o.completed, o.result.Answer, o.err)
+			}
+		})
+	}
+}
+
 func TestProgressIgnoresAmbientFrames(t *testing.T) {
 	var got int
 	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}

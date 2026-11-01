@@ -1797,20 +1797,20 @@ func TestRolloutActivityFreshHelperResponseRequiresProvenTurn(t *testing.T) {
 		`{"ordinal":11,"type":"event_msg","payload":{"type":"thread_goal_updated","thread_id":"child","turn_id":"current"}}`,
 		response(12, "current", "current", "new helper output"))
 	activity.poll()
-	if *progress != 1 {
-		t.Fatalf("proven helper response did not renew progress: %d", *progress)
+	if *progress != 2 {
+		t.Fatalf("proof did not credit early and later helper responses: %d", *progress)
 	}
 	appendUsageEvents(t, child,
 		response(13, "copied", "old-turn", "copied history"),
 		response(14, "missing-turn", "", "unattributed output"),
 		response(15, "current", "current", "new helper output"))
 	activity.poll()
-	if *progress != 1 {
+	if *progress != 2 {
 		t.Fatalf("copied, unbound or replayed helper output renewed progress: %d", *progress)
 	}
 	appendUsageEvents(t, child, response(16, "next", "current", "further helper output"))
 	activity.poll()
-	if *progress != 2 {
+	if *progress != 3 {
 		t.Fatalf("later proven helper response did not renew progress: %d", *progress)
 	}
 	appendUsageEvents(t, child,
@@ -1818,30 +1818,59 @@ func TestRolloutActivityFreshHelperResponseRequiresProvenTurn(t *testing.T) {
 		response(18, "foreign", "foreign", "foreign-thread output"),
 		usageRecordAt(19, "child", "usage-turn", "usage-response", 1, 0, 1))
 	activity.poll()
-	if *progress != 2 {
+	if *progress != 3 {
 		t.Fatalf("usage records or foreign-thread output renewed progress: %d", *progress)
 	}
 	appendUsageEvents(t, child, response(20, "usage-output", "usage-turn", "output after own-thread usage"))
 	activity.poll()
-	if *progress != 3 {
+	if *progress != 4 {
 		t.Fatalf("own-thread usage did not prove the helper response turn: %d", *progress)
 	}
 	appendUsageEvents(t, child, `{"ordinal":21,"type":"event_msg","payload":{"type":"exec_command_output","turn_id":"usage-turn","chunk":"more output"}}`)
 	activity.poll()
-	if *progress != 4 {
+	if *progress != 5 {
 		t.Fatalf("proved helper output without thread ID did not renew progress: %d", *progress)
 	}
 	appendUsageEvents(t, child,
 		`{"ordinal":22,"type":"event_msg","payload":{"type":"exec_command_output","turn_id":"usage-turn","chunk":""}}`,
 		`{"ordinal":23,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"usage-turn","chunk":""}}`)
 	activity.poll()
-	if *progress != 4 {
+	if *progress != 5 {
 		t.Fatalf("empty helper output renewed progress: %d", *progress)
 	}
 	appendUsageEvents(t, child, `{"ordinal":24,"type":"event_msg","payload":{"type":"item_completed","turn_id":"usage-turn","item":{"type":"CommandExecution","id":"finished-tool","aggregated_output":"PASS"}}}`)
 	activity.poll()
-	if *progress != 5 {
+	if *progress != 6 {
 		t.Fatalf("proved helper completion without thread ID did not renew progress: %d", *progress)
+	}
+}
+
+func TestRolloutActivityCreditsEarlyHelperResponseAfterTurnProof(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
+		rolloutMessageWithTurn(8, "copied", "copied history", "old-turn"),
+		rolloutMessageWithTurn(9, "early", "fresh helper output", "new-turn"),
+		rolloutMessageWithTurn(10, "second", "more helper output", "new-turn"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 0 {
+		t.Fatalf("unproved responses renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":11,"type":"event_msg","payload":{"type":"thread_goal_updated","thread_id":"child","turn_id":"new-turn"}}`)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("early response was lost after child-owned turn proof: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		rolloutMessageWithTurn(12, "early", "fresh helper output", "new-turn"),
+		rolloutMessageWithTurn(13, "second", "more helper output", "new-turn"))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("replayed early response renewed progress: %d", *progress)
 	}
 }
 
