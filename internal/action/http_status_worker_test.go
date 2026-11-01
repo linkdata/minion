@@ -90,6 +90,11 @@ func TestWorkerStatusCoalescesStreamingProgressNotifications(t *testing.T) {
 		status.phase("main", 1, "")
 		<-status.changed // Phase changes are immediate.
 		status.activity()
+		select {
+		case <-status.changed:
+		default:
+			t.Fatal("first real progress did not notify Status")
+		}
 		for range 100 {
 			status.activity()
 		}

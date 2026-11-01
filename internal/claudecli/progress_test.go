@@ -591,7 +591,7 @@ func TestEmptyOrReplayedFullFrameDoesNotRepeatStreamCredit(t *testing.T) {
 		before, want        int
 	}{
 		{"empty frame", start + "\n" + delta + "\n" + empty + "\n" + first, next, 1, 2},
-		{"replayed frame", start + "\n" + delta + "\n" + first + "\n" + delta + "\n" + first, next, 2, 3},
+		{"replayed frame", start + "\n" + delta + "\n" + first + "\n" + delta + "\n" + delta + "\n" + first, next, 1, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := 0
@@ -603,6 +603,58 @@ func TestEmptyOrReplayedFullFrameDoesNotRepeatStreamCredit(t *testing.T) {
 			writeChunks(t, &o, tc.after+"\n")
 			if o.err != nil || got != tc.want {
 				t.Fatalf("later unstreamed content lost: progress=%d want=%d error=%v", got, tc.want, o.err)
+			}
+		})
+	}
+}
+
+func TestFullClaudeFrameSealsOnlyItsStreamBlock(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const textStart = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}`
+	const textDelta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const ignoredIndex = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_delta","index":99}}`
+	const textFull = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
+	const textStop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":0}}`
+	const toolStart = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use"}}}`
+	const toolDelta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}}`
+	const toolFull = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"tool_use","id":"tool","name":"Read","input":{"x":1}}]}}`
+	const toolStop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_stop","index":1}}`
+	progress := 0
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{start, 0}, {textStart, 0}, {textDelta, 1}, {ignoredIndex, 1}, {textFull, 1},
+		{textDelta, 1}, {textStop, 1}, {toolStart, 2}, {textFull, 2}, {toolDelta, 3},
+		{textDelta, 3}, {toolFull, 3}, {toolDelta, 3}, {toolStop, 4}, {toolStop, 4},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || progress != step.want {
+			t.Fatalf("step %d: progress=%d want=%d error=%v", i, progress, step.want, o.err)
+		}
+	}
+}
+
+func TestFullClaudeFrameBeforeDeltaAndEmptyFrameStreamCredit(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const textStart = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}`
+	const textDelta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
+	for _, tc := range []struct {
+		name, events string
+		want         int
+	}{
+		{"full before delta", start + "\n" + textStart + "\n" + full + "\n" + textDelta, 1},
+		{"empty before delta", start + "\n" + textStart + "\n" + textDelta + "\n" + empty + "\n" + textDelta, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			writeChunks(t, &o, tc.events+"\n")
+			if o.err != nil || progress != tc.want {
+				t.Fatalf("progress=%d want=%d error=%v", progress, tc.want, o.err)
 			}
 		})
 	}

@@ -32,7 +32,7 @@ func newWorkerStatus(job Job, started time.Time) *workerStatus {
 	status := &workerStatus{
 		value: Status{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
 			ProgressSequence: 1, WorkerState: "busy", Phase: "prepare"},
-		progressAt: started, lastProgressSignal: started, changed: make(chan struct{}, 1),
+		progressAt: started, changed: make(chan struct{}, 1),
 	}
 	status.changed <- struct{}{}
 	return status

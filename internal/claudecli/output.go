@@ -135,8 +135,11 @@ type assistantSnapshot struct {
 }
 
 type progressStream struct {
-	messageID string
-	tools     map[int]uint8 // 1 started, 2 stopped.
+	messageID   string
+	activeIndex int
+	sealedIndex int
+	hasSealed   bool
+	tools       map[int]uint8 // 1 started, 2 stopped.
 }
 
 type taskProgressState struct {
@@ -325,11 +328,14 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.identitySeen = true
 		}
 	}
-	freshAssistantContent, streamedAssistant, assistantID := false, false, ""
+	freshAssistantContent, streamedAssistant, assistantContentful, assistantID := false, false, false, ""
 	if e.Type == "assistant" && !e.Ambient && o.acceptsSession(e.SessionID) {
-		freshAssistantContent, assistantID = o.recordAssistantUsage(e.Message, e.ParentToolUseID)
+		freshAssistantContent, assistantID, assistantContentful = o.recordAssistantUsage(e.Message, e.ParentToolUseID)
 		streamedAssistant = o.streamedSinceAssistant[assistantID]
 		delete(o.streamedSinceAssistant, assistantID)
+		if assistantContentful && o.err == nil {
+			o.sealStreamBlock(e, assistantID, freshAssistantContent)
+		}
 	}
 	stop := e.Type == "system" && e.Subtype == "task_notification" &&
 		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
@@ -886,6 +892,25 @@ func (o *jsonlOutput) recordAssistantContentProgress(id string, streamed bool) {
 	}
 }
 
+func streamProgressKey(e event) string {
+	if e.AgentID != "" {
+		return "agent:" + e.AgentID
+	}
+	if parent := bytes.TrimSpace(e.ParentToolUseID); len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
+		return "parent:" + string(parent)
+	}
+	return "root"
+}
+
+func (o *jsonlOutput) sealStreamBlock(e event, id string, freshContent bool) {
+	state := o.progressStreams[streamProgressKey(e)]
+	if state == nil || state.messageID != id || state.hasSealed && !freshContent {
+		return
+	}
+	state.sealedIndex = state.activeIndex
+	state.hasSealed = true
+}
+
 func (o *jsonlOutput) recordStreamProgress(e event) {
 	var native struct {
 		Type    string `json:"type"`
@@ -906,12 +931,7 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 	if json.Unmarshal(e.StreamEvent, &native) != nil {
 		return
 	}
-	key := "root"
-	if e.AgentID != "" {
-		key = "agent:" + e.AgentID
-	} else if parent := bytes.TrimSpace(e.ParentToolUseID); len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
-		key = "parent:" + string(parent)
-	}
+	key := streamProgressKey(e)
 	state := o.progressStreams[key]
 	if native.Type == "message_start" {
 		var parentID string
@@ -957,9 +977,18 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 	if state == nil {
 		return // A delta without a native message identity could be replayed.
 	}
+	if native.Index != nil {
+		switch native.Type {
+		case "content_block_start", "content_block_delta", "content_block_stop":
+			state.activeIndex = max(state.activeIndex, *native.Index)
+		}
+	}
 	switch native.Type {
 	case "content_block_start":
 		if native.Index == nil || native.ContentBlock.Type != "tool_use" {
+			return
+		}
+		if state.hasSealed && *native.Index <= state.sealedIndex {
 			return
 		}
 		if state.tools[*native.Index] != 0 {
@@ -971,6 +1000,13 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 		state.tools[*native.Index] = 1
 		o.markStreamProgress(state)
 	case "content_block_delta":
+		index := state.activeIndex
+		if native.Index != nil {
+			index = *native.Index
+		}
+		if state.hasSealed && index <= state.sealedIndex {
+			return // The full block already reported these partial deltas.
+		}
 		switch native.Delta.Type {
 		case "text_delta":
 			if native.Delta.Text != "" {
@@ -1325,7 +1361,7 @@ func (o *jsonlOutput) ensureAssistantTotal() {
 	o.assistantTotalReady = true
 }
 
-func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshContent bool, messageID string) {
+func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshContent bool, messageID string, hasContent bool) {
 	var message struct {
 		ID      string          `json:"id"`
 		Usage   json.RawMessage `json:"usage"`
