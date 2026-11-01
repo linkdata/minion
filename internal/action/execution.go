@@ -377,8 +377,9 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 			c.returned == nil && matching && inactivity != nil && inactivity.failure.Inactivity
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
-		if !errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity &&
-			(c.pending != nil || c.returned != nil || len(c.calls) != 0) {
+		if c.pending != nil && c.returned == nil ||
+			!errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity &&
+				(c.returned != nil || len(c.calls) != 0) {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
 		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.

@@ -232,6 +232,28 @@ func TestSelectedInactivityCannotOverrideFailedParentCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSelectedInactivityWithRejectedCallReceiptStaysLost(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	bad := f.call(2)
+	bad.Checkpoint.Call.Round++
+	ack := f.ack(t, "/after", bad, http.StatusInternalServerError, 2)
+	if ack.Failure == nil || !ack.Failure.Terminal {
+		t.Fatalf("invalid call receipt was not rejected: %+v", ack)
+	}
+	outcome := f.outcome(3, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(final, monitor.ErrTerminalJob) {
+		t.Fatalf("missing acknowledged receipt became a known failure: %v", final)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
 func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {
 	var data []byte
 	err := store.WithLock(func() error {
