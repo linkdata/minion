@@ -129,13 +129,13 @@ type messageUsage struct {
 }
 
 type assistantSnapshot struct {
-	tokens    usage.Tokens
-	hasTokens bool
+	tokens     usage.Tokens
+	hasTokens  bool
+	hasContent bool
 }
 
 type progressStream struct {
 	messageID string
-	replay    bool
 	tools     map[int]uint8 // 1 started, 2 stopped.
 }
 
@@ -912,9 +912,6 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 	} else if parent := bytes.TrimSpace(e.ParentToolUseID); len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
 		key = "parent:" + string(parent)
 	}
-	if o.progressStreams == nil {
-		o.progressStreams = make(map[string]*progressStream)
-	}
 	state := o.progressStreams[key]
 	if native.Type == "message_start" {
 		var parentID string
@@ -930,21 +927,26 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 		_, assistantSeen := o.assistantUsage[native.Message.ID]
 		_, historicalAssistant := o.assistantHistory[native.Message.ID]
 		replay := assistantSeen || historicalAssistant || o.progressSeen["assistant:"+native.Message.ID] || o.progressSeen[startKey]
-		if !replay {
-			if !o.rememberProgress(startKey) {
-				return
-			}
-			if o.results != 0 && !helper {
-				o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
-			}
-			if o.stopped && !helper {
-				if o.rootStartsAfterStop == nil {
-					o.rootStartsAfterStop = make(map[string]bool)
-				}
-				o.rootStartsAfterStop[native.Message.ID] = true
-			}
+		if replay {
+			delete(o.progressStreams, key)
+			return
 		}
-		state = &progressStream{messageID: native.Message.ID, replay: replay}
+		if !o.rememberProgress(startKey) {
+			return
+		}
+		if o.results != 0 && !helper {
+			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+		}
+		if o.stopped && !helper {
+			if o.rootStartsAfterStop == nil {
+				o.rootStartsAfterStop = make(map[string]bool)
+			}
+			o.rootStartsAfterStop[native.Message.ID] = true
+		}
+		if o.progressStreams == nil {
+			o.progressStreams = make(map[string]*progressStream)
+		}
+		state = &progressStream{messageID: native.Message.ID}
 		o.progressStreams[key] = state
 		return
 	}
@@ -954,9 +956,6 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 	}
 	if state == nil {
 		return // A delta without a native message identity could be replayed.
-	}
-	if state.replay {
-		return
 	}
 	switch native.Type {
 	case "content_block_start":
@@ -1381,15 +1380,28 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		contentKey = "assistant_content:" + message.ID + ":" + hex.EncodeToString(contentHash[:])
 		newContent = !o.progressSeen[contentKey]
 	}
-	if coveredStreamSnapshot {
+	// An empty full frame cannot consume the stream's first content snapshot.
+	firstStreamContent := hasContent && !prior.hasContent &&
+		o.progressSeen["stream_start:"+message.ID] && o.progressSeen["assistant:"+message.ID]
+	if firstStreamContent {
 		if newContent && !o.rememberProgress(contentKey) {
 			return
 		}
 		newContent = false
+	}
+	if hasContent {
+		prior.hasContent = true
+	}
+	if coveredStreamSnapshot || firstStreamContent {
 		if o.assistantHistory == nil {
 			o.assistantHistory = make(map[string]assistantSnapshot)
 		}
 		o.assistantHistory[message.ID] = prior
+	}
+	if firstStreamContent && seen && len(message.Usage) == 0 {
+		// An empty frame already registered this ID. Its first full content
+		// adds no work or counters when usage is absent.
+		return
 	}
 	if historical && !seen {
 		increased := valid && (!prior.hasTokens || prior.tokens.Max(tokens) != prior.tokens)

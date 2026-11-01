@@ -9,6 +9,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func TestProgressHistoryIsBoundedAcrossResumedCalls(t *testing.T) {
@@ -579,27 +580,104 @@ func TestFullAssistantContentAfterStreamDeltaDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
-func TestEmptyOrReplayedFullFrameConsumesStreamCredit(t *testing.T) {
+func TestEmptyOrReplayedFullFrameDoesNotRepeatStreamCredit(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
 	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
 	const first = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
 	const next = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"AB"}]}}`
 	for _, tc := range []struct {
-		name, events string
-		want         int
+		name, events, after string
+		before, want        int
 	}{
-		{"empty frame", start + "\n" + delta + "\n" + empty + "\n" + first, 2},
-		{"replayed frame", start + "\n" + delta + "\n" + first + "\n" + delta + "\n" + first + "\n" + next, 3},
+		{"empty frame", start + "\n" + delta + "\n" + empty + "\n" + first, next, 1, 2},
+		{"replayed frame", start + "\n" + delta + "\n" + first + "\n" + delta + "\n" + first, next, 2, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := 0
 			o := jsonlOutput{onProgress: func() { got++ }}
 			writeChunks(t, &o, tc.events+"\n")
+			if o.err != nil || got != tc.before {
+				t.Fatalf("first full frame: progress=%d want=%d error=%v", got, tc.before, o.err)
+			}
+			writeChunks(t, &o, tc.after+"\n")
 			if o.err != nil || got != tc.want {
 				t.Fatalf("later unstreamed content lost: progress=%d want=%d error=%v", got, tc.want, o.err)
 			}
 		})
+	}
+}
+
+func TestFirstFullFrameAfterEmptyStreamReplayPreservesResult(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}}`
+	const changed = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"AB"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}}`
+	const resumedResult = `{"type":"result","subtype":"success","result":"final answer","modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+	for _, callback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("callback=%t", callback), func(t *testing.T) {
+			progress := 0
+			first := jsonlOutput{}
+			if callback {
+				first.onProgress = func() { progress++ }
+			}
+			writeChunks(t, &first, start+"\n"+delta+"\n"+empty+"\n"+successfulResult+"\n")
+			first.finish()
+			if first.err != nil || !first.completed || callback && progress != 1 {
+				t.Fatalf("first call: completed=%t progress=%d error=%v", first.completed, progress, first.err)
+			}
+			resumed := jsonlOutput{onProgress: first.onProgress, baseline: first.result.Tokens, progressSeen: first.progressSeen,
+				assistantHistory: first.assistantHistory, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+			writeChunks(t, &resumed, resumedResult+"\n"+full+"\n")
+			if resumed.err != nil || !resumed.completed || resumed.result.Answer == "" ||
+				!resumed.result.UsageComplete || resumed.result.Tokens != (usage.Tokens{}) || callback && progress != 1 {
+				t.Fatalf("stream-covered replay: result=%+v completed=%t progress=%d error=%v", resumed.result, resumed.completed, progress, resumed.err)
+			}
+			writeChunks(t, &resumed, changed+"\n")
+			if resumed.err != nil || resumed.completed || callback && progress != 2 {
+				t.Fatalf("changed full frame did not count: completed=%t progress=%d error=%v", resumed.completed, progress, resumed.err)
+			}
+		})
+	}
+}
+
+func TestFirstFullFrameAfterEmptyStreamKeepsUsageEvidence(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
+	for _, tc := range []struct {
+		name, full   string
+		wantComplete bool
+	}{
+		{"omitted usage", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`, true},
+		{"malformed usage", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}],"usage":{}}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			writeChunks(t, &o, start+"\n"+delta+"\n"+empty+"\n"+successfulResult+"\n")
+			if o.err != nil || !o.completed || !o.result.UsageComplete || progress != 1 {
+				t.Fatalf("stream and result: result=%+v completed=%t progress=%d error=%v", o.result, o.completed, progress, o.err)
+			}
+			writeChunks(t, &o, tc.full+"\n")
+			if o.err != nil || !o.completed || o.result.UsageComplete != tc.wantComplete || o.result.Answer != "final answer" || progress != 1 {
+				t.Fatalf("full frame changed result: result=%+v completed=%t progress=%d error=%v", o.result, o.completed, progress, o.err)
+			}
+		})
+	}
+}
+
+func TestReplayedStreamStartsDoNotRetainAgentState(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	progress := 0
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	writeChunks(t, &o, start+"\n")
+	for i := range 100 {
+		writeChunks(t, &o, fmt.Sprintf(`{"type":"stream_event","agent_id":"agent-%d","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"A"}}}`+"\n", i))
+	}
+	if o.err != nil || len(o.progressStreams) != 1 || progress != 0 {
+		t.Fatalf("replayed starts retained agent state: streams=%d progress=%d error=%v", len(o.progressStreams), progress, o.err)
 	}
 }
 
