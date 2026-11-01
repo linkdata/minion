@@ -146,6 +146,7 @@ type jsonlOutput struct {
 	streamSeenBytes     int
 	taskProgress        map[string]taskProgressState
 	taskRuns            map[string]bool
+	taskRunCounts       map[string]int
 	runlessPending      map[string]int
 	runlessExplicit     map[string]bool // Presence records a start or usage; true means a start was seen.
 	runlessAmbiguous    map[string]bool
@@ -317,6 +318,10 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	stop := e.Type == "system" && e.Subtype == "task_notification" &&
 		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
 	if stop && !o.acceptTaskStop(e.TaskID, e.RunID, e.UUID, e.Summary) {
+		if e.TaskID != "" && e.RunID != "" {
+			// A duplicate notice can still carry the tagged run's only finish.
+			o.recordTaskProgress(e.TaskID, e.RunID, e.Status, e.UUID)
+		}
 		return
 	}
 	o.recordProgress(e)
@@ -713,6 +718,10 @@ func (o *jsonlOutput) acceptTaskStop(id, runID, uuid, summary string) bool {
 	// A later memory-pressure stop remains fatal even if an ordinary stop
 	// already used this identity.
 	if (uuidSeen || runSeen) && !(pressureStopSummary(summary) && o.taskFailure == nil) {
+		if uuidSeen && !runSeen && runKey != "" {
+			// Link the native run to the shared UUID for later replay suppression.
+			o.rememberProgress(runKey)
+		}
 		return false
 	}
 	if uuid != "" && !uuidSeen && !o.rememberProgress("task_notice_uuid:"+uuid) {
@@ -855,7 +864,10 @@ func (o *jsonlOutput) recordProgress(e event) {
 	case "system":
 		switch e.Subtype {
 		case "thinking_tokens":
-			if o.sessionID != "" && e.SessionID == o.sessionID && e.UUID != "" && e.ThinkingDelta > 0 {
+			// Helper estimates lack a task/run identity; root estimates have an explicit null parent.
+			parent := bytes.TrimSpace(e.ParentToolUseID)
+			if o.sessionID != "" && e.SessionID == o.sessionID && e.UUID != "" && e.ThinkingDelta > 0 &&
+				e.AgentID == "" && bytes.Equal(parent, []byte("null")) {
 				o.recordUniqueProgress("thinking_tokens:" + e.UUID)
 			}
 		}
@@ -1035,16 +1047,21 @@ func (o *jsonlOutput) ensureTaskRuns() {
 		return
 	}
 	o.taskRuns = make(map[string]bool)
+	o.taskRunCounts = make(map[string]int)
 	for identity := range o.progressSeen {
 		task, ok := strings.CutPrefix(identity, "task_start:")
 		if !ok {
 			task, ok = strings.CutPrefix(identity, "task_seen:")
 		}
-		if _, runID, tagged := strings.Cut(task, "\x00"); !ok || !tagged || runID == "" ||
+		id, runID, tagged := strings.Cut(task, "\x00")
+		if !ok || !tagged || runID == "" ||
 			o.progressSeen["task_finish:"+task] {
 			continue
 		}
-		o.taskRuns[task] = true
+		if !o.taskRuns[task] {
+			o.taskRuns[task] = true
+			o.taskRunCounts[id]++
+		}
 	}
 }
 
@@ -1078,6 +1095,9 @@ func (o *jsonlOutput) observeTaskRun(id, runID, identity string, credit bool) {
 	if o.err != nil {
 		return
 	}
+	if !o.taskRuns[key] {
+		o.taskRunCounts[id]++
+	}
 	o.taskRuns[key] = true
 	o.updateTaskPending()
 }
@@ -1095,6 +1115,12 @@ func (o *jsonlOutput) finishTaskRun(id, runID string) {
 	}
 	if o.err != nil {
 		return
+	}
+	if o.taskRuns[key] {
+		o.taskRunCounts[id]--
+		if o.taskRunCounts[id] == 0 {
+			delete(o.taskRunCounts, id)
+		}
 	}
 	delete(o.taskRuns, key)
 	o.updateTaskPending()
@@ -1132,6 +1158,12 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 		}
 		if o.completed && !replay {
 			o.completed, o.result.Answer = false, ""
+		}
+	}
+	if runID == "" && status != "started" && o.runlessPending[id] != 0 {
+		o.ensureTaskRuns()
+		if o.taskRunCounts[id] != 0 {
+			return // This ID-only notice may describe the tagged run instead.
 		}
 	}
 	if runID == "" {

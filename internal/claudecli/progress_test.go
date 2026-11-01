@@ -266,8 +266,8 @@ func TestAmbientStreamStartDoesNotReopenCompletedResult(t *testing.T) {
 func TestProgressThinkingTokensFrames(t *testing.T) {
 	var got int
 	first := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
-	const firstFrame = `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"frame-1","estimated_tokens":8,"estimated_tokens_delta":8}`
-	const secondFrame = `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"frame-2","estimated_tokens":12,"estimated_tokens_delta":4}`
+	const firstFrame = `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","parent_tool_use_id":null,"uuid":"frame-1","estimated_tokens":8,"estimated_tokens_delta":8}`
+	const secondFrame = `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","parent_tool_use_id":null,"uuid":"frame-2","estimated_tokens":12,"estimated_tokens_delta":4}`
 	for i, step := range []struct {
 		line string
 		want int
@@ -275,7 +275,7 @@ func TestProgressThinkingTokensFrames(t *testing.T) {
 		{firstFrame, 1},
 		{firstFrame, 1},
 		{secondFrame, 2},
-		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"zero","estimated_tokens":12,"estimated_tokens_delta":0}`, 2},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","parent_tool_use_id":null,"uuid":"zero","estimated_tokens":12,"estimated_tokens_delta":0}`, 2},
 		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"negative","estimated_tokens_delta":-1}`, 2},
 		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","estimated_tokens_delta":3}`, 2},
 		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"no-delta","estimated_tokens":15,"duration_ms":500}`, 2},
@@ -290,9 +290,144 @@ func TestProgressThinkingTokensFrames(t *testing.T) {
 
 	resumed := jsonlOutput{sessionID: "native-id", onProgress: first.onProgress, progressSeen: first.progressSeen}
 	writeChunks(t, &resumed, firstFrame+"\n"+secondFrame+"\n")
-	writeChunks(t, &resumed, `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"frame-3","estimated_tokens_delta":1}`+"\n")
+	writeChunks(t, &resumed, `{"type":"system","subtype":"thinking_tokens","session_id":"native-id","parent_tool_use_id":null,"uuid":"frame-3","estimated_tokens_delta":1}`+"\n")
 	if resumed.err != nil || got != 3 {
 		t.Fatalf("resumed thinking progress=%d, want 3; parser error=%v", got, resumed.err)
+	}
+}
+
+func TestProgressThinkingTokensIgnoresTaggedHelpers(t *testing.T) {
+	var got int
+	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"helper-agent","agent_id":"helper","estimated_tokens_delta":1}`, 0},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"helper-parent","parent_tool_use_id":"tool-1","estimated_tokens_delta":1}`, 0},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"unknown-parent","estimated_tokens_delta":1}`, 0},
+		{`{"type":"system","subtype":"thinking_tokens","session_id":"native-id","uuid":"root","parent_tool_use_id":null,"estimated_tokens_delta":1}`, 1},
+	} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("step %d: progress=%d, want %d; parser error=%v", i, got, step.want, o.err)
+		}
+	}
+}
+
+func TestSharedStopUUIDKeepsDistinctRunlessTaskPending(t *testing.T) {
+	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
+	const runlessList = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const synthetic = `{"type":"user","isSynthetic":true,"uuid":"stop-1","message":{"content":"<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>"}}`
+	const native = `{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`
+	const ownFinish = `{"type":"system","subtype":"task_notification","uuid":"finish-runless","task_id":"helper","status":"completed"}`
+	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	for _, tc := range []struct{ name, first, second string }{
+		{"start before tagged", runlessStart, taggedStart},
+		{"tagged before start", taggedStart, runlessStart},
+		{"list before tagged", runlessList, taggedStart},
+		{"tagged before list", taggedStart, runlessList},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.first+"\n"+tc.second+"\n"+synthetic+"\n"+native+"\n")
+			if o.err != nil || o.pending != 1 || o.runlessPending["helper"] != 1 || len(o.taskRuns) != 0 {
+				t.Fatalf("shared stop cleared distinct task: pending=%d runless=%v runs=%v error=%v", o.pending, o.runlessPending, o.taskRuns, o.err)
+			}
+			writeChunks(t, &o, ownFinish+"\n"+fresh+"\n"+successfulResult+"\n")
+			o.finish()
+			if o.err != nil || !o.completed || o.pending != 0 || o.result.Answer != "final answer" {
+				t.Fatalf("independent finish not accepted: pending=%d completed=%t answer=%q error=%v", o.pending, o.completed, o.result.Answer, o.err)
+			}
+		})
+	}
+}
+
+func TestSharedStopUUIDKeepsRunlessTaskPendingAfterResume(t *testing.T) {
+	const summary = `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","summary":"working"}`
+	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
+	const synthetic = `{"type":"user","isSynthetic":true,"uuid":"stop-1","message":{"content":"<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>"}}`
+	const native = `{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, summary+"\n"+taggedStart+"\n"+taggedStart+"\n")
+	if first.err != nil || first.taskRunCounts["helper"] != 1 {
+		t.Fatalf("repeated start counted twice: counts=%v error=%v", first.taskRunCounts, first.err)
+	}
+	resumed := jsonlOutput{progressSeen: first.progressSeen, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &resumed, runlessStart+"\n"+synthetic+"\n"+native+"\n")
+	if resumed.err != nil || resumed.pending != 1 || resumed.runlessPending["helper"] != 1 || resumed.taskRunCounts["helper"] != 0 {
+		t.Fatalf("resumed shared stop cleared distinct task: pending=%d runless=%v counts=%v error=%v", resumed.pending, resumed.runlessPending, resumed.taskRunCounts, resumed.err)
+	}
+}
+
+func TestSharedCompletionUUIDKeepsDistinctRunlessTaskPending(t *testing.T) {
+	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
+	const runlessList = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	for _, status := range []string{"completed", "failed"} {
+		for _, tc := range []struct{ name, first, second string }{
+			{"start before tagged", runlessStart, taggedStart},
+			{"tagged before start", taggedStart, runlessStart},
+			{"list before tagged", runlessList, taggedStart},
+			{"tagged before list", taggedStart, runlessList},
+		} {
+			t.Run(status+"/"+tc.name, func(t *testing.T) {
+				synthetic := fmt.Sprintf(`{"type":"user","isSynthetic":true,"uuid":"finish-1","message":{"content":"<task-notification><task-id>helper</task-id><status>%s</status></task-notification>"}}`, status)
+				native := fmt.Sprintf(`{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","run_id":"run-1","status":%q}`, status)
+				o := jsonlOutput{}
+				writeChunks(t, &o, tc.first+"\n"+tc.second+"\n"+synthetic+"\n"+native+"\n"+successfulResult+"\n")
+				o.finish()
+				if o.pending != 1 || o.runlessPending["helper"] != 1 || o.completed || o.result.Answer != "" || o.err == nil {
+					t.Fatalf("shared %s cleared distinct task: pending=%d runless=%v completed=%t answer=%q error=%v", status, o.pending, o.runlessPending, o.completed, o.result.Answer, o.err)
+				}
+			})
+		}
+	}
+}
+
+func TestAmbiguousSyntheticCompletionReplayKeepsRunlessTaskPending(t *testing.T) {
+	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
+	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	for _, status := range []string{"completed", "failed"} {
+		for _, noticeUUID := range []string{`"uuid":"finish-1",`, ""} {
+			t.Run(fmt.Sprintf("%s/identified=%t", status, noticeUUID != ""), func(t *testing.T) {
+				synthetic := fmt.Sprintf(`{"type":"user","isSynthetic":true,%s"message":{"content":"<task-notification><task-id>helper</task-id><status>%s</status></task-notification>"}}`, noticeUUID, status)
+				native := fmt.Sprintf(`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":%q}`, status)
+				o := jsonlOutput{}
+				writeChunks(t, &o, runlessStart+"\n"+taggedStart+"\n"+synthetic+"\n"+native+"\n"+synthetic+"\n"+successfulResult+"\n")
+				o.finish()
+				if o.pending != 1 || o.runlessPending["helper"] != 1 || o.completed || o.err == nil {
+					t.Fatalf("replayed %s cleared distinct task: pending=%d runless=%v completed=%t error=%v", status, o.pending, o.runlessPending, o.completed, o.err)
+				}
+			})
+		}
+	}
+}
+
+func TestBareCompletionKeepsDistinctRunlessTaskPending(t *testing.T) {
+	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
+	const runlessList = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	for _, status := range []string{"completed", "failed"} {
+		for _, tc := range []struct{ name, first, second string }{
+			{"start before tagged", runlessStart, taggedStart},
+			{"tagged before start", taggedStart, runlessStart},
+			{"list before tagged", runlessList, taggedStart},
+			{"tagged before list", taggedStart, runlessList},
+		} {
+			t.Run(status+"/"+tc.name, func(t *testing.T) {
+				bare := fmt.Sprintf(`{"type":"system","subtype":"task_notification","task_id":"helper","status":%q}`, status)
+				tagged := fmt.Sprintf(`{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":%q}`, status)
+				o := jsonlOutput{}
+				writeChunks(t, &o, tc.first+"\n"+tc.second+"\n"+bare+"\n"+tagged+"\n"+bare+"\n"+successfulResult+"\n")
+				o.finish()
+				if o.pending != 1 || o.runlessPending["helper"] != 1 || o.completed || o.result.Answer != "" || o.err == nil {
+					t.Fatalf("bare %s cleared distinct task: pending=%d runless=%v completed=%t answer=%q error=%v", status, o.pending, o.runlessPending, o.completed, o.result.Answer, o.err)
+				}
+			})
+		}
 	}
 }
 
@@ -696,7 +831,7 @@ func TestRunLessFinishCannotCompleteLaterTaggedRun(t *testing.T) {
 	}
 }
 
-func TestRunLessStartDoesNotReplayTaggedStart(t *testing.T) {
+func TestRunLessStartNeedsOwnFinishBesideTaggedRun(t *testing.T) {
 	progress := 0
 	o := jsonlOutput{onProgress: func() { progress++ }}
 	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
@@ -704,12 +839,17 @@ func TestRunLessStartDoesNotReplayTaggedStart(t *testing.T) {
 	const runlessFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
 	const taggedFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
 	writeChunks(t, &o, taggedStart+"\n"+runlessStart+"\n"+runlessFinish+"\n")
-	if o.err != nil || progress != 1 || o.pending != 1 {
-		t.Fatalf("runless replay renewed or cleared tagged work: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	if o.err != nil || progress != 1 || o.pending != 2 {
+		t.Fatalf("ambiguous runless finish cleared overlapping work: progress=%d pending=%d error=%v", progress, o.pending, o.err)
 	}
 	writeChunks(t, &o, taggedFinish+"\n")
-	if o.err != nil || progress != 2 || o.pending != 0 {
+	if o.err != nil || progress != 2 || o.pending != 1 {
 		t.Fatalf("tagged finish: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	}
+	const ownFinish = `{"type":"system","subtype":"task_notification","uuid":"own-finish","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, ownFinish+"\n")
+	if o.err != nil || o.pending != 0 {
+		t.Fatalf("independent runless finish: pending=%d error=%v", o.pending, o.err)
 	}
 }
 

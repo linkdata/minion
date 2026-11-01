@@ -279,14 +279,22 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		if err := executil.Run(cmd); err != nil {
-			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
-				err = errors.Join(cause, err)
+		executil.Prepare(cmd)
+		err := cmd.Start()
+		if err == nil {
+			if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
+				onProgress[0]()
 			}
-			return fmt.Errorf("audit %s failed: %w", validator.script, err)
+			err = cmd.Wait()
+			if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
+				onProgress[0]()
+			}
 		}
-		if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
-			onProgress[0]()
+		if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
+			err = errors.Join(cause, err)
+		}
+		if err != nil {
+			return fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}
 	return nil

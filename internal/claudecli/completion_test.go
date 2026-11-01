@@ -229,6 +229,45 @@ func TestIdentifiedTaskStopReplayKeepsAssessedResult(t *testing.T) {
 	}
 }
 
+func TestSyntheticStopAndTaggedNativeStopShareUUID(t *testing.T) {
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const synthetic = `{"type":"user","isSynthetic":true,"uuid":"stop-1","message":{"content":"<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>"}}`
+	const native = `{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`
+	const replay = `{"type":"system","subtype":"task_notification","uuid":"stop-2","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`
+	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, started+"\n"+synthetic+"\n"+native+"\n")
+	if o.err != nil || o.pending != 0 || !o.progressSeen["task_finish:"+taskRunKey("helper", "run-1")] {
+		t.Fatalf("native stop did not finish tagged run: pending=%d error=%v", o.pending, o.err)
+	}
+	writeChunks(t, &o, fresh+"\n"+successfulResult+"\n"+replay+"\n")
+	o.finish()
+	if o.err != nil || !o.completed || o.result.Answer != "final answer" {
+		t.Fatalf("replayed stop revoked assessed result: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+	}
+	stops := 0
+	for _, diagnostic := range o.result.Diagnostics {
+		if diagnostic.Code == "task_stopped" {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("recorded %d stop diagnostics, want one", stops)
+	}
+}
+
+func TestSyntheticStopAndTaggedNativePressureUpgradeShareUUID(t *testing.T) {
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	const synthetic = `{"type":"user","isSynthetic":true,"uuid":"stop-1","message":{"content":"<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>"}}`
+	const pressure = `{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"Background command \"helper\" was stopped because the system is running low on memory"}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, started+"\n"+synthetic+"\n"+pressure+"\n")
+	o.finish()
+	if o.err == nil || !strings.Contains(o.err.Error(), "provider memory pressure") || o.pending != 0 || o.completed {
+		t.Fatalf("pressure upgrade was lost: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
 func TestSyntheticArrayDuplicateStopRecordsOneDiagnostic(t *testing.T) {
 	const notice = `<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>`
 	const event = `{"type":"user","isSynthetic":true,"uuid":"stop-array","message":{"content":[{"type":"text","text":"` + notice + `"},{"type":"text","text":"` + notice + `"}]}}`

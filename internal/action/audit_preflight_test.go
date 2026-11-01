@@ -161,6 +161,37 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 	})
 }
 
+func TestRunnerMissingAuditArtifactDoesNotReportValidatorProgress(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nexit 99\n")
+	job := testJob(command.SecurityAudit)
+	progress := 0
+	progressAtModelExit := 0
+	runner := Runner{
+		WorkRoot:          t.TempDir(),
+		executionProgress: func() { progress++ },
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+				if file.Path == "REPORT.md" {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {
+					return aicli.Result{}, err
+				}
+			}
+			progressAtModelExit = progress
+			return aicli.Result{Answer: "Audit report\n"}, nil
+		},
+	}
+	result, err := runner.Run(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "audit REPORT.md is missing or empty") || len(result.Calls) != 1 {
+		t.Fatalf("missing artifact was accepted before validation: calls=%d error=%v", len(result.Calls), err)
+	}
+	if got := progress - progressAtModelExit; got != 1 {
+		t.Fatalf("progress after model exit=%d, want only model completion", got)
+	}
+}
+
 func TestAuditValidatorDiagnosticsStayOutOfErrors(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
