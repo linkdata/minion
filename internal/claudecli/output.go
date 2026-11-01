@@ -982,9 +982,6 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 }
 
 func (o *jsonlOutput) markStreamProgress(state *progressStream) {
-	if o.onProgress == nil {
-		return
-	}
 	key := "assistant:" + state.messageID
 	if !o.progressSeen[key] && !o.reserveProgress(1, len(key)) {
 		return
@@ -997,7 +994,9 @@ func (o *jsonlOutput) markStreamProgress(state *progressStream) {
 		o.streamedSinceAssistant = make(map[string]bool)
 	}
 	o.streamedSinceAssistant[state.messageID] = true
-	o.onProgress()
+	if o.onProgress != nil {
+		o.onProgress()
+	}
 }
 
 func (o *jsonlOutput) recordUniqueProgress(key string) {
@@ -1306,6 +1305,12 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	unknown := !root && (json.Unmarshal(parent, &parentID) != nil || parentID == "")
 	old, seen := o.assistantUsage[message.ID]
 	prior, historical := o.assistantHistory[message.ID]
+	coveredStreamSnapshot := !seen && !historical &&
+		o.progressSeen["stream_start:"+message.ID] && o.progressSeen["assistant:"+message.ID] &&
+		(!o.streamedSinceAssistant[message.ID] || o.completed)
+	if coveredStreamSnapshot {
+		historical = true // The first full snapshot can complete a stream already covered by a result.
+	}
 	priorTokens := prior.tokens
 	if !seen && !historical && !o.reserveProgress(1, len(message.ID)) {
 		return // The bounded history limit is a fatal output error.
@@ -1331,6 +1336,16 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	if hasContent {
 		contentKey = "assistant_content:" + message.ID + ":" + hex.EncodeToString(contentHash[:])
 		newContent = !o.progressSeen[contentKey]
+	}
+	if coveredStreamSnapshot {
+		if newContent && !o.rememberProgress(contentKey) {
+			return
+		}
+		newContent = false
+		if o.assistantHistory == nil {
+			o.assistantHistory = make(map[string]assistantSnapshot)
+		}
+		o.assistantHistory[message.ID] = prior
 	}
 	if historical && !seen {
 		increased := valid && (!prior.hasTokens || prior.tokens.Max(tokens) != prior.tokens)
@@ -1435,7 +1450,7 @@ func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
 	decoder.UseNumber()
 	var value any
 	if decoder.Decode(&value) != nil {
-		return sha256.Sum256(content), true
+		return [32]byte{}, false
 	}
 	switch typed := value.(type) {
 	case string:
@@ -1490,7 +1505,7 @@ func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
-		return sha256.Sum256(content), true
+		return [32]byte{}, false
 	}
 	return sha256.Sum256(canonical), true
 }

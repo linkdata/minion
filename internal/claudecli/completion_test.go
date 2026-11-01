@@ -257,6 +257,56 @@ func TestEarlierAssistantIDMakesResumedStreamStartAReplay(t *testing.T) {
 	}
 }
 
+func TestFirstFullAssistantAfterResumedStreamOnlyResultIsReplay(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"old output"}}}`
+	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
+	const replay = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"old output"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}}`
+	const changed = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"new output"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}}`
+	for _, callback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("progress callback=%t", callback), func(t *testing.T) {
+			progress, want := 0, 0
+			first := jsonlOutput{}
+			if callback {
+				first.onProgress = func() { progress++ }
+				want = 1
+			}
+			writeChunks(t, &first, start+"\n"+delta+"\n"+stop+"\n"+successfulResult+"\n")
+			first.finish()
+			if first.err != nil || !first.completed || progress != want {
+				t.Fatalf("stream-only first call: completed=%t progress=%d error=%v", first.completed, progress, first.err)
+			}
+			second := jsonlOutput{onProgress: first.onProgress, baseline: first.cumulative, progressSeen: first.progressSeen,
+				assistantHistory: first.assistantHistory, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+			writeChunks(t, &second, successfulResult+"\n"+replay+"\n")
+			if second.err != nil || !second.completed || second.result.Answer != "final answer" || progress != want {
+				t.Fatalf("first full replay renewed progress or revoked result: completed=%t progress=%d answer=%q error=%v",
+					second.completed, progress, second.result.Answer, second.err)
+			}
+			writeChunks(t, &second, changed+"\n")
+			if second.err != nil || second.completed || second.result.Answer != "" || progress != 2*want {
+				t.Fatalf("changed full content was lost: completed=%t progress=%d answer=%q error=%v",
+					second.completed, progress, second.result.Answer, second.err)
+			}
+		})
+	}
+}
+
+func TestFirstFullAssistantAfterSameCallResultCompletesStream(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"old output"}}}`
+	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"old output"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}}`
+	progress := 0
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	writeChunks(t, &o, start+"\n"+delta+"\n"+stop+"\n"+successfulResult+"\n"+full+"\n")
+	o.finish()
+	if o.err != nil || !o.completed || o.result.Answer != "final answer" || progress != 1 {
+		t.Fatalf("full stream completion after result: completed=%t progress=%d answer=%q error=%v",
+			o.completed, progress, o.result.Answer, o.err)
+	}
+}
+
 func TestEarlierAssistantCounterIncreaseInvalidatesCurrentResult(t *testing.T) {
 	first := jsonlOutput{}
 	writeChunks(t, &first, assistantUsageEvent("old", 3, 5, 7, 2)+"\n"+successfulResult+"\n")

@@ -1050,7 +1050,7 @@ func responseProgressEvent(raw json.RawMessage) (rolloutEvent, bool) {
 	switch response.Type {
 	case "message":
 		// shortcut: Unknown future ContentItem fields are ignored; extend this when Codex adds visible content.
-		var content []struct {
+		type contentPart struct {
 			Type     string `json:"type"`
 			Text     string `json:"text"`
 			ImageURL string `json:"image_url"`
@@ -1058,35 +1058,74 @@ func responseProgressEvent(raw json.RawMessage) (rolloutEvent, bool) {
 			FileID   string `json:"file_id"`
 			Detail   string `json:"detail"`
 		}
+		var content []contentPart
 		if json.Unmarshal(response.Content, &content) != nil {
 			return rolloutEvent{}, false
 		}
 		stable := content[:0]
 		for _, part := range content {
-			if part.Type == "input_image" && part.ImageURL == "" && part.FileID == "" {
-				continue // Detail alone is not an image input.
+			switch response.Role {
+			case "assistant":
+				if part.Type != "output_text" || part.Text == "" {
+					continue
+				}
+				stable = append(stable, contentPart{Type: part.Type, Text: part.Text})
+			case "user":
+				switch part.Type {
+				case "input_text":
+					if part.Text == "" {
+						continue
+					}
+					stable = append(stable, contentPart{Type: part.Type, Text: part.Text})
+				case "input_image":
+					if part.ImageURL == "" && part.FileID == "" {
+						continue // Detail alone is not an image input.
+					}
+					stable = append(stable, contentPart{Type: part.Type, ImageURL: part.ImageURL, FileID: part.FileID, Detail: part.Detail})
+				case "input_audio":
+					if part.AudioURL == "" && part.FileID == "" {
+						continue
+					}
+					stable = append(stable, contentPart{Type: part.Type, AudioURL: part.AudioURL, FileID: part.FileID})
+				default:
+					continue
+				}
+			default:
+				continue
 			}
-			stable = append(stable, part)
 		}
 		response.Content, _ = json.Marshal(stable)
 		response.Summary = nil
 	case "agent_message":
 		// AgentMessageInputContent also carries encrypted_content, which never enters progress identity.
-		var content []struct{ Type, Text string }
+		var content []struct {
+			Type, Text string
+		}
 		if json.Unmarshal(response.Content, &content) != nil {
 			return rolloutEvent{}, false
 		}
-		response.Content, _ = json.Marshal(content)
+		stable := make([]struct{ Type, Text string }, 0, len(content))
+		for _, part := range content {
+			if part.Type != "input_text" || part.Text == "" {
+				continue
+			}
+			stable = append(stable, struct{ Type, Text string }{part.Type, part.Text})
+		}
+		response.Content, _ = json.Marshal(stable)
 		response.Summary = nil
 	case "reasoning":
 		response.Content = nil // Never hash raw reasoning.
-		if len(response.Summary) != 0 {
-			var summary []struct{ Type, Text string }
-			if json.Unmarshal(response.Summary, &summary) != nil {
-				return rolloutEvent{}, false
-			}
-			response.Summary, _ = json.Marshal(summary)
+		var summary []struct{ Type, Text string }
+		if len(response.Summary) != 0 && json.Unmarshal(response.Summary, &summary) != nil {
+			return rolloutEvent{}, false
 		}
+		stable := make([]struct{ Type, Text string }, 0, len(summary))
+		for _, part := range summary {
+			if part.Type == "summary_text" && part.Text != "" {
+				stable = append(stable, part)
+			}
+		}
+		response.Summary, _ = json.Marshal(stable)
 	case "function_call_output", "custom_tool_call_output":
 		response.Summary = nil
 		var ok bool
@@ -1367,23 +1406,38 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		var parts []string
 		for _, content := range item.Content {
 			if content.Type != contentType {
-				a.contentMissing(meta.ID)
 				if kind == "user" {
 					switch content.Type {
 					case "input_image":
-						hasAttachment = hasAttachment || content.ImageURL != "" || content.FileID != ""
+						if content.ImageURL == "" && content.FileID == "" {
+							if content.Text != "" || content.AudioURL != "" || content.EncryptedContent != "" {
+								a.contentMissing(meta.ID)
+							}
+							continue
+						}
+						hasAttachment = true
 					case "input_audio":
-						hasAttachment = hasAttachment || content.AudioURL != "" || content.FileID != ""
+						if content.AudioURL == "" && content.FileID == "" {
+							if content.Text != "" || content.ImageURL != "" || content.EncryptedContent != "" {
+								a.contentMissing(meta.ID)
+							}
+							continue
+						}
+						hasAttachment = true
 					}
+				}
+				a.contentMissing(meta.ID)
+				continue
+			}
+			if content.Text == "" {
+				if content.ImageURL != "" || content.AudioURL != "" || content.FileID != "" || content.EncryptedContent != "" {
+					a.contentMissing(meta.ID)
 				}
 				continue
 			}
 			parts = append(parts, content.Text)
 		}
 		text = strings.Join(parts, "\n")
-		if len(item.Content) != 0 && text == "" {
-			a.contentMissing(meta.ID)
-		}
 	case "reasoning":
 		kind = "reasoning_summary"
 		var parts []string
@@ -1392,13 +1446,27 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 				a.contentMissing(meta.ID)
 				continue
 			}
-			parts = append(parts, summary.Text)
+			if summary.Text != "" {
+				parts = append(parts, summary.Text)
+			}
 		}
 		text = strings.Join(parts, "\n") // Never inspect raw or encrypted reasoning.
 	case "agent_message":
 		kind = "inter_agent_message"
 		var parts []string
 		for _, content := range item.Content {
+			if content.Type == "input_text" && content.Text == "" {
+				if content.EncryptedContent != "" {
+					a.contentMissing(meta.ID)
+				}
+				continue
+			}
+			if content.Type == "encrypted_content" && content.EncryptedContent == "" {
+				if content.Text != "" {
+					a.contentMissing(meta.ID)
+				}
+				continue
+			}
 			if content.Type != "input_text" {
 				a.contentMissing(meta.ID) // Encrypted or unknown content is unavailable.
 				hiddenContent = hiddenContent || content.Type == "encrypted_content" && content.EncryptedContent != ""

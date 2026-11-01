@@ -1716,6 +1716,119 @@ func TestRolloutActivityCapturesHelperUserMessage(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityEmptyResponsePartsDoNotChangeTranscript(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, kind, text string
+	}{
+		{
+			name:   "user empty text",
+			first:  `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			replay: `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_text","text":""}]}`,
+			kind:   "user", text: "inspect",
+		},
+		{
+			name:   "user empty audio",
+			first:  `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			replay: `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_audio","audio_url":""}]}`,
+			kind:   "user", text: "inspect",
+		},
+		{
+			name:   "agent empty text",
+			first:  `{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"}]}`,
+			replay: `{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"},{"type":"input_text","text":""}]}`,
+			kind:   "inter_agent_message", text: "child -> root\nworking",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"response_item","payload":`+tc.first+`}`,
+				`{"ordinal":10,"type":"response_item","payload":`+tc.replay+`}`)
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := []aicli.StreamEvent{
+				{NativeID: "child", Kind: tc.kind, Text: tc.text},
+				{NativeID: "child", Kind: tc.kind, Text: tc.text},
+			}
+			if !slices.Equal(*events, want) {
+				t.Fatalf("empty response part changed transcript: got %+v, want %+v (rollout %s)", *events, want, child)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityEmptyOnlyHelperResponseIsNotProgress(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"user audio", `{"type":"message","id":"empty-user","role":"user","content":[{"type":"input_audio","audio_url":""}]}`},
+		{"assistant text", `{"type":"message","id":"empty-assistant","role":"assistant","content":[{"type":"output_text","text":""}]}`},
+		{"agent text", `{"type":"agent_message","id":"empty-agent","author":"child","recipient":"root","content":[{"type":"input_text","text":""}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"response_item","payload":`+tc.raw+`}`)
+			activity, events, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 0 || len(*events) != 0 {
+				t.Fatalf("empty-only helper response: progress=%d, events=%+v", *progress, *events)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityInvalidResponsePartLeavesGap(t *testing.T) {
+	for _, tc := range []struct{ name, raw, kind, text string }{
+		{"assistant wrong role",
+			`{"type":"message","role":"assistant","content":[{"type":"input_image","image_url":""}]}`, "", ""},
+		{"user wrong role",
+			`{"type":"message","role":"user","content":[{"type":"output_text","text":""}]}`, "", ""},
+		{"assistant empty text with image",
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"","image_url":"unexpected"}]}`, "", ""},
+		{"user empty image with audio",
+			`{"type":"message","role":"user","content":[{"type":"input_image","image_url":"","audio_url":"unexpected"}]}`, "", ""},
+		{"user empty audio with image",
+			`{"type":"message","role":"user","content":[{"type":"input_audio","audio_url":"","image_url":"unexpected"}]}`, "", ""},
+		{"agent encrypted with text",
+			`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"encrypted_content","encrypted_content":"","text":"unexpected"}]}`, "", ""},
+		{"agent empty text with ciphertext",
+			`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"input_text","text":"","encrypted_content":"unexpected"}]}`, "", ""},
+		{"unknown message content",
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working"},{"type":"future_content","metadata":"ignored"}]}`, "assistant", "working"},
+		{"unknown agent content",
+			`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"},{"type":"future_content","metadata":"ignored"}]}`, "inter_agent_message", "child -> root\nworking"},
+		{"unknown reasoning summary",
+			`{"type":"reasoning","summary":[{"type":"summary_text","text":"working"},{"type":"future_content","metadata":"ignored"}]}`, "reasoning_summary", "working"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"response_item","payload":`+tc.raw+`}`)
+			activity, events, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}
+			if tc.kind != "" {
+				want = append(want, aicli.StreamEvent{NativeID: "child", Kind: tc.kind, Text: tc.text})
+			} else if *progress != 0 {
+				t.Fatalf("invalid-only response renewed progress: %d", *progress)
+			}
+			if !slices.Equal(*events, want) {
+				t.Fatalf("response events = %+v, want %+v", *events, want)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityIgnoresKnownMetadata(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)

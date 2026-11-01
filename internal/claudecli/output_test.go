@@ -42,6 +42,7 @@ func TestAssistantContentHashTracksExecutionContent(t *testing.T) {
 		t.Fatal("signature-only block was counted as execution content")
 	}
 	for _, raw := range []string{
+		`{invalid`,
 		`{"type":"text","text":"unsupported object shape"}`,
 		`[{"type":"unknown","metadata":"changed"}]`,
 		`["metadata"]`,

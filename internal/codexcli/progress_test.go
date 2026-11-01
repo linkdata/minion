@@ -2133,6 +2133,64 @@ func TestRolloutActivityAddedEmptyImageDoesNotRenewProgress(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityResponseContentReplayDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct{ name, first, replay string }{
+		{"empty user text",
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_text","text":""}]}`},
+		{"empty user audio",
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_audio","audio_url":""}]}`},
+		{"empty assistant text",
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"}]}`,
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"},{"type":"output_text","text":""}]}`},
+		{"empty agent text",
+			`{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"}]}`,
+			`{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"},{"type":"input_text","text":""}]}`},
+		{"unknown message content",
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"}]}`,
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"},{"type":"future_content","metadata":"changed"}]}`},
+		{"wrong-role message content",
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"}]}`,
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"},{"type":"input_text","text":"wrong role"}]}`},
+		{"unknown agent content",
+			`{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"}]}`,
+			`{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"},{"type":"future_content","metadata":"changed"}]}`},
+		{"unknown reasoning summary",
+			`{"type":"reasoning","id":"thought","summary":[{"type":"summary_text","text":"working"}]}`,
+			`{"type":"reasoning","id":"thought","summary":[{"type":"summary_text","text":"working"},{"type":"future_content","metadata":"changed"}]}`},
+		{"empty reasoning summary",
+			`{"type":"reasoning","id":"thought","summary":[{"type":"summary_text","text":"working"}]}`,
+			`{"type":"reasoning","id":"thought","summary":[{"type":"summary_text","text":"working"},{"type":"summary_text","text":""}]}`},
+		{"absent to unknown reasoning summary",
+			`{"type":"reasoning","id":"thought"}`,
+			`{"type":"reasoning","id":"thought","summary":[{"type":"future_content","metadata":"changed"}]}`},
+		{"irrelevant assistant text fields",
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working"}]}`,
+			`{"type":"message","id":"answer","role":"assistant","content":[{"type":"output_text","text":"working","image_url":"changed","detail":"high"}]}`},
+		{"irrelevant user image fields",
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_image","file_id":"one","detail":"high"}]}`,
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_image","file_id":"one","detail":"high","text":"changed","audio_url":"changed"}]}`},
+		{"irrelevant user audio fields",
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_audio","file_id":"one"}]}`,
+			`{"type":"message","id":"prompt","role":"user","content":[{"type":"input_audio","file_id":"one","text":"changed","image_url":"changed","detail":"high"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &rolloutActivity{progress: func() {}}
+			progressed := false
+			a.newResponseProgress("child", []byte(tc.first), &progressed)
+			if !progressed {
+				t.Fatal("first response did not establish progress identity")
+			}
+			progressed = false
+			a.newResponseProgress("child", []byte(tc.replay), &progressed)
+			if progressed {
+				t.Fatal("metadata-only replay renewed progress")
+			}
+		})
+	}
+}
+
 func TestRolloutActivityCompletedEmptyImageOnlyDoesNotRenewProgress(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))

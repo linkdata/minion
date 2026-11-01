@@ -57,6 +57,16 @@ func TestProgressHistoryIsBoundedAcrossResumedCalls(t *testing.T) {
 	}
 }
 
+func TestStreamReplayProofIsBoundedWithoutProgressCallback(t *testing.T) {
+	o := jsonlOutput{progressEntryLimit: 1}
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	writeChunks(t, &o, start+"\n"+delta+"\n")
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || o.progressEntries != 1 || o.progressSeen["assistant:old"] {
+		t.Fatalf("unbounded stream proof: entries=%d proof=%t error=%v", o.progressEntries, o.progressSeen["assistant:old"], o.err)
+	}
+}
+
 func TestTaggedRunStateAcrossResume(t *testing.T) {
 	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
 	const usage = `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-2","usage":{"total_tokens":1}}`
