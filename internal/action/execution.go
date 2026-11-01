@@ -372,9 +372,9 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 			slices.Equal(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
 			result.CriticStopReason == c.review.CriticStopReason
 		var inactivity *workerFailureError
+		errors.As(runErr, &inactivity)
 		knownInactivity := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil &&
-			c.returned == nil && matching &&
-			errors.As(runErr, &inactivity) && inactivity.failure.Inactivity
+			c.returned == nil && matching && inactivity != nil && inactivity.failure.Inactivity
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
 		if !errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity &&
@@ -384,6 +384,10 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
 		if !matching {
 			return errors.Join(runErr, checkpointContractError())
+		}
+		if c.AssignmentRequired() && c.assigned && c.failure != nil && inactivity != nil &&
+			inactivity.failure.Inactivity && !errors.Is(runErr, monitor.ErrTerminalJob) {
+			return errors.Join(runErr, monitor.ErrTerminalJob)
 		}
 		return runErr
 	}

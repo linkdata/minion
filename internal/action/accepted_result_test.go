@@ -208,6 +208,30 @@ func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
 	}
 }
 
+func TestSelectedInactivityCannotOverrideFailedParentCheckpoint(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	checkpointErr := errors.New("usage checkpoint save failed")
+	f.tx.sink.(*executionCheckpoints).owner.usageCheckpoint = &usageCheckpoint{
+		save: func() error { return checkpointErr },
+	}
+	ack := f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
+	if ack.Failure == nil || ack.Failure.Terminal || !errors.Is(f.tx.sink.(*executionCheckpoints).failure, checkpointErr) {
+		t.Fatalf("ordinary parent save failure was not retained: ack=%+v", ack)
+	}
+	outcome := f.outcome(2, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, checkpointErr) || !errors.Is(final, monitor.ErrTerminalJob) ||
+		errors.Is(final, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("worker inactivity overrode failed parent checkpoint: %v", final)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("failed checkpoint saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
 func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {
 	var data []byte
 	err := store.WithLock(func() error {
