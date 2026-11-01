@@ -380,6 +380,10 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			case task.TaskID == "":
 				anonymous++
 			case task.RunID == "":
+				o.rememberProgress("runless_id:" + task.TaskID)
+				if o.err != nil {
+					return
+				}
 				listed[task.TaskID]++
 				if _, explicit := o.runlessExplicit[task.TaskID]; explicit {
 					// This row may describe a second task with the same ID.
@@ -1175,6 +1179,10 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 	}
 	if runID == "" {
 		if status == "started" {
+			o.rememberProgress("runless_id:" + id)
+			if o.err != nil {
+				return
+			}
 			if noticeUUID != "" && !o.rememberProgress("task_start_uuid:"+noticeUUID) {
 				return
 			}
@@ -1221,6 +1229,10 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 	}
 	if e.RunID == "" {
 		// ID-only usage proves pending work but cannot prove fresh work for the timer.
+		o.rememberProgress("runless_id:" + e.TaskID)
+		if o.err != nil {
+			return
+		}
 		if o.runlessExplicit == nil {
 			o.runlessExplicit = make(map[string]bool)
 		}

@@ -671,7 +671,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	}
 	item := event.Item
 	tool := codexToolItem(item.Type) && item.Type != "error" && item.Type != "web_search" &&
-		!(item.Type == "collab_tool_call" && (item.Tool == "wait" || item.Tool == "close_agent"))
+		(item.Type != "collab_tool_call" || codexCollabWorkTool(item.Tool))
 	output := (item.Type == "agent_message" || item.Type == "reasoning") && item.Text != ""
 	if !tool && !output && !(item.Type == "reasoning" && event.Type == "item.completed") {
 		return
@@ -956,6 +956,14 @@ func (o *jsonlOutput) contentMissing() {
 func codexToolItem(kind string) bool {
 	switch kind {
 	case "command_execution", "file_change", "mcp_tool_call", "dynamic_tool_call", "web_search", "collab_tool_call", "error":
+		return true
+	}
+	return false
+}
+
+func codexCollabWorkTool(tool string) bool {
+	switch tool {
+	case "spawn_agent", "send_input", "resume_agent", "send_message", "followup_task", "interrupt_agent":
 		return true
 	}
 	return false

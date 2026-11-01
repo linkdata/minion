@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -216,6 +217,83 @@ esac
 	third, err := session.Run(t.Context(), dir, "continue again", false, "", config.ClaudeConfig{})
 	if err == nil || !strings.Contains(err.Error(), "No conversation found") || third.Answer != "" || session.id != id || !strings.Contains(readFile(t, binary+".3.args"), "--resume\n"+id) || readFile(t, binary+".count") != "3" {
 		t.Fatalf("missing resume silently replaced: %+v,%v", third, err)
+	}
+}
+
+func TestSessionResumePreservesUnresolvedUnidentifiedTasks(t *testing.T) {
+	for _, tc := range []struct{ name, start, finish string }{
+		{"ID only", `{"type":"system","subtype":"task_started","task_id":"helper"}`,
+			`{"type":"system","subtype":"task_notification","uuid":"done","task_id":"helper","status":"completed"}`},
+		{"anonymous", `{"type":"system","subtype":"background_tasks_changed","uuid":"listed","tasks":[{}]}`,
+			`{"type":"system","subtype":"background_tasks_changed","uuid":"cleared","tasks":[]}`},
+	} {
+		for _, callback := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/callback=%t", tc.name, callback), func(t *testing.T) {
+				fakeExecutable(t, "claude", `n=0; [ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+case "$n" in
+1) printf '%s\n' '`+tc.start+`' '`+successfulResult+`' ;;
+2) printf '%s\n' '`+successfulResult+`' ;;
+3) printf '%s\n' '`+tc.finish+`' '`+successfulResult+`' ;;
+esac
+`)
+				var session Session
+				if callback {
+					session.OnProgress = func() {}
+				}
+				t.Cleanup(func() {
+					if err := session.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				workspace := t.TempDir()
+				if _, err := session.Run(t.Context(), workspace, "first", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "background tasks still running") {
+					t.Fatalf("first call did not retain pending task: %v", err)
+				}
+				if _, err := session.Run(t.Context(), workspace, "resume", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "background tasks still running") {
+					t.Fatalf("resumed call accepted unclosed task: %v", err)
+				}
+				if result, err := session.Run(t.Context(), workspace, "close", false, "", config.ClaudeConfig{}); err != nil || result.Answer != "final answer" {
+					t.Fatalf("closing notice did not release task: result=%+v error=%v", result, err)
+				}
+			})
+		}
+	}
+}
+
+func TestNewConversationClearsUnidentifiedTasks(t *testing.T) {
+	session := Session{runlessPending: map[string]int{"helper": 1}, runlessExplicit: map[string]bool{"helper": true},
+		runlessAmbiguous: map[string]bool{"helper": true}, runlessCount: 1, anonymousPending: 1}
+	session.NewConversation()
+	if session.runlessPending != nil || session.runlessExplicit != nil || session.runlessAmbiguous != nil ||
+		session.runlessCount != 0 || session.anonymousPending != 0 {
+		t.Fatal("new conversation retained pending tasks")
+	}
+}
+
+func TestUnidentifiedTaskIDsRemainBoundedAcrossResume(t *testing.T) {
+	for _, tc := range []struct{ name, event string }{
+		{"start", `{"type":"system","subtype":"task_started","task_id":%q}`},
+		{"usage", `{"type":"system","subtype":"task_progress","task_id":%q,"usage":{"total_tokens":1}}`},
+		{"list", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":%q}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := jsonlOutput{progressEntryLimit: 2}
+			writeChunks(t, &first, fmt.Sprintf(tc.event, "a")+"\n"+fmt.Sprintf(tc.event, "b")+"\n")
+			if first.err != nil || first.progressEntries != 2 {
+				t.Fatalf("first two identities: entries=%d error=%v", first.progressEntries, first.err)
+			}
+			resumed := jsonlOutput{progressEntryLimit: 2, progressSeen: first.progressSeen,
+				progressEntries: first.progressEntries, progressBytes: first.progressBytes,
+				runlessPending: first.runlessPending, runlessExplicit: first.runlessExplicit,
+				runlessAmbiguous: first.runlessAmbiguous, runlessCount: first.runlessCount}
+			writeChunks(t, &resumed, fmt.Sprintf(tc.event, "c")+"\n")
+			if !errors.Is(resumed.err, aicli.ErrOutputLimit) || resumed.runlessPending["c"] != 0 {
+				t.Fatalf("third identity escaped bound: pending=%v entries=%d error=%v",
+					resumed.runlessPending, resumed.progressEntries, resumed.err)
+			}
+		})
 	}
 }
 

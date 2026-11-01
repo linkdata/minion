@@ -758,7 +758,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			"McpToolCall", "FunctionCallOutput", "Extension", "ImageView":
 			a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 		case "CollabAgentToolCall":
-			if item.Tool != "wait" && item.Tool != "close_agent" {
+			if codexCollabWorkTool(item.Tool) {
 				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 			}
 		}
@@ -822,7 +822,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 				a.contentMissing(meta.ID)
 				continue
 			}
-			parts = append(parts, content.Text)
+			if content.Text != "" {
+				parts = append(parts, content.Text)
+			}
 		}
 		text = strings.Join(parts, "\n")
 		if text == "" {
@@ -895,7 +897,7 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 				if part.Type == "image" && part.URL == "" && part.FileID == "" && part.Path == "" {
 					continue // Detail and display name cannot identify an image.
 				}
-				if part.Type == "text" && part.Text == "" {
+				if (part.Type == "text" || part.Type == "Text") && part.Text == "" {
 					continue
 				}
 				stable = append(stable, part)
@@ -915,7 +917,17 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 			if json.Unmarshal(item.Content, &content) != nil {
 				return
 			}
-			item.Content, _ = json.Marshal(content)
+			stable := content[:0]
+			for _, part := range content {
+				if (part.Type == "Text" || part.Type == "text") && part.Text == "" {
+					continue
+				}
+				stable = append(stable, part)
+			}
+			if len(stable) == 0 && item.Text == "" && !nonemptyProgressJSON(item.Questions) {
+				return
+			}
+			item.Content, _ = json.Marshal(stable)
 		}
 	case "Reasoning":
 		item.Content = nil // Raw reasoning is not stable visible progress.

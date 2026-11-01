@@ -114,6 +114,26 @@ func TestJSONLOutputProgressRequiresNewRootWork(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputUnidentifiedCollabToolsDoNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"poll-1","type":"collab_tool_call"}}`, 0},
+		{`{"type":"item.completed","item":{"id":"poll-2","type":"collab_tool_call","tool":""}}`, 0},
+		{`{"type":"item.started","item":{"id":"poll-3","type":"collab_tool_call","tool":"list_agents"}}`, 0},
+		{`{"type":"item.started","item":{"id":"work","type":"collab_tool_call","tool":"send_input"}}`, 1},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
 func TestJSONLOutputMetadataOnlyUpdatesDoNotRenewProgress(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}
@@ -440,6 +460,70 @@ func TestRolloutActivityProgressRequiresNewHelperWork(t *testing.T) {
 	activity.poll()
 	if *progress != 4 {
 		t.Fatalf("helper tool event progress=%d, want 4", *progress)
+	}
+}
+
+func TestRolloutActivityUnidentifiedCollabToolsDoNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		usageEventAt(9, "task_started", "child-turn"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("initial helper progress=%d, want 1", *progress)
+	}
+	appendUsageEvents(t, child,
+		rolloutCompletedItemTurn(10, "child", "child-turn", `{"type":"CollabAgentToolCall","id":"poll-1","status":"completed"}`),
+		rolloutCompletedItemTurn(11, "child", "child-turn", `{"type":"CollabAgentToolCall","id":"poll-2","tool":"list_agents","status":"completed"}`))
+	activity.poll()
+	if *progress != 1 {
+		t.Fatalf("unidentified helper collab tools renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		rolloutCompletedItemTurn(12, "child", "child-turn", `{"type":"CollabAgentToolCall","id":"send","tool":"send_input","status":"completed"}`))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("helper send_input progress=%d, want 2", *progress)
+	}
+}
+
+func TestRolloutActivityCompletedEmptyTextPartDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct{ name, first, replay, changed string }{
+		{"user message",
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"}]}`,
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"Text","text":""}]}`,
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect more"}]}`},
+		{"agent message",
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"working"}]}`,
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"working"},{"type":"Text","text":""}]}`,
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"more work"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &rolloutActivity{progress: func() {}}
+			for i, step := range []struct {
+				item string
+				want bool
+			}{{tc.first, true}, {tc.replay, false}, {tc.changed, true}} {
+				progressed := false
+				a.newItemProgress("child", "turn", []byte(step.item), &progressed)
+				if progressed != step.want {
+					t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRolloutActivityCompletedEmptyOnlyAgentTextDoesNotRenewProgress(t *testing.T) {
+	a := &rolloutActivity{progress: func() {}}
+	progressed := false
+	a.newItemProgress("child", "turn", []byte(`{"type":"AgentMessage","id":"empty","content":[{"type":"Text","text":""}]}`), &progressed)
+	if progressed {
+		t.Fatal("empty-only completed agent message renewed progress")
 	}
 }
 

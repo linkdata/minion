@@ -1761,6 +1761,37 @@ func TestRolloutActivityEmptyResponsePartsDoNotChangeTranscript(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityEmptyCompletedTextPartDoesNotChangeTranscript(t *testing.T) {
+	for _, tc := range []struct{ name, first, replay, kind, text string }{
+		{"user",
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"}]}`,
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"Text","text":""}]}`,
+			"user", "inspect"},
+		{"agent",
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"working"}]}`,
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"working"},{"type":"Text","text":""}]}`,
+			"assistant", "working"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItemTurn(9, "child", "turn", tc.first),
+				rolloutCompletedItemTurn(10, "child", "turn", tc.replay))
+			setActivityHistoryMode(t, child, "paginated")
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := aicli.StreamEvent{NativeID: "child", Kind: tc.kind, Text: tc.text}
+			if !slices.Equal(*events, []aicli.StreamEvent{want, want}) {
+				t.Fatalf("completed text replay = %+v, want two %+v", *events, want)
+			}
+		})
+	}
+}
+
 func TestRolloutActivityEmptyOnlyHelperResponseIsNotProgress(t *testing.T) {
 	for _, tc := range []struct{ name, raw string }{
 		{"user audio", `{"type":"message","id":"empty-user","role":"user","content":[{"type":"input_audio","audio_url":""}]}`},
