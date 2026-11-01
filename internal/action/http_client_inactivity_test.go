@@ -228,7 +228,7 @@ func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {
 		}
 		select {
 		case outcome := <-outcomes:
-			if outcome.Failure == nil || !outcome.Failure.Terminal || outcome.Failure.Deadline ||
+			if outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Inactivity || outcome.Failure.Deadline ||
 				outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown ||
 				len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
 				t.Fatalf("watch admission reported wrong outcome: %+v", outcome)

@@ -742,6 +742,36 @@ func TestAssignedRecoveryRecordsLostWorkerOutcome(t *testing.T) {
 	}
 }
 
+func TestDiscardAcceptedReportsSavedInactivity(t *testing.T) {
+	m, store, job, _, path := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m.Logger = log.New(&logs, "", 0)
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "inactivity", time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error { return m.discardAccepted(store) }); err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() ||
+		!strings.Contains(logs.String(), "job="+job.ID+" outcome=inactivity") {
+		t.Fatalf("discard lost inactivity report: state=%+v log=%q", store.Data, logs.String())
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, time.Now().UTC())
+	if got := reopened.Data.TerminalDecisions[job.ID].Outcome; got != "inactivity" {
+		t.Fatalf("discard replaced saved inactivity with %q", got)
+	}
+}
+
 func TestCompleteSelectedClassifiesUnknownAndDeadline(t *testing.T) {
 	for _, test := range []struct {
 		name    string

@@ -155,7 +155,7 @@ func TestHTTPFailureBoundsDiagnosticsWithoutChangingOrdinaryFailurePolicy(t *tes
 func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 	failure := &httpFailure{
 		Message:  strings.Repeat("\x01", httpFailureMessageLimit),
-		Terminal: true, Canceled: true, Deadline: true, Unsafe: true, OutcomeUnknown: true,
+		Terminal: true, Canceled: true, Deadline: true, Inactivity: true, Unsafe: true, OutcomeUnknown: true,
 		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true,
 	}
 	if err := failure.validate(); err != nil {
