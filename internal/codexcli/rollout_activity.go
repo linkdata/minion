@@ -1182,6 +1182,9 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		} `json:"internal_chat_message_metadata_passthrough"`
 		Content []struct {
 			Type, Text       string
+			ImageURL         string `json:"image_url"`
+			AudioURL         string `json:"audio_url"`
+			FileID           string `json:"file_id"`
 			EncryptedContent string `json:"encrypted_content"`
 		} `json:"content"`
 		Summary []struct {
@@ -1198,7 +1201,7 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	}
 	uncertain := uncertainOrdinal || before != nil && item.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 	kind, text := "", ""
-	hiddenContent := false
+	hiddenContent, hasAttachment := false, false
 	switch item.Type {
 	case "message":
 		contentType := "output_text"
@@ -1217,6 +1220,14 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		for _, content := range item.Content {
 			if content.Type != contentType {
 				a.contentMissing(meta.ID)
+				if kind == "user" {
+					switch content.Type {
+					case "input_image":
+						hasAttachment = hasAttachment || content.ImageURL != "" || content.FileID != ""
+					case "input_audio":
+						hasAttachment = hasAttachment || content.AudioURL != "" || content.FileID != ""
+					}
+				}
 				continue
 			}
 			parts = append(parts, content.Text)
@@ -1269,7 +1280,7 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	a.emitVisible(meta.ID, kind, text, uncertain)
 	return (before == nil || item.Metadata.TurnID != "") &&
 		(item.Type != "agent_message" || item.Author == meta.ID) &&
-		(text != "" || item.Type == "reasoning" || hiddenContent && item.Author == meta.ID), item.Metadata.TurnID
+		(text != "" || item.Type == "reasoning" || hiddenContent && item.Author == meta.ID || hasAttachment), item.Metadata.TurnID
 }
 
 func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {

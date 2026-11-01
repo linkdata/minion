@@ -423,6 +423,52 @@ func TestRolloutActivityResponseVisibleContentRenewsProgress(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityAttachmentOnlyResponseRenewsProgress(t *testing.T) {
+	for _, test := range []struct {
+		name, first, changed, fileID string
+	}{
+		{"image", `{"type":"input_image","image_url":"data:image/png;base64,one"}`, `{"type":"input_image","image_url":"data:image/png;base64,two"}`, `{"type":"input_image","file_id":"image-one"}`},
+		{"audio", `{"type":"input_audio","audio_url":"data:audio/wav;base64,one"}`, `{"type":"input_audio","audio_url":"data:audio/wav;base64,two"}`, `{"type":"input_audio","file_id":"audio-one"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			boundary := int64(9)
+			response := func(ordinal, elapsed int, content string) string {
+				return fmt.Sprintf(`{"ordinal":%d,"type":"response_item","payload":{"type":"message","id":"attachment","role":"user","content":[%s],"elapsed_time_ms":%d}}`, ordinal, content, elapsed)
+			}
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary, response(9, 100, test.first))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 || !activity.missing["child"] {
+				t.Fatalf("first attachment: progress=%d, missing=%t; want 1 and true", *progress, activity.missing["child"])
+			}
+			for i, step := range []struct {
+				content string
+				want    int
+			}{
+				{test.first, 1}, // Timing metadata alone is a replay.
+				{test.changed, 2},
+				{test.fileID, 3},
+				{`{"type":"input_image","image_url":"","file_id":"","detail":"high"}`, 3},
+				{`{"type":"input_audio","audio_url":"","file_id":""}`, 3},
+				{`{"type":"input_image","audio_url":"data:audio/wav;base64,other"}`, 3},
+				{`{"type":"input_audio","image_url":"data:image/png;base64,other"}`, 3},
+				{`{"type":"unknown","image_url":"data:image/png;base64,other"}`, 3},
+				{`{"type":"input_image","unknown_field":"other"}`, 3},
+			} {
+				appendUsageEvents(t, child, response(10+i, 200+i, step.content))
+				activity.poll()
+				if *progress != step.want {
+					t.Fatalf("step %d: progress=%d, want %d", i, *progress, step.want)
+				}
+			}
+		})
+	}
+}
+
 func TestRolloutActivityAgentMessageHiddenContentDoesNotRenewProgress(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
