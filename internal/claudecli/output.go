@@ -314,8 +314,13 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if e.Type == "assistant" {
 		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
 	}
+	stop := e.Type == "system" && e.Subtype == "task_notification" &&
+		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
+	if stop && !o.acceptTaskStop(e.TaskID, e.RunID, e.UUID, e.Summary) {
+		return
+	}
 	o.recordProgress(e)
-	if e.Type == "system" && e.Subtype == "task_notification" && (e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID) {
+	if stop {
 		o.recordTaskStop(e.Status, e.Summary)
 	}
 	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
@@ -418,10 +423,32 @@ func (o *jsonlOutput) finishLine(line []byte) {
 				o.fail(fmt.Errorf("invalid Claude tool response: %w", err))
 				return
 			}
+			synthetic := e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID)
+			claimed := false
+			var seenNotices map[string]bool
 			for _, content := range blocks {
-				if e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID) && content.Type == "text" {
-					o.recordTaskNotice(content.Text, e.UUID)
+				notice := strings.TrimSpace(content.Text)
+				if !synthetic || content.Type != "text" || !strings.HasPrefix(notice, "<task-notification>") {
+					continue
 				}
+				if !claimed && e.UUID != "" {
+					// The UUID identifies replay of the array, not each task inside it.
+					if !o.rememberProgress("task_notice_uuid:" + e.UUID) {
+						return
+					}
+					if o.err != nil {
+						return
+					}
+					claimed = true
+				}
+				if seenNotices[notice] {
+					continue
+				}
+				if seenNotices == nil {
+					seenNotices = make(map[string]bool)
+				}
+				seenNotices[notice] = true
+				o.recordTaskNotice(notice, "")
 			}
 		}
 	}
@@ -676,6 +703,27 @@ func (o *jsonlOutput) recordTaskStop(status, summary string) {
 	}
 }
 
+func (o *jsonlOutput) acceptTaskStop(id, runID, uuid, summary string) bool {
+	var runKey string
+	if id != "" && runID != "" {
+		runKey = "task_stop_run:" + taskRunKey(id, runID)
+	}
+	uuidSeen := uuid != "" && o.progressSeen["task_notice_uuid:"+uuid]
+	runSeen := runKey != "" && o.progressSeen[runKey]
+	// A later memory-pressure stop remains fatal even if an ordinary stop
+	// already used this identity.
+	if (uuidSeen || runSeen) && !(pressureStopSummary(summary) && o.taskFailure == nil) {
+		return false
+	}
+	if uuid != "" && !uuidSeen && !o.rememberProgress("task_notice_uuid:"+uuid) {
+		return false
+	}
+	if runKey != "" && !runSeen {
+		o.rememberProgress(runKey)
+	}
+	return o.err == nil
+}
+
 func (o *jsonlOutput) startFailureGrace() {
 	if o.fatal != nil {
 		o.fatal()
@@ -698,23 +746,34 @@ func (o *jsonlOutput) recordTaskNotice(text, noticeUUID string) {
 		return
 	}
 	status, _, found = strings.Cut(status, "</status>")
-	status = strings.TrimSpace(html.UnescapeString(status))
-	if _, taskID, ok := strings.Cut(header, "<task-id>"); found && ok {
-		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
-			id := strings.TrimSpace(html.UnescapeString(taskID[:end]))
-			if id != "" {
-				o.recordTaskProgress(id, "", status, noticeUUID)
-			}
-		}
-	}
-	if !found || status != "killed" && status != "stopped" {
+	if !found {
 		return
 	}
-	_, summary, _ := strings.Cut(text, "<summary>")
-	if end := strings.LastIndex(summary, "</summary>"); end >= 0 {
-		summary = summary[:end]
+	status = strings.TrimSpace(html.UnescapeString(status))
+	var id string
+	if _, taskID, ok := strings.Cut(header, "<task-id>"); ok {
+		if end := strings.Index(taskID, "</task-id>"); end >= 0 {
+			id = strings.TrimSpace(html.UnescapeString(taskID[:end]))
+		}
 	}
-	o.recordTaskStop(status, html.UnescapeString(summary))
+	stop := status == "killed" || status == "stopped"
+	var summary string
+	if stop {
+		_, summary, _ = strings.Cut(text, "<summary>")
+		if end := strings.LastIndex(summary, "</summary>"); end >= 0 {
+			summary = summary[:end]
+		}
+		summary = html.UnescapeString(summary)
+		if !o.acceptTaskStop(id, "", noticeUUID, summary) {
+			return
+		}
+	}
+	if id != "" {
+		o.recordTaskProgress(id, "", status, noticeUUID)
+	}
+	if stop {
+		o.recordTaskStop(status, summary)
+	}
 }
 
 // Progress is native execution, including task usage changes, but never

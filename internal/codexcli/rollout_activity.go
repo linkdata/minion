@@ -1138,11 +1138,11 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 // An unbounded fresh helper file may begin with copied parent history. Its
 // own thread and turn identify fresh work when no fork ordinal or prefix does.
 func (a *rolloutActivity) helperProgressProven(meta rolloutMeta, threadID, turnID string) bool {
-	if meta.HistoryStart != nil {
-		return true
-	}
 	if a.before[meta.ID] != nil {
 		return turnID != ""
+	}
+	if meta.HistoryStart != nil {
+		return true
 	}
 	return threadID == meta.ID && turnID != ""
 }

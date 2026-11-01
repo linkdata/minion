@@ -482,6 +482,18 @@ func TestRunLessNoticeUUIDReplayCannotFinishLaterStart(t *testing.T) {
 	}
 }
 
+func TestSyntheticNoticeArrayCompletesDistinctTasksWithSharedUUID(t *testing.T) {
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"one"}`
+	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"two"}`
+	const notices = `{"type":"user","isSynthetic":true,"uuid":"notices","message":{"content":[{"type":"text","text":"<task-notification><task-id>one</task-id><status>completed</status></task-notification>"},{"type":"text","text":"<task-notification><task-id>two</task-id><status>completed</status></task-notification>"}]}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, first+"\n"+second+"\n"+notices+"\n"+successfulResult+"\n"+notices+"\n")
+	o.finish()
+	if o.err != nil || o.pending != 0 || !o.completed || o.result.Answer != "final answer" {
+		t.Fatalf("shared notice UUID lost task completion or replayed it: pending=%d completed=%t answer=%q error=%v", o.pending, o.completed, o.result.Answer, o.err)
+	}
+}
+
 func TestRunLessStartSurvivesReplayedEmptyList(t *testing.T) {
 	o := jsonlOutput{}
 	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`
@@ -789,11 +801,12 @@ func TestProgressRequiresNativeContentIdentity(t *testing.T) {
 		`{"type":"assistant","message":{"id":"empty-tool","content":[{"type":"tool_use"}]}}`,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"no ID"}]}}`,
 		`{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>worker</task-id><status>completed"}}`,
+		`{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>worker</task-id><status>stopped"}}`,
 	} {
 		writeChunks(t, &o, line+"\n")
 	}
-	if got != 0 || o.err != nil {
-		t.Fatalf("unbound content renewed progress: count=%d error=%v", got, o.err)
+	if got != 0 || o.err != nil || o.stopped {
+		t.Fatalf("unbound or malformed content changed task state: count=%d stopped=%t error=%v", got, o.stopped, o.err)
 	}
 	writeChunks(t, &o, `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"helper-message"}}}`+"\n")
 	writeChunks(t, &o, `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"helper work"}}}`+"\n")

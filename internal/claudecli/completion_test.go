@@ -183,6 +183,85 @@ func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 	}
 }
 
+func TestIdentifiedTaskStopReplayKeepsAssessedResult(t *testing.T) {
+	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	for _, tc := range []struct {
+		name, first, replay string
+	}{
+		{
+			"same native UUID",
+			`{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`,
+			`{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`,
+		},
+		{
+			"same run with new UUID",
+			`{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"killed","summary":"helper killed"}`,
+			`{"type":"system","subtype":"task_notification","uuid":"stop-2","task_id":"helper","run_id":"run-1","status":"killed","summary":"helper killed"}`,
+		},
+		{
+			"UUID without task identity",
+			`{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped","summary":"helper stopped"}`,
+			`{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped","summary":"helper stopped"}`,
+		},
+		{
+			"synthetic string UUID",
+			`{"type":"user","isSynthetic":true,"uuid":"stop-1","message":{"content":"<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>"}}`,
+			`{"type":"user","isSynthetic":true,"uuid":"stop-1","message":{"content":"<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>"}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.first+"\n"+fresh+"\n"+successfulResult+"\n"+tc.replay+"\n")
+			o.finish()
+			if o.err != nil || !o.completed || o.result.Answer != "final answer" {
+				t.Fatalf("replayed stop revoked assessed result: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+			}
+			stops := 0
+			for _, diagnostic := range o.result.Diagnostics {
+				if diagnostic.Code == "task_stopped" {
+					stops++
+				}
+			}
+			if stops != 1 {
+				t.Fatalf("recorded %d stop diagnostics, want one", stops)
+			}
+		})
+	}
+}
+
+func TestSyntheticArrayDuplicateStopRecordsOneDiagnostic(t *testing.T) {
+	const notice = `<task-notification><task-id>helper</task-id><status>stopped</status><summary>helper stopped</summary></task-notification>`
+	const event = `{"type":"user","isSynthetic":true,"uuid":"stop-array","message":{"content":[{"type":"text","text":"` + notice + `"},{"type":"text","text":"` + notice + `"}]}}`
+	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, event+"\n"+fresh+"\n"+successfulResult+"\n"+event+"\n")
+	o.finish()
+	if o.err != nil || !o.completed {
+		t.Fatalf("duplicate stop revoked assessed result: completed=%t error=%v", o.completed, o.err)
+	}
+	stops := 0
+	for _, diagnostic := range o.result.Diagnostics {
+		if diagnostic.Code == "task_stopped" {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("recorded %d stop diagnostics, want one", stops)
+	}
+}
+
+func TestTaskStopPressureUpgradeRemainsFatal(t *testing.T) {
+	const ordinary = `{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"helper stopped"}`
+	const pressure = `{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"stopped","summary":"Background command \"helper\" was stopped because the system is running low on memory"}`
+	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, ordinary+"\n"+fresh+"\n"+successfulResult+"\n"+pressure+"\n")
+	o.finish()
+	if o.err == nil || !strings.Contains(o.err.Error(), "provider memory pressure") || o.completed {
+		t.Fatalf("pressure escalation after ordinary stop was lost: completed=%t error=%v", o.completed, o.err)
+	}
+}
+
 func TestOutputTerminalReasonRequiresCompletion(t *testing.T) {
 	for _, reason := range []string{`"completed"`, `"tool_deferred"`, `"aborted_tools"`, `"aborted_streaming"`, `"background_requested"`, `"hook_stopped"`, `"stop_hook_prevented"`, `""`, `null`, `42`} {
 		t.Run(reason, func(t *testing.T) {

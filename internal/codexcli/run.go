@@ -1,6 +1,7 @@
 package codexcli
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -682,6 +683,8 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		Type             string          `json:"type"`
 		Tool             string          `json:"tool"`
 		Command          json.RawMessage `json:"command"`
+		Server           string          `json:"server"`
+		Arguments        json.RawMessage `json:"arguments"`
 		Text             string          `json:"text"`
 		AggregatedOutput string          `json:"aggregated_output"`
 		Output           json.RawMessage `json:"output"`
@@ -699,11 +702,21 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	}
 	key := "id:" + item.ID
 	if item.ID == "" {
+		var arguments any
+		if len(visible.Arguments) != 0 {
+			decoder := json.NewDecoder(bytes.NewReader(visible.Arguments))
+			decoder.UseNumber()
+			if decoder.Decode(&arguments) != nil {
+				return
+			}
+		}
 		identity, err := json.Marshal(struct {
-			Type    string          `json:"type"`
-			Tool    string          `json:"tool"`
-			Command json.RawMessage `json:"command"`
-		}{visible.Type, visible.Tool, visible.Command})
+			Type      string          `json:"type"`
+			Tool      string          `json:"tool"`
+			Command   json.RawMessage `json:"command"`
+			Server    string          `json:"server"`
+			Arguments any             `json:"arguments"`
+		}{visible.Type, visible.Tool, visible.Command, visible.Server, arguments})
 		if err != nil {
 			return
 		}
@@ -712,7 +725,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	}
 	// Native IDs or the stable legacy signature identify the item. Metadata
 	// changes are not evidence of new output or execution.
-	visible.Type, visible.Tool, visible.Command = "", "", nil
+	visible.Type, visible.Tool, visible.Command, visible.Server, visible.Arguments = "", "", nil, "", nil
 	content, err := json.Marshal(visible)
 	if err != nil {
 		return
