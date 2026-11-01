@@ -1972,7 +1972,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	recordAssignedStop := func(stoppedAt time.Time, cause error) error {
 		parentDeadline, _ := ctx.Deadline()
 		outcome := selectedStopOutcome(cause, stoppedAt, job.Deadline, parentDeadline)
-		return store.WithLock(func() error {
+		var decision state.TerminalDecision
+		err := store.WithLock(func() error {
 			accepted := store.Data.Accepted
 			if accepted == nil {
 				// Assignment validation may have durably discarded this attempt
@@ -1990,12 +1991,17 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if !accepted.Assigned {
 				return nil
 			}
-			_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, stoppedAt)
+			var err error
+			decision, err = store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, stoppedAt)
 			if err != nil {
 				return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 			}
 			return nil
 		})
+		if err == nil && decision.Outcome != "" {
+			m.logf("saved accepted stop decision job=%s outcome=%s", job.ID, decision.Outcome)
+		}
+		return err
 	}
 	stopWorker := func(fallback error) error {
 		completionMu.Lock()

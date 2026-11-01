@@ -176,6 +176,8 @@ func (*deadlineProbeAction) WaitCapacity(context.Context) error { return nil }
 func TestSelectedDeadlineIsDurableBeforeWorkerCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m, store, job, gh, _ := assignmentValidationFixture(t)
+		var logs bytes.Buffer
+		m.Logger = log.New(&logs, "", 0)
 		now := time.Now().UTC()
 		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = now, now.Add(time.Minute)
 		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: now.Add(time.Minute)}
@@ -203,6 +205,9 @@ func TestSelectedDeadlineIsDurableBeforeWorkerCleanup(t *testing.T) {
 		if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "expired" {
 			t.Fatalf("expiry was not saved while worker cleanup was blocked: %+v", store.Data)
 		}
+		if !strings.Contains(logs.String(), "saved accepted stop decision job="+job.ID+" outcome=expired") {
+			t.Fatalf("saved expiry was not logged before worker cleanup: %s", logs.String())
+		}
 		close(handler.release)
 		released = true
 		if outcome := <-handler.observed; outcome != "expired" {
@@ -218,6 +223,8 @@ func TestSelectedDeadlineIsDurableBeforeWorkerCleanup(t *testing.T) {
 func TestSelectedCancellationIsDurableBeforeWorkerCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m, store, job, gh, _ := assignmentValidationFixture(t)
+		var logs bytes.Buffer
+		m.Logger = log.New(&logs, "", 0)
 		gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(job.Source.UpdatedAt), nil }
 		handler := &deadlineProbeAction{store: store, entered: make(chan struct{}, 1), stopped: make(chan struct{}, 1),
 			release: make(chan struct{}), observed: make(chan string, 1)}
@@ -238,6 +245,9 @@ func TestSelectedCancellationIsDurableBeforeWorkerCleanup(t *testing.T) {
 		<-handler.stopped
 		if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "canceled" {
 			t.Fatalf("cancellation was not saved while worker cleanup was blocked: %+v", store.Data)
+		}
+		if !strings.Contains(logs.String(), "saved accepted stop decision job="+job.ID+" outcome=canceled") {
+			t.Fatalf("saved cancellation was not logged before worker cleanup: %s", logs.String())
 		}
 		close(handler.release)
 		released = true
