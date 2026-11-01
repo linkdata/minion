@@ -500,23 +500,33 @@ func materialize(ctx context.Context, root string, files []File, progress func()
 
 // CheckUnchanged verifies exact materialized source bytes and permissions without following links.
 func CheckUnchanged(ctx context.Context, root string, base []File) error {
+	return CheckUnchangedWithProgress(ctx, root, base, nil)
+}
+
+// CheckUnchangedWithProgress reports each successfully verified path.
+func CheckUnchangedWithProgress(ctx context.Context, root string, base []File, progress func()) error {
 	if err := validateFiles(base); err != nil {
 		return err
 	}
-	return checkUnchanged(ctx, root, base, false)
+	return checkUnchanged(ctx, root, base, false, progress)
 }
 
 // CheckChangesUnchanged verifies a candidate with separate source/change bounds,
 // excluding only the top-level .git directory, verified separately by its owner.
 func CheckChangesUnchanged(ctx context.Context, root string, base []File, changes []Change) error {
+	return CheckChangesUnchangedWithProgress(ctx, root, base, changes, nil)
+}
+
+// CheckChangesUnchangedWithProgress reports each successfully verified path.
+func CheckChangesUnchangedWithProgress(ctx context.Context, root string, base []File, changes []Change, progress func()) error {
 	files, err := changedFiles(base, changes)
 	if err != nil {
 		return err
 	}
-	return checkUnchanged(ctx, root, files, true)
+	return checkUnchanged(ctx, root, files, true, progress)
 }
 
-func checkUnchanged(ctx context.Context, root string, base []File, repository bool) error {
+func checkUnchanged(ctx context.Context, root string, base []File, repository bool, progress func()) error {
 	prior := make(map[string]File, len(base))
 	for _, file := range base {
 		prior[file.Path] = file
@@ -532,6 +542,9 @@ func checkUnchanged(ctx context.Context, root string, base []File, repository bo
 		}
 		if entry.IsDir() {
 			// Empty directories carry no versioned source state; still inspect their entries.
+			if progress != nil && ctx.Err() == nil {
+				progress()
+			}
 			return nil
 		}
 		old, exists := prior[rel]
@@ -546,9 +559,15 @@ func checkUnchanged(ctx context.Context, root string, base []File, repository bo
 		if !sourceModeMatches(info, old.Mode) || !bytes.Equal(old.Data, data) {
 			return fmt.Errorf("workspace changed: changed %q", rel)
 		}
+		if progress != nil && ctx.Err() == nil {
+			progress()
+		}
 		return nil
 	})
 	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if len(prior) != 0 {

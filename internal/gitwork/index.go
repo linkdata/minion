@@ -39,11 +39,17 @@ type OfflineIndex struct {
 	tracked                       map[string]int64
 	executable                    map[string]bool
 	controls                      map[string][sha256.Size]byte
+	progress                      func()
 }
 
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
 // The caller supplies canonical absolute directories, with metadata outside source and model grants.
 func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
+	return NewOfflineIndexWithProgress(ctx, dir, source, files, nil)
+}
+
+// NewOfflineIndexWithProgress reports Git command starts, accepted finishes, and completed scans.
+func NewOfflineIndexWithProgress(ctx context.Context, dir, source string, files []workspace.File, progress func()) (*OfflineIndex, error) {
 	if workspace.Within(source, dir) || workspace.Within(dir, source) {
 		return nil, errors.New("offline index and source directories overlap")
 	}
@@ -51,7 +57,7 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
-	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), executable: make(map[string]bool), controls: make(map[string][sha256.Size]byte)}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), executable: make(map[string]bool), controls: make(map[string][sha256.Size]byte), progress: progress}
 	for _, file := range files {
 		index.tracked[file.Path] = int64(len(file.Data))
 		if file.Mode == workspace.Executable {
@@ -113,7 +119,9 @@ func (index *OfflineIndex) changesWithControlLimit(ctx context.Context, limit in
 		}
 		size := index.tracked[name]
 		filename := filepath.Join(index.source, filepath.FromSlash(name))
-		if err := workspace.CheckRoot(filepath.Dir(filename)); err != nil {
+		parentErr := workspace.CheckRoot(filepath.Dir(filename))
+		index.completed(ctx)
+		if err := parentErr; err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) {
 				// Git selects the replacement; this baseline descendant no longer exists.
 				continue
@@ -304,7 +312,7 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 	directories := map[string]map[string][]string{}
 	scanned := 0
 	var stale []byte
-	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
+	for i, name := range slices.Sorted(maps.Keys(index.tracked)) {
 		actual := "."
 		found := true
 		for _, part := range strings.Split(name, "/") {
@@ -349,6 +357,9 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 						_ = f.Close()
 						return nil, fmt.Errorf("inspect fix directory %q: %w", actual, readErr)
 					}
+					if len(entries) != 0 {
+						index.completed(ctx)
+					}
 					if remaining == 0 || errors.Is(readErr, io.EOF) {
 						break
 					}
@@ -382,8 +393,11 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 			stale = append(stale, name...)
 			stale = append(stale, 0)
 		}
+		if (i+1)%128 == 0 {
+			index.completed(ctx)
+		}
 	}
-	return stale, nil
+	return stale, ctx.Err()
 }
 
 // Check control-file shapes before Git can open FIFOs while discovering output.
@@ -501,15 +515,18 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 				for _, name := range trackedChildren[dir] {
 					info, err := os.Lstat(filepath.Join(index.source, filepath.FromSlash(name)))
 					if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+						index.completed(ctx)
 						continue
 					}
 					if err != nil {
 						return fmt.Errorf("tracked fix directory %q: %w", name, err)
 					}
+					index.completed(ctx)
 					if info.IsDir() {
 						next = append(next, directory{parent: dir, name: path.Base(name), ignored: true})
 					}
 				}
+				index.completed(ctx)
 				continue
 			}
 			f, err := workspace.OpenDirectory(absolute)
@@ -542,6 +559,9 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 							return err
 						}
 					}
+					if len(batch) != 0 {
+						index.completed(ctx)
+					}
 					if errors.Is(err, io.EOF) {
 						return nil
 					}
@@ -556,7 +576,7 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 		}
 		dirs = next
 	}
-	return nil
+	return ctx.Err()
 }
 
 func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
@@ -615,7 +635,12 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd := gitCommand(runCtx, index.binary, dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
-	err := executil.Run(cmd)
+	executil.Prepare(cmd)
+	err := cmd.Start()
+	if err == nil {
+		index.completed(ctx)
+		err = cmd.Wait()
+	}
 	contextErr := ctx.Err()
 	if output.Exceeded && contextErr == nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
@@ -623,9 +648,17 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	if err != nil || contextErr != nil {
 		var exit *exec.ExitError
 		if args[0] == "check-ignore" && errors.As(err, &exit) && exit.ExitCode() == 1 && contextErr == nil {
+			index.completed(ctx)
 			return output.Bytes(), nil
 		}
 		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
 	}
+	index.completed(ctx)
 	return output.Bytes(), nil
+}
+
+func (index *OfflineIndex) completed(ctx context.Context) {
+	if index.progress != nil && ctx.Err() == nil {
+		index.progress()
+	}
 }

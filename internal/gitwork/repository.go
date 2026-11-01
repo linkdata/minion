@@ -18,12 +18,18 @@ import (
 
 // Repository owns sanitized, immutable model-visible Git metadata.
 type Repository struct {
-	dir    string
-	digest [sha256.Size]byte
+	dir      string
+	digest   [sha256.Size]byte
+	progress func()
 }
 
 // MaterializeRepository imports only objects/refs into fresh offline metadata; it never checks out source or copies configuration.
 func MaterializeRepository(ctx context.Context, source string, snapshot workspace.Snapshot) (*Repository, error) {
+	return MaterializeRepositoryWithProgress(ctx, source, snapshot, nil)
+}
+
+// MaterializeRepositoryWithProgress reports Git command starts and accepted finishes, and completed metadata reads.
+func MaterializeRepositoryWithProgress(ctx context.Context, source string, snapshot workspace.Snapshot, progress func()) (*Repository, error) {
 	if err := workspace.ValidateSnapshot(snapshot); err != nil {
 		return nil, err
 	}
@@ -42,7 +48,7 @@ func MaterializeRepository(ctx context.Context, source string, snapshot workspac
 	if err := os.Mkdir(dir, 0700); err != nil {
 		return nil, err
 	}
-	index := &OfflineIndex{dir: dir, source: source, binary: binary}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, progress: progress}
 	run := func(args ...string) ([]byte, error) { return index.run(ctx, workspace.MaxBytes, nil, args...) }
 	if _, err := run("init", "--quiet", "--template=", "--object-format=sha1", "--ref-format=files"); err != nil {
 		return nil, err
@@ -190,8 +196,8 @@ auto = false
 	if _, err := run("update-index", "-q", "--refresh"); err != nil {
 		return nil, err
 	}
-	repo := &Repository{dir: dir}
-	if repo.digest, err = repositoryDigest(ctx, dir); err != nil {
+	repo := &Repository{dir: dir, progress: progress}
+	if repo.digest, err = repositoryDigestWithProgress(ctx, dir, workspace.MaxEntries, progress); err != nil {
 		return nil, err
 	}
 	return repo, nil
@@ -224,7 +230,7 @@ func initFilesystemConfig(data []byte) (string, error) {
 
 // Verify detects changes without executing model-visible Git configuration.
 func (r *Repository) Verify(ctx context.Context) error {
-	digest, err := repositoryDigest(ctx, r.dir)
+	digest, err := repositoryDigestWithProgress(ctx, r.dir, workspace.MaxEntries, r.progress)
 	if err != nil {
 		return err
 	}
@@ -239,6 +245,10 @@ func repositoryDigest(ctx context.Context, dir string) (sum [sha256.Size]byte, e
 }
 
 func repositoryDigestWithLimit(ctx context.Context, dir string, limit int) (sum [sha256.Size]byte, err error) {
+	return repositoryDigestWithProgress(ctx, dir, limit, nil)
+}
+
+func repositoryDigestWithProgress(ctx context.Context, dir string, limit int, progress func()) (sum [sha256.Size]byte, err error) {
 	hash := sha256.New()
 	type entry struct{ parent, name string }
 	pending, count, total := []entry{{name: dir}}, 1, 0
@@ -282,6 +292,9 @@ func repositoryDigestWithLimit(ctx context.Context, dir string, limit int) (sum 
 					for _, entry := range batch {
 						children = append(children, entry.Name())
 					}
+					if len(batch) != 0 && progress != nil && ctx.Err() == nil {
+						progress()
+					}
 					if errors.Is(err, io.EOF) {
 						return nil
 					}
@@ -306,6 +319,12 @@ func repositoryDigestWithLimit(ctx context.Context, dir string, limit int) (sum 
 		total += len(data)
 		fmt.Fprintf(hash, "%d\x00", len(data))
 		hash.Write(data)
+		if progress != nil && ctx.Err() == nil {
+			progress()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return sum, err
 	}
 	hash.Sum(sum[:0])
 	return sum, nil

@@ -19,12 +19,13 @@ type reviewSnapshot struct {
 	changes           []workspace.Change
 	artifacts         []workspace.File
 	repository        *gitwork.Repository
+	progress          func()
 	refresh           func(context.Context) error
 }
 
 // Freeze outside the main model's writable grants. The caller owns the partial snapshot even on failure.
 func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source, outputDir string, index *gitwork.OfflineIndex, progress func(), secrets ...string) (*reviewSnapshot, error) {
-	s := &reviewSnapshot{base: job.Source.Files}
+	s := &reviewSnapshot{base: job.Source.Files, progress: progress}
 	// Bind the action once; refresh only frozen bytes between model calls.
 	s.refresh = func(ctx context.Context) error {
 		var err error
@@ -42,7 +43,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			if err := workspace.MaterializeChangesWithProgress(ctx, s.source, job.Source.Files, s.changes, progress); err != nil {
 				return err
 			}
-			if s.repository, err = gitwork.MaterializeRepository(ctx, s.source, job.Source); err != nil {
+			if s.repository, err = gitwork.MaterializeRepositoryWithProgress(ctx, s.source, job.Source, progress); err != nil {
 				return err
 			}
 			if progress != nil {
@@ -82,7 +83,7 @@ func resetReviewDirectory(path, workRoot, prefix string) (string, error) {
 
 func (s *reviewSnapshot) verify(ctx context.Context) error {
 	if s.ownedSource {
-		if err := workspace.CheckChangesUnchanged(ctx, s.source, s.base, s.changes); err != nil {
+		if err := workspace.CheckChangesUnchangedWithProgress(ctx, s.source, s.base, s.changes, s.progress); err != nil {
 			return fmt.Errorf("frozen candidate source changed during critic review: %w", err)
 		}
 	}
@@ -92,7 +93,7 @@ func (s *reviewSnapshot) verify(ctx context.Context) error {
 		}
 	}
 	if s.outputDir != "" {
-		if err := workspace.CheckUnchanged(ctx, s.outputDir, s.artifacts); err != nil {
+		if err := workspace.CheckUnchangedWithProgress(ctx, s.outputDir, s.artifacts, s.progress); err != nil {
 			return fmt.Errorf("frozen candidate reports changed during critic review: %w", err)
 		}
 	}

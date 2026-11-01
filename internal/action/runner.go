@@ -398,7 +398,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := workspace.MaterializeWithProgress(ctx, source, job.Source.Files, noteProgress); err != nil {
 		return result, preparationFailure("materialize source", err)
 	}
-	repository, err := gitwork.MaterializeRepository(ctx, source, job.Source)
+	repository, err := gitwork.MaterializeRepositoryWithProgress(ctx, source, job.Source, noteProgress)
 	if err != nil {
 		return result, preparationFailure("materialize repository", err)
 	}
@@ -413,7 +413,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, preparationFailure("create private index", err)
 		}
 		owned = append(owned, metadataDir)
-		index, err = gitwork.NewOfflineIndex(ctx, metadataDir, source, job.Source.Files)
+		index, err = gitwork.NewOfflineIndexWithProgress(ctx, metadataDir, source, job.Source.Files, noteProgress)
 		if err != nil {
 			// Native Git can refuse a source that passed portable path validation.
 			if errors.Is(err, gitwork.ErrUnsupportedSource) {
@@ -421,7 +421,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			return result, preparationFailure("prepare private index", err)
 		}
-		noteProgress()
 	}
 	outputDir := ""
 	if job.Action == command.SecurityAudit {
