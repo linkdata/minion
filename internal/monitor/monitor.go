@@ -1785,6 +1785,21 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
 	}
 	if !time.Now().Before(job.Deadline) {
+		if accepted.FixedRefusal == "" && (accepted.Assigned || failure.ModelCallStarted) {
+			stored, err := store.HasAcceptedResult()
+			if err != nil {
+				return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
+			}
+			if !stored || !accepted.ResultReady {
+				// Without a saved stop or result, delivered work is unverified after restart.
+				at := m.now().UTC()
+				decision, err := decideAccepted(store, job, "lost", at)
+				if err != nil {
+					return err
+				}
+				return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+			}
+		}
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if accepted.FixedRefusal != "" {

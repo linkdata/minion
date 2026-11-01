@@ -722,26 +722,43 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 }
 
 func TestAssignedRecoveryRecordsLostWorkerOutcome(t *testing.T) {
-	m, store, job, gh, path := assignmentValidationFixture(t)
-	store.Data.Accepted.Assigned = true
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	m.Handler = selectedHandler(func(Job) error {
-		t.Fatal("lost worker was redispatched")
-		return nil
-	})
-	if _, err := m.RunOnce(t.Context(), store); err != nil ||
-		store.Data.TerminalDecisions[job.ID].Outcome != "lost" ||
-		store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
-		t.Fatalf("lost worker was not finalized: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reopened := openStateAt(t, path, time.Time{})
-	if reopened.Data.TerminalDecisions[job.ID].Outcome != "lost" {
-		t.Fatalf("lost worker decision was not durable: %+v", reopened.Data)
+	for _, overdue := range []bool{false, true} {
+		t.Run(fmt.Sprint(overdue), func(t *testing.T) {
+			m, store, job, gh, path := assignmentValidationFixture(t)
+			accepted := store.Data.Accepted
+			accepted.Assigned = true
+			if overdue {
+				accepted.AcceptedAt = time.Now().UTC().Add(-8 * time.Minute)
+				accepted.Deadline = accepted.AcceptedAt.Add(7 * time.Minute)
+				failure := store.Data.JobFailures[job.ID]
+				failure.AcceptedAt, failure.Deadline = accepted.AcceptedAt, accepted.Deadline
+				store.Data.JobFailures[job.ID] = failure
+				m.Now = time.Now
+			}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, time.Time{})
+			m.Handler = selectedHandler(func(Job) error {
+				t.Fatal("lost worker was redispatched")
+				return nil
+			})
+			if _, err := m.RunOnce(t.Context(), store); err != nil ||
+				store.Data.TerminalDecisions[job.ID].Outcome != "lost" ||
+				store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
+				t.Fatalf("lost worker was not finalized: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, time.Time{})
+			if reopened.Data.TerminalDecisions[job.ID].Outcome != "lost" {
+				t.Fatalf("lost worker decision was not durable: %+v", reopened.Data)
+			}
+		})
 	}
 }
 
