@@ -1641,3 +1641,241 @@ func TestRolloutActivityResumeResponseOnlyTurnDoesNotRenewProgress(t *testing.T)
 		t.Fatalf("current helper turn did not renew progress: %d", progress)
 	}
 }
+
+func TestRolloutActivityOrdinalLessNativePayloadMetadataDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, changed string
+	}{
+		{
+			name:    "command output",
+			first:   `{"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"current","chunk":"tick","elapsed_time_ms":1}}`,
+			replay:  `{"payload":{"occurred_at_ms":2,"chunk":"tick","turn_id":"current","thread_id":"child","type":"exec_command_output"},"type":"event_msg"}`,
+			changed: `{"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"child","turn_id":"current","chunk":"tock"}}`,
+		},
+		{
+			name:    "agent message",
+			first:   `{"type":"event_msg","payload":{"type":"agent_message","thread_id":"child","turn_id":"current","message":"working","elapsed_time_ms":1}}`,
+			replay:  `{"payload":{"message":"working","occurred_at_ms":2,"turn_id":"current","thread_id":"child","type":"agent_message"},"type":"event_msg"}`,
+			changed: `{"type":"event_msg","payload":{"type":"agent_message","thread_id":"child","turn_id":"current","message":"more work"}}`,
+		},
+		{
+			name:    "user message",
+			first:   `{"type":"event_msg","payload":{"type":"user_message","thread_id":"child","turn_id":"current","message":"inspect","elapsed_time_ms":1}}`,
+			replay:  `{"payload":{"message":"inspect","occurred_at_ms":2,"turn_id":"current","thread_id":"child","type":"user_message"},"type":"event_msg"}`,
+			changed: `{"type":"event_msg","payload":{"type":"user_message","thread_id":"child","turn_id":"current","message":"inspect more"}}`,
+		},
+		{
+			name:    "reasoning",
+			first:   `{"type":"event_msg","payload":{"type":"agent_reasoning","thread_id":"child","turn_id":"current","text":"thinking","elapsed_time_ms":1}}`,
+			replay:  `{"payload":{"text":"thinking","occurred_at_ms":2,"turn_id":"current","thread_id":"child","type":"agent_reasoning"},"type":"event_msg"}`,
+			changed: `{"type":"event_msg","payload":{"type":"agent_reasoning","thread_id":"child","turn_id":"current","text":"more thinking"}}`,
+		},
+		{
+			name:    "raw reasoning",
+			first:   `{"type":"event_msg","payload":{"type":"agent_reasoning_raw_content","thread_id":"child","turn_id":"current","text":"thinking","elapsed_time_ms":1}}`,
+			replay:  `{"payload":{"text":"thinking","occurred_at_ms":2,"turn_id":"current","thread_id":"child","type":"agent_reasoning_raw_content"},"type":"event_msg"}`,
+			changed: `{"type":"event_msg","payload":{"type":"agent_reasoning_raw_content","thread_id":"child","turn_id":"current","text":"more thinking"}}`,
+		},
+		{
+			name:    "helper communication",
+			first:   `{"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"working","internal_chat_message_metadata_passthrough":{"turn_id":"current","elapsed_time_ms":1}}}`,
+			replay:  `{"payload":{"internal_chat_message_metadata_passthrough":{"occurred_at_ms":2,"turn_id":"current"},"content":"working","recipient":"root","author":"child"},"type":"inter_agent_communication"}`,
+			changed: `{"type":"inter_agent_communication","payload":{"author":"child","recipient":"root","content":"more work","internal_chat_message_metadata_passthrough":{"turn_id":"current"}}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			child := writeUsageRolloutBoundary(t, home, "child", "root", nil, tc.first)
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			for i, step := range []struct {
+				event string
+				want  int
+			}{{"", 1}, {tc.replay, 1}, {tc.changed, 2}} {
+				if step.event != "" {
+					appendUsageEvents(t, child, step.event)
+				}
+				activity.poll()
+				if *progress != step.want {
+					t.Fatalf("step %d: progress=%d, want %d", i, *progress, step.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRolloutActivityEmptyImageDetailDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, attached string
+		progress                      func(*rolloutActivity, string, *bool)
+	}{
+		{
+			name:     "response message",
+			first:    `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_image","detail":"low"}]}`,
+			replay:   `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_image","detail":"high"}]}`,
+			attached: `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_image","detail":"high","file_id":"image-one"}]}`,
+			progress: func(a *rolloutActivity, raw string, progressed *bool) {
+				a.newResponseProgress("child", []byte(raw), progressed)
+			},
+		},
+		{
+			name:     "completed user message",
+			first:    `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","detail":"low"}]}`,
+			replay:   `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","detail":"high"}]}`,
+			attached: `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","detail":"high","fileId":"image-one"}]}`,
+			progress: func(a *rolloutActivity, raw string, progressed *bool) {
+				a.newItemProgress("child", "current", []byte(raw), progressed)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &rolloutActivity{progress: func() {}}
+			for i, step := range []struct {
+				raw  string
+				want bool
+			}{{tc.first, true}, {tc.replay, false}, {tc.attached, true}} {
+				progressed := false
+				tc.progress(a, step.raw, &progressed)
+				if progressed != step.want {
+					t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRolloutActivityOrdinalLessNativeAttachmentsAndQuestionsRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, eventType, field, first, replay, changed string
+	}{
+		{"image", "user_message", "images", `["image-one"]`, `["image-one"]`, `["image-two"]`},
+		{"file ID", "user_message", "file_ids", `["file-one"]`, `["file-one"]`, `["file-two"]`},
+		{"local image", "user_message", "local_images", `["/tmp/image-one.png"]`, `["/tmp/image-one.png"]`, `["/tmp/image-two.png"]`},
+		{"audio", "user_message", "audio", `["audio-one"]`, `["audio-one"]`, `["audio-two"]`},
+		{"local audio", "user_message", "local_audio", `["/tmp/audio-one.wav"]`, `["/tmp/audio-one.wav"]`, `["/tmp/audio-two.wav"]`},
+		{"question", "agent_message", "questions", `[{"question":"Which target?","options":["one","two"]}]`, `[{"options":["one","two"],"question":"Which target?"}]`, `[{"question":"Which target now?","options":["one","two"]}]`},
+	} {
+		for _, message := range []string{"same text", ""} {
+			t.Run(fmt.Sprintf("%s/message=%t", tc.name, message != ""), func(t *testing.T) {
+				home, started := t.TempDir(), time.Now()
+				writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+				event := func(value string, elapsed int) string {
+					return fmt.Sprintf(`{"type":"event_msg","payload":{"type":%q,"thread_id":"child","turn_id":"current","message":%q,%q:%s,"elapsed_time_ms":%d}}`, tc.eventType, message, tc.field, value, elapsed)
+				}
+				child := writeUsageRolloutBoundary(t, home, "child", "root", nil, event(tc.first, 1))
+				activity, _, progress := newActivityTestRecorder(t, home, started)
+				activity.root("root")
+				activity.child("child", true)
+				for i, step := range []struct {
+					value string
+					want  int
+				}{{"", 1}, {tc.replay, 1}, {tc.changed, 2}} {
+					if step.value != "" {
+						appendUsageEvents(t, child, event(step.value, i+1))
+					}
+					activity.poll()
+					if *progress != step.want {
+						t.Fatalf("step %d: progress=%d, want %d", i, *progress, step.want)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestRolloutActivityOrdinalLessEmptyNativeCollectionsDoNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, eventType, field string
+	}{
+		{"empty image list", "user_message", "images"},
+		{"empty question list", "agent_message", "questions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			event := func(elapsed int) string {
+				return fmt.Sprintf(`{"type":"event_msg","payload":{"type":%q,"thread_id":"child","turn_id":"current",%q:[],"elapsed_time_ms":%d}}`, tc.eventType, tc.field, elapsed)
+			}
+			child := writeUsageRolloutBoundary(t, home, "child", "root", nil, event(1))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			appendUsageEvents(t, child, event(2))
+			activity.poll()
+			if *progress != 0 {
+				t.Fatalf("empty collection renewed progress: %d", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityAddedEmptyImageDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay string
+		progress            func(*rolloutActivity, string, *bool)
+	}{
+		{
+			name:   "response message",
+			first:  `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			replay: `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_image","detail":"high"}]}`,
+			progress: func(a *rolloutActivity, raw string, progressed *bool) {
+				a.newResponseProgress("child", []byte(raw), progressed)
+			},
+		},
+		{
+			name:   "completed user message",
+			first:  `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"}]}`,
+			replay: `{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"image","detail":"high"}]}`,
+			progress: func(a *rolloutActivity, raw string, progressed *bool) {
+				a.newItemProgress("child", "current", []byte(raw), progressed)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &rolloutActivity{progress: func() {}}
+			for i, step := range []struct {
+				raw  string
+				want bool
+			}{{tc.first, true}, {tc.replay, false}} {
+				progressed := false
+				tc.progress(a, step.raw, &progressed)
+				if progressed != step.want {
+					t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRolloutActivityCompletedEmptyImageOnlyDoesNotRenewProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	boundary := int64(9)
+	empty := `{"type":"UserMessage","id":"prompt","content":[{"type":"image","detail":"low"}]}`
+	child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutCompletedItemTurn(9, "child", "current", empty))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	for i, step := range []struct {
+		item string
+		want int
+	}{
+		{"", 0},
+		{`{"type":"UserMessage","id":"prompt","content":[{"type":"image","detail":"high","name":"placeholder"}]}`, 0},
+		{`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":""},{"type":"image","detail":"high"}]}`, 0},
+		{`{"type":"UserMessage","id":"prompt","text":"inspect","content":[{"type":"image","detail":"high"}]}`, 1},
+		{`{"type":"UserMessage","id":"prompt","content":[{"type":"image","fileId":"image-one"}]}`, 2},
+	} {
+		if step.item != "" {
+			appendUsageEvents(t, child, rolloutCompletedItemTurn(9+i, "child", "current", step.item))
+		}
+		activity.poll()
+		if *progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, *progress, step.want)
+		}
+	}
+}

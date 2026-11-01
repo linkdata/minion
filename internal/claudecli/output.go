@@ -813,9 +813,11 @@ func (o *jsonlOutput) recordProgress(e event) {
 			return
 		}
 		var blocks []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-			ID   string `json:"id"`
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ID       string `json:"id"`
+			Thinking string `json:"thinking"`
+			Data     string `json:"data"`
 		}
 		var text string
 		if json.Unmarshal(message.Content, &text) == nil && text != "" {
@@ -824,7 +826,10 @@ func (o *jsonlOutput) recordProgress(e event) {
 		}
 		if json.Unmarshal(message.Content, &blocks) == nil {
 			for _, block := range blocks {
-				if block.Type == "text" && block.Text != "" || block.Type == "tool_use" && block.ID != "" {
+				if block.Type == "text" && block.Text != "" ||
+					block.Type == "tool_use" && block.ID != "" ||
+					block.Type == "thinking" && block.Thinking != "" ||
+					block.Type == "redacted_thinking" && block.Data != "" {
 					o.recordUniqueProgress("assistant:" + message.ID)
 					return
 				}

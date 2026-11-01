@@ -188,6 +188,40 @@ func TestProgressFollowsFreshExecutionEvents(t *testing.T) {
 	}
 }
 
+func TestProgressFromPrivateAssistantBlocks(t *testing.T) {
+	var progress int
+	var events []aicli.StreamEvent
+	first := jsonlOutput{sessionID: "native-id", onProgress: func() { progress++ },
+		onEvent: func(e aicli.StreamEvent) { events = append(events, e) }}
+	const thinking = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"thinking","content":[{"type":"thinking","thinking":"private reasoning","signature":"signed"}]}}`
+	const redacted = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"redacted","content":[{"type":"redacted_thinking","data":"opaque"}]}}`
+	const omitted = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"omitted","content":[{"type":"thinking","thinking":"","signature":"signed"}]}}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{thinking, 1},
+		{thinking, 1},
+		{redacted, 2},
+		{redacted, 2},
+		{omitted, 2},
+		{`{"type":"assistant","session_id":"native-id","message":{"id":"empty-thinking","content":[{"type":"thinking","thinking":""}]}}`, 2},
+		{`{"type":"assistant","session_id":"native-id","message":{"id":"empty-redacted","content":[{"type":"redacted_thinking","data":""}]}}`, 2},
+		{`{"type":"assistant","session_id":"foreign","message":{"id":"foreign","content":[{"type":"thinking","thinking":"private"}]}}`, 2},
+	} {
+		writeChunks(t, &first, step.line+"\n")
+		if first.err != nil || progress != step.want || len(events) != 0 {
+			t.Fatalf("step %d: progress=%d, want %d; events=%+v error=%v", i, progress, step.want, events, first.err)
+		}
+	}
+	resumed := jsonlOutput{sessionID: "native-id", onProgress: first.onProgress, onEvent: first.onEvent,
+		progressSeen: first.progressSeen, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &resumed, thinking+"\n"+redacted+"\n"+omitted+"\n")
+	if resumed.err != nil || progress != 2 || len(events) != 0 {
+		t.Fatalf("resumed private blocks: progress=%d events=%+v error=%v", progress, events, resumed.err)
+	}
+}
+
 func TestProgressIgnoresAmbientFrames(t *testing.T) {
 	var got int
 	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
@@ -238,7 +272,6 @@ func TestProgressThinkingTokensFrames(t *testing.T) {
 		line string
 		want int
 	}{
-		{`{"type":"assistant","session_id":"native-id","message":{"id":"redacted","content":[{"type":"redacted_thinking","data":"opaque"}]}}`, 0},
 		{firstFrame, 1},
 		{firstFrame, 1},
 		{secondFrame, 2},

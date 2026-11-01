@@ -526,7 +526,10 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		if !uncertainOrdinal && message.Author == meta.ID &&
 			(before == nil || message.Metadata.TurnID != "") &&
 			(message.Content != "" || message.EncryptedContent != "") {
-			a.newProgress(meta.ID, event, event.Ordinal, progressed)
+			a.newNativeProgress(meta.ID, event, struct {
+				TurnID, Author, Recipient, Content string
+				HasEncrypted                       bool
+			}{message.Metadata.TurnID, message.Author, message.Recipient, message.Content, message.EncryptedContent != ""}, progressed)
 		}
 		return
 	}
@@ -576,9 +579,54 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
 	proven := meta.ID == rootID || a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]
+	nativeProgress := func() {
+		fields := struct {
+			Type, TurnID, Message, Text, Chunk string
+			Images                             []json.RawMessage `json:"images,omitempty"`
+			FileIDs                            []json.RawMessage `json:"file_ids,omitempty"`
+			LocalImages                        []json.RawMessage `json:"local_images,omitempty"`
+			Audio                              []json.RawMessage `json:"audio,omitempty"`
+			LocalAudio                         []json.RawMessage `json:"local_audio,omitempty"`
+			Questions                          []json.RawMessage `json:"questions,omitempty"`
+		}{Type: payload.Type, TurnID: payload.TurnID}
+		switch payload.Type {
+		case "exec_command_output":
+			fields.Chunk = payload.Chunk
+		case "user_message":
+			fields.Message = payload.Message
+			var input struct {
+				Images      []json.RawMessage `json:"images"`
+				FileIDs     []json.RawMessage `json:"file_ids"`
+				LocalImages []json.RawMessage `json:"local_images"`
+				Audio       []json.RawMessage `json:"audio"`
+				LocalAudio  []json.RawMessage `json:"local_audio"`
+			}
+			if json.Unmarshal(event.Payload, &input) == nil {
+				fields.Images, fields.FileIDs, fields.LocalImages = input.Images, input.FileIDs, input.LocalImages
+				fields.Audio, fields.LocalAudio = input.Audio, input.LocalAudio
+			}
+			if fields.Message == "" && len(fields.Images)+len(fields.FileIDs)+len(fields.LocalImages)+len(fields.Audio)+len(fields.LocalAudio) == 0 {
+				return
+			}
+		case "agent_message":
+			fields.Message = payload.Message
+			var output struct {
+				Questions []json.RawMessage `json:"questions"`
+			}
+			if json.Unmarshal(event.Payload, &output) == nil {
+				fields.Questions = output.Questions
+			}
+			if fields.Message == "" && len(fields.Questions) == 0 {
+				return
+			}
+		case "agent_reasoning", "agent_reasoning_raw_content":
+			fields.Text = payload.Text
+		}
+		a.newNativeProgress(meta.ID, event, fields, progressed)
+	}
 	if !uncertainOrdinal && proven && payload.Type == "exec_command_output" && payload.Chunk != "" &&
 		(meta.ID != rootID || a.before[meta.ID] == nil || payload.TurnID != "") {
-		a.newProgress(meta.ID, event, event.Ordinal, progressed)
+		nativeProgress()
 	}
 	if meta.ID != rootID && !uncertainOrdinal && proven {
 		switch payload.Type {
@@ -589,12 +637,10 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			"exec_command_begin", "exec_command_end":
 			a.newToolProgress(meta.ID, event.Payload, progressed)
 		case "user_message", "agent_message":
-			if payload.Message != "" {
-				a.newProgress(meta.ID, event, event.Ordinal, progressed)
-			}
+			nativeProgress()
 		case "agent_reasoning", "agent_reasoning_raw_content":
 			if payload.Text != "" {
-				a.newProgress(meta.ID, event, event.Ordinal, progressed)
+				nativeProgress()
 			}
 		}
 	}
@@ -825,7 +871,20 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 			if json.Unmarshal(item.Content, &content) != nil {
 				return
 			}
-			item.Content, _ = json.Marshal(content)
+			stable := content[:0]
+			for _, part := range content {
+				if part.Type == "image" && part.URL == "" && part.FileID == "" && part.Path == "" {
+					continue // Detail and display name cannot identify an image.
+				}
+				if part.Type == "text" && part.Text == "" {
+					continue
+				}
+				stable = append(stable, part)
+			}
+			if len(stable) == 0 && item.Text == "" {
+				return
+			}
+			item.Content, _ = json.Marshal(stable)
 		}
 	case "AgentMessage":
 		// Ciphertext and per-part timing can change when the same message reappears.
@@ -977,7 +1036,14 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		if json.Unmarshal(response.Content, &content) != nil {
 			return
 		}
-		response.Content, _ = json.Marshal(content)
+		stable := content[:0]
+		for _, part := range content {
+			if part.Type == "input_image" && part.ImageURL == "" && part.FileID == "" {
+				continue // Detail alone is not an image input.
+			}
+			stable = append(stable, part)
+		}
+		response.Content, _ = json.Marshal(stable)
 		response.Summary = nil
 	case "agent_message":
 		// AgentMessageInputContent also carries encrypted_content, which never enters progress identity.
@@ -1097,6 +1163,22 @@ func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {
 	}
 	stable, err := json.Marshal(result)
 	return stable, err == nil
+}
+
+func (a *rolloutActivity) newNativeProgress(id string, event rolloutEvent, fields any, progressed *bool) {
+	if event.Ordinal <= 0 {
+		var err error
+		event.Payload, err = json.Marshal(fields)
+		if err != nil {
+			return
+		}
+		var ok bool
+		event.Payload, ok = normalizeProgressJSON(event.Payload)
+		if !ok {
+			return
+		}
+	}
+	a.newProgress(id, event, event.Ordinal, progressed)
 }
 
 func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int64, progressed *bool) {
