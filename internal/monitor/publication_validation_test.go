@@ -812,6 +812,36 @@ func TestTerminalFailureReportsInactivityBeforeSidecarClear(t *testing.T) {
 	}
 }
 
+func TestTerminalDecisionReportsInactivityBeforeFailureReplyCheckpoint(t *testing.T) {
+	m, store, job, gh, path := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	failure := store.Data.JobFailures[job.ID]
+	failure.Attempts = maxJobAttempts
+	store.Data.JobFailures[job.ID] = failure
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := decideAccepted(store, job, "inactivity", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m.Logger = log.New(&logs, "", 0)
+	m.Handler = &terminalUsageRecoveryHandler{onTerminal: func(Job, string, time.Time) {
+		if err := os.Rename(path, path+".saved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	err = m.resolveSelectedDecision(t.Context(), store, job, time.Now().UTC(), failure, decision)
+	if !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
+		!strings.Contains(logs.String(), "job="+job.ID+" outcome=inactivity") {
+		t.Fatalf("failed reply checkpoint hid saved terminal outcome: err=%v calls=%d log=%q", err, gh.commentCalls, logs.String())
+	}
+}
+
 func TestCompleteSelectedClassifiesUnknownAndDeadline(t *testing.T) {
 	for _, test := range []struct {
 		name    string

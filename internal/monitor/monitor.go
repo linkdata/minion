@@ -1426,6 +1426,7 @@ func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Stor
 	}); err != nil {
 		return fmt.Errorf("%w: confirm terminal decision: %w", ErrAcceptanceState, err)
 	}
+	m.logf("confirmed accepted terminal decision job=%s outcome=%s", job.ID, decision.Outcome)
 	m.completeTerminalUsage(job, decision)
 	switch decision.Outcome {
 	case "succeeded":
@@ -1457,6 +1458,7 @@ func (m *Monitor) discardAccepted(store *state.Store) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 	}
+	m.logf("confirmed accepted terminal decision job=%s outcome=%s", accepted.JobID, decision.Outcome)
 	m.completeTerminalUsage(jobFromAccepted(*accepted), decision)
 	processed, hadProcessed := store.Data.Processed[accepted.JobID]
 	failure, hadFailure := store.Data.JobFailures[accepted.JobID]
@@ -1465,7 +1467,6 @@ func (m *Monitor) discardAccepted(store *state.Store) error {
 	delete(store.Data.JobFailures, accepted.JobID)
 	store.Data.Accepted = nil
 	if err := saveAcceptanceState(store); err != nil {
-		m.logf("discard accepted finalization failed job=%s outcome=%s: %v", accepted.JobID, decision.Outcome, err)
 		if hadProcessed {
 			store.Data.Processed[accepted.JobID] = processed
 		} else {
@@ -1479,7 +1480,6 @@ func (m *Monitor) discardAccepted(store *state.Store) error {
 		store.Data.Accepted = accepted
 		return err
 	}
-	m.logf("discard accepted job=%s outcome=%s", accepted.JobID, decision.Outcome)
 	if err := store.ClearAcceptedResult(); err != nil {
 		return fmt.Errorf("%w: clear discarded result: %w", ErrAcceptanceState, err)
 	}
@@ -2917,7 +2917,6 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 	var access state.AccessDisposition
 	var accessAttemptID string
 	outcome := "failed"
-	var cleanupFailureOutcome string
 	err = store.WithLock(func() error {
 		processed, hadProcessed := store.Data.Processed[job.ID]
 		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
@@ -2949,9 +2948,6 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 			store.Data.Accepted = nil
 		}
 		if err := saveJobResult(store, accepted != nil); err != nil {
-			if accepted != nil {
-				cleanupFailureOutcome = previousDecision.Outcome
-			}
 			if hadProcessed {
 				store.Data.Processed[job.ID] = processed
 			} else {
@@ -2970,9 +2966,6 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		}
 		return nil
 	})
-	if err != nil && cleanupFailureOutcome != "" {
-		m.logf("accepted finalization failed job=%s outcome=%s: %v", job.ID, cleanupFailureOutcome, err)
-	}
 	if err == nil {
 		if access != (state.AccessDisposition{}) {
 			m.logf("unresolved accepted GitHub access job=%s repository=%s source=%s source_key=%s attempt=%s reason=%s reply=%s operator_action=%s",
