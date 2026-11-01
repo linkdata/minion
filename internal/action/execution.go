@@ -363,33 +363,36 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		return c.fail(fmt.Errorf("%w: selected assignment was not delivered", monitor.ErrAcceptanceState))
 	}
 	if !claimedSuccess {
-		// A bound failed Outcome can name inactivity even when its usage is incomplete.
-		calls := c.calls
+		// A bound failed Outcome can retain worker limit claims with incomplete usage.
+		matching := c.matchesFailedResult(result)
+		expectedCalls := len(c.calls)
 		if c.returned != nil {
-			calls = append(slices.Clone(calls), *c.returned)
+			expectedCalls++
 		}
-		matching := result.matchesJob(c.job) && (c.pending == nil || c.returned != nil) &&
-			slices.Equal(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
-			result.CriticStopReason == c.review.CriticStopReason
-		var inactivity *workerFailureError
-		errors.As(runErr, &inactivity)
+		var workerReport *workerFailureError
+		errors.As(runErr, &workerReport)
 		checkpointedSelectedResult := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil && matching
-		knownInactivity := checkpointedSelectedResult && inactivity != nil && inactivity.failure.Inactivity
+		knownInactivity := checkpointedSelectedResult && workerReport != nil && workerReport.failure.Inactivity
+		knownRuntimeCap := checkpointedSelectedResult && workerReport != nil && workerReport.failure.RuntimeCap &&
+			!errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
 		knownCancellation := checkpointedSelectedResult && c.assignmentContext != nil && errors.Is(c.assignmentContext.Err(), context.Canceled) &&
 			errors.Is(runErr, context.Canceled) && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
-		if len(result.Calls) > len(calls) || c.pending != nil && c.returned == nil ||
-			!errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity && !knownCancellation && len(c.calls) != 0 {
+		if len(result.Calls) > expectedCalls || c.pending != nil && c.returned == nil ||
+			!errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity && !knownRuntimeCap && !knownCancellation && len(c.calls) != 0 {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
 		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
 		if !matching {
 			return errors.Join(runErr, checkpointContractError())
 		}
-		if c.AssignmentRequired() && c.assigned && c.failure != nil && inactivity != nil &&
-			inactivity.failure.Inactivity && !errors.Is(runErr, monitor.ErrTerminalJob) {
+		if c.AssignmentRequired() && c.assigned && c.failure != nil && workerReport != nil &&
+			workerReport.failure.Inactivity && !errors.Is(runErr, monitor.ErrTerminalJob) {
 			return errors.Join(runErr, monitor.ErrTerminalJob)
+		}
+		if knownRuntimeCap {
+			return errors.Join(runErr, monitor.ErrCheckpointedWorkerRuntimeCap)
 		}
 		return runErr
 	}
@@ -400,6 +403,24 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
 			return checkpointContractError()
 		}
+	}
+	return nil
+}
+
+func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
+	calls := c.calls
+	if c.returned != nil {
+		calls = append(slices.Clone(calls), *c.returned)
+	}
+	return result.matchesJob(c.job) && (c.pending == nil || c.returned != nil) &&
+		slices.Equal(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
+		result.CriticStopReason == c.review.CriticStopReason
+}
+
+// validateFailedResult checks parent-owned evidence before a failed Outcome is ACKed.
+func (c *executionCheckpoints) validateFailedResult(result Result) error {
+	if !c.matchesFailedResult(result) {
+		return checkpointContractError()
 	}
 	return nil
 }

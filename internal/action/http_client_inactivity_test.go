@@ -138,6 +138,33 @@ func TestWatchAdmissionDeadlineUsesAbsoluteOrder(t *testing.T) {
 	}
 }
 
+func TestWorkerLimitUsesAbsoluteOrderAfterDelayedCallbacks(t *testing.T) {
+	start := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		cause      error
+		hard, idle time.Duration
+		at         time.Duration
+		ownCap     bool
+		want       workerLimit
+	}{
+		{name: "inactivity elapsed first but hard callback won", cause: errExecutorRuntimeCap, hard: 10 * time.Second, idle: 9 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitInactivity},
+		{name: "hard elapsed first but inactivity callback won", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "hard wins exact tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, at: 10 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "only inactivity elapsed", hard: 11 * time.Second, idle: 9 * time.Second, at: 10 * time.Second, ownCap: true, want: workerLimitInactivity},
+		{name: "caller owns earlier hard deadline", cause: context.DeadlineExceeded, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitNone},
+		{name: "parent cancellation remains first", cause: context.Canceled, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitNone},
+		{name: "inner deadline before limits", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 11 * time.Second, at: 9 * time.Second, ownCap: true, want: workerLimitNone},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := selectWorkerLimit(test.cause, start.Add(test.at), start.Add(test.hard), start.Add(test.idle), test.ownCap)
+			if got != test.want {
+				t.Fatalf("worker limit = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)
@@ -348,12 +375,14 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		renew()
 		time.Sleep(3 * time.Second)
 		err := <-f.done
-		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errExecutorRuntimeCap) ||
+			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
 			t.Fatalf("hard runtime did not cap chatty model: %v", err)
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
-		if !errors.As(got.err, &reported) || !reported.failure.Deadline || reported.failure.Inactivity || len(got.result.Calls) != 1 {
+		if !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
+			reported.failure.Inactivity || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
 		}
 	})

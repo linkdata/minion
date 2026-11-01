@@ -75,3 +75,9 @@ func (w *inactivityTimer) stop() {
 	}
 	w.mu.Unlock()
 }
+
+func (w *inactivityTimer) deadline() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last.Add(w.timeout)
+}

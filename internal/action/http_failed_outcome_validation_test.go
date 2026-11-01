@@ -1,0 +1,94 @@
+package action
+
+import (
+	"errors"
+	"net/http"
+	"testing"
+
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/usage"
+)
+
+func TestSelectedFailedOutcomeChecksAcknowledgedCallBeforeACK(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		omitCall      bool
+		wantACKStatus int
+		wantRefused   bool
+	}{
+		{name: "omitted acknowledged call", omitCall: true, wantACKStatus: http.StatusInternalServerError, wantRefused: true},
+		{name: "matching incomplete usage", wantACKStatus: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, _, _ := selectedHTTPResultFixture(t, nil)
+			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+			paid := f.call(2)
+			paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7}
+			f.ack(t, "/after", paid, http.StatusOK, 2)
+
+			outcome := f.outcome(3, nil)
+			outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+			if !test.omitCall {
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			}
+			ack := f.ack(t, "/outcome", outcome, test.wantACKStatus, 3)
+			if (ack.Failure != nil) != test.wantRefused {
+				t.Fatalf("failed Outcome ACK refusal=%t, want %t", ack.Failure != nil, test.wantRefused)
+			}
+			got := f.result(t)
+			if !got.result.matchesJob(f.job) || len(got.result.Calls) != len(outcome.Result.Calls) {
+				t.Fatalf("failed Outcome changed diagnostic facts: result=%+v error=%v", got.result, got.err)
+			}
+			f.executor.mu.Lock()
+			unavailable := f.executor.unavailable
+			f.executor.mu.Unlock()
+			if unavailable != test.wantRefused {
+				t.Fatalf("worker unavailable=%t after failed Outcome, want %t", unavailable, test.wantRefused)
+			}
+			if test.wantRefused {
+				if _, err := f.executor.Execute(t.Context(), f.job, f.tx.sink); err == nil {
+					t.Fatal("protocol-invalid failed Outcome left the worker reusable")
+				}
+				if err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) {
+					t.Fatalf("invalid failed Outcome escaped parent validation: %v", err)
+				}
+			} else {
+				err := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+				var inactivity interface{ ExecutorInactivity() bool }
+				if !errors.As(err, &inactivity) || !inactivity.ExecutorInactivity() || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatalf("matching incomplete usage lost known inactivity: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestSelectedFailedOutcomeAfterRejectedBeforeQuarantinesWorker(t *testing.T) {
+	f, _, _ := selectedHTTPResultFixture(t, nil)
+	bad := f.call(1)
+	bad.Checkpoint.Ordinal = 2 // Shaped, but inconsistent with the parent's first-call slot.
+	ack := f.ack(t, "/before", bad, http.StatusInternalServerError, 1)
+	if ack.Failure == nil {
+		t.Fatal("invalid BeforeCall received a success ACK")
+	}
+	outcome := f.outcome(2, errors.New("worker stopped after rejected BeforeCall"))
+	reply := f.request("/outcome", outcome)
+	if reply.err != nil || reply.ack.Kind != "outcome" || reply.ack.Sequence != 2 ||
+		(reply.status != http.StatusOK && reply.status != http.StatusInternalServerError) ||
+		(reply.status == http.StatusInternalServerError && reply.ack.Failure == nil) {
+		t.Fatalf("failed Outcome was not received: %+v", reply)
+	}
+	got := f.result(t)
+	if !errors.Is(got.err, monitor.ErrTerminalJob) || !got.result.matchesJob(f.job) || len(got.result.Calls) != 0 {
+		t.Fatalf("rejected BeforeCall changed parent failure or raw facts: result=%+v error=%v", got.result, got.err)
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("rejected BeforeCall left the worker endpoint reusable")
+	}
+	if _, err := f.executor.Execute(t.Context(), f.job, f.tx.sink); err == nil {
+		t.Fatal("rejected BeforeCall allowed another assignment")
+	}
+}

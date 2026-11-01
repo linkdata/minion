@@ -734,6 +734,11 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 		want                string
 	}{
 		{name: "worker inactivity", result: testExecutorInactivity{}, want: "inactivity"},
+		{name: "worker runtime cap before parent", result: ErrCheckpointedWorkerRuntimeCap, want: "expired"},
+		{name: "worker runtime cap after parent cancel", result: ErrCheckpointedWorkerRuntimeCap, cause: context.Canceled, want: "canceled"},
+		{name: "worker runtime cap after earlier parent deadline", result: ErrCheckpointedWorkerRuntimeCap, parentDeadlineDelta: -time.Second, want: "canceled"},
+		{name: "worker runtime cap with unknown receipt", result: errors.Join(ErrExecutionOutcomeUnknown, ErrCheckpointedWorkerRuntimeCap), want: "lost"},
+		{name: "generic inner deadline", result: context.DeadlineExceeded, want: "failed"},
 		{name: "parent cancellation", result: testExecutorInactivity{}, cause: context.Canceled, want: "canceled"},
 		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: -time.Second, want: "canceled"},
 		{name: "earlier parent deadline before context callback", result: testExecutorInactivity{}, parentDeadlineDelta: -time.Second, want: "canceled"},

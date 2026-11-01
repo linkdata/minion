@@ -1,0 +1,127 @@
+package action
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/monitor"
+)
+
+func TestWorkerLimitKeepsEarlierCallerDeadlineWhenCallbacksLag(t *testing.T) {
+	start := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name  string
+		cause error
+		hard  time.Duration
+		idle  time.Duration
+		want  workerLimit
+	}{
+		{name: "caller before delayed inactivity callback", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, want: workerLimitNone},
+		{name: "caller and inactivity tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, want: workerLimitNone},
+		{name: "inactivity before delayed caller callback", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 9 * time.Second, want: workerLimitInactivity},
+		{name: "inactivity before caller with no callback", hard: 10 * time.Second, idle: 9 * time.Second, want: workerLimitInactivity},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := selectWorkerLimit(test.cause, start.Add(12*time.Second),
+				start.Add(test.hard), start.Add(test.idle), false)
+			if got != test.want {
+				t.Fatalf("worker limit = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWorkerLimitOutcomeKeepsConsistentDiagnosticAndFallback(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		cause      error
+		runErr     error
+		hardFirst  bool
+		oversized  bool
+		wantCap    bool
+		wantDetail string
+	}{
+		{name: "inactivity beats hard callback", cause: errExecutorRuntimeCap,
+			runErr: errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap), wantDetail: "inactivity"},
+		{name: "hard beats inactivity callback", cause: errExecutorInactivity,
+			runErr: errors.Join(monitor.ErrTerminalJob, errExecutorInactivity), hardFirst: true, wantCap: true, wantDetail: "runtime cap"},
+		{name: "selected hard limit is terminal", cause: errExecutorInactivity,
+			runErr: errors.New("ordinary model failure"), hardFirst: true, wantCap: true, wantDetail: "runtime cap"},
+		{name: "degraded outcome keeps corrected inactivity", cause: errExecutorRuntimeCap,
+			runErr: errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap), oversized: true, wantDetail: "inactivity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now()
+			hard, idle := now.Add(-time.Second), now.Add(-2*time.Second)
+			if test.hardFirst {
+				hard, idle = idle, hard
+			}
+			got, degraded, err := captureWorkerLimitOutcome(t, test.cause, test.runErr, hard, idle, test.oversized)
+			if degraded != test.oversized || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != test.oversized {
+				t.Fatalf("degraded=%t error=%v, want degraded=%t", degraded, err, test.oversized)
+			}
+			if got.Failure == nil || !got.Failure.Terminal || got.Failure.Inactivity == test.wantCap ||
+				got.Failure.RuntimeCap != test.wantCap || got.Failure.Deadline != test.wantCap ||
+				!strings.Contains(got.Failure.Message, test.wantDetail) {
+				t.Fatalf("inconsistent selected limit: %+v", got.Failure)
+			}
+			losing := "runtime cap"
+			if test.wantCap {
+				losing = "inactivity"
+			}
+			if strings.Contains(got.Failure.Message, losing) {
+				t.Fatalf("losing limit remained in diagnostic: %+v", got.Failure)
+			}
+			if test.oversized && got.Result.Answer != "" {
+				t.Fatalf("degraded outcome kept oversized answer: %d bytes", len(got.Result.Answer))
+			}
+		})
+	}
+}
+
+func captureWorkerLimitOutcome(t *testing.T, cause, runErr error, hard, idle time.Time, oversized bool) (httpOutcome, bool, error) {
+	t.Helper()
+	job := testJob(command.Comment)
+	binding := httpJobBinding(job)
+	result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+	if oversized {
+		result.Answer = strings.Repeat("x", maxOutputBytes+1)
+	}
+	actionCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	cancel(cause)
+	var received httpOutcome
+	client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/outcome" {
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+		if err := httpDecode(r.Body, httpOutcomeBytes, &received); err != nil {
+			t.Fatal(err)
+		}
+		data, err := httpEncode(httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: received.Sequence}, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(bytes.NewReader(data))}, nil
+	})}
+	inactivity := &inactivityTimer{last: idle.Add(-time.Second), timeout: time.Second}
+	checkpoints := &httpClientCheckpoints{
+		transport: &httpExecutionClient{client: client, base: &url.URL{Scheme: "http", Host: "worker.test"}},
+		control:   t.Context(), action: actionCtx, inactivity: inactivity, hardDeadline: hard, ownRuntimeCap: true,
+		binding: binding,
+	}
+	err := checkpoints.outcome(result, runErr)
+	if !checkpoints.transport.outcomeAcknowledged {
+		t.Fatal("Outcome acknowledgement was not accepted")
+	}
+	return received, checkpoints.transport.outcomeDegraded, err
+}

@@ -18,6 +18,15 @@ import (
 )
 
 func TestHTTPInactivityOutcomePersistsThroughSelectedMonitor(t *testing.T) {
+	testHTTPWorkerLimitOutcome(t, false)
+}
+
+func TestHTTPEarlyRuntimeCapOutcomePersistsThroughSelectedMonitor(t *testing.T) {
+	testHTTPWorkerLimitOutcome(t, true)
+}
+
+func testHTTPWorkerLimitOutcome(t *testing.T, earlyRuntimeCap bool) {
+	t.Helper()
 	gitFixtureRemote(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
@@ -56,7 +65,16 @@ func TestHTTPInactivityOutcomePersistsThroughSelectedMonitor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerServer := httptest.NewServer(remote)
+	workerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if earlyRuntimeCap && r.URL.Path == "/next" {
+			remote.serveNextEncoded(w, r, func(assignment httpAssignment) ([]byte, error) {
+				assignment.Job.RuntimeBudget = time.Nanosecond // Worker stops before the parent deadline.
+				return httpEncode(assignment, httpJobBytes)
+			})
+			return
+		}
+		remote.ServeHTTP(w, r)
+	}))
 	t.Cleanup(func() { _ = remote.Close(); workerServer.Close() })
 	selected := make(chan Identity, 1)
 	parentOutcome := make(chan error, 1)
@@ -76,20 +94,35 @@ func TestHTTPInactivityOutcomePersistsThroughSelectedMonitor(t *testing.T) {
 		workerDone <- RunHTTP(ctx, workerServer.Client(), workerServer.URL, LocalExecutorID,
 			&Runner{WorkRoot: workerRoot, runModel: func(_ context.Context, _ modelRun) (aicli.Result, error) {
 				close(modelStarted)
+				if earlyRuntimeCap {
+					return aicli.Result{}, errors.New("model ran after worker runtime cap")
+				}
 				return aicli.Result{}, errors.Join(monitor.ErrTerminalJob, errExecutorInactivity)
 			}})
 	}()
 	if _, err := m.RunOnce(ctx, store); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-modelStarted:
-	default:
-		t.Fatal("monitor did not reach the model call")
+	if earlyRuntimeCap {
+		select {
+		case <-modelStarted:
+			t.Fatal("worker ran a model after its runtime cap")
+		default:
+		}
+	} else {
+		select {
+		case <-modelStarted:
+		default:
+			t.Fatal("monitor did not reach the model call")
+		}
 	}
 	select {
 	case err := <-workerDone:
-		if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, context.DeadlineExceeded) {
+		if earlyRuntimeCap {
+			if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("HTTP worker did not report its runtime cap: %v", err)
+			}
+		} else if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("HTTP worker did not report inactivity: %v", err)
 		}
 	case <-ctx.Done():
@@ -98,9 +131,10 @@ func TestHTTPInactivityOutcomePersistsThroughSelectedMonitor(t *testing.T) {
 	var reported *workerFailureError
 	select {
 	case err := <-parentOutcome:
-		if !errors.As(err, &reported) || !reported.ExecutorInactivity() ||
-			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrTerminalJob) {
-			t.Fatalf("parent did not retain a known typed inactivity outcome: %v", err)
+		if !errors.As(err, &reported) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrTerminalJob) ||
+			(earlyRuntimeCap && !reported.failure.RuntimeCap ||
+				!earlyRuntimeCap && !reported.ExecutorInactivity()) {
+			t.Fatalf("parent did not retain a checkpointed worker-limit outcome: %v", err)
 		}
 	case <-ctx.Done():
 		t.Fatalf("parent did not finish HTTP execution: %v", ctx.Err())
@@ -112,8 +146,12 @@ func TestHTTPInactivityOutcomePersistsThroughSelectedMonitor(t *testing.T) {
 		t.Fatalf("monitor did not select an action: %v", ctx.Err())
 	}
 	decision := store.Data.TerminalDecisions[identity.JobID]
-	if decision.Outcome != "inactivity" || decision.AttemptID != identity.AttemptID || store.Data.Processed[identity.JobID].IsZero() {
-		t.Fatalf("monitor did not finish with inactivity: decision=%+v state=%+v", decision, store.Data)
+	wantOutcome := "inactivity"
+	if earlyRuntimeCap {
+		wantOutcome = "expired"
+	}
+	if decision.Outcome != wantOutcome || decision.AttemptID != identity.AttemptID || store.Data.Processed[identity.JobID].IsZero() {
+		t.Fatalf("monitor did not finish with %s: decision=%+v state=%+v", wantOutcome, decision, store.Data)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -124,6 +162,6 @@ func TestHTTPInactivityOutcomePersistsThroughSelectedMonitor(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	if got := reopened.Data.TerminalDecisions[identity.JobID]; got != decision {
-		t.Fatalf("reopened state lost inactivity decision: got=%+v want=%+v", got, decision)
+		t.Fatalf("reopened state lost %s decision: got=%+v want=%+v", wantOutcome, got, decision)
 	}
 }

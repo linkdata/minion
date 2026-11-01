@@ -24,6 +24,7 @@ type httpFailure struct {
 	Canceled          bool   `json:"canceled,omitempty"`
 	Deadline          bool   `json:"deadline,omitempty"`
 	Inactivity        bool   `json:"inactivity,omitempty"`
+	RuntimeCap        bool   `json:"runtime_cap,omitempty"`
 	Unsafe            bool   `json:"unsafe,omitempty"`
 	OutcomeUnknown    bool   `json:"outcome_unknown,omitempty"`
 	RequestTransport  bool   `json:"request_transport,omitempty"`
@@ -42,6 +43,7 @@ func newHTTPFailure(err error) *httpFailure {
 		Message:  httpFailureDiagnostic(err.Error()),
 		Terminal: errors.Is(err, monitor.ErrTerminalJob), Canceled: errors.Is(err, context.Canceled),
 		Deadline: errors.Is(err, context.DeadlineExceeded), Inactivity: errors.Is(err, errExecutorInactivity),
+		RuntimeCap:        errors.Is(err, errExecutorRuntimeCap),
 		Unsafe:            errors.Is(err, workroot.ErrUnsafe),
 		OutcomeUnknown:    errors.Is(err, monitor.ErrExecutionOutcomeUnknown),
 		RequestTransport:  errors.Is(err, monitor.ErrRequestTransport) || errors.As(err, &network),

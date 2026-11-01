@@ -90,6 +90,26 @@ func TestHTTPFailureCarriesOnlyInactivityLabelFromWorker(t *testing.T) {
 	}
 }
 
+func TestHTTPFailureCarriesRuntimeCapOnlyAsWorkerClaim(t *testing.T) {
+	failure := roundTripHTTPFailure(t, newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap)))
+	if !failure.RuntimeCap || !failure.Deadline || !failure.Terminal || failure.Inactivity {
+		t.Fatalf("worker runtime cap changed across wire: %+v", failure)
+	}
+	workerErr := failure.workerErr()
+	var claim *workerFailureError
+	if !errors.As(workerErr, &claim) || !claim.failure.RuntimeCap ||
+		errors.Is(workerErr, monitor.ErrTerminalJob) || errors.Is(workerErr, context.DeadlineExceeded) {
+		t.Fatalf("worker cap claim gained parent policy authority: %v", workerErr)
+	}
+}
+
+func TestHTTPFailureGenericDeadlineIsNotRuntimeCap(t *testing.T) {
+	failure := roundTripHTTPFailure(t, newHTTPFailure(context.DeadlineExceeded))
+	if !failure.Deadline || failure.RuntimeCap {
+		t.Fatalf("generic deadline became worker runtime cap: %+v", failure)
+	}
+}
+
 func TestHTTPFailurePreservesRequestTransportPolicyWithoutReconstructingURL(t *testing.T) {
 	for _, unknown := range []bool{false, true} {
 		t.Run(fmt.Sprint(unknown), func(t *testing.T) {
@@ -155,7 +175,7 @@ func TestHTTPFailureBoundsDiagnosticsWithoutChangingOrdinaryFailurePolicy(t *tes
 func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 	failure := &httpFailure{
 		Message:  strings.Repeat("\x01", httpFailureMessageLimit),
-		Terminal: true, Canceled: true, Deadline: true, Inactivity: true, Unsafe: true, OutcomeUnknown: true,
+		Terminal: true, Canceled: true, Deadline: true, Inactivity: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
 		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true,
 	}
 	if err := failure.validate(); err != nil {

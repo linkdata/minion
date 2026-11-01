@@ -192,7 +192,11 @@ func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
 				outcome = f.outcome(2, nil)
 			}
 			outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
-			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
+			status := http.StatusOK
+			if !receiptAcknowledged {
+				status = http.StatusInternalServerError
+			}
+			f.ack(t, "/outcome", outcome, status, outcome.Sequence)
 			got := f.result(t)
 			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
 			var claim interface{ ExecutorInactivity() bool }
@@ -243,7 +247,7 @@ func TestSelectedInactivityWithRejectedCallReceiptStaysLost(t *testing.T) {
 	}
 	outcome := f.outcome(3, nil)
 	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
-	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
+	f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
 	got := f.result(t)
 	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
 	if !errors.Is(final, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(final, monitor.ErrTerminalJob) {
@@ -259,7 +263,7 @@ func TestSelectedInactivityWithUncheckpointedClaimedCallStaysLost(t *testing.T) 
 	outcome := f.outcome(1, nil)
 	outcome.Result.Calls = []CallUsage{f.call(1).Checkpoint.Call}
 	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
-	f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+	f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 1)
 	got := f.result(t)
 	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
 	if !errors.Is(final, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(final, monitor.ErrTerminalJob) {
@@ -267,6 +271,71 @@ func TestSelectedInactivityWithUncheckpointedClaimedCallStaysLost(t *testing.T) 
 	}
 	if present, err := store.HasAcceptedResult(); err != nil || present {
 		t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
+func TestSelectedRuntimeCapRequiresMatchingCallReceipts(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		before       bool
+		after        bool
+		claimCall    bool
+		checkpointed bool
+		unknown      bool
+		ackStatus    int
+	}{
+		{name: "no model call", checkpointed: true, ackStatus: http.StatusOK},
+		{name: "acknowledged incomplete usage", before: true, after: true, claimCall: true, checkpointed: true, ackStatus: http.StatusOK},
+		{name: "missing required receipt", before: true, unknown: true, ackStatus: http.StatusInternalServerError},
+		{name: "fabricated call", claimCall: true, unknown: true, ackStatus: http.StatusInternalServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixture(t, nil)
+			sequence := uint64(1)
+			if test.before {
+				f.ack(t, "/before", f.call(1), http.StatusOK, sequence)
+				sequence++
+			}
+			paid := f.call(2)
+			paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7}
+			if test.after {
+				f.ack(t, "/after", paid, http.StatusOK, sequence)
+				sequence++
+			}
+			outcome := f.outcome(sequence, nil)
+			if test.claimCall {
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			}
+			outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap))
+			f.ack(t, "/outcome", outcome, test.ackStatus, sequence)
+			got := f.result(t)
+			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+			if errors.Is(final, monitor.ErrCheckpointedWorkerRuntimeCap) != test.checkpointed ||
+				errors.Is(final, monitor.ErrExecutionOutcomeUnknown) != test.unknown {
+				t.Fatalf("checkpointed cap=%t unknown=%t: %v", test.checkpointed, test.unknown, final)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("failed runtime cap saved a publishable result: present=%t err=%v", present, err)
+			}
+		})
+	}
+}
+
+func TestSelectedRuntimeCapCannotOverrideFailedParentCheckpoint(t *testing.T) {
+	f, _, _ := selectedHTTPResultFixture(t, nil)
+	checkpointErr := errors.New("usage checkpoint save failed")
+	f.tx.sink.(*executionCheckpoints).owner.usageCheckpoint = &usageCheckpoint{
+		save: func() error { return checkpointErr },
+	}
+	f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
+	outcome := f.outcome(2, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, checkpointErr) || errors.Is(final, monitor.ErrCheckpointedWorkerRuntimeCap) ||
+		errors.Is(final, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("worker cap overrode failed parent checkpoint: %v", final)
 	}
 }
 

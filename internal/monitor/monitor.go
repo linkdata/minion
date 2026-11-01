@@ -50,6 +50,9 @@ var ErrTerminalJob = errors.New("terminal job failure")
 // Such work must not be automatically repeated.
 var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
 
+// ErrCheckpointedWorkerRuntimeCap marks a worker cap claim bound to parent call receipts.
+var ErrCheckpointedWorkerRuntimeCap = errors.New("checkpointed worker runtime cap")
+
 // ErrRequestTransport retains a request failure's infrastructure retry classification.
 var ErrRequestTransport = errors.New("request transport failure")
 
@@ -2442,6 +2445,12 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 	}
 	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled) ||
 		(errors.Is(result, context.DeadlineExceeded) && errors.Is(cause, context.DeadlineExceeded))) {
+		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
+	}
+	if assigned && errors.Is(result, ErrCheckpointedWorkerRuntimeCap) {
+		if beforeDeadlines {
+			return "expired", nil
+		}
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
 	var inactivity interface{ ExecutorInactivity() bool }
