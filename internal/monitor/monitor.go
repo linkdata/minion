@@ -2950,9 +2950,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
 		previousAccepted := store.Data.Accepted
 		previousDecision := store.Data.TerminalDecisions[job.ID]
-		if previousDecision.Outcome != "" {
-			outcome = previousDecision.Outcome
-		}
+		outcome = previousDecision.Outcome
 		accessChanged := false
 		if accepted != nil && unresolvedReason != "" {
 			if previousDecision.AttemptID != accepted.AttemptID || accepted.SourceKey == "" {
