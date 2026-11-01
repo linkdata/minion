@@ -859,6 +859,10 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 	if err != nil {
 		return
 	}
+	snapshot, ok := normalizeProgressJSON(snapshot)
+	if !ok {
+		return
+	}
 	a.newProgress(id, rolloutEvent{Type: "item_completed", Payload: snapshot}, 0, progressed)
 }
 
@@ -919,6 +923,10 @@ func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progre
 	}
 	snapshot, err := json.Marshal(tool)
 	if err != nil {
+		return
+	}
+	snapshot, ok := normalizeProgressJSON(snapshot)
+	if !ok {
 		return
 	}
 	a.newProgress(id, rolloutEvent{Type: "tool_event", Payload: snapshot}, 0, progressed)
@@ -999,6 +1007,10 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 	}
 	snapshot, err := json.Marshal(response)
 	if err != nil {
+		return
+	}
+	snapshot, ok := normalizeProgressJSON(snapshot)
+	if !ok {
 		return
 	}
 	a.newProgress(id, rolloutEvent{Type: "response_item", Payload: snapshot}, 0, progressed)

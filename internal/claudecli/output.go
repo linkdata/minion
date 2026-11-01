@@ -1199,30 +1199,27 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 	if o.progressSeen["task_finish:"+key] {
 		return // Delayed cumulative usage is not fresh execution.
 	}
-	// Usage proves the run has started, even if this event has no counters.
-	// Keep that identity without crediting summaries or a later start replay.
-	o.observeTaskRun(e.TaskID, e.RunID, "task_start:", false)
-	if o.err != nil {
-		return
-	}
 	var counters struct {
 		TotalTokens *int64 `json:"total_tokens"`
 		ToolUses    *int64 `json:"tool_uses"`
 	}
-	if json.Unmarshal(e.Usage, &counters) != nil {
-		return
-	}
+	validUsage := json.Unmarshal(e.Usage, &counters) == nil
 	state, knownTask := o.taskProgress[key]
 	changed := false
-	if counters.TotalTokens != nil && *counters.TotalTokens > state.totalTokens {
+	if validUsage && counters.TotalTokens != nil && *counters.TotalTokens > state.totalTokens {
 		state.totalTokens = *counters.TotalTokens
 		changed = true
 	}
-	if counters.ToolUses != nil && *counters.ToolUses > state.toolUses {
+	if validUsage && counters.ToolUses != nil && *counters.ToolUses > state.toolUses {
 		state.toolUses = *counters.ToolUses
 		changed = true
 	}
-	if !changed {
+	identity := "task_seen:"
+	if changed || o.progressSeen["task_start:"+key] {
+		identity = "task_start:"
+	}
+	o.observeTaskRun(e.TaskID, e.RunID, identity, false)
+	if o.err != nil || !changed {
 		return
 	}
 	entries, bytes := 0, 0

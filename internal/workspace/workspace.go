@@ -385,21 +385,33 @@ func CheckRoot(root string) error {
 
 // Materialize requires a root and parents not concurrently writable by untrusted processes.
 func Materialize(root string, files []File) error {
+	return MaterializeWithProgress(context.Background(), root, files, nil)
+}
+
+// MaterializeWithProgress has Materialize's trusted-root requirement. It reports each
+// completed file and stops between files on cancellation.
+func MaterializeWithProgress(ctx context.Context, root string, files []File, progress func()) error {
 	if err := validateFiles(files); err != nil {
 		return err
 	}
-	return materialize(root, files)
+	return materialize(ctx, root, files, progress)
 }
 
 // MaterializeChanges creates a complete candidate with exclusive file creation.
 // Source and change bounds apply separately, so a candidate can grow by the change limit.
 // It requires the same trusted root and parents as Materialize.
 func MaterializeChanges(root string, base []File, changes []Change) error {
+	return MaterializeChangesWithProgress(context.Background(), root, base, changes, nil)
+}
+
+// MaterializeChangesWithProgress has MaterializeChanges' trusted-root requirement.
+// It reports each completed candidate file and stops between files on cancellation.
+func MaterializeChangesWithProgress(ctx context.Context, root string, base []File, changes []Change, progress func()) error {
 	files, err := changedFiles(base, changes)
 	if err != nil {
 		return err
 	}
-	return materialize(root, files)
+	return materialize(ctx, root, files, progress)
 }
 
 func changedFiles(base []File, changes []Change) ([]File, error) {
@@ -434,7 +446,10 @@ func changedFiles(base []File, changes []Change) ([]File, error) {
 	return final, nil
 }
 
-func materialize(root string, files []File) error {
+func materialize(ctx context.Context, root string, files []File, progress func()) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := CheckRoot(root); err != nil {
 		return err
 	}
@@ -455,6 +470,9 @@ func materialize(root string, files []File) error {
 	// Creating each spelling once refuses aliases on casefolding filesystems.
 	directories := map[string]bool{}
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		name := filepath.Join(root, filepath.FromSlash(file.Path))
 		for i, char := range file.Path {
 			if char != '/' || directories[file.Path[:i]] {
@@ -473,8 +491,11 @@ func materialize(root string, files []File) error {
 		if err := writeFile(f, file.Data, mode); err != nil {
 			return err
 		}
+		if progress != nil {
+			progress()
+		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 // CheckUnchanged verifies exact materialized source bytes and permissions without following links.

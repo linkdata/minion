@@ -99,7 +99,7 @@ func TestReviewContextPreservesDistinctRevisionIdentities(t *testing.T) {
 	job.Source.Omitted = []string{"base-link", "head-link"}
 	job.Source.HeadOmitted = []string{"head-link"}
 	root := t.TempDir()
-	if err := materializeContext(root, job.Source); err != nil {
+	if err := materializeContext(t.Context(), root, job.Source, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join(root, "source.json"))

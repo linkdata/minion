@@ -681,7 +681,7 @@ func TestContextDescribesOmittedRevisionScope(t *testing.T) {
 			job := testJob(action)
 			job.Source.Omitted = []string{"docs"}
 			root := t.TempDir()
-			if err := materializeContext(root, job.Source); err != nil {
+			if err := materializeContext(t.Context(), root, job.Source, nil); err != nil {
 				t.Fatal(err)
 			}
 			data, err := os.ReadFile(filepath.Join(root, "source.json"))

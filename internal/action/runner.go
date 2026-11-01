@@ -389,19 +389,17 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := workspace.CheckRoot(source); err != nil {
 		return result, preparationFailure("check source workspace", err)
 	}
-	if err := workspace.Materialize(source, job.Source.Files); err != nil {
+	if err := workspace.MaterializeWithProgress(ctx, source, job.Source.Files, noteProgress); err != nil {
 		return result, preparationFailure("materialize source", err)
 	}
-	noteProgress()
 	repository, err := gitwork.MaterializeRepository(ctx, source, job.Source)
 	if err != nil {
 		return result, preparationFailure("materialize repository", err)
 	}
 	noteProgress()
-	if err := materializeContext(contextDir, job.Source); err != nil {
+	if err := materializeContext(ctx, contextDir, job.Source, noteProgress); err != nil {
 		return result, preparationFailure("materialize context", err)
 	}
-	noteProgress()
 	var index *gitwork.OfflineIndex
 	if job.Action == command.Fix {
 		metadataDir, err := os.MkdirTemp(workRoot, ".minion-index-")
@@ -455,7 +453,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			var err error
 			if !reviewCurrent {
 				if review == nil {
-					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.secretValues()...)
+					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, noteProgress, configured.secretValues()...)
 				} else {
 					err = review.refresh(ctx)
 				}
@@ -516,26 +514,29 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			record := attemptRecord{Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role,
 				Round: request.round, ReviewPhase: request.reviewPhase, Provider: request.provider, Model: request.model}
+			request.onInput = func(input aicli.PreparedInput) {
+				noteProgress()
+				if configured.eventSink == nil {
+					return
+				}
+				text, unavailable := preparedInputText(input, configured.secretValues()...)
+				if unavailable != "" {
+					text = unavailableInputText(unavailable)
+				}
+				inputRecord := record
+				inputRecord.Kind, inputRecord.Text, inputRecord.Agent = attemptRecordInput, text, input.NativeID
+				inputRecord.EventSource = request.provider + ".input.prepared"
+				inputRecord.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				configured.eventSink(inputRecord)
+				if unavailable != "" {
+					// Keep the call's prepared-input gap visible and withhold coverage.
+					gap := record
+					gap.Kind, gap.EventSource, gap.ObservedAt = attemptRecordDiscussion, request.provider+".input.unavailable", inputRecord.ObservedAt
+					configured.eventSink(gap)
+				}
+			}
 			if configured.eventSink != nil {
 				hasConfiguredSecret := slices.ContainsFunc(configured.secretValues(), func(secret string) bool { return secret != "" })
-				request.onInput = func(input aicli.PreparedInput) {
-					noteProgress()
-					text, unavailable := preparedInputText(input, configured.secretValues()...)
-					if unavailable != "" {
-						text = unavailableInputText(unavailable)
-					}
-					inputRecord := record
-					inputRecord.Kind, inputRecord.Text, inputRecord.Agent = attemptRecordInput, text, input.NativeID
-					inputRecord.EventSource = request.provider + ".input.prepared"
-					inputRecord.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
-					configured.eventSink(inputRecord)
-					if unavailable != "" {
-						// Keep the call's prepared-input gap visible and withhold coverage.
-						gap := record
-						gap.Kind, gap.EventSource, gap.ObservedAt = attemptRecordDiscussion, request.provider+".input.unavailable", inputRecord.ObservedAt
-						configured.eventSink(gap)
-					}
-				}
 				request.onEvent = func(event aicli.StreamEvent) {
 					if hasConfiguredSecret && (event.Kind == "assistant_incomplete" || event.Kind == "tool_incomplete") {
 						event.Kind, event.Text = "content_missing", ""
@@ -796,7 +797,7 @@ func preparationFailure(stage string, err error) error {
 	return fmt.Errorf("%w: %s: %w", monitor.ErrTerminalJob, stage, err)
 }
 
-func materializeContext(root string, snapshot workspace.Snapshot) error {
+func materializeContext(ctx context.Context, root string, snapshot workspace.Snapshot, progress func()) error {
 	omittedScope := "head"
 	if snapshot.Base != "" {
 		omittedScope = "head_and_base"
@@ -815,15 +816,24 @@ func materializeContext(root string, snapshot workspace.Snapshot) error {
 		return err
 	}
 	for name, data := range map[string][]byte{"source.json": metadata, "comparison.diff": snapshot.Diff} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
 			return err
 		}
+	}
+	if progress != nil {
+		progress()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	base := filepath.Join(root, "base")
 	if err := os.Mkdir(base, 0700); err != nil {
 		return err
 	}
-	return workspace.Materialize(base, snapshot.BaseFiles)
+	return workspace.MaterializeWithProgress(ctx, base, snapshot.BaseFiles, progress)
 }
 
 func modelGitCommand() string {

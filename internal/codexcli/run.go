@@ -731,6 +731,10 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if err != nil {
 		return
 	}
+	content, ok = normalizeProgressJSON(content)
+	if !ok {
+		return
+	}
 	snapshot := sha256.Sum256(content)
 	prior, seen := o.progressItems[key]
 	spawnAdmitted := item.Type == "collab_tool_call" && item.Tool == "spawn_agent" &&

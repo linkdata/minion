@@ -716,7 +716,7 @@ func TestFinishedTaggedRunIgnoresDelayedUsageAndReplay(t *testing.T) {
 	}
 }
 
-func TestSummaryOnlyUsageRetainsTaggedIdentityWithoutCredit(t *testing.T) {
+func TestSummaryOnlyUsageDoesNotHideLaterTaggedStart(t *testing.T) {
 	progress := 0
 	o := jsonlOutput{onProgress: func() { progress++ }}
 	const summary = `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","summary":"working"}`
@@ -724,11 +724,16 @@ func TestSummaryOnlyUsageRetainsTaggedIdentityWithoutCredit(t *testing.T) {
 	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
 	const nativeFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
 	writeChunks(t, &o, summary+"\n"+runlessFinish+"\n"+started+"\n")
-	if o.err != nil || progress != 0 || o.pending != 1 || !o.progressSeen["task_start:"+taskRunKey("helper", "run-1")] {
-		t.Fatalf("summary-only identity: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	if o.err != nil || progress != 1 || o.pending != 1 || !o.progressSeen["task_seen:"+taskRunKey("helper", "run-1")] ||
+		!o.progressSeen["task_start:"+taskRunKey("helper", "run-1")] {
+		t.Fatalf("summary-only identity hid native start: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	}
+	writeChunks(t, &o, started+"\n")
+	if o.err != nil || progress != 1 {
+		t.Fatalf("replayed native start renewed timer: progress=%d error=%v", progress, o.err)
 	}
 	writeChunks(t, &o, nativeFinish+"\n")
-	if o.err != nil || progress != 1 || o.pending != 0 {
+	if o.err != nil || progress != 2 || o.pending != 0 {
 		t.Fatalf("native finish missed: progress=%d pending=%d error=%v", progress, o.pending, o.err)
 	}
 }

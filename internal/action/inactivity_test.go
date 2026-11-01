@@ -3,6 +3,9 @@ package action
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -10,6 +13,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestInactivityTimerUsesProgressAndStopsAtUpload(t *testing.T) {
@@ -109,4 +113,103 @@ func TestRunnerExecuteProgressRenewsInactivity(t *testing.T) {
 			t.Fatalf("direct Execute after progress: result=%+v error=%v", result, err)
 		}
 	})
+}
+
+func TestDirectRunnerPreparedInputRenewsInactivity(t *testing.T) {
+	for _, execute := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Run", true: "Execute"}[execute], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.RuntimeBudget = time.Minute
+				job.InactivityTimeout = 5 * time.Second
+				runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
+					if request.onInput == nil {
+						t.Fatal("direct model has no prepared-input progress callback")
+					}
+					time.Sleep(4 * time.Second)
+					request.onInput(aicli.PreparedInput{Path: "/fixture/cli", Args: []string{"cli"}, Dir: request.dir, Stdin: request.prompt})
+					time.Sleep(4 * time.Second)
+					synctest.Wait()
+					if ctx.Err() != nil {
+						t.Fatalf("prepared input did not renew inactivity: %v", context.Cause(ctx))
+					}
+					return aicli.Result{Answer: "Completed."}, nil
+				}}
+				var result Result
+				var err error
+				if execute {
+					result, err = runner.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+				} else {
+					result, err = runner.Run(t.Context(), job)
+				}
+				if err != nil || result.Answer != "Completed." || len(result.Calls) != 1 {
+					t.Fatalf("direct Runner prepared input: result=%+v error=%v", result, err)
+				}
+			})
+		})
+	}
+}
+
+func TestRunnerCreditsEachUnpackedSourceFileAndStopsOnCancellation(t *testing.T) {
+	job := testJob(command.Comment)
+	job.Source.Files = []workspace.File{
+		{Path: "first.txt", Mode: workspace.Regular, Data: []byte("first\n")},
+		{Path: "second.txt", Mode: workspace.Regular, Data: []byte("second\n")},
+	}
+	attachRepository(t, &job)
+	workRoot := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	firstOnly := false
+	runner := Runner{WorkRoot: workRoot,
+		statusActivity: func() {
+			entries, err := os.ReadDir(workRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range entries {
+				if !strings.HasPrefix(entry.Name(), "minion-") {
+					continue
+				}
+				source := filepath.Join(workRoot, entry.Name())
+				_, firstErr := os.Stat(filepath.Join(source, "first.txt"))
+				_, secondErr := os.Stat(filepath.Join(source, "second.txt"))
+				if firstErr == nil && errors.Is(secondErr, os.ErrNotExist) {
+					firstOnly = true
+					cancel()
+				}
+			}
+		},
+		runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			return aicli.Result{}, errors.New("model started after unpack cancellation")
+		},
+	}
+	_, err := runner.Run(ctx, job)
+	if !firstOnly || !errors.Is(err, context.Canceled) {
+		t.Fatalf("unpacking did not expose completed file and stop: firstOnly=%t error=%v", firstOnly, err)
+	}
+	assertEmptyDir(t, workRoot)
+}
+
+func TestContextCreditsEachUnpackedBaseFileAndStopsOnCancellation(t *testing.T) {
+	job := testJob(command.Review)
+	job.Source.BaseFiles = []workspace.File{
+		{Path: "first.txt", Mode: workspace.Regular, Data: []byte("first\n")},
+		{Path: "second.txt", Mode: workspace.Regular, Data: []byte("second\n")},
+	}
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	firstOnly := false
+	err := materializeContext(ctx, root, job.Source, func() {
+		_, firstErr := os.Stat(filepath.Join(root, "base", "first.txt"))
+		_, secondErr := os.Stat(filepath.Join(root, "base", "second.txt"))
+		if firstErr == nil && errors.Is(secondErr, os.ErrNotExist) {
+			firstOnly = true
+			cancel()
+		}
+	})
+	if !firstOnly || !errors.Is(err, context.Canceled) {
+		t.Fatalf("base unpacking did not expose completed file and stop: firstOnly=%t error=%v", firstOnly, err)
+	}
 }
