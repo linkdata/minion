@@ -1391,6 +1391,12 @@ func TestRolloutMCPToolResultMetadataDoesNotRenewProgress(t *testing.T) {
 			replay:  `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"same","annotations":{"priority":0.9}}]}}`,
 			changed: `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"changed","annotations":{"priority":0.9}}]}}`,
 		},
+		{
+			name:    "embedded resource",
+			first:   `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"Ok":{"content":[{"type":"resource","resource":{"uri":"file:///one","text":"same","_meta":{"trace":"one"}}}]}}}`,
+			replay:  `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"Ok":{"content":[{"type":"resour\u0063e","resource":{"uri":"file:///one","text":"same","_meta":{"trace":"two"}}}]}}}`,
+			changed: `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"Ok":{"content":[{"type":"resource","resource":{"uri":"file:///one","text":"changed","_meta":{"trace":"two"}}}]}}}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := &rolloutActivity{progress: func() {}}

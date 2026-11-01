@@ -24,6 +24,27 @@ func TestRootMCPResultMetadataReplayDoesNotRenewProgress(t *testing.T) {
 	}
 }
 
+func TestRootEmbeddedResourceMetadataReplayDoesNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"mcp","type":"mcp_tool_call","result":{"content":[{"type":"resource","resource":{"uri":"file:///one","text":"same","_meta":{"trace":"one"}}}]}}}`, 1},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","result":{"content":[{"type":"resour\u0063e","resource":{"uri":"file:///one","text":"same","_meta":{"trace":"two"}}}]}}}`, 1},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","result":{"content":[{"type":"resource","resource":{"uri":"file:///one","text":"changed","_meta":{"trace":"two"}}}]}}}`, 2},
+	} {
+		if _, err := output.Write([]byte(step.line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		if progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
 func TestIDLessRootMCPCallsUseInvocationIdentity(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}

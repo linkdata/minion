@@ -188,6 +188,9 @@ type jsonlOutput struct {
 	aggregateTokens        usage.Tokens
 	assistantUsage         map[string]messageUsage
 	assistantHistory       map[string]assistantSnapshot
+	assistantTotal         usage.Tokens // Sum of per-message counter maxima.
+	assistantTotalReady    bool
+	assistantTotalOverflow bool
 	assistantTokens        usage.Tokens
 	rootTokens             usage.Tokens
 	uncovered              bool
@@ -481,6 +484,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	tokens, complete := e.tokens()
 	o.hasCumulative = false
 	if complete {
+		o.ensureAssistantTotal()
 		cumulative := tokens
 		tokens = tokens.Sub(o.baseline)
 		var rawRoot eventUsage
@@ -491,7 +495,9 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		// An exact snapshot must cover the prior cumulative floor plus all
 		// attributable current counters before it can become the next baseline.
 		lower, valid := o.assistantLowerBound()
-		complete = tokens.Valid() && valid && covers(tokens, lower) && (!rootValid || covers(tokens, root))
+		complete = tokens.Valid() && valid && !o.assistantTotalOverflow &&
+			covers(tokens, lower) && covers(cumulative, o.assistantTotal) &&
+			(!rootValid || covers(tokens, root))
 		if complete {
 			o.cumulative, o.hasCumulative = cumulative, true
 		}
@@ -1297,6 +1303,24 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 	}
 }
 
+func (o *jsonlOutput) ensureAssistantTotal() {
+	if o.assistantTotalReady {
+		return
+	}
+	for _, snapshot := range o.assistantHistory {
+		if !snapshot.hasTokens {
+			continue
+		}
+		total, valid := o.assistantTotal.AddChecked(snapshot.tokens)
+		if !valid {
+			o.assistantTotalOverflow = true
+			break
+		}
+		o.assistantTotal = total
+	}
+	o.assistantTotalReady = true
+}
+
 func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshContent bool, messageID string) {
 	var message struct {
 		ID      string          `json:"id"`
@@ -1320,18 +1344,21 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	coveredStreamSnapshot := !seen && !historical &&
 		o.progressSeen["stream_start:"+message.ID] && o.progressSeen["assistant:"+message.ID] &&
 		(!o.streamedSinceAssistant[message.ID] || o.completed)
-	if coveredStreamSnapshot {
-		historical = true // The first full snapshot can complete a stream already covered by a result.
-	}
-	priorTokens := prior.tokens
-	if !seen && !historical && !o.reserveProgress(1, len(message.ID)) {
-		return // The bounded history limit is a fatal output error.
-	}
 	var rawUsage eventUsage
 	valid := json.Unmarshal(message.Usage, &rawUsage) == nil
 	var tokens usage.Tokens
 	if valid {
 		tokens, valid = rawUsage.tokens()
+	}
+	if coveredStreamSnapshot {
+		// A delayed full frame can contain more text than the observed stream
+		// without proving new work. Keep the frame as a baseline so it is not
+		// billed again as a new message.
+		historical = true
+	}
+	priorTokens := prior.tokens
+	if !seen && !historical && !o.reserveProgress(1, len(message.ID)) {
+		return // The bounded history limit is a fatal output error.
 	}
 	unknownPrior := historical && !prior.hasTokens
 	firstHistoricalCounters := valid && (unknownPrior && !seen || seen && old.priorMissing)
@@ -1373,9 +1400,22 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 	}
 	if valid {
-		if updated := prior.tokens.Max(tokens); updated.Valid() {
-			prior.tokens, prior.hasTokens = updated, true
-		} else {
+		updated := prior.tokens.Max(tokens)
+		o.ensureAssistantTotal()
+		if !o.assistantTotalOverflow {
+			remaining := o.assistantTotal.Sub(prior.tokens)
+			total, ok := remaining.AddChecked(updated)
+			if ok {
+				o.assistantTotal = total
+			} else {
+				o.assistantTotalOverflow = true
+			}
+		}
+		prior.tokens, prior.hasTokens = updated, true
+		if !updated.Valid() {
+			// Keep an impossible counter floor in history so a resumed call
+			// cannot certify later cumulative usage as exact.
+			o.assistantTotalOverflow = true
 			valid = false
 		}
 	}
@@ -1383,9 +1423,18 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		o.assistantHistory = make(map[string]assistantSnapshot)
 	}
 	o.assistantHistory[message.ID] = prior
+	if o.hasCumulative && (o.assistantTotalOverflow || valid && !covers(o.cumulative, o.assistantTotal)) {
+		if !o.assistantTotalOverflow {
+			if lower := o.result.Tokens.Max(o.assistantTotal.Sub(o.baseline)); lower.Valid() {
+				o.result.Tokens = lower
+			}
+		}
+		o.hasCumulative, o.uncovered = false, true
+		o.result.UsageComplete = false
+	}
 	if firstHistoricalCounters && !newContent {
 		// A newly revealed absolute floor is not evidence of current work.
-		// Preserve a covered result and charge only future increases.
+		// Keep the answer; only later counter increases are attributable.
 		if seen {
 			o.assistantUsage[message.ID] = old
 		}

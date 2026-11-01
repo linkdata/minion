@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -304,6 +305,104 @@ func TestFirstFullAssistantAfterSameCallResultCompletesStream(t *testing.T) {
 	if o.err != nil || !o.completed || o.result.Answer != "final answer" || progress != 1 {
 		t.Fatalf("full stream completion after result: completed=%t progress=%d answer=%q error=%v",
 			o.completed, progress, o.result.Answer, o.err)
+	}
+}
+
+func TestFirstFullAssistantWithUsageBeyondResultNeedsCoveringUsage(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"current"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}}`
+	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"current","content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":12}}}`
+	data := start + "\n" + delta + "\n" + stop + "\n" + successfulResult + "\n" + full + "\n"
+	for _, recovered := range []bool{false, true} {
+		o := jsonlOutput{}
+		writeChunks(t, &o, numberResultEvents(data))
+		if !o.completed || o.result.Answer != "final answer" || o.result.UsageComplete || o.result.Tokens.Output != 12 {
+			t.Fatalf("result hid excess assistant usage: result=%+v completed=%t", o.result, o.completed)
+		}
+		if recovered {
+			next := strings.ReplaceAll(successfulResult, `"outputTokens":11`, `"outputTokens":12`)
+			writeChunks(t, &o, strings.TrimSuffix(next, "}")+`,"result_index":1}`+"\n")
+		}
+		o.finish()
+		if o.err != nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 12}) || o.result.UsageComplete != recovered {
+			t.Fatalf("recovered=%t result=%+v error=%v", recovered, o.result, o.err)
+		}
+	}
+}
+
+func TestCumulativeResultCannotHideInvalidAssistantCounterDelta(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"current"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}}`
+	const result = `{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":15,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":11}}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"current","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":15,"output_tokens":12}}}`
+	o := jsonlOutput{baseline: usage.Tokens{Input: 15, Output: 11}}
+	writeChunks(t, &o, numberResultEvents(start+"\n"+delta+"\n"+result+"\n"+full+"\n"+result+"\n"))
+	o.finish()
+	if o.err != nil || o.result.UsageComplete || o.assistantTotal != (usage.Tokens{Input: 15, CachedInput: 15, Output: 12}) {
+		t.Fatalf("cumulative result ignored assistant totals: result=%+v total=%+v error=%v", o.result, o.assistantTotal, o.err)
+	}
+}
+
+func TestImpossibleAssistantCounterFloorPersistsUntilNewConversation(t *testing.T) {
+	first := jsonlOutput{}
+	writeChunks(t, &first, assistantUsageEvent("old", math.MaxInt64-20, 0, 0, 1)+"\n"+
+		assistantUsageEvent("old", 1, 0, 0, math.MaxInt64-2)+"\n")
+	if snapshot := first.assistantHistory["old"]; !snapshot.hasTokens || snapshot.tokens.Valid() {
+		t.Fatalf("impossible counter floor was not retained: %+v", snapshot)
+	}
+	var session Session
+	session.assistantHistory = first.assistantHistory
+	second := jsonlOutput{assistantHistory: session.assistantHistory}
+	writeChunks(t, &second, successfulResult+"\n")
+	second.finish()
+	if second.err != nil || second.result.Answer != "final answer" || second.result.UsageComplete {
+		t.Fatalf("resumed call certified impossible usage: %+v, %v", second.result, second.err)
+	}
+	session.NewConversation()
+	third := jsonlOutput{assistantHistory: session.assistantHistory}
+	writeChunks(t, &third, successfulResult+"\n")
+	third.finish()
+	if third.err != nil || !third.result.UsageComplete {
+		t.Fatalf("new conversation retained impossible usage: %+v, %v", third.result, third.err)
+	}
+}
+
+func TestFirstHistoricalCountersBeyondCumulativeResultNeedCoveringUsage(t *testing.T) {
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
+	const late = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":12}}}`
+	const resumedResult = `{"type":"result","subtype":"success","result":"final answer","modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, old+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil || !first.result.UsageComplete {
+		t.Fatalf("first cumulative result: %+v, %v", first.result, first.err)
+	}
+	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen,
+		assistantHistory: first.assistantHistory}
+	writeChunks(t, &second, resumedResult+"\n"+late+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.result.Answer != "final answer" || second.result.UsageComplete || second.result.Tokens.Output < 1 {
+		t.Fatalf("late historical counters retained exact usage: %+v completed=%t error=%v", second.result, second.completed, second.err)
+	}
+}
+
+func TestTwoLateStreamedMessagesCannotExceedCumulativeResult(t *testing.T) {
+	o := jsonlOutput{}
+	var events string
+	for _, id := range []string{"one", "two"} {
+		events += fmt.Sprintf(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":%q}}}`, id) + "\n"
+		events += `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"part"}}}` + "\n"
+		events += `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}` + "\n"
+	}
+	events += successfulResult + "\n"
+	for _, id := range []string{"one", "two"} {
+		events += assistantUsageEvent(id, 1, 0, 0, 8) + "\n"
+	}
+	writeChunks(t, &o, events)
+	o.finish()
+	if o.err != nil || !o.completed || o.result.Answer != "final answer" || o.result.UsageComplete || o.result.Tokens.Output < 16 {
+		t.Fatalf("separate message usage escaped cumulative check: %+v completed=%t error=%v", o.result, o.completed, o.err)
 	}
 }
 

@@ -1200,8 +1200,8 @@ func stableMCPToolEventResult(raw json.RawMessage) (json.RawMessage, bool) {
 }
 
 func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {
-	// Only result-level _meta and direct ContentBlock metadata are transport
-	// annotations. Preserve structuredContent and arbitrary nested tool data.
+	// MCP result, block, and embedded resource _meta are transport annotations.
+	// Preserve structuredContent and arbitrary nested tool data.
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return raw, true
@@ -1227,6 +1227,21 @@ func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {
 			}
 			delete(fields, "_meta")
 			delete(fields, "annotations")
+			var kind string
+			if json.Unmarshal(fields["type"], &kind) == nil && kind == "resource" {
+				resource := bytes.TrimSpace(fields["resource"])
+				if len(resource) != 0 && resource[0] == '{' {
+					var contents map[string]json.RawMessage
+					if json.Unmarshal(resource, &contents) != nil {
+						return nil, false
+					}
+					delete(contents, "_meta")
+					var err error
+					if fields["resource"], err = json.Marshal(contents); err != nil {
+						return nil, false
+					}
+				}
+			}
 			var err error
 			if blocks[i], err = json.Marshal(fields); err != nil {
 				return nil, false
