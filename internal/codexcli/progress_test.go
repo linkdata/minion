@@ -766,6 +766,34 @@ func TestRolloutActivityRootCommandOutputRenewsProgress(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityResumedRootCommandOutputRequiresTurn(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old-root", "old-response", 1)...)
+	var session usageSession
+	session.begin(t.Context(), home, "root", started)
+	if before := session.before["root"]; before == nil || !before.valid || !before.prefixKnown || !before.turns["old-root"] {
+		t.Fatalf("resumed root prefix was not verified: %+v", before)
+	}
+	progress := 0
+	activity := newRolloutActivity(t.Context(), home, started, session.known, nil, session.before, nil, nil,
+		func() { progress++ })
+	activity.root("root")
+	activity.poll()
+	appendUsageEvents(t, root,
+		`{"ordinal":21,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","chunk":"late old output"}}`,
+		`{"ordinal":22,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"old-root","chunk":"late old turn output"}}`)
+	activity.poll()
+	if progress != 0 {
+		t.Fatalf("old root output renewed progress: %d", progress)
+	}
+	appendUsageEvents(t, root,
+		`{"ordinal":23,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"new-root","chunk":"current output"}}`)
+	activity.poll()
+	if progress != 1 {
+		t.Fatalf("current root output progress=%d, want 1", progress)
+	}
+}
+
 func TestRolloutActivityOrdinalProgressDoesNotFillIdentityCap(t *testing.T) {
 	activity := rolloutActivity{progress: func() {}}
 	event := rolloutEvent{Type: "event_msg", Payload: []byte(`{"type":"exec_command_output","chunk":"tick"}`)}

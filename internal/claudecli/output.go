@@ -1107,6 +1107,14 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 	default:
 		return
 	}
+	repeatedUnidentifiedNotice := false
+	if runID == "" && noticeUUID == "" && status != "started" {
+		// Without either identity, a later notice with this ID may replay this one.
+		repeatedUnidentifiedNotice = !o.rememberProgress("task_notice_id_only:" + id)
+		if o.err != nil {
+			return
+		}
+	}
 	if status == "completed" || status == "failed" {
 		// A task ID and status cannot distinguish a new notice from replay.
 		replay := runID != "" && o.progressSeen["task_finish:"+taskRunKey(id, runID)]
@@ -1147,7 +1155,7 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 				o.runlessPending[id] = 1
 				o.runlessCount++
 			}
-		} else if o.runlessPending[id] == 1 && !o.runlessAmbiguous[id] {
+		} else if o.runlessPending[id] == 1 && !o.runlessAmbiguous[id] && !repeatedUnidentifiedNotice {
 			// Once duplicated, an ID-only notice cannot identify the remaining task.
 			delete(o.runlessPending, id)
 			delete(o.runlessExplicit, id)

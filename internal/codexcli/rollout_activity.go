@@ -576,7 +576,8 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal)
 	proven := meta.ID == rootID || a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]
-	if !uncertainOrdinal && proven && payload.Type == "exec_command_output" && payload.Chunk != "" {
+	if !uncertainOrdinal && proven && payload.Type == "exec_command_output" && payload.Chunk != "" &&
+		(meta.ID != rootID || a.before[meta.ID] == nil || payload.TurnID != "") {
 		a.newProgress(meta.ID, event, event.Ordinal, progressed)
 	}
 	if meta.ID != rootID && !uncertainOrdinal && proven {

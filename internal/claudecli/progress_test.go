@@ -482,6 +482,39 @@ func TestRunLessNoticeUUIDReplayCannotFinishLaterStart(t *testing.T) {
 	}
 }
 
+func TestRunLessNoticeWithoutUUIDReplayCannotFinishLaterStart(t *testing.T) {
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
+	const finish = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", resume), func(t *testing.T) {
+			o := &jsonlOutput{}
+			writeChunks(t, o, first+"\n"+finish+"\n")
+			if resume {
+				o = &jsonlOutput{progressSeen: o.progressSeen, progressBytes: o.progressBytes, progressEntries: o.progressEntries}
+			}
+			writeChunks(t, o, second+"\n"+finish+"\n"+successfulResult+"\n")
+			o.finish()
+			if o.pending != 1 || o.completed || o.err == nil {
+				t.Fatalf("replayed unidentified finish cleared later start: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestRunLessNoticeWithoutUUIDAllowsIdentifiableLaterFinish(t *testing.T) {
+	o := jsonlOutput{}
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
+	const bare = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const identified = `{"type":"system","subtype":"task_notification","uuid":"finish-2","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, first+"\n"+bare+"\n"+second+"\n"+bare+"\n"+identified+"\n"+successfulResult+"\n")
+	o.finish()
+	if o.pending != 0 || !o.completed || o.err != nil {
+		t.Fatalf("identified later finish was not accepted: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
 func TestSyntheticNoticeArrayCompletesDistinctTasksWithSharedUUID(t *testing.T) {
 	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"one"}`
 	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"two"}`
