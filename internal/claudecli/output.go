@@ -3,6 +3,8 @@ package claudecli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,8 +122,14 @@ func (e event) tokens() (usage.Tokens, bool) {
 
 type messageUsage struct {
 	tokens     usage.Tokens
+	prior      usage.Tokens
 	generation int64
 	root       bool
+}
+
+type assistantSnapshot struct {
+	tokens    usage.Tokens
+	hasTokens bool
 }
 
 type progressStream struct {
@@ -136,51 +144,52 @@ type taskProgressState struct {
 }
 
 type jsonlOutput struct {
-	sessionID           string
-	apiKey              string
-	onEvent             func(aicli.StreamEvent)
-	onProgress          func()
-	progressSeen        map[string]bool
-	progressStreams     map[string]*progressStream
-	streamSeen          map[string]bool
-	streamSeenBytes     int
-	taskProgress        map[string]taskProgressState
-	taskRuns            map[string]bool
-	taskRunCounts       map[string]int
-	runlessPending      map[string]int
-	runlessExplicit     map[string]bool // Presence records a start or usage; true means a start was seen.
-	runlessAmbiguous    map[string]bool
-	runlessCount        int
-	anonymousPending    int
-	progressBytes       int64
-	progressEntries     int
-	progressByteLimit   int64 // Tests may lower the cumulative history limit.
-	progressEntryLimit  int   // Tests may lower the cumulative history limit.
-	identitySeen        bool
-	baseline            usage.Tokens
-	baselineUnknown     bool
-	cumulative          usage.Tokens
-	hasCumulative       bool
-	cancel              context.CancelFunc
-	stream              aicli.JSONL
-	fatal               func()
-	fatalGap            bool
-	stopped             bool
-	err                 error
-	usageLimit          error
-	taskFailure         error
-	completed           bool
-	structured          bool
-	pending             int
-	results             int64
-	indexed             bool
-	result              aicli.Result
-	aggregateGeneration int64
-	aggregateTokens     usage.Tokens
-	assistantUsage      map[string]messageUsage
-	assistantTokens     usage.Tokens
-	rootTokens          usage.Tokens
-	uncovered           bool
+	sessionID              string
+	apiKey                 string
+	onEvent                func(aicli.StreamEvent)
+	onProgress             func()
+	progressSeen           map[string]bool
+	progressStreams        map[string]*progressStream
+	streamedSinceAssistant map[string]bool
+	rootStartsAfterStop    map[string]bool
+	taskProgress           map[string]taskProgressState
+	taskRuns               map[string]bool
+	taskRunCounts          map[string]int
+	runlessPending         map[string]int
+	runlessExplicit        map[string]bool // Presence records a start or usage; true means a start was seen.
+	runlessAmbiguous       map[string]bool
+	runlessCount           int
+	anonymousPending       int
+	progressBytes          int64
+	progressEntries        int
+	progressByteLimit      int64 // Tests may lower the cumulative history limit.
+	progressEntryLimit     int   // Tests may lower the cumulative history limit.
+	identitySeen           bool
+	baseline               usage.Tokens
+	baselineUnknown        bool
+	cumulative             usage.Tokens
+	hasCumulative          bool
+	cancel                 context.CancelFunc
+	stream                 aicli.JSONL
+	fatal                  func()
+	fatalGap               bool
+	stopped                bool
+	err                    error
+	usageLimit             error
+	taskFailure            error
+	completed              bool
+	structured             bool
+	pending                int
+	results                int64
+	indexed                bool
+	result                 aicli.Result
+	aggregateGeneration    int64
+	aggregateTokens        usage.Tokens
+	assistantUsage         map[string]messageUsage
+	assistantHistory       map[string]assistantSnapshot
+	assistantTokens        usage.Tokens
+	rootTokens             usage.Tokens
+	uncovered              bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -312,8 +321,12 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.identitySeen = true
 		}
 	}
-	if e.Type == "assistant" {
-		o.recordAssistantUsage(e.Message, e.ParentToolUseID)
+	freshAssistantContent, streamedAssistant := false, false
+	if e.Type == "assistant" && !e.Ambient && o.acceptsSession(e.SessionID) {
+		var id string
+		freshAssistantContent, id = o.recordAssistantUsage(e.Message, e.ParentToolUseID)
+		streamedAssistant = o.streamedSinceAssistant[id]
+		delete(o.streamedSinceAssistant, id)
 	}
 	stop := e.Type == "system" && e.Subtype == "task_notification" &&
 		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
@@ -324,7 +337,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		return
 	}
-	o.recordProgress(e)
+	o.recordProgress(e, freshAssistantContent, streamedAssistant)
 	if stop {
 		o.recordTaskStop(e.Status, e.Summary)
 	}
@@ -699,6 +712,7 @@ func (o *jsonlOutput) recordTaskStop(status, summary string) {
 	// successful result can certify completion. Ambient cleanup is ignored.
 	o.observe("task_stopped", strings.TrimSpace(status+": "+summary))
 	o.stopped = true
+	o.rootStartsAfterStop = nil
 	o.completed, o.result.Answer = false, ""
 	if pressureStopSummary(summary) {
 		// Keep parsing cumulative counters; later results cannot erase this stop.
@@ -788,7 +802,7 @@ func (o *jsonlOutput) recordTaskNotice(text, noticeUUID string) {
 // Progress is native execution, including task usage changes, but never
 // result-only usage, result waiting, or repeated snapshots. The callback is
 // separate from transcript capture and sends no text.
-func (o *jsonlOutput) recordProgress(e event) {
+func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAssistant bool) {
 	if e.Ambient || !o.acceptsSession(e.SessionID) {
 		return
 	}
@@ -814,6 +828,9 @@ func (o *jsonlOutput) recordProgress(e event) {
 	}
 	switch e.Type {
 	case "assistant":
+		if !freshAssistantContent {
+			return
+		}
 		var message struct {
 			ID      string          `json:"id"`
 			Content json.RawMessage `json:"content"`
@@ -830,7 +847,7 @@ func (o *jsonlOutput) recordProgress(e event) {
 		}
 		var text string
 		if json.Unmarshal(message.Content, &text) == nil && text != "" {
-			o.recordUniqueProgress("assistant:" + message.ID)
+			o.recordAssistantContentProgress(message.ID, streamedAssistant)
 			return
 		}
 		if json.Unmarshal(message.Content, &blocks) == nil {
@@ -839,7 +856,7 @@ func (o *jsonlOutput) recordProgress(e event) {
 					block.Type == "tool_use" && block.ID != "" ||
 					block.Type == "thinking" && block.Thinking != "" ||
 					block.Type == "redacted_thinking" && block.Data != "" {
-					o.recordUniqueProgress("assistant:" + message.ID)
+					o.recordAssistantContentProgress(message.ID, streamedAssistant)
 					return
 				}
 			}
@@ -871,6 +888,18 @@ func (o *jsonlOutput) recordProgress(e event) {
 				o.recordUniqueProgress("thinking_tokens:" + e.UUID)
 			}
 		}
+	}
+}
+
+func (o *jsonlOutput) recordAssistantContentProgress(id string, streamed bool) {
+	if streamed {
+		return // Stream output already reported this message's activity.
+	}
+	key := "assistant:" + id
+	if o.progressSeen[key] {
+		o.onProgress() // The new content snapshot already reserved bounded history.
+	} else {
+		o.recordUniqueProgress(key)
 	}
 }
 
@@ -916,22 +945,20 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 		}
 		startKey := "stream_start:" + native.Message.ID
 		_, assistantSeen := o.assistantUsage[native.Message.ID]
-		replay := assistantSeen || o.progressSeen["assistant:"+native.Message.ID] || o.progressSeen[startKey] || o.streamSeen[native.Message.ID]
+		_, historicalAssistant := o.assistantHistory[native.Message.ID]
+		replay := assistantSeen || historicalAssistant || o.progressSeen["assistant:"+native.Message.ID] || o.progressSeen[startKey]
 		if !replay {
-			// Without a callback, cap replay memory; missed IDs fail closed as fresh work.
-			if o.onProgress != nil {
-				if !o.rememberProgress(startKey) {
-					return
-				}
-			} else if len(o.streamSeen) < maxProgressHistoryEntries && len(native.Message.ID) <= maxProgressHistoryBytes-o.streamSeenBytes {
-				if o.streamSeen == nil {
-					o.streamSeen = make(map[string]bool)
-				}
-				o.streamSeen[native.Message.ID] = true
-				o.streamSeenBytes += len(native.Message.ID)
+			if !o.rememberProgress(startKey) {
+				return
 			}
 			if o.results != 0 && !helper {
 				o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+			}
+			if o.stopped && !helper {
+				if o.rootStartsAfterStop == nil {
+					o.rootStartsAfterStop = make(map[string]bool)
+				}
+				o.rootStartsAfterStop[native.Message.ID] = true
 			}
 		}
 		state = &progressStream{messageID: native.Message.ID, replay: replay}
@@ -996,6 +1023,10 @@ func (o *jsonlOutput) markStreamProgress(state *progressStream) {
 		o.progressSeen = make(map[string]bool)
 	}
 	o.progressSeen[key] = true
+	if o.streamedSinceAssistant == nil {
+		o.streamedSinceAssistant = make(map[string]bool)
+	}
+	o.streamedSinceAssistant[state.messageID] = true
 	o.onProgress()
 }
 
@@ -1160,6 +1191,13 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 			o.completed, o.result.Answer = false, ""
 		}
 	}
+	if runID == "" && status != "started" {
+		// A later ID-only finish may describe this task after its ID is reused.
+		o.rememberProgress("task_id_only_terminal:" + id)
+		if o.err != nil {
+			return
+		}
+	}
 	if runID == "" && status != "started" && o.runlessPending[id] != 0 {
 		o.ensureTaskRuns()
 		if o.taskRunCounts[id] != 0 {
@@ -1173,6 +1211,9 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 			}
 			if o.err != nil {
 				return
+			}
+			if o.progressSeen["task_id_only_terminal:"+id] {
+				o.markRunlessAmbiguous(id)
 			}
 			if o.runlessExplicit == nil {
 				o.runlessExplicit = make(map[string]bool)
@@ -1275,10 +1316,11 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 	}
 }
 
-func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
+func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshContent bool, messageID string) {
 	var message struct {
-		ID    string          `json:"id"`
-		Usage json.RawMessage `json:"usage"`
+		ID      string          `json:"id"`
+		Usage   json.RawMessage `json:"usage"`
+		Content json.RawMessage `json:"content"`
 	}
 	if json.Unmarshal(raw, &message) != nil || message.ID == "" {
 		o.hasCumulative = false
@@ -1288,10 +1330,53 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 		}
 		return
 	}
+	messageID = message.ID
 	root := bytes.Equal(bytes.TrimSpace(parent), []byte("null"))
 	var parentID string
 	unknown := !root && (json.Unmarshal(parent, &parentID) != nil || parentID == "")
 	old, seen := o.assistantUsage[message.ID]
+	prior, historical := o.assistantHistory[message.ID]
+	priorTokens := prior.tokens
+	if !seen && !historical && !o.reserveProgress(1, len(message.ID)) {
+		return // The bounded history limit is a fatal output error.
+	}
+	var rawUsage eventUsage
+	valid := json.Unmarshal(message.Usage, &rawUsage) == nil
+	var tokens usage.Tokens
+	if valid {
+		tokens, valid = rawUsage.tokens()
+	}
+	contentHash, hasContent := assistantContentHash(message.Content)
+	contentKey := ""
+	newContent := false
+	if hasContent {
+		contentKey = "assistant_content:" + message.ID + ":" + hex.EncodeToString(contentHash[:])
+		newContent = !o.progressSeen[contentKey]
+	}
+	if historical && !seen {
+		increased := valid && (!prior.hasTokens || prior.tokens.Max(tokens) != prior.tokens)
+		if !increased && !newContent {
+			return // Exact or older replay cannot change this call.
+		}
+	}
+	if newContent && !o.rememberProgress(contentKey) {
+		return // The bounded history limit is a fatal output error.
+	}
+	freshContent = newContent
+	if newContent && o.results != 0 {
+		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+	}
+	if valid {
+		if updated := prior.tokens.Max(tokens); updated.Valid() {
+			prior.tokens, prior.hasTokens = updated, true
+		} else {
+			valid = false
+		}
+	}
+	if o.assistantHistory == nil {
+		o.assistantHistory = make(map[string]assistantSnapshot)
+	}
+	o.assistantHistory[message.ID] = prior
 	if o.baselineUnknown || !seen {
 		o.hasCumulative = false
 	}
@@ -1299,12 +1384,13 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 		if o.assistantUsage == nil {
 			o.assistantUsage = make(map[string]messageUsage)
 		}
-		old = messageUsage{generation: o.aggregateGeneration, root: root}
+		old = messageUsage{prior: priorTokens, generation: o.aggregateGeneration, root: root}
 		// Remember IDs even before usable counters arrive. A later block from
 		// an already covered message must not become a new billable call.
 		o.assistantUsage[message.ID] = old
 		o.uncovered = o.aggregateGeneration != 0
-		if root {
+		if root && !historical && (!o.stopped || o.rootStartsAfterStop[message.ID] ||
+			!o.progressSeen["stream_start:"+message.ID]) {
 			o.stopped = false
 		}
 		if (root || unknown) && o.results != 0 {
@@ -1320,17 +1406,11 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 			o.hasCumulative, o.uncovered, o.result.UsageComplete = false, true, false
 		}
 	}
-	var rawUsage eventUsage
-	valid := json.Unmarshal(message.Usage, &rawUsage) == nil
-	var tokens usage.Tokens
-	if valid {
-		tokens, valid = rawUsage.tokens()
-	}
 	if !valid {
 		markUsageUncertain()
 		return
 	}
-	tokens = old.tokens.Max(tokens)
+	tokens = old.tokens.Max(old.prior.Max(tokens).Sub(old.prior))
 	if !tokens.Valid() {
 		markUsageUncertain()
 		return
@@ -1355,6 +1435,39 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) {
 		lower, valid := o.assistantLowerBound()
 		o.hasCumulative = valid && covers(o.cumulative.Sub(o.baseline), lower)
 	}
+	return
+}
+
+func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
+	content := bytes.TrimSpace(raw)
+	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
+		return [32]byte{}, false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return sha256.Sum256(content), true
+	}
+	switch typed := value.(type) {
+	case string:
+		if typed == "" {
+			return [32]byte{}, false
+		}
+	case []any:
+		if len(typed) == 0 {
+			return [32]byte{}, false
+		}
+	case map[string]any:
+		if len(typed) == 0 {
+			return [32]byte{}, false
+		}
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return sha256.Sum256(content), true
+	}
+	return sha256.Sum256(canonical), true
 }
 
 func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {

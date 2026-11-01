@@ -463,6 +463,63 @@ func TestProgressDeduplicatesResumedMessagesAndSyntheticTaskNotices(t *testing.T
 	}
 }
 
+func TestFullAssistantContentVariantsRenewProgressWithoutStreamDelta(t *testing.T) {
+	var got int
+	o := jsonlOutput{onProgress: func() { got++ }}
+	const first = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
+	const next = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"AB"}]}}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{{first, 1}, {next, 2}, {first, 2}, {next, 2}} {
+		writeChunks(t, &o, step.line+"\n")
+		if o.err != nil || got != step.want {
+			t.Fatalf("variant %d: progress=%d want=%d error=%v", i, got, step.want, o.err)
+		}
+	}
+}
+
+func TestFullAssistantContentAfterStreamDeltaDoesNotDoubleCount(t *testing.T) {
+	var got int
+	o := jsonlOutput{onProgress: func() { got++ }}
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const first = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
+	const next = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"AB"}]}}`
+	writeChunks(t, &o, start+"\n"+delta+"\n"+first+"\n")
+	if o.err != nil || got != 1 {
+		t.Fatalf("full message duplicated stream progress: got=%d error=%v", got, o.err)
+	}
+	writeChunks(t, &o, next+"\n"+first+"\n")
+	if o.err != nil || got != 2 {
+		t.Fatalf("fresh variant or replay credit wrong: got=%d error=%v", got, o.err)
+	}
+}
+
+func TestEmptyOrReplayedFullFrameConsumesStreamCredit(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
+	const first = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
+	const next = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"AB"}]}}`
+	for _, tc := range []struct {
+		name, events string
+		want         int
+	}{
+		{"empty frame", start + "\n" + delta + "\n" + empty + "\n" + first, 2},
+		{"replayed frame", start + "\n" + delta + "\n" + first + "\n" + delta + "\n" + first + "\n" + next, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := 0
+			o := jsonlOutput{onProgress: func() { got++ }}
+			writeChunks(t, &o, tc.events+"\n")
+			if o.err != nil || got != tc.want {
+				t.Fatalf("later unstreamed content lost: progress=%d want=%d error=%v", got, tc.want, o.err)
+			}
+		})
+	}
+}
+
 func TestProgressTracksForegroundTaskRuns(t *testing.T) {
 	var got int
 	o := jsonlOutput{sessionID: "native-id", onProgress: func() { got++ }}
@@ -651,6 +708,35 @@ func TestRunLessNoticeUUIDReplayCannotFinishLaterStart(t *testing.T) {
 	}
 }
 
+func TestRunLessNewNoticeUUIDCannotFinishReusedTaskID(t *testing.T) {
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const finished = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
+	const delayed = `{"type":"system","subtype":"task_notification","uuid":"finish-2","task_id":"helper","status":"completed"}`
+	for _, resume := range []bool{false, true} {
+		t.Run(fmt.Sprintf("resume=%t", resume), func(t *testing.T) {
+			o := &jsonlOutput{}
+			initial := first + "\n" + finished + "\n"
+			if resume {
+				initial += successfulResult + "\n"
+			}
+			writeChunks(t, o, initial)
+			if resume {
+				o.finish()
+				if o.err != nil || !o.completed {
+					t.Fatalf("first call did not complete: completed=%t error=%v", o.completed, o.err)
+				}
+				o = &jsonlOutput{progressSeen: o.progressSeen, progressBytes: o.progressBytes, progressEntries: o.progressEntries}
+			}
+			writeChunks(t, o, second+"\n"+delayed+"\n"+successfulResult+"\n")
+			o.finish()
+			if o.pending != 1 || o.completed || o.err == nil {
+				t.Fatalf("uncorrelated finish cleared reused task ID: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+			}
+		})
+	}
+}
+
 func TestRunLessNoticeWithoutUUIDReplayCannotFinishLaterStart(t *testing.T) {
 	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
 	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
@@ -671,7 +757,7 @@ func TestRunLessNoticeWithoutUUIDReplayCannotFinishLaterStart(t *testing.T) {
 	}
 }
 
-func TestRunLessNoticeWithoutUUIDAllowsIdentifiableLaterFinish(t *testing.T) {
+func TestRunLessNoticeWithoutUUIDLeavesLaterFinishAmbiguous(t *testing.T) {
 	o := jsonlOutput{}
 	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
 	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
@@ -679,8 +765,8 @@ func TestRunLessNoticeWithoutUUIDAllowsIdentifiableLaterFinish(t *testing.T) {
 	const identified = `{"type":"system","subtype":"task_notification","uuid":"finish-2","task_id":"helper","status":"completed"}`
 	writeChunks(t, &o, first+"\n"+bare+"\n"+second+"\n"+bare+"\n"+identified+"\n"+successfulResult+"\n")
 	o.finish()
-	if o.pending != 0 || !o.completed || o.err != nil {
-		t.Fatalf("identified later finish was not accepted: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	if o.pending != 1 || o.completed || o.err == nil {
+		t.Fatalf("uncorrelated later finish cleared reused ID: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
 	}
 }
 

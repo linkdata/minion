@@ -37,15 +37,16 @@ type Session struct {
 	skillPaths                   []string
 	id                           string
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
-	baseline        usage.Tokens
-	usageGap        bool
-	progressSeen    map[string]bool
-	taskProgress    map[string]taskProgressState
-	progressBytes   int64
-	progressEntries int
-	started, reset  bool
-	closed          bool
-	initErr         error
+	baseline         usage.Tokens
+	usageGap         bool
+	progressSeen     map[string]bool
+	assistantHistory map[string]assistantSnapshot
+	taskProgress     map[string]taskProgressState
+	progressBytes    int64
+	progressEntries  int
+	started, reset   bool
+	closed           bool
+	initErr          error
 }
 
 // NewConversation forgets the native history and accounting, retaining role paths.
@@ -53,6 +54,7 @@ type Session struct {
 func (s *Session) NewConversation() {
 	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
 	s.progressSeen = nil
+	s.assistantHistory = nil
 	s.taskProgress = nil
 	s.progressBytes, s.progressEntries = 0, 0
 	s.reset = s.runtimeDir != ""

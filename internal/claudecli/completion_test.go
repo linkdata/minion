@@ -61,6 +61,303 @@ func TestNewAssistantParentageCannotPreserveStaleResult(t *testing.T) {
 	}
 }
 
+func TestReplayedAssistantFromEarlierCallCannotAssessStoppedTask(t *testing.T) {
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
+	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"fresh"}}`
+	const stop = `{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped"}`
+	for _, tc := range []struct {
+		name, after string
+		wantSuccess bool
+	}{
+		{"replay", old, false},
+		{"updated historical root", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"late text"}]}}`, false},
+		{"fresh root", old + "\n" + fresh, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := jsonlOutput{}
+			writeChunks(t, &first, old+"\n"+successfulResult+"\n")
+			first.finish()
+			if first.err != nil {
+				t.Fatal(first.err)
+			}
+			o := jsonlOutput{progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+				progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+			writeChunks(t, &o, stop+"\n"+tc.after+"\n"+successfulResult+"\n")
+			o.finish()
+			if (o.err == nil) != tc.wantSuccess || o.completed != tc.wantSuccess {
+				t.Fatalf("stopped task assessment: completed=%t error=%v", o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestRootStreamMustStartAfterTaskStopToAssessIt(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root-A"}}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root-A","content":[{"type":"text","text":"assessment"}]}}`
+	const stop = `{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped"}`
+	for _, tc := range []struct {
+		name, events string
+		wantSuccess  bool
+	}{
+		{"start before stop", start + "\n" + stop + "\n" + full, false},
+		{"replayed start after stop", start + "\n" + stop + "\n" + start + "\n" + full, false},
+		{"start after stop", stop + "\n" + start + "\n" + full, true},
+		{"full response without stream", stop + "\n" + full, true},
+	} {
+		for _, progress := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/progress=%t", tc.name, progress), func(t *testing.T) {
+				o := jsonlOutput{}
+				if progress {
+					o.onProgress = func() {}
+				}
+				writeChunks(t, &o, tc.events+"\n"+successfulResult+"\n")
+				o.finish()
+				if (o.err == nil) != tc.wantSuccess || o.completed != tc.wantSuccess {
+					t.Fatalf("stream/stop ordering: completed=%t stopped=%t error=%v", o.completed, o.stopped, o.err)
+				}
+			})
+		}
+	}
+}
+
+func TestNoCallbackResumedStreamStartCannotAssessLaterStop(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root-A"}}}`
+	const stop = `{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped"}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root-A"}}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, start+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil || !first.completed {
+		t.Fatalf("first call: completed=%t error=%v", first.completed, first.err)
+	}
+	second := jsonlOutput{progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &second, stop+"\n"+full+"\n"+successfulResult+"\n")
+	second.finish()
+	if second.err == nil || second.completed || !second.stopped {
+		t.Fatalf("resumed old stream assessed stop: completed=%t stopped=%t error=%v", second.completed, second.stopped, second.err)
+	}
+}
+
+func TestUntrackedRootStreamStartCannotAssessStoppedTask(t *testing.T) {
+	const stop = `{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped"}`
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root-A"}}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root-A"}}`
+	o := jsonlOutput{progressEntryLimit: 1}
+	writeChunks(t, &o, stop+"\n"+start+"\n"+full+"\n"+successfulResult+"\n")
+	o.finish()
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || o.completed || !o.stopped {
+		t.Fatalf("untracked start assessed stopped task: completed=%t stopped=%t error=%v", o.completed, o.stopped, o.err)
+	}
+}
+
+func TestNewAssistantContentAfterResultRequiresAnotherResult(t *testing.T) {
+	for _, tc := range []struct{ name, parent string }{
+		{"root", `null`},
+		{"helper", `"delegate"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := `{"type":"assistant","parent_tool_use_id":` + tc.parent + `,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`
+			changed := `{"type":"assistant","parent_tool_use_id":` + tc.parent + `,"message":{"id":"A","content":[{"type":"text","text":"AB"}]}}`
+			o := jsonlOutput{}
+			writeChunks(t, &o, numberResultEvents(first+"\n"+successfulResult+"\n"+changed)+"\n")
+			if o.err != nil || o.completed || o.result.Answer != "" {
+				t.Fatalf("new content kept old result: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+			}
+			writeChunks(t, &o, strings.TrimSuffix(successfulResult, "}")+`,"result_index":1}`+"\n")
+			o.finish()
+			if o.err != nil || !o.completed || o.result.Answer != "final answer" {
+				t.Fatalf("later result did not assess new content: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+			}
+		})
+	}
+}
+
+func TestEarlierAssistantAddedContentInvalidatesCurrentResult(t *testing.T) {
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"before"}]}}`
+	const changed = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"after"}]}}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, old+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	second := jsonlOutput{progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &second, successfulResult+"\n"+changed+"\n")
+	second.finish()
+	if second.err == nil || second.completed || second.result.Answer != "" {
+		t.Fatalf("added historical content left stale answer: completed=%t answer=%q error=%v", second.completed, second.result.Answer, second.err)
+	}
+}
+
+func TestEarlierAssistantEmptyAndReorderedContentAreReplays(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, later string
+	}{
+		{"empty list", `{"id":"old"}`, `{"id":"old","content":[]}`},
+		{"empty object", `{"id":"old"}`, `{"id":"old","content":{}}`},
+		{"empty string", `{"id":"old"}`, `{"id":"old","content":""}`},
+		{"reordered keys", `{"id":"old","content":[{"type":"tool_use","id":"tool","input":{"a":1,"b":2}}]}`,
+			`{"id":"old","content":[{"id":"tool","input":{"b":2,"a":1},"type":"tool_use"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := jsonlOutput{}
+			writeChunks(t, &first, `{"type":"assistant","parent_tool_use_id":null,"message":`+tc.first+`}`+"\n"+successfulResult+"\n")
+			first.finish()
+			if first.err != nil {
+				t.Fatal(first.err)
+			}
+			second := jsonlOutput{progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+				progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+			writeChunks(t, &second, successfulResult+"\n"+`{"type":"assistant","parent_tool_use_id":null,"message":`+tc.later+`}`+"\n")
+			second.finish()
+			if second.err != nil || !second.completed || second.result.Answer != "final answer" {
+				t.Fatalf("semantic replay revoked result: completed=%t answer=%q error=%v", second.completed, second.result.Answer, second.err)
+			}
+		})
+	}
+}
+
+func TestNonadjacentEarlierAssistantContentReplayIsIgnored(t *testing.T) {
+	const firstFrame = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"A"}]}}`
+	const laterFrame = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"AB"}]}}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, firstFrame+"\n"+laterFrame+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	second := jsonlOutput{progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &second, successfulResult+"\n"+firstFrame+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.result.Answer != "final answer" {
+		t.Fatalf("nonadjacent content replay revoked result: completed=%t answer=%q error=%v", second.completed, second.result.Answer, second.err)
+	}
+}
+
+func TestEarlierAssistantIDMakesResumedStreamStartAReplay(t *testing.T) {
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"old output"}}}`
+	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, old+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil {
+		t.Fatal(first.err)
+	}
+	second := jsonlOutput{progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &second, successfulResult+"\n"+start+"\n"+delta+"\n"+stop+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.result.Answer != "final answer" {
+		t.Fatalf("resumed stream replay revoked result: completed=%t answer=%q error=%v", second.completed, second.result.Answer, second.err)
+	}
+}
+
+func TestEarlierAssistantCounterIncreaseInvalidatesCurrentResult(t *testing.T) {
+	first := jsonlOutput{}
+	writeChunks(t, &first, assistantUsageEvent("old", 3, 5, 7, 2)+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil || !first.hasCumulative {
+		t.Fatalf("first usage baseline: error=%v cumulative=%t", first.err, first.hasCumulative)
+	}
+	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":14}}}`
+	writeChunks(t, &second, cumulative+"\n"+assistantUsageEvent("old", 3, 5, 7, 5)+"\n")
+	second.finish()
+	if second.err == nil || second.completed || second.result.Tokens.Output < 3 || second.result.UsageComplete {
+		t.Fatalf("late counter increase left stale result or lost known usage: result=%+v error=%v", second.result, second.err)
+	}
+}
+
+func TestExactEarlierAssistantReplayAfterCurrentResultIsIgnored(t *testing.T) {
+	old := assistantUsageEvent("old", 3, 5, 7, 2)
+	first := jsonlOutput{}
+	writeChunks(t, &first, old+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil || !first.hasCumulative {
+		t.Fatalf("first usage baseline: error=%v cumulative=%t", first.err, first.hasCumulative)
+	}
+	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":14}}}`
+	writeChunks(t, &second, cumulative+"\n"+old+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.result.Answer != "done" ||
+		second.result.Tokens != (usage.Tokens{Output: 3}) || !second.result.UsageComplete {
+		t.Fatalf("exact replay revoked or inflated current result: result=%+v completed=%t error=%v", second.result, second.completed, second.err)
+	}
+}
+
+func TestEarlierAssistantHigherCountersUseOnlyIncrease(t *testing.T) {
+	first := jsonlOutput{}
+	writeChunks(t, &first, assistantUsageEvent("old", 3, 5, 7, 2)+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil || !first.hasCumulative {
+		t.Fatalf("first usage baseline: error=%v cumulative=%t", first.err, first.hasCumulative)
+	}
+	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":14}}}`
+	writeChunks(t, &second, assistantUsageEvent("old", 3, 5, 7, 5)+"\n"+cumulative+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.result.Tokens != (usage.Tokens{Output: 3}) || !second.result.UsageComplete {
+		t.Fatalf("historical counters inflated current usage: result=%+v completed=%t error=%v", second.result, second.completed, second.err)
+	}
+}
+
+func TestAssistantReplayHistoryLimitFailsClosed(t *testing.T) {
+	o := jsonlOutput{progressEntryLimit: 1}
+	writeChunks(t, &o, `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"one"}}`+"\n"+
+		`{"type":"assistant","parent_tool_use_id":null,"message":{"id":"two"}}`+"\n"+successfulResult+"\n")
+	o.finish()
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || o.completed || o.result.Answer != "" {
+		t.Fatalf("assistant history limit did not stop result: completed=%t answer=%q error=%v", o.completed, o.result.Answer, o.err)
+	}
+}
+
+func TestForeignAndAmbientAssistantsCannotChangeResultOrStopState(t *testing.T) {
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"done"}`
+	const stop = `{"type":"system","subtype":"task_notification","session_id":"native-id","uuid":"stop-1","status":"stopped"}`
+	for _, tc := range []struct{ name, field string }{
+		{"foreign", `"session_id":"foreign"`},
+		{"ambient", `"session_id":"native-id","ambient":true`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assistant := `{"type":"assistant",` + tc.field + `,"parent_tool_use_id":null,"message":{"id":"unrelated"}}`
+			before := jsonlOutput{sessionID: "native-id"}
+			writeChunks(t, &before, `{"type":"system","subtype":"init","session_id":"native-id"}`+"\n"+result+"\n"+assistant+"\n")
+			before.finish()
+			if before.err != nil || !before.completed || before.result.Answer != "done" {
+				t.Fatalf("unrelated assistant revoked result: completed=%t answer=%q error=%v", before.completed, before.result.Answer, before.err)
+			}
+			after := jsonlOutput{sessionID: "native-id"}
+			writeChunks(t, &after, `{"type":"system","subtype":"init","session_id":"native-id"}`+"\n"+stop+"\n"+assistant+"\n"+result+"\n")
+			after.finish()
+			if after.err == nil || after.completed || !after.stopped {
+				t.Fatalf("unrelated assistant assessed stop: completed=%t stopped=%t error=%v", after.completed, after.stopped, after.err)
+			}
+		})
+	}
+}
+
+func TestCurrentSessionHelperAssistantStillContributesUsage(t *testing.T) {
+	o := jsonlOutput{sessionID: "native-id"}
+	helper := strings.Replace(assistantUsageEvent("helper", 1, 0, 0, 2),
+		`"parent_tool_use_id":null`, `"parent_tool_use_id":"delegate","session_id":"native-id","agent_id":"agent-1"`, 1)
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":1,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}`
+	writeChunks(t, &o, `{"type":"system","subtype":"init","session_id":"native-id"}`+"\n"+helper+"\n"+result+"\n")
+	o.finish()
+	if o.err != nil || o.assistantTokens != (usage.Tokens{Input: 1, Output: 2}) ||
+		o.result.Tokens != (usage.Tokens{Input: 1, Output: 2}) || !o.result.UsageComplete {
+		t.Fatalf("current-session helper usage lost: assistant=%+v result=%+v error=%v", o.assistantTokens, o.result, o.err)
+	}
+}
+
 func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 	start := func(id, fields string) string {
 		return fmt.Sprintf(`{"type":"stream_event"%s,"event":{"type":"message_start","message":{"id":%q}}}`, fields, id)
@@ -108,7 +405,8 @@ func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 				if progress {
 					o.onProgress = func() {}
 				} else {
-					o.progressByteLimit, o.progressEntryLimit = 1, 1
+					// Assistant IDs now occupy bounded replay history without a callback.
+					o.progressByteLimit, o.progressEntryLimit = 128, 4
 				}
 				writeChunks(t, &o, numberResultEvents(data))
 				o.finish()

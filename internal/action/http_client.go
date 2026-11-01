@@ -187,11 +187,20 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	defer cancelAction(context.Canceled)
 	inactivity := startInactivityTimer(started, job.InactivityTimeout, cancelAction)
 	defer inactivity.stop()
-	jobRunner.executionProgress = inactivity.progress
 	startStop := sync.OnceFunc(func() { shortenControl(assignment.StopGrace) })
 	stopOnAction := context.AfterFunc(actionCtx, startStop)
 	defer stopOnAction()
 	checkpoints.action = actionCtx
+	if err := context.Cause(actionCtx); err != nil {
+		startStop()
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = errors.Join(monitor.ErrTerminalJob, err)
+		}
+		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		clearCredentials()
+		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
+	}
+	jobRunner.executionProgress = inactivity.progress
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)
 	if err != nil {
@@ -275,8 +284,11 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	var runErr error
 	// Preparation consumes the accepted runtime.
 	job.RuntimeBudget = time.Until(expires)
+	inactivity.expire()
 	if job.RuntimeBudget <= 0 {
 		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	} else if actionCtx.Err() != nil {
+		runErr = context.Cause(actionCtx)
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}

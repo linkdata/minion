@@ -128,7 +128,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var failureTimer *time.Timer
-	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, onProgress: s.OnProgress, progressSeen: s.progressSeen, taskProgress: s.taskProgress, progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, onProgress: s.OnProgress, progressSeen: s.progressSeen, assistantHistory: s.assistantHistory, taskProgress: s.taskProgress, progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 		// Let the CLI flush a final result and cumulative accounting, then stop
 		// a managed retry watchdog without renewing the action deadline.
 		failureTimer = time.AfterFunc(time.Second, cancel)
@@ -172,6 +172,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	output.finish()
 	s.progressSeen = output.progressSeen
+	s.assistantHistory = output.assistantHistory
 	s.taskProgress = output.taskProgress
 	s.progressBytes, s.progressEntries = output.progressBytes, output.progressEntries
 	if ceilingMatched {

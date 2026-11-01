@@ -1,8 +1,10 @@
 package action
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -22,6 +24,34 @@ type httpInactivityFixture struct {
 	outcomeEntered chan struct{}
 	releaseOutcome func()
 	done           chan error
+}
+
+type delayedHTTPDeadlineContext struct {
+	context.Context
+	ready <-chan struct{}
+	once  sync.Once
+	delay time.Duration
+}
+
+func (c *delayedHTTPDeadlineContext) Deadline() (time.Time, bool) {
+	select {
+	case <-c.ready:
+		c.once.Do(func() { time.Sleep(c.delay) })
+	default:
+	}
+	return c.Context.Deadline()
+}
+
+type httpPullCloseSignal struct {
+	io.ReadCloser
+	once  sync.Once
+	ready chan<- struct{}
+}
+
+func (b *httpPullCloseSignal) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { close(b.ready) })
+	return err
 }
 
 func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model func(context.Context, modelRun) (aicli.Result, error)) *httpInactivityFixture {
@@ -94,6 +124,60 @@ func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
 		failure == nil || !failure.Terminal || failure.Deadline || !failure.RequestTransport {
 		t.Fatalf("overdue admission failure lost terminal inactivity: error=%v failure=%+v", err, failure)
 	}
+}
+
+func TestRunHTTPExpiredAssignmentSkipsWatchAndModel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		job.RuntimeBudget = time.Minute
+		job.InactivityTimeout = 5 * time.Second
+		binding := httpJobBinding(job)
+		pullClosed := make(chan struct{})
+		ctx := &delayedHTTPDeadlineContext{Context: t.Context(), ready: pullClosed, delay: 6 * time.Second}
+		var watchCalls, modelCalls int
+		var outcome httpOutcome
+		respond := func(value any) (*http.Response, error) {
+			data, err := httpEncode(value, httpJobBytes)
+			if err != nil {
+				return nil, err
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(data))}, nil
+		}
+		client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/next":
+				response, err := respond(httpAssignment{Job: job, StopGrace: httpControlTimeout})
+				if err == nil {
+					response.Body = &httpPullCloseSignal{ReadCloser: response.Body, ready: pullClosed}
+				}
+				return response, err
+			case "/cancel":
+				watchCalls++
+				return nil, errors.New("overdue watch opened")
+			case "/outcome":
+				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+					return nil, err
+				}
+				return respond(httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+			default:
+				return nil, errors.New("unexpected worker request")
+			}
+		})}
+		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			modelCalls++
+			return aicli.Result{}, errors.New("overdue model started")
+		}}
+		err := RunHTTP(ctx, client, "http://worker.test", job.Identity.ExecutorID, runner)
+		if watchCalls != 0 || modelCalls != 0 {
+			t.Fatalf("overdue assignment entered watch or model: watch=%d model=%d error=%v", watchCalls, modelCalls, err)
+		}
+		if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
+			errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrRequestTransport) ||
+			outcome.Failure == nil || !outcome.Failure.Terminal || outcome.Failure.Deadline ||
+			outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown {
+			t.Fatalf("overdue assignment lost terminal inactivity: error=%v outcome=%+v", err, outcome)
+		}
+	})
 }
 
 func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {

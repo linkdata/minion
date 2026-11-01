@@ -25,6 +25,7 @@ type inactivityTimer struct {
 func startInactivityTimer(start time.Time, timeout time.Duration, cancel context.CancelCauseFunc) *inactivityTimer {
 	w := &inactivityTimer{last: start, timeout: timeout, cancel: cancel}
 	w.timer = time.AfterFunc(max(0, timeout-time.Since(start)), w.expire)
+	w.expire()
 	return w
 }
 
