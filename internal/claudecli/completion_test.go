@@ -686,7 +686,8 @@ func TestIdentifiedTaskStopReplayKeepsAssessedResult(t *testing.T) {
 		{
 			"same run with new UUID",
 			`{"type":"system","subtype":"task_notification","uuid":"stop-1","task_id":"helper","run_id":"run-1","status":"killed","summary":"helper killed"}`,
-			`{"type":"system","subtype":"task_notification","uuid":"stop-2","task_id":"helper","run_id":"run-1","status":"killed","summary":"helper killed"}`,
+			`{"type":"system","subtype":"task_notification","uuid":"stop-2","task_id":"helper","run_id":"run-1","status":"killed","summary":"helper killed"}` + "\n" +
+				`{"type":"user","isSynthetic":true,"uuid":"stop-2","message":{"content":"<task-notification><task-id>helper</task-id><status>killed</status><summary>helper killed</summary></task-notification>"}}`,
 		},
 		{
 			"UUID without task identity",

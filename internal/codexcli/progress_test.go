@@ -114,6 +114,25 @@ func TestJSONLOutputProgressRequiresNewRootWork(t *testing.T) {
 	}
 }
 
+func TestEmptyFileChangeUpdateDoesNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"patch","type":"file_change"}}`, 1},
+		{`{"type":"item.updated","item":{"id":"patch","type":"file_change","changes":[]}}`, 1},
+		{`{"type":"item.completed","item":{"id":"patch","type":"file_change","changes":[]}}`, 2},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d: progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
 func TestJSONLOutputUnidentifiedCollabToolsDoNotRenewProgress(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}

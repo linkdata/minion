@@ -444,6 +444,33 @@ func TestSharedCompletionUUIDKeepsDistinctRunlessTaskPending(t *testing.T) {
 	}
 }
 
+func TestSharedTaskNoticeUUIDDoesNotRenewTaggedFinish(t *testing.T) {
+	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
+	for _, status := range []string{"completed", "failed", "stopped", "killed"} {
+		for _, array := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/array=%t", status, array), func(t *testing.T) {
+				progress := 0
+				o := jsonlOutput{onProgress: func() { progress++ }}
+				notice := fmt.Sprintf("<task-notification><task-id>helper</task-id><status>%s</status></task-notification>", status)
+				content := fmt.Sprintf("%q", notice)
+				if array {
+					content = fmt.Sprintf(`[{"type":"text","text":%q}]`, notice)
+				}
+				synthetic := `{"type":"user","isSynthetic":true,"uuid":"notice-1","message":{"content":` + content + `}}`
+				tagged := fmt.Sprintf(`{"type":"system","subtype":"task_notification","uuid":"notice-1","task_id":"helper","run_id":"run-1","status":%q}`, status)
+				writeChunks(t, &o, started+"\n"+synthetic+"\n")
+				if o.err != nil || progress != 1 || o.pending != 1 {
+					t.Fatalf("synthetic notice: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+				}
+				writeChunks(t, &o, tagged+"\n")
+				if o.err != nil || progress != 1 || o.pending != 0 {
+					t.Fatalf("replayed tagged finish: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+				}
+			})
+		}
+	}
+}
+
 func TestAmbiguousSyntheticCompletionReplayKeepsRunlessTaskPending(t *testing.T) {
 	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
 	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`

@@ -336,7 +336,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if stop && !o.acceptTaskStop(e.TaskID, e.RunID, e.UUID, e.Summary) {
 		if e.TaskID != "" && e.RunID != "" {
 			// A duplicate notice can still carry the tagged run's only finish.
-			o.recordTaskProgress(e.TaskID, e.RunID, e.Status, e.UUID)
+			o.finishTaskRun(e.TaskID, e.RunID, false)
 		}
 		return
 	}
@@ -742,6 +742,9 @@ func (o *jsonlOutput) acceptTaskStop(id, runID, uuid, summary string) bool {
 	// A later memory-pressure stop remains fatal even if an ordinary stop
 	// already used this identity.
 	if (uuidSeen || runSeen) && !(pressureStopSummary(summary) && o.taskFailure == nil) {
+		if uuid != "" && !uuidSeen && !o.rememberProgress("task_notice_uuid:"+uuid) {
+			return false
+		}
 		if uuidSeen && !runSeen && runKey != "" {
 			// Link the native run to the shared UUID for later replay suppression.
 			o.rememberProgress(runKey)
@@ -1112,13 +1115,13 @@ func (o *jsonlOutput) observeTaskRun(id, runID, identity string, credit bool) {
 	o.updateTaskPending()
 }
 
-func (o *jsonlOutput) finishTaskRun(id, runID string) {
+func (o *jsonlOutput) finishTaskRun(id, runID string, credit bool) {
 	key := taskRunKey(id, runID)
 	if o.progressSeen["task_finish:"+key] {
 		return
 	}
 	o.ensureTaskRuns()
-	if o.onProgress != nil {
+	if credit && o.onProgress != nil {
 		o.recordUniqueProgress("task_finish:" + key)
 	} else {
 		o.rememberProgress("task_finish:" + key)
@@ -1153,6 +1156,7 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 			return
 		}
 	}
+	creditFinish := true
 	if status == "completed" || status == "failed" {
 		// A task ID and status cannot distinguish a new notice from replay.
 		replay := runID != "" && o.progressSeen["task_finish:"+taskRunKey(id, runID)]
@@ -1166,6 +1170,7 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 			}
 			replay = replay || seenNotice
 		}
+		creditFinish = !replay
 		if o.completed && !replay {
 			o.completed, o.result.Answer = false, ""
 		}
@@ -1225,7 +1230,7 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 	if status == "started" {
 		o.observeTaskRun(id, runID, "task_start:", true)
 	} else {
-		o.finishTaskRun(id, runID)
+		o.finishTaskRun(id, runID, creditFinish)
 	}
 }
 

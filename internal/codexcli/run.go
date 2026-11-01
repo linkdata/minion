@@ -711,6 +711,9 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 			return
 		}
 	}
+	if !nonemptyProgressJSON(visible.Changes) {
+		visible.Changes = nil // An empty change list is not new tool output.
+	}
 	var ok bool
 	if visible.Command, ok = normalizeProgressJSON(visible.Command); !ok {
 		return
