@@ -2944,7 +2944,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 	}
 	var access state.AccessDisposition
 	var accessAttemptID string
-	outcome := "failed"
+	var outcome string
 	err = store.WithLock(func() error {
 		processed, hadProcessed := store.Data.Processed[job.ID]
 		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
@@ -3000,7 +3000,11 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 				job.ID, access.Repository, access.SourceURL, access.SourceKey, accessAttemptID,
 				access.Reason, access.ReplyState, access.OperatorAction)
 		}
-		m.logf("stop retrying failed %s from %s outcome=%s", job.Command.Action, itemLocation(job.Source), outcome)
+		if outcome == "" {
+			m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
+		} else {
+			m.logf("stop retrying failed %s from %s outcome=%s", job.Command.Action, itemLocation(job.Source), outcome)
+		}
 		if accepted != nil {
 			if clearErr := store.ClearAcceptedResult(); clearErr != nil {
 				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
