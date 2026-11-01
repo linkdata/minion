@@ -16,7 +16,8 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestRunHTTPCollectsCodexUsageAndCleansRolloutAfterDeadline(t *testing.T) {
+func TestRunHTTPCollectsCodexUsageAfterParentDeadlineSignal(t *testing.T) {
+	// The local action deadline and grace bounds are covered separately in http_client_test.go.
 	installActionTestSkills(t)
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
@@ -65,7 +66,11 @@ exec sleep 30
 				t.Error(err)
 			}
 			if kind == "after" {
-				after <- call.Checkpoint.Call
+				select {
+				case after <- call.Checkpoint.Call:
+				default:
+					t.Error("duplicate AfterCall")
+				}
 			}
 			httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: call.Sequence})
 		case "status":
@@ -79,7 +84,11 @@ exec sleep 30
 			if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
 				t.Error(err)
 			}
-			outcomes <- outcome
+			select {
+			case outcomes <- outcome:
+			default:
+				t.Error("duplicate Outcome")
+			}
 			httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: outcome.Sequence})
 		default:
 			t.Errorf("unexpected worker request: %s", r.URL.Path)
