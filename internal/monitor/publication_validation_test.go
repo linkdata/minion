@@ -375,13 +375,18 @@ func TestSelectedTerminalResultBeforeDeadlineSurvivesSlowInvitationCheck(t *test
 	}
 }
 
-func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
-	for _, earlyParentDeadline := range []bool{false, true} {
-		name := "user cancellation"
-		if earlyParentDeadline {
-			name = "earlier parent deadline"
-		}
-		t.Run(name, func(t *testing.T) {
+func TestSelectedResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		earlyParentDeadline bool
+		result              error
+	}{
+		{name: "user cancellation, nil result"},
+		{name: "user cancellation, canceled result", result: context.Canceled},
+		{name: "earlier parent deadline, nil result", earlyParentDeadline: true},
+		{name: "earlier parent deadline, canceled result", earlyParentDeadline: true, result: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m, store, job, gh, _ := assignmentValidationFixture(t)
 				now := time.Now().UTC()
@@ -394,7 +399,7 @@ func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
 				}
 				parent := t.Context()
 				var stop context.CancelFunc
-				if earlyParentDeadline {
+				if test.earlyParentDeadline {
 					parent, stop = context.WithDeadline(parent, now.Add(500*time.Millisecond))
 				} else {
 					parent, stop = context.WithCancel(parent)
@@ -425,12 +430,12 @@ func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
 					}); err != nil {
 						return err
 					}
-					if earlyParentDeadline {
+					if test.earlyParentDeadline {
 						time.Sleep(600 * time.Millisecond)
 					} else {
 						stop()
 					}
-					return nil // Cleanup returned success after the stop was already requested.
+					return test.result // Cleanup returned after the stop was already requested.
 				}
 				err := m.runSelectedWithControls(parent, store, job, "", nil, run,
 					func(err error) error { return m.completeSelected(parent, store, job, now, err) })

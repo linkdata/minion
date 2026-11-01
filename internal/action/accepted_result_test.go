@@ -362,20 +362,33 @@ func TestSelectedCheckpointRefusalWithoutMarkerRemainsJobFailure(t *testing.T) {
 }
 
 func TestSelectedCanceledOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T) {
-	f, store, _ := selectedHTTPResultFixture(t, nil)
-	outcome := completeHTTPResult(t, f)
-	outcome.Result.Diagnostics = []Diagnostic{{Code: "canceled", Message: "worker finished after cancellation"}}
-	f.tx.stopBudget()
-	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
-	if ack.Failure == nil {
-		t.Fatal("canceled result received a success ACK")
-	}
-	got := f.result(t)
-	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("canceled result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
-	}
-	if saved, err := store.HasAcceptedResult(); err != nil || saved {
-		t.Fatalf("canceled result was saved: saved=%t error=%v", saved, err)
+	for _, parentCanceled := range []bool{false, true} {
+		t.Run(fmt.Sprint(parentCanceled), func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixture(t, nil)
+			outcome := completeHTTPResult(t, f)
+			outcome.Result.Diagnostics = []Diagnostic{{Code: "canceled", Message: "worker finished after cancellation"}}
+			if parentCanceled {
+				ctx, cancel := context.WithCancel(t.Context())
+				f.tx.sink.(*executionCheckpoints).assignmentContext = ctx
+				cancel()
+			}
+			f.tx.stopBudget()
+			ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+			if ack.Failure == nil {
+				t.Fatal("canceled result received a success ACK")
+			}
+			got := f.result(t)
+			if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("canceled result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
+			}
+			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+			if errors.Is(final, monitor.ErrExecutionOutcomeUnknown) != !parentCanceled {
+				t.Fatalf("parent-canceled receipt classification: parentCanceled=%t error=%v", parentCanceled, final)
+			}
+			if saved, err := store.HasAcceptedResult(); err != nil || saved {
+				t.Fatalf("canceled result was saved: saved=%t error=%v", saved, err)
+			}
+		})
 	}
 }
 
