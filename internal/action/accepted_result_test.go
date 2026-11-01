@@ -176,11 +176,11 @@ func completeHTTPResult(t *testing.T, f *httpServerTest) httpOutcome {
 }
 
 func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
-	for _, complete := range []bool{false, true} {
-		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+	for _, receiptAcknowledged := range []bool{false, true} {
+		t.Run(fmt.Sprint(receiptAcknowledged), func(t *testing.T) {
 			f, store, _ := selectedHTTPResultFixture(t, nil)
 			var outcome httpOutcome
-			if complete {
+			if receiptAcknowledged {
 				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 				paid := f.call(2)
 				paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7} // The stopped model may have incomplete usage.
@@ -197,9 +197,9 @@ func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
 			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
 			var claim interface{ ExecutorInactivity() bool }
 			if !errors.As(final, &claim) || !claim.ExecutorInactivity() ||
-				errors.Is(final, monitor.ErrExecutionOutcomeUnknown) == complete ||
-				errors.Is(final, monitor.ErrTerminalJob) == complete {
-				t.Fatalf("acknowledged call=%t changed inactivity classification: %v", complete, final)
+				errors.Is(final, monitor.ErrExecutionOutcomeUnknown) == receiptAcknowledged ||
+				errors.Is(final, monitor.ErrTerminalJob) == receiptAcknowledged {
+				t.Fatalf("acknowledged call=%t changed inactivity classification: %v", receiptAcknowledged, final)
 			}
 			if present, err := store.HasAcceptedResult(); err != nil || present {
 				t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
