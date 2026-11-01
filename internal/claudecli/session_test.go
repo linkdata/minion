@@ -412,6 +412,38 @@ esac
 	}
 }
 
+func TestSessionHistoricalAssistantWithoutCountersDoesNotRebill(t *testing.T) {
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
+	const revisedOld = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"continued"}]}}`
+	const oldUsage = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}`
+	const first = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":100,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	const second = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":120,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	const third = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":140,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	fakeExecutable(t, "claude", `n=0
+[ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+case "$n" in
+1) printf '%s\n' '`+old+`' '`+first+`' ;;
+2) printf '%s\n' '`+revisedOld+`' '`+oldUsage+`' '`+second+`' ;;
+3) printf '%s\n' '`+third+`' ;;
+esac
+`)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	source := t.TempDir()
+	for call, want := range []usage.Tokens{{Input: 100}, {Input: 20}, {Input: 20}} {
+		result, err := session.Run(t.Context(), source, "task", false, "", config.ClaudeConfig{})
+		if err != nil || result.Tokens != want || !result.UsageComplete || session.baseline.Input != 100+20*int64(call) {
+			t.Fatalf("call %d rebilled historical counters: result=%+v baseline=%+v error=%v", call+1, result, session.baseline, err)
+		}
+	}
+}
+
 func TestSessionCleansNativeScratchBeforeResume(t *testing.T) {
 	fakeExecutable(t, "claude", `cat >/dev/null
 [ -d "$CLAUDE_CODE_TMPDIR" ] && [ ! -L "$CLAUDE_CODE_TMPDIR" ] || exit 4

@@ -310,6 +310,49 @@ func TestEarlierAssistantHigherCountersUseOnlyIncrease(t *testing.T) {
 	}
 }
 
+func TestHistoricalAssistantWithoutCountersNeedsAggregateForExactUsage(t *testing.T) {
+	first := jsonlOutput{}
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
+	const initial = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":100,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	writeChunks(t, &first, old+"\n"+initial+"\n")
+	first.finish()
+	if first.err != nil || !first.hasCumulative {
+		t.Fatalf("first call lacked a known baseline: cumulative=%t error=%v", first.hasCumulative, first.err)
+	}
+	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	const fallback = `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}`
+	writeChunks(t, &second, assistantUsageEvent("old", 100, 0, 0, 0)+"\n"+
+		assistantUsageEvent("old", 105, 0, 0, 0)+"\n"+fallback+"\n")
+	second.finish()
+	if second.err != nil || second.result.Tokens != (usage.Tokens{Input: 20}) ||
+		second.assistantTokens != (usage.Tokens{Input: 5}) || second.result.UsageComplete || second.hasCumulative {
+		t.Fatalf("historical counters misattributed: assistant=%+v result=%+v cumulative=%t error=%v",
+			second.assistantTokens, second.result, second.hasCumulative, second.err)
+	}
+}
+
+func TestLateFirstHistoricalAssistantCountersDoNotRevokeCoveredResult(t *testing.T) {
+	first := jsonlOutput{}
+	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
+	const initial = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":100,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	writeChunks(t, &first, old+"\n"+initial+"\n")
+	first.finish()
+	if first.err != nil || !first.hasCumulative {
+		t.Fatalf("first call lacked a known baseline: cumulative=%t error=%v", first.hasCumulative, first.err)
+	}
+	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":120,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}}`
+	writeChunks(t, &second, cumulative+"\n"+assistantUsageEvent("old", 100, 0, 0, 0)+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.result.Answer != "done" ||
+		second.result.Tokens != (usage.Tokens{Input: 20}) || !second.result.UsageComplete || !second.hasCumulative {
+		t.Fatalf("late historical floor revoked covered result: result=%+v completed=%t cumulative=%t error=%v",
+			second.result, second.completed, second.hasCumulative, second.err)
+	}
+}
+
 func TestAssistantReplayHistoryLimitFailsClosed(t *testing.T) {
 	o := jsonlOutput{progressEntryLimit: 1}
 	writeChunks(t, &o, `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"one"}}`+"\n"+

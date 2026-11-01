@@ -108,6 +108,41 @@ func TestReviewSnapshotFixCreditsCopiedFilesAndStopsOnCancellation(t *testing.T)
 	}
 }
 
+func TestReviewSnapshotFixCreditsCompletedRepositoryImport(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Source.Files = []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}}
+	attachRepository(t, &job)
+	index, source := offlineIndexFixture(t, job.Source.Files)
+	workRoot := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	progress := 0
+	snapshot, err := freezeReviewSnapshot(ctx, workRoot, job, source, "", index, func() {
+		progress++
+		if progress != 2 {
+			return
+		}
+		paths, globErr := filepath.Glob(filepath.Join(workRoot, "minion-review-*"))
+		if globErr != nil || len(paths) != 1 {
+			t.Fatalf("frozen repository path: %v, %v", paths, globErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(paths[0], ".git", "HEAD")); statErr != nil {
+			t.Fatalf("repository import was not complete at progress callback: %v", statErr)
+		}
+		cancel()
+	})
+	if snapshot != nil {
+		t.Cleanup(func() {
+			if err := snapshot.close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if !errors.Is(err, context.Canceled) || progress != 2 {
+		t.Fatalf("frozen import cancellation was not observed: progress=%d error=%v", progress, err)
+	}
+}
+
 func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 	job := testJob(command.Fix)
 	unchanged := job.Source.Files[0]

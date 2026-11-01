@@ -45,6 +45,12 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			if s.repository, err = gitwork.MaterializeRepository(ctx, s.source, job.Source); err != nil {
 				return err
 			}
+			if progress != nil {
+				progress()
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		} else {
 			s.source = source
 		}

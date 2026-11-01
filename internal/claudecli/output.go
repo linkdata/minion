@@ -121,10 +121,11 @@ func (e event) tokens() (usage.Tokens, bool) {
 }
 
 type messageUsage struct {
-	tokens     usage.Tokens
-	prior      usage.Tokens
-	generation int64
-	root       bool
+	tokens       usage.Tokens
+	prior        usage.Tokens
+	priorMissing bool
+	generation   int64
+	root         bool
 }
 
 type assistantSnapshot struct {
@@ -1346,6 +1347,15 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	if valid {
 		tokens, valid = rawUsage.tokens()
 	}
+	unknownPrior := historical && !prior.hasTokens
+	firstHistoricalCounters := valid && (unknownPrior && !seen || seen && old.priorMissing)
+	if firstHistoricalCounters {
+		// The first counters for an old ID may include work before this call.
+		// Only later increases are attributable without a cumulative result.
+		priorTokens = tokens
+		old.prior = tokens
+		old.priorMissing = false
+	}
 	contentHash, hasContent := assistantContentHash(message.Content)
 	contentKey := ""
 	newContent := false
@@ -1377,6 +1387,14 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		o.assistantHistory = make(map[string]assistantSnapshot)
 	}
 	o.assistantHistory[message.ID] = prior
+	if firstHistoricalCounters && !newContent {
+		// A newly revealed absolute floor is not evidence of current work.
+		// Preserve a covered result and charge only future increases.
+		if seen {
+			o.assistantUsage[message.ID] = old
+		}
+		return
+	}
 	if o.baselineUnknown || !seen {
 		o.hasCumulative = false
 	}
@@ -1384,7 +1402,8 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		if o.assistantUsage == nil {
 			o.assistantUsage = make(map[string]messageUsage)
 		}
-		old = messageUsage{prior: priorTokens, generation: o.aggregateGeneration, root: root}
+		old = messageUsage{prior: priorTokens, priorMissing: unknownPrior && !valid,
+			generation: o.aggregateGeneration, root: root}
 		// Remember IDs even before usable counters arrive. A later block from
 		// an already covered message must not become a new billable call.
 		o.assistantUsage[message.ID] = old

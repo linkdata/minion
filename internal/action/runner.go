@@ -520,27 +520,24 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			}
 			record := attemptRecord{Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role,
 				Round: request.round, ReviewPhase: request.reviewPhase, Provider: request.provider, Model: request.model}
-			request.onInput = func(input aicli.PreparedInput) {
-				if configured.eventSink == nil {
-					return
-				}
-				text, unavailable := preparedInputText(input, configured.secretValues()...)
-				if unavailable != "" {
-					text = unavailableInputText(unavailable)
-				}
-				inputRecord := record
-				inputRecord.Kind, inputRecord.Text, inputRecord.Agent = attemptRecordInput, text, input.NativeID
-				inputRecord.EventSource = request.provider + ".input.prepared"
-				inputRecord.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
-				configured.eventSink(inputRecord)
-				if unavailable != "" {
-					// Keep the call's prepared-input gap visible and withhold coverage.
-					gap := record
-					gap.Kind, gap.EventSource, gap.ObservedAt = attemptRecordDiscussion, request.provider+".input.unavailable", inputRecord.ObservedAt
-					configured.eventSink(gap)
-				}
-			}
 			if configured.eventSink != nil {
+				request.onInput = func(input aicli.PreparedInput) {
+					text, unavailable := preparedInputText(input, configured.secretValues()...)
+					if unavailable != "" {
+						text = unavailableInputText(unavailable)
+					}
+					inputRecord := record
+					inputRecord.Kind, inputRecord.Text, inputRecord.Agent = attemptRecordInput, text, input.NativeID
+					inputRecord.EventSource = request.provider + ".input.prepared"
+					inputRecord.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					configured.eventSink(inputRecord)
+					if unavailable != "" {
+						// Keep the call's prepared-input gap visible and withhold coverage.
+						gap := record
+						gap.Kind, gap.EventSource, gap.ObservedAt = attemptRecordDiscussion, request.provider+".input.unavailable", inputRecord.ObservedAt
+						configured.eventSink(gap)
+					}
+				}
 				hasConfiguredSecret := slices.ContainsFunc(configured.secretValues(), func(secret string) bool { return secret != "" })
 				request.onEvent = func(event aicli.StreamEvent) {
 					if hasConfiguredSecret && (event.Kind == "assistant_incomplete" || event.Kind == "tool_incomplete") {

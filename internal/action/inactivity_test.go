@@ -133,6 +133,9 @@ func TestRunnerRunEnforcesInactivityAfterLateSuccess(t *testing.T) {
 			if request.onProgress == nil {
 				t.Fatal("direct model has no inactivity progress callback")
 			}
+			if request.onInput != nil {
+				t.Fatal("direct model installed an unused prepared-input callback")
+			}
 			<-ctx.Done()
 			return aicli.Result{Answer: proposalJSON("Late success.", "")}, nil
 		}}
