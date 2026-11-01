@@ -1,6 +1,7 @@
 package codexcli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +25,9 @@ type Session struct {
 	// OnProgress receives process start and exit, new root output, tool activity, or attributable helper work.
 	// Stdout and rollout discovery may call it concurrently; the callback must synchronize shared state.
 	OnProgress func()
+	// PostCallContext bounds rollout observation and post-call collection.
+	// The CLI process still uses Run's action context. Nil uses that context for both.
+	PostCallContext context.Context
 
 	bound, used, reset, skillsReady   bool
 	workspace, binary, home, output   string

@@ -51,6 +51,7 @@ type Runner struct {
 	statusActivity    func()
 	executionProgress func()
 	eventSink         func(attemptRecord)
+	postCallContext   context.Context
 }
 
 // NewRemoteRunner validates each assignment's CLI after its credentials arrive.

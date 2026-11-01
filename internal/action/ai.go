@@ -95,8 +95,9 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 		request.session.codex.OnEvent = request.onEvent
 		request.session.codex.OnInput = request.onInput
 		request.session.codex.OnProgress = request.onProgress
+		request.session.codex.PostCallContext = r.postCallContext
 		defer func() {
-			request.session.codex.OnEvent, request.session.codex.OnInput, request.session.codex.OnProgress = nil, nil, nil
+			request.session.codex.OnEvent, request.session.codex.OnInput, request.session.codex.OnProgress, request.session.codex.PostCallContext = nil, nil, nil, nil
 		}()
 		return request.session.codex.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	case "claude":

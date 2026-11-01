@@ -158,8 +158,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		}
 	}
 
-	// Persist sessions to recover helper/interrupted usage while the action
-	// budget is live. Cancellation can leave rollout-only counters unread.
+	// Persist sessions for helper/interrupted usage. The worker's fixed
+	// post-stop budget can still read those records after action cancellation.
 	args := []string{"exec"}
 	if s.threadID != "" {
 		args = append(args, "resume")
@@ -192,6 +192,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	args = append(args, "-")
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	postCallCtx := ctx
+	if s.PostCallContext != nil {
+		postCallCtx = s.PostCallContext
+	}
 	// #nosec G204 -- The resolved executable is outside the source snapshot, and arguments do not pass through a shell.
 	cmd := exec.CommandContext(runCtx, realBinary, args...)
 	cmd.Args[0] = "codex"
@@ -251,7 +255,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			}
 			emit(event)
 		}
-		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
+		activity = newRolloutActivity(postCallCtx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
 		activity.rootProgressClosed = &output.progressClosed
 		activity.stopRun = cancelRun
 		if s.threadID != "" {
@@ -329,16 +333,16 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		clean = false
 	}
 	var childError error
-	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(ctx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly, output.spawns)
+	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(postCallCtx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly, output.spawns)
 	rootID := cmp.Or(output.expectedID, output.threadID)
-	newPaths, scanErr := rolloutPaths(ctx, codexHome, started)
+	newPaths, scanErr := rolloutPaths(postCallCtx, codexHome, started)
 	if scanErr != nil {
 		s.rolloutDiscoveryErr = errors.Join(s.rolloutDiscoveryErr, fmt.Errorf("codex exec: inspect new rollouts under %q: %w", filepath.Join(codexHome, "sessions"), scanErr))
 	} else {
 		if rootID != "" {
-			s.admitRollouts(ctx, rootID, started, newPaths, s.accounting.provedSpawns)
+			s.admitRollouts(postCallCtx, rootID, started, newPaths, s.accounting.provedSpawns)
 		}
-		s.reportUnownedNewRollouts(ctx, newPaths, rootID, output.children, s.accounting.provedSpawns, output.conflictingID)
+		s.reportUnownedNewRollouts(postCallCtx, newPaths, rootID, output.children, s.accounting.provedSpawns, output.conflictingID)
 	}
 	if errors.Is(runErr, exec.ErrWaitDelay) || childError != nil {
 		s.preserveOwnedRollouts("writer completion unverified")
