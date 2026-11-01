@@ -2424,6 +2424,16 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		}
 		return "", nil
 	}
+	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
+		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {
+		return "", nil // A canceled unused reservation still refunds its attempt.
+	}
+	if assigned && !parentDeadline.IsZero() && parentDeadline.Before(job.Deadline) && !completedAt.Before(parentDeadline) {
+		return "canceled", nil // The earlier caller deadline passed before completion.
+	}
+	if errors.Is(cause, context.DeadlineExceeded) && beforeDeadlines {
+		cause = nil // The deadline signal arrived after the worker returned.
+	}
 	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled) ||
 		(errors.Is(result, context.DeadlineExceeded) && errors.Is(cause, context.DeadlineExceeded))) {
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
@@ -2434,10 +2444,6 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 			return "inactivity", nil
 		}
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
-	}
-	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
-		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {
-		return "", nil // A canceled unused reservation still refunds its attempt.
 	}
 	if stored {
 		if !errors.Is(result, ErrTerminalJob) || errors.Is(result, context.Canceled) ||

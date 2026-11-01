@@ -687,9 +687,31 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 	if err != nil || outcome != "canceled" {
 		t.Fatalf("earlier parent deadline with worker error became failure: outcome=%q err=%v", outcome, err)
 	}
-	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, nil, parentDeadline, parentDeadline)
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, nil, earlyCompletedAt, earlyCompletedAt.Add(500*time.Millisecond))
 	if err != nil || outcome != "failed" {
 		t.Fatalf("inner deadline with live action context became cancellation: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, nil, parentDeadline, parentDeadline)
+	if err != nil || outcome != "canceled" {
+		t.Fatalf("elapsed parent deadline before callback became inner failure: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, context.DeadlineExceeded, earlyCompletedAt, time.Time{})
+	if err != nil || outcome != "failed" {
+		t.Fatalf("inner deadline became a later hard-cap signal: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, context.DeadlineExceeded, earlyCompletedAt, earlyCompletedAt.Add(time.Nanosecond))
+	if err != nil || outcome != "failed" {
+		t.Fatalf("inner deadline became a later parent-deadline signal: outcome=%q err=%v", outcome, err)
+	}
+}
+
+func TestSelectedCompletedOutcomeRetainsUndeliveredCancellationRefund(t *testing.T) {
+	_, store, job, _, _ := assignmentValidationFixture(t)
+	completedAt := job.Deadline.Add(-time.Second)
+	parentDeadline := completedAt.Add(-time.Second)
+	outcome, err := selectedCompletedOutcome(store, job, context.Canceled, context.Canceled, completedAt, parentDeadline)
+	if err != nil || outcome != "" {
+		t.Fatalf("undelivered cancellation lost its refund after an earlier parent deadline: outcome=%q err=%v", outcome, err)
 	}
 }
 
@@ -708,9 +730,12 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 		{name: "hard deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, want: "inactivity"},
 		{name: "parent deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: time.Second, want: "inactivity"},
 		{name: "hard deadline at completion", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, late: true, want: "expired"},
+		{name: "earlier parent deadline before callback after hard cap", result: testExecutorInactivity{}, parentDeadlineDelta: -time.Second, late: true, want: "canceled"},
+		{name: "earlier parent deadline after terminal worker failure", result: ErrTerminalJob, parentDeadlineDelta: -time.Second, late: true, want: "canceled"},
 		{name: "original hard cap", result: testExecutorInactivity{}, late: true, want: "expired"},
 		{name: "unknown execution", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), want: "lost"},
 		{name: "late missing call receipt", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), late: true, want: "lost"},
+		{name: "late missing call receipt after parent deadline", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), parentDeadlineDelta: -time.Second, late: true, want: "lost"},
 		{name: "parent checkpoint failure", result: errors.Join(ErrTerminalJob, testExecutorInactivity{}), want: "failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
