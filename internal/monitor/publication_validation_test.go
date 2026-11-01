@@ -674,6 +674,10 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 	if err != nil || outcome != "canceled" {
 		t.Fatalf("earlier parent deadline lost to completion: outcome=%q err=%v", outcome, err)
 	}
+	outcome, err = selectedCompletedOutcome(store, job, nil, nil, completedAt, completedAt.Add(-time.Second))
+	if err != nil || outcome != "canceled" {
+		t.Fatalf("earlier parent deadline before context callback lost to completion: outcome=%q err=%v", outcome, err)
+	}
 	outcome, err = selectedCompletedOutcome(store, job, context.Canceled, context.DeadlineExceeded, job.Deadline.Add(time.Second), time.Time{})
 	if err != nil || outcome != "expired" {
 		t.Fatalf("original deadline lost to later worker cancellation: outcome=%q err=%v", outcome, err)
@@ -700,6 +704,7 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 		{name: "worker inactivity", result: testExecutorInactivity{}, want: "inactivity"},
 		{name: "parent cancellation", result: testExecutorInactivity{}, cause: context.Canceled, want: "canceled"},
 		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: -time.Second, want: "canceled"},
+		{name: "earlier parent deadline before context callback", result: testExecutorInactivity{}, parentDeadlineDelta: -time.Second, want: "canceled"},
 		{name: "hard deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, want: "inactivity"},
 		{name: "parent deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: time.Second, want: "inactivity"},
 		{name: "hard deadline at completion", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, late: true, want: "expired"},

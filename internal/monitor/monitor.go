@@ -2377,6 +2377,9 @@ func selectedStopOutcome(cause error, stoppedAt, deadline, parentDeadline time.T
 // with retryable publication failure is left for the normal recovery path.
 func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, completedAt, parentDeadline time.Time) (string, error) {
 	if result == nil && cause == nil {
+		if !parentDeadline.IsZero() && parentDeadline.Before(job.Deadline) && !completedAt.Before(parentDeadline) {
+			return "canceled", nil // The earlier caller deadline passed before completion.
+		}
 		return "succeeded", nil
 	}
 	if errors.Is(result, ErrAcceptanceState) || errors.Is(result, ErrAcceptedDiscarded) || errors.Is(result, ErrAcceptedRetry) {
@@ -2427,7 +2430,7 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 	}
 	var inactivity interface{ ExecutorInactivity() bool }
 	if assigned && !errors.Is(result, ErrTerminalJob) && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {
-		if cause == nil || errors.Is(cause, context.DeadlineExceeded) && beforeDeadlines {
+		if beforeDeadlines && (cause == nil || errors.Is(cause, context.DeadlineExceeded)) {
 			return "inactivity", nil
 		}
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
