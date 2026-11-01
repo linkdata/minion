@@ -1795,11 +1795,14 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if !time.Now().Before(job.Deadline) {
 		if accepted.FixedRefusal == "" && (accepted.Assigned || failure.ModelCallStarted) {
+			if !accepted.ResultReady {
+				return resolveLost()
+			}
 			stored, err := store.HasAcceptedResult()
 			if err != nil {
 				return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
 			}
-			if !stored || !accepted.ResultReady {
+			if !stored {
 				return resolveLost()
 			}
 		}
@@ -1807,6 +1810,9 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if accepted.FixedRefusal != "" {
 		return m.terminalAccepted(ctx, store, job, failure)
+	}
+	if !accepted.ResultReady && (accepted.Assigned || failure.ModelCallStarted) {
+		return resolveLost()
 	}
 	stored, err := store.HasAcceptedResult()
 	if err != nil {

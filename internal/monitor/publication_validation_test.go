@@ -722,12 +722,19 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 }
 
 func TestAssignedRecoveryRecordsLostWorkerOutcome(t *testing.T) {
-	for _, overdue := range []bool{false, true} {
-		t.Run(fmt.Sprint(overdue), func(t *testing.T) {
+	for _, test := range []struct {
+		overdue, nonregularSidecar bool
+	}{
+		{},
+		{nonregularSidecar: true},
+		{overdue: true},
+		{overdue: true, nonregularSidecar: true},
+	} {
+		t.Run(fmt.Sprintf("overdue=%t/nonregular=%t", test.overdue, test.nonregularSidecar), func(t *testing.T) {
 			m, store, job, gh, path := assignmentValidationFixture(t)
 			accepted := store.Data.Accepted
 			accepted.Assigned = true
-			if overdue {
+			if test.overdue {
 				accepted.AcceptedAt = time.Now().UTC().Add(-8 * time.Minute)
 				accepted.Deadline = accepted.AcceptedAt.Add(7 * time.Minute)
 				failure := store.Data.JobFailures[job.ID]
@@ -740,6 +747,11 @@ func TestAssignedRecoveryRecordsLostWorkerOutcome(t *testing.T) {
 			}
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
+			}
+			if test.nonregularSidecar {
+				if err := os.Mkdir(path+".result", 0700); err != nil {
+					t.Fatal(err)
+				}
 			}
 			store = openStateAt(t, path, time.Time{})
 			m.Handler = selectedHandler(func(Job) error {
