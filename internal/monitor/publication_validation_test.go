@@ -692,6 +692,7 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadline: true, want: "canceled"},
 		{name: "original hard cap", result: testExecutorInactivity{}, late: true, want: "expired"},
 		{name: "unknown execution", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), want: "lost"},
+		{name: "parent checkpoint failure", result: errors.Join(ErrTerminalJob, testExecutorInactivity{}), want: "failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, store, job, _, _ := assignmentValidationFixture(t)
@@ -780,6 +781,34 @@ func TestDiscardAcceptedReportsSavedInactivity(t *testing.T) {
 				t.Fatalf("discard replaced saved inactivity with %q", got)
 			}
 		})
+	}
+}
+
+func TestTerminalFailureReportsInactivityBeforeSidecarClear(t *testing.T) {
+	m, store, job, _, path := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "inactivity", time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path+".result", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".result/held", []byte("held"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m.Logger = log.New(&logs, "", 0)
+	err := m.finishFailedJob(t.Context(), store, job, time.Now().UTC())
+	if !errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil ||
+		store.Data.TerminalDecisions[job.ID].Outcome != "inactivity" ||
+		!strings.Contains(logs.String(), "outcome=inactivity") {
+		t.Fatalf("sidecar clear lost terminal report: err=%v state=%+v log=%q", err, store.Data, logs.String())
 	}
 }
 

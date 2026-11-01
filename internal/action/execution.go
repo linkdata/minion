@@ -363,19 +363,26 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		return c.fail(fmt.Errorf("%w: selected assignment was not delivered", monitor.ErrAcceptanceState))
 	}
 	if !claimedSuccess {
-		// An admitted model call may have incurred a charge even without a receipt.
-		// The parent owns this checkpoint; worker failure flags do not set retry policy.
-		if !errors.Is(runErr, monitor.ErrTerminalJob) &&
-			(c.pending != nil || c.returned != nil || len(c.calls) != 0) {
-			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
-		}
-		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
+		// A bound failed Outcome can name inactivity even when its usage is incomplete.
 		calls := c.calls
 		if c.returned != nil {
 			calls = append(slices.Clone(calls), *c.returned)
 		}
-		if !result.matchesJob(c.job) || (c.pending != nil && c.returned == nil) || !slices.Equal(result.Calls, calls) ||
-			!slices.Equal(result.Refutations, c.review.Refutations) || result.CriticStopReason != c.review.CriticStopReason {
+		matching := result.matchesJob(c.job) && (c.pending == nil || c.returned != nil) &&
+			slices.Equal(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
+			result.CriticStopReason == c.review.CriticStopReason
+		var inactivity *workerFailureError
+		knownInactivity := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil &&
+			c.returned == nil && matching &&
+			errors.As(runErr, &inactivity) && inactivity.failure.Inactivity
+		// An admitted model call may have incurred a charge even without a receipt.
+		// The parent owns this checkpoint; worker failure flags do not set retry policy.
+		if !errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity &&
+			(c.pending != nil || c.returned != nil || len(c.calls) != 0) {
+			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
+		}
+		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
+		if !matching {
 			return errors.Join(runErr, checkpointContractError())
 		}
 		return runErr

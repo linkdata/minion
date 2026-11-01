@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -172,6 +173,39 @@ func completeHTTPResult(t *testing.T, f *httpServerTest) httpOutcome {
 	outcome.Result.Answer = "Completed answer"
 	outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
 	return outcome
+}
+
+func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
+	for _, complete := range []bool{false, true} {
+		t.Run(fmt.Sprint(complete), func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixture(t, nil)
+			var outcome httpOutcome
+			if complete {
+				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+				paid := f.call(2)
+				paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7} // The stopped model may have incomplete usage.
+				f.ack(t, "/after", paid, http.StatusOK, 2)
+				outcome = f.outcome(3, nil)
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			} else {
+				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+				outcome = f.outcome(2, nil)
+			}
+			outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+			f.ack(t, "/outcome", outcome, http.StatusOK, outcome.Sequence)
+			got := f.result(t)
+			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+			var claim interface{ ExecutorInactivity() bool }
+			if !errors.As(final, &claim) || !claim.ExecutorInactivity() ||
+				errors.Is(final, monitor.ErrExecutionOutcomeUnknown) == complete ||
+				errors.Is(final, monitor.ErrTerminalJob) == complete {
+				t.Fatalf("acknowledged call=%t changed inactivity classification: %v", complete, final)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+			}
+		})
+	}
 }
 
 func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {

@@ -2395,7 +2395,7 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
 	var inactivity interface{ ExecutorInactivity() bool }
-	if assigned && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {
+	if assigned && !errors.Is(result, ErrTerminalJob) && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {
 		if cause != nil {
 			return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 		}
@@ -2971,12 +2971,12 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 				job.ID, access.Repository, access.SourceURL, access.SourceKey, accessAttemptID,
 				access.Reason, access.ReplyState, access.OperatorAction)
 		}
+		m.logf("stop retrying failed %s from %s outcome=%s", job.Command.Action, itemLocation(job.Source), outcome)
 		if accepted != nil {
 			if clearErr := store.ClearAcceptedResult(); clearErr != nil {
 				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
 			}
 		}
-		m.logf("stop retrying failed %s from %s outcome=%s", job.Command.Action, itemLocation(job.Source), outcome)
 	}
 	return err
 }
