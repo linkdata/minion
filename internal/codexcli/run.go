@@ -714,15 +714,15 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if !nonemptyProgressJSON(visible.Changes) {
 		visible.Changes = nil // An empty change list is not new tool output.
 	}
-	var ok bool
-	if visible.Command, ok = normalizeProgressJSON(visible.Command); !ok {
-		return
-	}
-	if visible.Arguments, ok = normalizeProgressJSON(visible.Arguments); !ok {
-		return
-	}
 	key := "id:" + item.ID
 	if item.ID == "" {
+		var ok bool
+		if visible.Command, ok = normalizeProgressJSON(visible.Command); !ok {
+			return
+		}
+		if visible.Arguments, ok = normalizeProgressJSON(visible.Arguments); !ok {
+			return
+		}
 		identity, err := json.Marshal(struct {
 			Type      string          `json:"type"`
 			Tool      string          `json:"tool"`
@@ -745,7 +745,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if err != nil {
 		return
 	}
-	content, ok = normalizeProgressJSON(content)
+	content, ok := normalizeProgressJSON(content)
 	if !ok {
 		return
 	}
