@@ -12,7 +12,7 @@ import (
 var errExecutorInactivity = errors.New("executor inactivity timeout")
 
 // inactivityTimer measures execution progress, not HTTP contact or Status delivery.
-// The assignment receipt time is its origin even when admission takes time.
+// The caller supplies its origin so admission time counts before first progress.
 type inactivityTimer struct {
 	mu      sync.Mutex
 	timer   *time.Timer

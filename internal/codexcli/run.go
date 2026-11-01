@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -251,6 +252,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			emit(event)
 		}
 		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
+		activity.rootProgressClosed = &output.progressClosed
 		activity.stopRun = cancelRun
 		if s.threadID != "" {
 			activity.root(s.threadID)
@@ -501,6 +503,7 @@ type progressCodexItem struct {
 type progressCodexSnapshot struct {
 	generation uint64
 	snapshot   [sha256.Size]byte
+	completed  bool
 }
 
 type jsonlOutput struct {
@@ -524,6 +527,7 @@ type jsonlOutput struct {
 	parseErr          error
 	finalMessage      string
 	completed         bool
+	progressClosed    atomic.Bool // Terminal turns stay closed despite late items until turn.started.
 	failed            bool
 	failureReason     string
 	diagnostics       []aicli.ProviderDiagnostic
@@ -602,12 +606,15 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 			}
 			capture = selected
 		}
-		turnCompleted := o.completed
 		o.accept(event)
 		if o.stopErr != nil {
 			return
 		}
-		if !turnCompleted {
+		closed := o.progressClosed.Load()
+		// A newly admitted helper can keep working after the root turn ends.
+		freshChild := closed && o.onChild != nil && o.spawnFresh && event.Item != nil &&
+			event.Item.Type == "collab_tool_call" && event.Item.Tool == "spawn_agent"
+		if !closed || freshChild {
 			o.recordExecutionProgress(event, line)
 			if o.stopErr != nil {
 				return
@@ -741,25 +748,28 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		len(item.ReceiverThreadIDs) != 0 && o.spawnFresh
 	// The child observer proves each new receiver. Without it, only the first
 	// receiver transition can be distinguished from a repeated item snapshot.
-	newChildAdmission := seen && !prior.completed && spawnAdmitted &&
-		(!prior.spawnAdmitted || o.onChild != nil)
+	newChildAdmission := seen && spawnAdmitted &&
+		(o.onChild != nil || (!prior.completed && !prior.spawnAdmitted))
 	if item.Type == "collab_tool_call" && item.Tool == "spawn_agent" && len(item.ReceiverThreadIDs) != 0 &&
 		!o.spawnFresh && !(seen && !prior.completed && prior.spawnAdmitted) {
 		return // The rollout already credited this child; stdout did not admit it earlier.
 	}
 	if seen {
-		if item.ID != "" && prior.completed {
+		if item.ID != "" && prior.completed && !newChildAdmission {
 			return
 		}
 		// An ID-less partial item without new output cannot prove another cycle.
-		if item.ID == "" && prior.completed && event.Type != "item.completed" &&
+		if item.ID == "" && prior.completed && !newChildAdmission && event.Type != "item.completed" &&
 			visible.Text == "" && visible.AggregatedOutput == "" &&
 			!nonemptyProgressJSON(visible.Output) && !nonemptyProgressJSON(visible.Result) &&
 			!nonemptyProgressJSON(visible.Changes) {
 			return
 		}
-		if !newChildAdmission && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
-			(event.Type != "item.completed" || prior.completed) {
+		if item.ID == "" && !newChildAdmission && event.Type != "item.completed" &&
+			o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot, true}] {
+			return // A completed-only snapshot cannot prove a later partial cycle.
+		}
+		if !newChildAdmission && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot, event.Type == "item.completed"}] {
 			return
 		}
 	}
@@ -779,7 +789,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		o.nextProgressGeneration++
 		prior.generation = o.nextProgressGeneration
 	}
-	identity := progressCodexSnapshot{prior.generation, snapshot}
+	identity := progressCodexSnapshot{prior.generation, snapshot, event.Type == "item.completed"}
 	if !o.progressSnapshots[identity] {
 		if o.progressSnapshots == nil {
 			o.progressSnapshots = make(map[progressCodexSnapshot]bool)
@@ -1034,6 +1044,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		}
 	case "turn.started":
 		o.completed, o.finalMessage = false, ""
+		o.progressClosed.Store(false)
 	case "item.completed":
 		if event.Item != nil && event.Item.Type == "agent_message" {
 			o.finalMessage = event.Item.Text
@@ -1041,12 +1052,14 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		}
 	case "turn.completed":
 		o.completed = true
+		o.progressClosed.Store(true)
 		o.tokens = nil
 		if tokens, valid := event.Usage.tokens(); valid {
 			o.tokens = &tokens
 		}
 	case "turn.failed":
 		o.failed = true
+		o.progressClosed.Store(true)
 		o.failureReason = eventReason(event)
 		o.observe("turn_failed", o.failureReason)
 	case "error":

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -66,6 +67,60 @@ func TestInactivityTimerStopEnforcesElapsedDeadline(t *testing.T) {
 			t.Fatalf("stopped overdue timer lost inactivity cause: %v", context.Cause(ctx))
 		}
 	})
+}
+
+type delayedRunnerErrContext struct {
+	context.Context
+	once  sync.Once
+	delay time.Duration
+}
+
+func (c *delayedRunnerErrContext) Err() error {
+	c.once.Do(func() { time.Sleep(c.delay) })
+	return c.Context.Err()
+}
+
+func TestDirectRunnerBudgetsIncludeEntryTime(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		execute    bool
+		runtime    time.Duration
+		inactivity time.Duration
+		want       error
+	}{
+		{"Run inactivity", false, 8 * time.Second, 5 * time.Second, errExecutorInactivity},
+		{"Execute inactivity", true, 8 * time.Second, 5 * time.Second, errExecutorInactivity},
+		{"Run runtime", false, 5 * time.Second, 10 * time.Second, context.DeadlineExceeded},
+		{"Execute runtime", true, 5 * time.Second, 10 * time.Second, context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.RuntimeBudget, job.InactivityTimeout = test.runtime, test.inactivity
+				modelCalled := false
+				runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					modelCalled = true
+					synctest.Wait()
+					return aicli.Result{Answer: "Completed."}, nil
+				}}
+				ctx := &delayedRunnerErrContext{Context: t.Context(), delay: 6 * time.Second}
+				var result Result
+				var err error
+				if test.execute {
+					result, err = runner.Execute(ctx, job, runnerExecutionCheckpoints{})
+				} else {
+					result, err = runner.Run(ctx, job)
+				}
+				other := errExecutorInactivity
+				if test.want == errExecutorInactivity {
+					other = context.DeadlineExceeded
+				}
+				if !errors.Is(err, test.want) || errors.Is(err, other) || !errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || modelCalled {
+					t.Fatalf("entry-time %s budget: result=%+v error=%v modelCalled=%t", test.name, result, err, modelCalled)
+				}
+			})
+		})
+	}
 }
 
 func TestRunnerRunEnforcesInactivityAfterLateSuccess(t *testing.T) {

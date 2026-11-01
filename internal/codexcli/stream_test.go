@@ -60,7 +60,7 @@ func TestJSONLOutputStreamsCompleteItemsAndMarksUnboundProgress(t *testing.T) {
 		t.Fatalf("tool payload fields lost: %+v", got)
 	}
 	if output.threadID != "native-root" || !output.completed || output.finalMessage != "complete message" {
-		t.Fatalf("streaming changed native accounting: %+v", output)
+		t.Fatalf("streaming changed native accounting: thread=%q completed=%t final=%q", output.threadID, output.completed, output.finalMessage)
 	}
 }
 

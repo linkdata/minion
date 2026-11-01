@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -32,6 +33,7 @@ type rolloutActivity struct {
 	excluded           map[string]bool
 	emit               func(aicli.StreamEvent)
 	progress           func()
+	rootProgressClosed *atomic.Bool
 	stopRun            func()
 	progressEvents     map[[sha256.Size]byte]bool
 	progressOrdinal    map[string]int64
@@ -1185,6 +1187,12 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 	if a.progress == nil {
 		return
 	}
+	suppress := false
+	if a.rootProgressClosed != nil && a.rootProgressClosed.Load() && event.Type != "child_spawn" {
+		a.mu.Lock()
+		suppress = id != "" && id == a.rootID
+		a.mu.Unlock()
+	}
 	if ordinal > 0 {
 		// Rollout ordinals are appended in order. A cursor needs only its
 		// latest ordinal to distinguish fresh output from replay, even for a
@@ -1196,7 +1204,9 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 			a.progressOrdinal = make(map[string]int64)
 		}
 		a.progressOrdinal[id] = ordinal
-		*progressed = true
+		if !suppress {
+			*progressed = true
+		}
 		return
 	}
 	hash := sha256.New()
@@ -1227,7 +1237,9 @@ func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int
 		a.progressEvents = make(map[[sha256.Size]byte]bool)
 	}
 	a.progressEvents[digest] = true
-	*progressed = true
+	if !suppress {
+		*progressed = true
+	}
 }
 
 // An unbounded fresh helper file may begin with copied parent history. Its

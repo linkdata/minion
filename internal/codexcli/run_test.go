@@ -1092,7 +1092,7 @@ func TestJSONLOutputCapturesUsageAndHelpers(t *testing.T) {
 `))
 	output.stream.Finish()
 	if output.threadID != "root" || len(output.children) != 1 || output.children[0] != "child" || output.tokens == nil || *output.tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
-		t.Fatalf("missing accounting events: %+v", output)
+		t.Fatalf("missing accounting events: thread=%q children=%v tokens=%v", output.threadID, output.children, output.tokens)
 	}
 	for _, invalid := range []string{
 		`{"input_tokens":100,"output_tokens":12}`,

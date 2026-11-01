@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -205,6 +206,77 @@ func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
 		if progress != step.want {
 			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
 		}
+	}
+}
+
+func TestJSONLOutputIDLessCompletedSnapshotReplayAfterUpdate(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"A"}}`, 1},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"B"}}`, 2},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"A"}}`, 2},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"B"}}`, 3},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
+func TestJSONLOutputCompletedTurnDoesNotRenewProgressUntilTurnStarts(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"root"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"answer"}}`,
+		`{"type":"turn.completed"}`,
+		`{"type":"item.completed","item":{"id":"answer","type":"agent_message","text":"stale answer"}}`,
+		`{"type":"item.started","item":{"id":"stale-tool","type":"command_execution","command":"old work"}}`,
+	} {
+		_, _ = output.Write([]byte(line + "\n"))
+	}
+	if progress != 1 || output.completed || output.finalMessage != "stale answer" {
+		t.Fatalf("post-completion message renewed progress or lost incomplete-turn proof: progress=%d completed=%t final=%q", progress, output.completed, output.finalMessage)
+	}
+	for _, line := range []string{
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"next-tool","type":"command_execution","command":"new work"}}`,
+		`{"type":"item.completed","item":{"id":"next-answer","type":"agent_message","text":"next answer"}}`,
+		`{"type":"turn.completed"}`,
+	} {
+		_, _ = output.Write([]byte(line + "\n"))
+	}
+	if progress != 3 || !output.completed || output.finalMessage != "next answer" {
+		t.Fatalf("new turn lost progress or result: progress=%d completed=%t final=%q", progress, output.completed, output.finalMessage)
+	}
+}
+
+func TestJSONLOutputFailedTurnDoesNotRenewProgressUntilTurnStarts(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"root"}`,
+		`{"type":"turn.started"}`,
+		`{"type":"item.started","item":{"id":"first","type":"command_execution","command":"old work"}}`,
+		`{"type":"turn.failed","error":{"message":"failed"}}`,
+		`{"type":"item.started","item":{"id":"stale","type":"command_execution","command":"stale work"}}`,
+	} {
+		_, _ = output.Write([]byte(line + "\n"))
+	}
+	if progress != 1 || !output.failed {
+		t.Fatalf("failed turn renewed progress or lost failure: progress=%d failed=%t", progress, output.failed)
+	}
+	_, _ = output.Write([]byte(`{"type":"turn.started"}` + "\n"))
+	_, _ = output.Write([]byte(`{"type":"item.started","item":{"id":"next","type":"command_execution","command":"new work"}}` + "\n"))
+	if progress != 2 {
+		t.Fatalf("new turn after failure lost progress: %d", progress)
 	}
 }
 
@@ -828,6 +900,188 @@ func TestRolloutActivityRootCommandOutputRenewsProgress(t *testing.T) {
 	activity.poll()
 	if *progress != 1 {
 		t.Fatalf("replayed or empty root output renewed progress: %d", *progress)
+	}
+}
+
+func TestRolloutActivityTerminalRootProgressGateKeepsHelperWork(t *testing.T) {
+	for _, terminal := range []string{`{"type":"turn.completed"}`, `{"type":"turn.failed","error":{"message":"failed"}}`} {
+		t.Run(terminal, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			root := writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			output := jsonlOutput{}
+			activity.rootProgressClosed = &output.progressClosed
+			activity.poll()
+			for _, line := range []string{`{"type":"thread.started","thread_id":"root"}`, `{"type":"turn.started"}`, terminal} {
+				_, _ = output.Write([]byte(line + "\n"))
+			}
+			lateOrdinal := `{"ordinal":9,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"root-turn","chunk":"late root output"}}`
+			lateNoOrdinal := `{"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"root-turn","chunk":"late unnumbered output"}}`
+			appendUsageEvents(t, root, lateOrdinal, lateNoOrdinal)
+			activity.poll()
+			if *progress != 0 {
+				t.Fatalf("root output after terminal turn renewed progress: %d", *progress)
+			}
+
+			start := int64(8)
+			writeUsageRolloutBoundary(t, home, "child", "root", &start, usageEventAt(8, "task_started", "child-turn"))
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 1 {
+				t.Fatalf("helper work after root terminal lost progress: %d", *progress)
+			}
+			appendUsageEvents(t, root, rolloutSpawn(10, "new-child"))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("fresh child admission after root terminal lost progress: %d", *progress)
+			}
+			appendUsageEvents(t, root, rolloutSpawn(11, "new-child"))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("replayed child admission renewed progress: %d", *progress)
+			}
+			_, _ = output.Write([]byte(`{"type":"turn.started"}` + "\n"))
+			appendUsageEvents(t, root, lateOrdinal, lateNoOrdinal)
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("suppressed root rollout events replayed after turn start: %d", *progress)
+			}
+			appendUsageEvents(t, root, `{"ordinal":12,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"next-turn","chunk":"new root output"}}`)
+			activity.poll()
+			if *progress != 3 {
+				t.Fatalf("new root turn did not reopen progress: %d", *progress)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityRootProgressGateConcurrentWithStdout(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	events := []string{usageEventAt(8, "task_started", "root-turn")}
+	for ordinal := 9; ordinal < 109; ordinal++ {
+		events = append(events, fmt.Sprintf(`{"ordinal":%d,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"root-turn","chunk":"tick"}}`, ordinal))
+	}
+	root := writeUsageRollout(t, home, "root", "", events...)
+	var progress atomic.Int64
+	activity := newRolloutActivity(t.Context(), home, started, nil, nil, nil, nil, nil, func() { progress.Add(1) })
+	activity.root("root")
+	output := jsonlOutput{}
+	activity.rootProgressClosed = &output.progressClosed
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" + `{"type":"turn.started"}` + "\n"))
+	done := make(chan struct{})
+	go func() {
+		activity.poll()
+		close(done)
+	}()
+	for range 100 {
+		_, _ = output.Write([]byte(`{"type":"turn.completed"}` + "\n" + `{"type":"turn.started"}` + "\n"))
+	}
+	_, _ = output.Write([]byte(`{"type":"turn.completed"}` + "\n"))
+	<-done
+	before := progress.Load()
+	appendUsageEvents(t, root, `{"ordinal":109,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"root-turn","chunk":"late"}}`)
+	activity.poll()
+	if progress.Load() != before {
+		t.Fatalf("root output after concurrent terminal transition renewed progress: %d -> %d", before, progress.Load())
+	}
+	_, _ = output.Write([]byte(`{"type":"turn.started"}` + "\n"))
+	appendUsageEvents(t, root, `{"ordinal":110,"type":"event_msg","payload":{"type":"exec_command_output","thread_id":"root","turn_id":"next-turn","chunk":"new"}}`)
+	activity.poll()
+	if progress.Load() <= before {
+		t.Fatalf("new turn after concurrent terminal transition lost progress: %d -> %d", before, progress.Load())
+	}
+}
+
+func TestRootSpawnAfterTerminalCreditsFreshChildOnce(t *testing.T) {
+	for _, first := range []string{"stdout completed", "stdout started", "rollout"} {
+		t.Run(first, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			root := writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			output := jsonlOutput{onProgress: func() { *progress++ }, onChild: func(ids []string, spawned bool) bool {
+				fresh := false
+				for _, id := range ids {
+					fresh = activity.child(id, spawned) || fresh
+				}
+				return fresh
+			}}
+			activity.rootProgressClosed = &output.progressClosed
+			activity.poll()
+			_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" + `{"type":"turn.completed"}` + "\n"))
+			spawnStarted := `{"type":"item.started","item":{"id":"spawn","type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child"]}}`
+			spawnCompleted := `{"type":"item.completed","item":{"id":"spawn","type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child"]}}`
+			if first == "rollout" {
+				appendUsageEvents(t, root, rolloutSpawn(9, "child"))
+				activity.poll()
+			} else if first == "stdout started" {
+				_, _ = output.Write([]byte(spawnStarted + "\n"))
+			} else {
+				_, _ = output.Write([]byte(spawnCompleted + "\n"))
+			}
+			if *progress != 1 {
+				t.Fatalf("fresh child admission after terminal turn progress=%d, want 1", *progress)
+			}
+			if first != "rollout" {
+				appendUsageEvents(t, root, rolloutSpawn(9, "child"))
+				activity.poll()
+			}
+			_, _ = output.Write([]byte(spawnCompleted + "\n"))
+			if *progress != 1 {
+				t.Fatalf("stdout/rollout child replay renewed progress: %d", *progress)
+			}
+			secondChild := `{"type":"item.completed","item":{"id":"spawn","type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["second-child"]}}`
+			_, _ = output.Write([]byte(secondChild + "\n"))
+			if *progress != 2 {
+				t.Fatalf("second fresh child admission lost progress: %d", *progress)
+			}
+			_, _ = output.Write([]byte(secondChild + "\n"))
+			appendUsageEvents(t, root, rolloutSpawn(10, "second-child"))
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("second child replay renewed progress: %d", *progress)
+			}
+		})
+	}
+}
+
+func TestIDLessRootSpawnAfterTerminalCreditsSecondFreshChild(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	root := writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))
+	activity, _, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	output := jsonlOutput{onProgress: func() { *progress++ }, onChild: func(ids []string, spawned bool) bool {
+		fresh := false
+		for _, id := range ids {
+			fresh = activity.child(id, spawned) || fresh
+		}
+		return fresh
+	}}
+	activity.rootProgressClosed = &output.progressClosed
+	_, _ = output.Write([]byte(`{"type":"thread.started","thread_id":"root"}` + "\n" + `{"type":"turn.completed"}` + "\n"))
+	first := `{"type":"item.completed","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child-1"]}}`
+	secondStarted := `{"type":"item.started","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child-2"]}}`
+	secondUpdated := `{"type":"item.updated","item":{"type":"collab_tool_call","tool":"spawn_agent","receiver_thread_ids":["child-2"]}}`
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{first, 1},
+		{secondStarted, 2},
+		{secondUpdated, 2},
+		{first, 2},
+		{secondStarted, 2},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if *progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, *progress, step.want)
+		}
+	}
+	appendUsageEvents(t, root, rolloutSpawn(9, "child-2"))
+	activity.poll()
+	if *progress != 2 {
+		t.Fatalf("stdout-first child replayed from rollout: %d", *progress)
 	}
 }
 
