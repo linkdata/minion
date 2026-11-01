@@ -109,7 +109,10 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 		}
 		request.session.claude.OnEvent = request.onEvent
 		request.session.claude.OnInput = request.onInput
-		defer func() { request.session.claude.OnEvent, request.session.claude.OnInput = nil, nil }()
+		request.session.claude.OnProgress = request.onProgress
+		defer func() {
+			request.session.claude.OnEvent, request.session.claude.OnInput, request.session.claude.OnProgress = nil, nil, nil
+		}()
 		return request.session.claude.Run(ctx, request.dir, request.prompt, request.writable, request.outputDir, settings)
 	default:
 		return aicli.Result{}, fmt.Errorf("unsupported AI provider %q", request.provider)

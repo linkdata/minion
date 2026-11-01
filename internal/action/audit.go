@@ -66,6 +66,10 @@ func checkAuditValidatorScripts(skill string) error {
 }
 
 func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {
+	return readAuditArtifactsWithProgress(outputDir, partial, nil, secrets...)
+}
+
+func readAuditArtifactsWithProgress(outputDir string, partial bool, progress func(), secrets ...string) ([]workspace.File, []Diagnostic, error) {
 	var files []workspace.File
 	var diagnostics []Diagnostic
 	for _, name := range auditArtifacts {
@@ -102,6 +106,9 @@ func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]wo
 			continue
 		}
 		files = append(files, workspace.File{Path: name, Mode: workspace.Regular, Data: data})
+		if progress != nil {
+			progress()
+		}
 	}
 	return files, diagnostics, nil
 }
@@ -243,12 +250,12 @@ func auditArtifactMayBeEmpty(name string) bool {
 	return name == "FINDINGS-DETAIL.md" || name == "NEEDS-VALIDATION.md"
 }
 
-func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string) error {
+func validateAuditFiles(ctx context.Context, files []workspace.File, validationDir, skill string, tools auditTools, repo, target, head string, onProgress func()) error {
 	byPath, err := validateAuditArtifactInput(files, repo, target, head)
 	if err != nil {
 		return err
 	}
-	return runAuditValidators(ctx, byPath, validationDir, skill, tools)
+	return runAuditValidators(ctx, byPath, validationDir, skill, tools, onProgress)
 }
 
 func validateAuditArtifactInput(files []workspace.File, repo, target, head string) (map[string][]byte, error) {
@@ -269,20 +276,40 @@ func validateAuditArtifactInput(files []workspace.File, repo, target, head strin
 	return byPath, nil
 }
 
-func runAuditValidators(ctx context.Context, byPath map[string][]byte, validationDir, skill string, tools auditTools) error {
+func runAuditValidators(ctx context.Context, byPath map[string][]byte, validationDir, skill string, tools auditTools, onProgress func()) error {
 	for _, validator := range auditValidators {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := os.WriteFile(filepath.Join(validationDir, validator.artifact), byPath[validator.artifact], 0600); err != nil {
 			return fmt.Errorf("copy audit %s for validation: %w", validator.artifact, err)
+		}
+		if ctx.Err() == nil && onProgress != nil {
+			onProgress()
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		script := filepath.Join(filepath.Dir(skill), validator.script)
 		// #nosec G204 -- the installed skill path and validation directory are checked paths; arguments bypass a shell.
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
-		if err := executil.Run(cmd); err != nil {
-			if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
-				err = errors.Join(cause, err)
+		executil.Prepare(cmd)
+		err := cmd.Start()
+		if err == nil {
+			if ctx.Err() == nil && onProgress != nil {
+				onProgress()
 			}
+			err = cmd.Wait()
+			if ctx.Err() == nil && onProgress != nil {
+				onProgress()
+			}
+		}
+		if cause := ctx.Err(); cause != nil && !errors.Is(err, cause) {
+			err = errors.Join(cause, err)
+		}
+		if err != nil {
 			return fmt.Errorf("audit %s failed: %w", validator.script, err)
 		}
 	}

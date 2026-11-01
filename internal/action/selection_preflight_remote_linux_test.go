@@ -29,6 +29,37 @@ func remoteCLIServerTest(t *testing.T, job Job, credentials WorkerCredentials) *
 		func(handler http.Handler) *httptest.Server { return httptest.NewTestServer(t, handler) }, credentials)
 }
 
+func TestRemoteRunnerCLIProbesDoNotReportExecutionProgress(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("CODEX_ACCESS_TOKEN", "")
+	fakeOnPath(t, "codex", preflightCodexCLI)
+	workRoot := t.TempDir()
+	runner := NewRemoteRunner(workRoot)
+	beforeSource, afterSource := 0, 0
+	runner.executionProgress = func() {
+		entries, err := os.ReadDir(workRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "minion-") {
+				afterSource++
+				return
+			}
+		}
+		beforeSource++
+	}
+	runner.runModel = func(context.Context, modelRun) (aicli.Result, error) {
+		return aicli.Result{Answer: "Ready", UsageComplete: true}, nil
+	}
+	result, err := runner.Run(t.Context(), remoteCLIJob())
+	if err != nil || result.Answer != "Ready" || beforeSource != 0 || afterSource == 0 {
+		t.Fatalf("remote run: answer=%q, error=%v, progress before/after source=%d/%d", result.Answer, err, beforeSource, afterSource)
+	}
+}
+
 func TestRemoteRunnerChecksCLIWithEachAssignmentCredential(t *testing.T) {
 	installActionTestSkills(t, testReviewSkillURL)
 	t.Setenv("CODEX_HOME", t.TempDir())

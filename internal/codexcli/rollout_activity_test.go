@@ -1177,6 +1177,46 @@ func TestRolloutActivityCancellationStopsCurrentMultilineScan(t *testing.T) {
 	}
 }
 
+func TestRolloutActivityReportsProvenProgressBeforeScanEnds(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "first helper message"),
+		rolloutMessage(10, "second", "later helper message"))
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var events []aicli.StreamEvent
+	progress := 0
+	activity := newRolloutActivity(ctx, home, started, nil, nil, nil, nil,
+		func(event aicli.StreamEvent) { events = append(events, event) },
+		func() { progress++; cancel() })
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	want := []aicli.StreamEvent{
+		{NativeID: "child", Kind: "assistant", Text: "first helper message"},
+		{NativeID: "child", Kind: "content_missing"},
+	}
+	if progress != 1 || !slices.Equal(events, want) {
+		t.Fatalf("progress arrived after scan: count=%d events=%+v; want %+v", progress, events, want)
+	}
+}
+
+func TestRolloutActivityReportsFinalFreshProgress(t *testing.T) {
+	home, started := t.TempDir(), time.Now()
+	boundary := int64(9)
+	writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+		rolloutMessage(9, "first", "first helper message"),
+		rolloutMessage(10, "second", "later helper message"))
+	activity, events, progress := newActivityTestRecorder(t, home, started)
+	activity.root("root")
+	activity.child("child", true)
+	activity.poll()
+	if *progress != 2 || len(*events) != 2 {
+		t.Fatalf("latest fresh output lost its progress callback: callbacks=%d events=%+v", *progress, *events)
+	}
+}
+
 func TestRolloutActivityCancellationAfterCompleteAppendGapsAtFinish(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	boundary := int64(9)
@@ -1206,7 +1246,7 @@ func TestRolloutActivityCancellationAfterCompleteAppendGapsAtFinish(t *testing.T
 func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "root-turn"))
-	writeUsageRolloutBoundary(t, home, "child", "root", nil,
+	child := writeUsageRolloutBoundary(t, home, "child", "root", nil,
 		rolloutMessage(8, "uncertain-message", "attribution uncertain"))
 
 	activity, events, progress := newActivityTestRecorder(t, home, started)
@@ -1233,8 +1273,20 @@ func TestRolloutActivityUnknownHistoryBoundaryLabelsPossibleDuplicate(t *testing
 			t.Fatalf("unexpected event: %+v", event)
 		}
 	}
-	if labeled != 1 || missing != 1 || *progress <= baselineProgress {
-		t.Fatalf("unknown boundary events=%+v progress=%d; want labeled content and one coverage gap", *events, *progress)
+	if labeled != 1 || missing != 1 || *progress != baselineProgress {
+		t.Fatalf("unknown boundary events=%+v progress=%d; copied history must not renew progress", *events, *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":9,"type":"event_msg","payload":{"type":"mcp_tool_call_end","turn_id":"current","call_id":"unattributed"}}`)
+	activity.poll()
+	if *progress != baselineProgress {
+		t.Fatalf("unattributed helper tool renewed progress: %d", *progress)
+	}
+	appendUsageEvents(t, child,
+		`{"ordinal":10,"type":"event_msg","payload":{"type":"mcp_tool_call_end","thread_id":"child","turn_id":"current","call_id":"owned"}}`)
+	activity.poll()
+	if *progress != baselineProgress+1 {
+		t.Fatalf("current helper tool did not renew progress: %d", *progress)
 	}
 }
 
@@ -1661,6 +1713,150 @@ func TestRolloutActivityCapturesHelperUserMessage(t *testing.T) {
 	}
 	if !slices.Equal(*events, want) {
 		t.Fatalf("helper prompt or reply lost: got %+v; want %+v", *events, want)
+	}
+}
+
+func TestRolloutActivityEmptyResponsePartsDoNotChangeTranscript(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, kind, text string
+	}{
+		{
+			name:   "user empty text",
+			first:  `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			replay: `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_text","text":""}]}`,
+			kind:   "user", text: "inspect",
+		},
+		{
+			name:   "user empty audio",
+			first:  `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"}]}`,
+			replay: `{"type":"message","id":"prompt","role":"user","content":[{"type":"input_text","text":"inspect"},{"type":"input_audio","audio_url":""}]}`,
+			kind:   "user", text: "inspect",
+		},
+		{
+			name:   "agent empty text",
+			first:  `{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"}]}`,
+			replay: `{"type":"agent_message","id":"update","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"},{"type":"input_text","text":""}]}`,
+			kind:   "inter_agent_message", text: "child -> root\nworking",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"response_item","payload":`+tc.first+`}`,
+				`{"ordinal":10,"type":"response_item","payload":`+tc.replay+`}`)
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := []aicli.StreamEvent{
+				{NativeID: "child", Kind: tc.kind, Text: tc.text},
+				{NativeID: "child", Kind: tc.kind, Text: tc.text},
+			}
+			if !slices.Equal(*events, want) {
+				t.Fatalf("empty response part changed transcript: got %+v, want %+v (rollout %s)", *events, want, child)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityEmptyCompletedTextPartDoesNotChangeTranscript(t *testing.T) {
+	for _, tc := range []struct{ name, first, replay, kind, text string }{
+		{"user",
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"}]}`,
+			`{"type":"UserMessage","id":"prompt","content":[{"type":"text","text":"inspect"},{"type":"Text","text":""}]}`,
+			"user", "inspect"},
+		{"agent",
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"working"}]}`,
+			`{"type":"AgentMessage","id":"reply","content":[{"type":"Text","text":"working"},{"type":"Text","text":""}]}`,
+			"assistant", "working"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			child := writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				rolloutCompletedItemTurn(9, "child", "turn", tc.first),
+				rolloutCompletedItemTurn(10, "child", "turn", tc.replay))
+			setActivityHistoryMode(t, child, "paginated")
+			activity, events, _ := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := aicli.StreamEvent{NativeID: "child", Kind: tc.kind, Text: tc.text}
+			if !slices.Equal(*events, []aicli.StreamEvent{want, want}) {
+				t.Fatalf("completed text replay = %+v, want two %+v", *events, want)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityEmptyOnlyHelperResponseIsNotProgress(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"user audio", `{"type":"message","id":"empty-user","role":"user","content":[{"type":"input_audio","audio_url":""}]}`},
+		{"assistant text", `{"type":"message","id":"empty-assistant","role":"assistant","content":[{"type":"output_text","text":""}]}`},
+		{"agent text", `{"type":"agent_message","id":"empty-agent","author":"child","recipient":"root","content":[{"type":"input_text","text":""}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"response_item","payload":`+tc.raw+`}`)
+			activity, events, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			if *progress != 0 || len(*events) != 0 {
+				t.Fatalf("empty-only helper response: progress=%d, events=%+v", *progress, *events)
+			}
+		})
+	}
+}
+
+func TestRolloutActivityInvalidResponsePartLeavesGap(t *testing.T) {
+	for _, tc := range []struct{ name, raw, kind, text string }{
+		{"assistant wrong role",
+			`{"type":"message","role":"assistant","content":[{"type":"input_image","image_url":""}]}`, "", ""},
+		{"user wrong role",
+			`{"type":"message","role":"user","content":[{"type":"output_text","text":""}]}`, "", ""},
+		{"assistant empty text with image",
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"","image_url":"unexpected"}]}`, "", ""},
+		{"user empty image with audio",
+			`{"type":"message","role":"user","content":[{"type":"input_image","image_url":"","audio_url":"unexpected"}]}`, "", ""},
+		{"user empty audio with image",
+			`{"type":"message","role":"user","content":[{"type":"input_audio","audio_url":"","image_url":"unexpected"}]}`, "", ""},
+		{"agent encrypted with text",
+			`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"encrypted_content","encrypted_content":"","text":"unexpected"}]}`, "", ""},
+		{"agent empty text with ciphertext",
+			`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"input_text","text":"","encrypted_content":"unexpected"}]}`, "", ""},
+		{"unknown message content",
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"working"},{"type":"future_content","metadata":"ignored"}]}`, "assistant", "working"},
+		{"unknown agent content",
+			`{"type":"agent_message","author":"child","recipient":"root","content":[{"type":"input_text","text":"working"},{"type":"future_content","metadata":"ignored"}]}`, "inter_agent_message", "child -> root\nworking"},
+		{"unknown reasoning summary",
+			`{"type":"reasoning","summary":[{"type":"summary_text","text":"working"},{"type":"future_content","metadata":"ignored"}]}`, "reasoning_summary", "working"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			boundary := int64(9)
+			writeUsageRolloutBoundary(t, home, "child", "root", &boundary,
+				`{"ordinal":9,"type":"response_item","payload":`+tc.raw+`}`)
+			activity, events, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			activity.child("child", true)
+			activity.poll()
+			activity.finish()
+			want := []aicli.StreamEvent{{NativeID: "child", Kind: "content_missing"}}
+			if tc.kind != "" {
+				want = append(want, aicli.StreamEvent{NativeID: "child", Kind: tc.kind, Text: tc.text})
+			} else if *progress != 0 {
+				t.Fatalf("invalid-only response renewed progress: %d", *progress)
+			}
+			if !slices.Equal(*events, want) {
+				t.Fatalf("response events = %+v, want %+v", *events, want)
+			}
+		})
 	}
 }
 

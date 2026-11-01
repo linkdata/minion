@@ -313,7 +313,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		t.Helper()
 		files, _, err := readAuditArtifacts(root, false, "")
 		if err == nil {
-			err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
+			err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head, nil)
 		}
 		if err == nil {
 			byPath := make(map[string][]byte, len(files))
@@ -559,6 +559,24 @@ func TestPrivateAuditReportUsesRawByteLimit(t *testing.T) {
 	files, diagnostics, err := readAuditArtifacts(root, false)
 	if err != nil || len(diagnostics) != 0 || len(files) != 1 || string(files[0].Data) != report {
 		t.Fatalf("private raw-bounded report rejected: files=%d diagnostics=%v error=%v", len(files), diagnostics, err)
+	}
+}
+
+func TestAuditArtifactReadProgressOnlyForAcceptedFiles(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	root := t.TempDir()
+	for _, file := range auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n") {
+		writeFixtureFile(t, root, file.Path, file.Data)
+	}
+	progress := 0
+	files, _, err := readAuditArtifactsWithProgress(root, false, func() { progress++ })
+	if err != nil || len(files) != len(auditArtifacts) || progress != len(auditArtifacts) {
+		t.Fatalf("accepted artifacts: files=%d progress=%d error=%v", len(files), progress, err)
+	}
+	writeFixtureFile(t, root, "run-metadata.json", []byte("{"))
+	progress = 0
+	if _, _, err := readAuditArtifactsWithProgress(root, false, func() { progress++ }); err == nil || progress != 0 {
+		t.Fatalf("invalid first artifact: progress=%d error=%v", progress, err)
 	}
 }
 

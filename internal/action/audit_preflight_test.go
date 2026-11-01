@@ -122,7 +122,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 				allowed := empty && auditArtifactMayBeEmpty(name)
 				marker := filepath.Join(t.TempDir(), "node-called")
 				nodeDir := fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 0\n")
-				err := validateAuditFiles(t.Context(), supplied, t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head)
+				err := validateAuditFiles(t.Context(), supplied, t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head, nil)
 				if allowed {
 					if err != nil {
 						t.Fatalf("allowed empty %s rejected: %v", name, err)
@@ -151,7 +151,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 		}
 		marker := filepath.Join(t.TempDir(), "node-called")
 		nodeDir := fakeOnPath(t, "node", "#!/bin/sh\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
-		err := validateAuditFiles(t.Context(), files, t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head)
+		err := validateAuditFiles(t.Context(), files, t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head, nil)
 		if err == nil || !strings.Contains(err.Error(), "REPORT.md is missing or empty") {
 			t.Fatalf("blank report accepted: %v", err)
 		}
@@ -161,12 +161,40 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 	})
 }
 
+func TestRunnerMissingAuditArtifactSkipsValidator(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	marker := filepath.Join(t.TempDir(), "validator-called")
+	fakeOnPath(t, "node", "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
+	job := testJob(command.SecurityAudit)
+	runner := Runner{
+		WorkRoot: t.TempDir(),
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			for _, file := range auditArtifactsFixture(job, request.dir, "Audit report\n") {
+				if file.Path == "REPORT.md" {
+					continue
+				}
+				if err := os.WriteFile(filepath.Join(request.outputDir, file.Path), file.Data, 0600); err != nil {
+					return aicli.Result{}, err
+				}
+			}
+			return aicli.Result{Answer: "Audit report\n"}, nil
+		},
+	}
+	result, err := runner.Run(t.Context(), job)
+	if err == nil || !strings.Contains(err.Error(), "audit REPORT.md is missing or empty") || len(result.Calls) != 1 {
+		t.Fatalf("missing artifact was accepted before validation: calls=%d error=%v", len(result.Calls), err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing report invoked validator: %v", err)
+	}
+}
+
 func TestAuditValidatorDiagnosticsStayOutOfErrors(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	const diagnostic = "PRIVATE_VALIDATOR_FINDING\nforged journal line \"quoted\"\n"
 	script := "#!/bin/sh\nprintf '%s' " + shellQuote(diagnostic) + " >&2\nexit 23\n"
 	nodeDir := fakeOnPath(t, "node", script)
-	err := validateAuditFiles(t.Context(), auditArtifactsFixture(job, "/source", "Audit report\n"), t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head)
+	err := validateAuditFiles(t.Context(), auditArtifactsFixture(job, "/source", "Audit report\n"), t.TempDir(), "/installed/SKILL.md", auditTools{binary: filepath.Join(nodeDir, "node"), permissionFlag: "--permission"}, job.Identity.Repository, "/source", job.Source.Head, nil)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 23 || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "audit validate-findings.cjs failed") || strings.Contains(err.Error(), "PRIVATE_VALIDATOR_FINDING") || strings.Contains(err.Error(), "forged journal") {
 		t.Fatalf("private diagnostic leaked or native failure lost: error=%v", err)

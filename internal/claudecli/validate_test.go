@@ -41,7 +41,7 @@ fi
 				t.Fatal(err)
 			}
 			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
-			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
+			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--include-partial-messages\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
 			}
 			if tc.fails {
@@ -54,7 +54,7 @@ fi
 				t.Fatalf("Validate = %+v, %v", cfg, err)
 			}
 			fresh := readFile(t, binary+".fresh-args")
-			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") || !strings.Contains(fresh, "--json-schema\n{\"type\":\"object\"}\n") {
+			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") || !strings.Contains(fresh, "--include-partial-messages\n") || !strings.Contains(fresh, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("fresh capability probe used wrong arguments: %q", fresh)
 			}
 			if tc.effort != "" && !strings.Contains(fresh, "--effort\n"+tc.effort+"\n") {
@@ -78,7 +78,7 @@ fi
 }
 
 func TestValidateRejectsMissingInvocationOptionBeforeModelCall(t *testing.T) {
-	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model", "--effort"} {
+	for _, option := range []string{"--session-id", "--resume", "--add-dir", "--model", "--effort", "--include-partial-messages"} {
 		t.Run(option, func(t *testing.T) {
 			binary := fakeValidationCLI(t, validationCLIBehavior{rejected: option})
 			settings := config.ClaudeConfig{}

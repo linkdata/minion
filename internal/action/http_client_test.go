@@ -328,12 +328,14 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 			if request.role != roleMain || request.round != 1 {
 				t.Errorf("unexpected model call: %+v", request)
 			}
+			request.onProgress() // The stub represents a started CLI process.
 			modelEntered <- struct{}{}
 			select {
 			case <-releaseModel:
 			case <-ctx.Done():
 				return aicli.Result{}, ctx.Err()
 			}
+			request.onProgress() // The stub process has exited.
 			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
 		}}
 		workerDone := make(chan error, 1)
@@ -386,7 +388,7 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 		}
 		upload := waitStatus("upload", main.Sequence)
 		if upload.ProgressSequence <= main.ProgressSequence || upload.Round != 0 {
-			t.Fatalf("final upload did not advance progress: main=%+v upload=%+v", main, upload)
+			t.Fatalf("model completion did not advance progress before upload: main=%+v upload=%+v", main, upload)
 		}
 		synctest.Wait()
 		for draining := true; draining; {

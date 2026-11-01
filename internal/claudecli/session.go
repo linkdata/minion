@@ -23,7 +23,10 @@ type Session struct {
 	// OnEvent receives redacted, fully emitted events; final follows validation.
 	OnEvent func(aicli.StreamEvent)
 	// OnInput receives prepared stdin and command metadata before the CLI starts.
-	OnInput                      func(aicli.PreparedInput)
+	OnInput func(aicli.PreparedInput)
+	// OnProgress receives process start and exit plus fresh native execution activity.
+	// Stdout may call it concurrently with process lifecycle callbacks.
+	OnProgress                   func()
 	workspace, binary, outputDir string
 	writable                     bool
 	settings                     config.ClaudeConfig
@@ -34,17 +37,33 @@ type Session struct {
 	skillPaths                   []string
 	id                           string
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
-	baseline       usage.Tokens
-	usageGap       bool
-	started, reset bool
-	closed         bool
-	initErr        error
+	baseline         usage.Tokens
+	usageGap         bool
+	progressSeen     map[string]bool
+	assistantHistory map[string]assistantSnapshot
+	taskProgress     map[string]taskProgressState
+	runlessPending   map[string]int
+	runlessExplicit  map[string]bool
+	runlessAmbiguous map[string]bool
+	runlessCount     int
+	anonymousPending int
+	progressBytes    int64
+	progressEntries  int
+	started, reset   bool
+	closed           bool
+	initErr          error
 }
 
 // NewConversation forgets the native history and accounting, retaining role paths.
 // Run clears model-writable scratch before starting the independent conversation.
 func (s *Session) NewConversation() {
 	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
+	s.progressSeen = nil
+	s.assistantHistory = nil
+	s.taskProgress = nil
+	s.runlessPending, s.runlessExplicit, s.runlessAmbiguous = nil, nil, nil
+	s.runlessCount, s.anonymousPending = 0, 0
+	s.progressBytes, s.progressEntries = 0, 0
 	s.reset = s.runtimeDir != ""
 }
 

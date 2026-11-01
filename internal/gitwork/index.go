@@ -39,11 +39,17 @@ type OfflineIndex struct {
 	tracked                       map[string]int64
 	executable                    map[string]bool
 	controls                      map[string][sha256.Size]byte
+	progress                      func()
 }
 
 // NewOfflineIndex creates private Git metadata for a materialized source snapshot.
 // The caller supplies canonical absolute directories, with metadata outside source and model grants.
 func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.File) (*OfflineIndex, error) {
+	return NewOfflineIndexWithProgress(ctx, dir, source, files, nil)
+}
+
+// NewOfflineIndexWithProgress reports Git command starts, accepted finishes, and verified files.
+func NewOfflineIndexWithProgress(ctx context.Context, dir, source string, files []workspace.File, progress func()) (*OfflineIndex, error) {
 	if workspace.Within(source, dir) || workspace.Within(dir, source) {
 		return nil, errors.New("offline index and source directories overlap")
 	}
@@ -51,7 +57,7 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	if err != nil {
 		return nil, fmt.Errorf("offline fix index requires git: %w", err)
 	}
-	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), executable: make(map[string]bool), controls: make(map[string][sha256.Size]byte)}
+	index := &OfflineIndex{dir: dir, source: source, binary: binary, tracked: make(map[string]int64, len(files)), executable: make(map[string]bool), controls: make(map[string][sha256.Size]byte), progress: progress}
 	for _, file := range files {
 		index.tracked[file.Path] = int64(len(file.Data))
 		if file.Mode == workspace.Executable {
@@ -144,6 +150,7 @@ func (index *OfflineIndex) changesWithControlLimit(ctx context.Context, limit in
 			}
 			total += info.Size()
 		}
+		index.completed(ctx)
 	}
 	// Rebuild baseline entries without cached worktree stats before each capture.
 	if _, err := index.run(ctx, 1024, nil, "read-tree", index.baseline); err != nil {
@@ -383,7 +390,7 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 			stale = append(stale, 0)
 		}
 	}
-	return stale, nil
+	return stale, ctx.Err()
 }
 
 // Check control-file shapes before Git can open FIFOs while discovering output.
@@ -495,6 +502,7 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 						return err
 					}
 				}
+				index.completed(ctx)
 			}
 			if current.ignored {
 				// Git cannot export untracked descendants of an excluded directory.
@@ -556,7 +564,7 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 		}
 		dirs = next
 	}
-	return nil
+	return ctx.Err()
 }
 
 func parseIndexChanges(raw []byte) ([]workspace.Change, []string, error) {
@@ -615,7 +623,12 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	cmd := gitCommand(runCtx, index.binary, dir, env, append(gitArgs, args...)...)
 	output, diagnostic := bounded.Buffer{Limit: limit, Cancel: cancel}, bounded.Buffer{Limit: bounded.DiagnosticBytes}
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = &output, &diagnostic, bytes.NewReader(input)
-	err := executil.Run(cmd)
+	executil.Prepare(cmd)
+	err := cmd.Start()
+	if err == nil {
+		index.completed(ctx)
+		err = cmd.Wait()
+	}
 	contextErr := ctx.Err()
 	if output.Exceeded && contextErr == nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return nil, fmt.Errorf("offline git %s output exceeds action limit: %w", args[0], ErrCheckoutTooLarge)
@@ -623,9 +636,17 @@ func (index *OfflineIndex) run(ctx context.Context, limit int, input []byte, arg
 	if err != nil || contextErr != nil {
 		var exit *exec.ExitError
 		if args[0] == "check-ignore" && errors.As(err, &exit) && exit.ExitCode() == 1 && contextErr == nil {
+			index.completed(ctx)
 			return output.Bytes(), nil
 		}
 		return nil, gitFailure("offline git", args[0], diagnostic.String(), contextErr, err)
 	}
+	index.completed(ctx)
 	return output.Bytes(), nil
+}
+
+func (index *OfflineIndex) completed(ctx context.Context) {
+	if index.progress != nil && ctx.Err() == nil {
+		index.progress()
+	}
 }

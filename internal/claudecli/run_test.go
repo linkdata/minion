@@ -170,8 +170,8 @@ printf '%s\n' '`+successfulResult+`'
 				t.Fatal("unsafe or incorrect environment reached Claude")
 			}
 			args := strings.Split(strings.TrimSuffix(readFile(t, binary+".args"), "\n"), "\n")
-			if strings.Contains(strings.Join(args, "\n"), "--include-partial-messages") {
-				t.Fatal("unused token deltas consume the bounded event budget")
+			if !slices.Contains(args, "--include-partial-messages") {
+				t.Fatal("live model deltas are unavailable to the progress callback")
 			}
 			if !slices.Contains(args, "--setting-sources=") {
 				t.Fatalf("empty setting-source selection missing: %q", args)
@@ -368,7 +368,7 @@ func TestRunStructuredOutput(t *testing.T) {
 		fails        bool
 	}{
 		{"success", strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`, false},
-		{"final schema after background completion", `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult + "\n" + `{"type":"system","subtype":"background_tasks_changed","tasks":[]}` + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`, false},
+		{"final schema after background completion", `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"reviewer"}]}` + "\n" + successfulResult + "\n" + `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}` + "\n" + strings.TrimSuffix(successfulResult, "}") + `,"structured_output":` + structured + `}`, false},
 		{"missing", successfulResult, true},
 		{"null", strings.TrimSuffix(successfulResult, "}") + `,"structured_output":null}`, true},
 		{"failed", `{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"structured_output":` + structured + `}`, true},

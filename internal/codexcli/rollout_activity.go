@@ -2,6 +2,7 @@ package codexcli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -22,15 +24,21 @@ import (
 // remains the source of root discussion; rollout cursors supply helper content
 // and progress when the root stream is quiet.
 type rolloutActivity struct {
-	ctx         context.Context
-	home        string
-	started     time.Time
-	known       map[string]rolloutMeta
-	provedKnown map[string]bool
-	before      map[string]*usageBoundary
-	excluded    map[string]bool
-	emit        func(aicli.StreamEvent)
-	progress    func()
+	ctx                context.Context
+	home               string
+	started            time.Time
+	known              map[string]rolloutMeta
+	provedKnown        map[string]bool
+	before             map[string]*usageBoundary
+	excluded           map[string]bool
+	emit               func(aicli.StreamEvent)
+	progress           func()
+	rootProgressClosed *atomic.Bool
+	stopRun            func()
+	progressEvents     map[[sha256.Size]byte]bool
+	progressOrdinal    map[string]int64
+	progressEventLimit int // Tests lower the cap; zero uses maxUsageRecords.
+	progressLimit      bool
 
 	mu        sync.Mutex // stdout announcements may arrive while a scan runs
 	rootID    string
@@ -57,13 +65,18 @@ type rolloutActivity struct {
 }
 
 type rolloutActivityCursor struct {
-	meta       rolloutMeta
-	file       os.FileInfo
-	offset     int64
-	pending    []byte
-	dropping   bool
-	seenHeader bool
-	untrusted  bool
+	meta        rolloutMeta
+	file        os.FileInfo
+	offset      int64
+	pending     []byte
+	dropping    bool
+	seenHeader  bool
+	untrusted   bool
+	provedTurns map[string]bool
+	// Retain bounded identities until a child-owned event proves the turn;
+	// repeated response items then remain replay-safe without storing text.
+	pendingResponses     map[string][][sha256.Size]byte
+	pendingResponseCount int
 }
 
 const maxActivityPendingBytes = 8 << 20
@@ -96,15 +109,18 @@ func (a *rolloutActivity) root(id string) {
 // A wait/close observation can reactivate an owned resumed helper. New helper
 // files require a current spawn, not merely an observed receiver ID. A started
 // stdout spawn permits live capture; cleanup still needs completed proof.
-func (a *rolloutActivity) child(id string, spawned bool) {
+func (a *rolloutActivity) child(id string, spawned bool) bool {
 	if id == "" || len(id) > maxItemIDBytes {
 		a.mu.Lock()
 		a.overflow = true
 		a.mu.Unlock()
-		return
+		return false
 	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
 	if len(a.announced) < maxCodexChildren || a.announced[id] {
+		_, known := a.known[id]
+		newSpawn := spawned && !a.spawned[id] && !known
 		if !a.announced[id] || spawned && !a.spawned[id] {
 			a.refresh = true
 		}
@@ -112,10 +128,11 @@ func (a *rolloutActivity) child(id string, spawned bool) {
 		if spawned {
 			a.spawned[id] = true
 		}
+		return newSpawn
 	} else {
 		a.overflow = true
 	}
-	a.mu.Unlock()
+	return false
 }
 
 func (a *rolloutActivity) start() {
@@ -243,9 +260,10 @@ func (a *rolloutActivity) poll() {
 		}
 	}
 	progressed := false
+	var lastProgressReport time.Time
 	selected := map[string]bool{rootID: true} // Stdout identifies the root even before its rollout appears.
 	if meta, ok := files[rootID]; ok && !ambiguous[rootID] && !meta.duplicate && meta.ParentID == "" && (meta.SessionID == "" || meta.SessionID == rootID) {
-		a.scan(meta, rootID, &progressed)
+		a.scan(meta, rootID, &progressed, &lastProgressReport)
 	}
 	for changed := true; changed; {
 		changed = false
@@ -268,12 +286,24 @@ func (a *rolloutActivity) poll() {
 				continue
 			}
 			selected[id], changed = true, true
-			a.scan(meta, rootID, &progressed)
+			a.scan(meta, rootID, &progressed, &lastProgressReport)
 		}
 	}
 	if progressed && a.progress != nil {
-		a.progress()
+		a.progress() // Credit fresh work even when the final scan took less than one second.
 	}
+}
+
+func (a *rolloutActivity) reportProgress(progressed *bool, lastReport *time.Time) {
+	if !*progressed || a.progress == nil {
+		return
+	}
+	now := time.Now()
+	if !lastReport.IsZero() && now.Sub(*lastReport) < time.Second {
+		return
+	}
+	*progressed, *lastReport = false, now
+	a.progress()
 }
 
 func (a *rolloutActivity) needsDiscovery(rootID string, announced, spawned map[string]bool) bool {
@@ -291,7 +321,7 @@ func (a *rolloutActivity) needsDiscovery(rootID string, announced, spawned map[s
 	return false
 }
 
-func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool) {
+func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool, lastProgressReport *time.Time) {
 	if a.prefixFailed[meta.ID] || meta.path == "" || a.excluded[meta.path] && a.known[meta.ID].path != meta.path {
 		return
 	}
@@ -406,6 +436,7 @@ func (a *rolloutActivity) scan(meta rolloutMeta, rootID string, progressed *bool
 				a.contentMissing(meta.ID)
 			} else {
 				a.consume(meta, rootID, cursor, line, progressed)
+				a.reportProgress(progressed, lastProgressReport)
 			}
 		}
 		a.pendingBytes -= int64(len(cursor.pending))
@@ -462,8 +493,23 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		if meta.ID == rootID {
 			return // Root stdout supplies discussion.
 		}
-		if a.consumeResponse(meta, event.Payload, uncertainOrdinal) && !uncertainOrdinal {
-			*progressed = true
+		fresh, turnID := a.consumeResponse(meta, event.Payload, uncertainOrdinal)
+		if fresh && !uncertainOrdinal && a.progress != nil {
+			if meta.HistoryStart != nil || a.before[meta.ID] != nil || cursor.provedTurns[turnID] {
+				a.newResponseProgress(meta.ID, event.Payload, progressed)
+			} else if turnID != "" {
+				if response, ok := responseProgressEvent(event.Payload); ok {
+					if cursor.pendingResponseCount >= maxUsageRecords {
+						a.contentMissing(meta.ID)
+					} else {
+						if cursor.pendingResponses == nil {
+							cursor.pendingResponses = make(map[string][][sha256.Size]byte)
+						}
+						cursor.pendingResponses[turnID] = append(cursor.pendingResponses[turnID], progressIdentity(meta.ID, response))
+						cursor.pendingResponseCount++
+					}
+				}
+			}
 		}
 		return
 	}
@@ -496,14 +542,31 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			uncertain := uncertainOrdinal || before != nil && message.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 			a.emitVisible(meta.ID, "inter_agent_communication", message.Author+" -> "+message.Recipient+"\n"+message.Content, uncertain)
 		}
-		if !uncertainOrdinal && (message.Content != "" || message.EncryptedContent != "") {
-			*progressed = true
+		// Only helper-authored communication proves helper progress.
+		if !uncertainOrdinal && message.Author == meta.ID &&
+			(before == nil || message.Metadata.TurnID != "") &&
+			(message.Content != "" || message.EncryptedContent != "") {
+			a.newNativeProgress(meta.ID, event, struct {
+				TurnID, Author, Recipient, Content string
+				HasEncrypted                       bool
+			}{message.Metadata.TurnID, message.Author, message.Recipient, message.Content, message.EncryptedContent != ""}, progressed)
 		}
 		return
 	}
 	if event.Type != "event_msg" {
 		switch event.Type {
-		case "turn_context", "token_usage_record", "world_state", "compacted":
+		case "token_usage_record":
+			var record struct {
+				ThreadID   string `json:"thread_id"`
+				SessionID  string `json:"session_id"`
+				TurnID     string `json:"turn_id"`
+				ResponseID string `json:"response_id"`
+			}
+			if json.Unmarshal(event.Payload, &record) == nil && record.SessionID == rootID && record.ResponseID != "" {
+				a.proveHelperTurn(meta, rootID, cursor, record.ThreadID, record.TurnID, uncertainOrdinal, progressed)
+			}
+			return
+		case "turn_context", "world_state", "compacted":
 			return // Known metadata, not visible assistant discussion.
 		default:
 			if meta.ID != rootID {
@@ -521,6 +584,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		Kind        string          `json:"kind"`
 		Message     string          `json:"message"`
 		Text        string          `json:"text"`
+		Chunk       string          `json:"chunk"`
 		Item        json.RawMessage `json:"item"`
 	}
 	if json.Unmarshal(event.Payload, &payload) != nil {
@@ -533,12 +597,79 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if b := a.before[meta.ID]; b != nil && payload.TurnID != "" && b.turns[payload.TurnID] {
 		return
 	}
-	if !uncertainOrdinal && (a.before[meta.ID] == nil || payload.TurnID != "" || meta.ID == rootID && payload.Type == "task_started") {
-		*progressed = true
+	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal, progressed)
+	proven := meta.ID == rootID || a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]
+	nativeProgress := func() {
+		if a.progress == nil {
+			return
+		}
+		fields := struct {
+			Type, TurnID, Message, Text, Chunk string
+			Images                             []json.RawMessage `json:"images,omitempty"`
+			FileIDs                            []json.RawMessage `json:"file_ids,omitempty"`
+			LocalImages                        []json.RawMessage `json:"local_images,omitempty"`
+			Audio                              []json.RawMessage `json:"audio,omitempty"`
+			LocalAudio                         []json.RawMessage `json:"local_audio,omitempty"`
+			Questions                          []json.RawMessage `json:"questions,omitempty"`
+		}{Type: payload.Type, TurnID: payload.TurnID}
+		switch payload.Type {
+		case "exec_command_output":
+			fields.Chunk = payload.Chunk
+		case "user_message":
+			fields.Message = payload.Message
+			var input struct {
+				Images      []json.RawMessage `json:"images"`
+				FileIDs     []json.RawMessage `json:"file_ids"`
+				LocalImages []json.RawMessage `json:"local_images"`
+				Audio       []json.RawMessage `json:"audio"`
+				LocalAudio  []json.RawMessage `json:"local_audio"`
+			}
+			if json.Unmarshal(event.Payload, &input) == nil {
+				fields.Images, fields.FileIDs, fields.LocalImages = input.Images, input.FileIDs, input.LocalImages
+				fields.Audio, fields.LocalAudio = input.Audio, input.LocalAudio
+			}
+			if fields.Message == "" && len(fields.Images)+len(fields.FileIDs)+len(fields.LocalImages)+len(fields.Audio)+len(fields.LocalAudio) == 0 {
+				return
+			}
+		case "agent_message":
+			fields.Message = payload.Message
+			var output struct {
+				Questions []json.RawMessage `json:"questions"`
+			}
+			if json.Unmarshal(event.Payload, &output) == nil {
+				fields.Questions = output.Questions
+			}
+			if fields.Message == "" && len(fields.Questions) == 0 {
+				return
+			}
+		case "agent_reasoning", "agent_reasoning_raw_content":
+			fields.Text = payload.Text
+		}
+		a.newNativeProgress(meta.ID, event, fields, progressed)
+	}
+	if !uncertainOrdinal && proven && payload.Type == "exec_command_output" && payload.Chunk != "" &&
+		(meta.ID != rootID || a.before[meta.ID] == nil || payload.TurnID != "") {
+		nativeProgress()
+	}
+	if meta.ID != rootID && !uncertainOrdinal && proven {
+		switch payload.Type {
+		case "task_started", "task_complete", "turn_aborted":
+			// One lifecycle transition of each kind belongs to a turn, even if replayed at a new ordinal.
+			a.newProgress(meta.ID, rolloutEvent{Type: payload.Type, Payload: []byte(payload.TurnID)}, 0, progressed)
+		case "patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
+			"exec_command_begin", "exec_command_end":
+			a.newToolProgress(meta.ID, event.Payload, progressed)
+		case "user_message", "agent_message":
+			nativeProgress()
+		case "agent_reasoning", "agent_reasoning_raw_content":
+			if payload.Text != "" {
+				nativeProgress()
+			}
+		}
 	}
 	if payload.Type == "collab_agent_spawn_end" {
 		if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
-			a.rolloutSpawn(meta, payload.TurnID, payload.NewThreadID)
+			a.rolloutSpawn(meta, payload.TurnID, payload.NewThreadID, progressed)
 		}
 		return
 	}
@@ -546,7 +677,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		switch payload.Kind {
 		case "started":
 			if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
-				a.rolloutSpawn(meta, payload.TurnID, payload.AgentID)
+				a.rolloutSpawn(meta, payload.TurnID, payload.AgentID, progressed)
 			}
 		case "interacted", "interrupted", "completed":
 			if a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
@@ -621,6 +752,21 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 		a.contentMissing(meta.ID)
 		return
 	}
+	if meta.ID != rootID && payload.Type == "item_completed" && !uncertainOrdinal && proven {
+		switch item.Type {
+		case "Plan", "UserMessage", "AgentMessage":
+			if item.Text != "" || len(item.Content) != 0 || item.Type == "AgentMessage" && len(item.Questions) != 0 {
+				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
+			}
+		case "Reasoning", "CommandExecution", "DynamicToolCall", "FileChange",
+			"McpToolCall", "FunctionCallOutput", "Extension", "ImageView":
+			a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
+		case "CollabAgentToolCall":
+			if codexCollabWorkTool(item.Tool) {
+				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
+			}
+		}
+	}
 	if meta.ID != rootID && (payload.Type == "item_started" || payload.Type == "item_updated") {
 		a.contentMissing(meta.ID) // Native persistence does not include partial item events.
 		return
@@ -628,7 +774,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	if payload.Type == "item_completed" && item.Type == "SubAgentActivity" && a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 		switch item.Kind {
 		case "started":
-			a.rolloutSpawn(meta, payload.TurnID, item.AgentID)
+			a.rolloutSpawn(meta, payload.TurnID, item.AgentID, progressed)
 		case "interacted", "interrupted", "completed":
 			a.rolloutObserve(meta, payload.TurnID, item.AgentID)
 		default:
@@ -637,7 +783,7 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	}
 	if item.Type == "CollabAgentToolCall" && item.Tool == "spawn_agent" && item.Status == "completed" && a.spawnAttributable(meta, rootID, uncertainOrdinal, payload.ThreadID, payload.TurnID) {
 		for _, id := range item.ReceiverIDs {
-			a.rolloutSpawn(meta, payload.TurnID, id)
+			a.rolloutSpawn(meta, payload.TurnID, id, progressed)
 		}
 	}
 	if meta.ID == rootID {
@@ -680,7 +826,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 				a.contentMissing(meta.ID)
 				continue
 			}
-			parts = append(parts, content.Text)
+			if content.Text != "" {
+				parts = append(parts, content.Text)
+			}
 		}
 		text = strings.Join(parts, "\n")
 		if text == "" {
@@ -703,6 +851,557 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	a.emitVisible(meta.ID, kind, text, uncertain)
 }
 
+func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
+	// Hash item identity, lifecycle, and known output fields; timing metadata can change on replay.
+	type progressItem struct {
+		ID               string          `json:"id"`
+		Type             string          `json:"type"`
+		Kind             string          `json:"kind"`
+		Tool             string          `json:"tool"`
+		Status           string          `json:"status"`
+		Text             string          `json:"text"`
+		AggregatedOutput string          `json:"aggregated_output"`
+		Command          json.RawMessage `json:"command"`
+		Content          json.RawMessage `json:"content"`
+		Summary          json.RawMessage `json:"summary_text"`
+		Questions        json.RawMessage `json:"questions"`
+		Output           json.RawMessage `json:"output"`
+		Result           json.RawMessage `json:"result"`
+		Changes          json.RawMessage `json:"changes"`
+		ExitCode         json.RawMessage `json:"exit_code"`
+		Path             json.RawMessage `json:"path"`
+		Query            json.RawMessage `json:"query"`
+		Prompt           json.RawMessage `json:"prompt"`
+		Arguments        json.RawMessage `json:"arguments"`
+		Response         json.RawMessage `json:"response"`
+	}
+	var item progressItem
+	if json.Unmarshal(raw, &item) != nil {
+		return
+	}
+	switch item.Type {
+	case "UserMessage":
+		// UserInput text_elements and other UI metadata do not change the prompt.
+		// Keep text and the attachment fields defined by the app-server schema.
+		if len(item.Content) != 0 {
+			var content []struct {
+				Type   string `json:"type"`
+				Text   string `json:"text"`
+				URL    string `json:"url"`
+				FileID string `json:"fileId"`
+				Path   string `json:"path"`
+				Name   string `json:"name"`
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal(item.Content, &content) != nil {
+				return
+			}
+			stable := content[:0]
+			for _, part := range content {
+				if part.Type == "image" && part.URL == "" && part.FileID == "" && part.Path == "" {
+					continue // Detail and display name cannot identify an image.
+				}
+				if (part.Type == "text" || part.Type == "Text") && part.Text == "" {
+					continue
+				}
+				stable = append(stable, part)
+			}
+			if len(stable) == 0 && item.Text == "" {
+				return
+			}
+			if len(stable) == 0 {
+				item.Content = nil
+			} else {
+				item.Content, _ = json.Marshal(stable)
+			}
+		}
+	case "AgentMessage":
+		// Ciphertext and per-part timing can change when the same message reappears.
+		if len(item.Content) != 0 {
+			var content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(item.Content, &content) != nil {
+				return
+			}
+			stable := content[:0]
+			for _, part := range content {
+				if (part.Type == "Text" || part.Type == "text") && part.Text == "" {
+					continue
+				}
+				stable = append(stable, part)
+			}
+			if len(stable) == 0 && item.Text == "" && !nonemptyProgressJSON(item.Questions) {
+				return
+			}
+			if len(stable) == 0 {
+				item.Content = nil
+			} else {
+				item.Content, _ = json.Marshal(stable)
+			}
+		}
+		if !nonemptyProgressJSON(item.Questions) {
+			item.Questions = nil
+		}
+	case "Reasoning":
+		item.Content = nil // Raw reasoning is not stable visible progress.
+		if !nonemptyProgressJSON(item.Summary) {
+			item.Summary = nil
+		}
+	case "FunctionCallOutput":
+		var ok bool
+		if item.Output, ok = stableFunctionCallOutput(item.Output); !ok {
+			return
+		}
+	case "McpToolCall":
+		var ok bool
+		if item.Result, ok = stableMCPResult(item.Result); !ok {
+			return
+		}
+	}
+	snapshot, err := json.Marshal(struct {
+		TurnID string       `json:"turn_id"`
+		Item   progressItem `json:"item"`
+	}{turnID, item})
+	if err != nil {
+		return
+	}
+	snapshot, ok := normalizeProgressJSON(snapshot)
+	if !ok {
+		return
+	}
+	a.newProgress(id, rolloutEvent{Type: "item_completed", Payload: snapshot}, 0, progressed)
+}
+
+func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
+	// A call ID proves a new tool call; identical ID-less events cannot prove one.
+	var tool struct {
+		Type             string          `json:"type"`
+		TurnID           string          `json:"turn_id"`
+		CallID           string          `json:"call_id"`
+		ID               string          `json:"id"`
+		Name             json.RawMessage `json:"name"`
+		Server           json.RawMessage `json:"server"`
+		Tool             json.RawMessage `json:"tool"`
+		Invocation       json.RawMessage `json:"invocation"`
+		Status           json.RawMessage `json:"status"`
+		Command          json.RawMessage `json:"command"`
+		CWD              json.RawMessage `json:"cwd"`
+		ParsedCmd        json.RawMessage `json:"parsed_cmd"`
+		Source           json.RawMessage `json:"source"`
+		InteractionInput json.RawMessage `json:"interaction_input"`
+		Arguments        json.RawMessage `json:"arguments"`
+		Input            json.RawMessage `json:"input"`
+		Output           json.RawMessage `json:"output"`
+		Stdout           json.RawMessage `json:"stdout"`
+		Stderr           json.RawMessage `json:"stderr"`
+		AggregatedOutput json.RawMessage `json:"aggregated_output"`
+		FormattedOutput  json.RawMessage `json:"formatted_output"`
+		Result           json.RawMessage `json:"result"`
+		Results          json.RawMessage `json:"results"`
+		Response         json.RawMessage `json:"response"`
+		Changes          json.RawMessage `json:"changes"`
+		Success          json.RawMessage `json:"success"`
+		ExitCode         json.RawMessage `json:"exit_code"`
+		Query            json.RawMessage `json:"query"`
+		Prompt           json.RawMessage `json:"prompt"`
+		Path             json.RawMessage `json:"path"`
+		Image            json.RawMessage `json:"image"`
+		Error            json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(raw, &tool) != nil {
+		return
+	}
+	var invocation *struct {
+		Server    string          `json:"server"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if json.Unmarshal(tool.Invocation, &invocation) == nil && invocation != nil {
+		tool.Invocation, _ = json.Marshal(invocation)
+	} else {
+		tool.Invocation = nil
+	}
+	if tool.Type == "mcp_tool_call_end" {
+		var ok bool
+		if tool.Result, ok = stableMCPToolEventResult(tool.Result); !ok {
+			return
+		}
+	}
+	snapshot, err := json.Marshal(tool)
+	if err != nil {
+		return
+	}
+	snapshot, ok := normalizeProgressJSON(snapshot)
+	if !ok {
+		return
+	}
+	a.newProgress(id, rolloutEvent{Type: "tool_event", Payload: snapshot}, 0, progressed)
+}
+
+func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, progressed *bool) {
+	if event, ok := responseProgressEvent(raw); ok {
+		a.newProgress(id, event, 0, progressed)
+	}
+}
+
+func responseProgressEvent(raw json.RawMessage) (rolloutEvent, bool) {
+	var response struct {
+		Type      string `json:"type"`
+		ID        string `json:"id"`
+		Role      string `json:"role"`
+		Author    string `json:"author"`
+		Recipient string `json:"recipient"`
+		CallID    string `json:"call_id"`
+		Metadata  struct {
+			TurnID string `json:"turn_id"`
+		} `json:"internal_chat_message_metadata_passthrough"`
+		Name      json.RawMessage `json:"name"`
+		Content   json.RawMessage `json:"content"`
+		Summary   json.RawMessage `json:"summary"`
+		Command   json.RawMessage `json:"command"`
+		Arguments json.RawMessage `json:"arguments"`
+		Input     json.RawMessage `json:"input"`
+		Output    json.RawMessage `json:"output"`
+		Result    json.RawMessage `json:"result"`
+		Changes   json.RawMessage `json:"changes"`
+		Query     json.RawMessage `json:"query"`
+		Results   json.RawMessage `json:"results"`
+		Tools     json.RawMessage `json:"tools"`
+		Path      json.RawMessage `json:"path"`
+		Prompt    json.RawMessage `json:"prompt"`
+		Status    json.RawMessage `json:"status"`
+		ExitCode  json.RawMessage `json:"exit_code"`
+	}
+	if json.Unmarshal(raw, &response) != nil {
+		return rolloutEvent{}, false
+	}
+	switch response.Type {
+	case "message":
+		// shortcut: Unknown future ContentItem fields are ignored; extend this when Codex adds visible content.
+		type contentPart struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL string `json:"image_url"`
+			AudioURL string `json:"audio_url"`
+			FileID   string `json:"file_id"`
+			Detail   string `json:"detail"`
+		}
+		var content []contentPart
+		if json.Unmarshal(response.Content, &content) != nil {
+			return rolloutEvent{}, false
+		}
+		stable := content[:0]
+		for _, part := range content {
+			switch response.Role {
+			case "assistant":
+				if part.Type != "output_text" || part.Text == "" {
+					continue
+				}
+				stable = append(stable, contentPart{Type: part.Type, Text: part.Text})
+			case "user":
+				switch part.Type {
+				case "input_text":
+					if part.Text == "" {
+						continue
+					}
+					stable = append(stable, contentPart{Type: part.Type, Text: part.Text})
+				case "input_image":
+					if part.ImageURL == "" && part.FileID == "" {
+						continue // Detail alone is not an image input.
+					}
+					stable = append(stable, contentPart{Type: part.Type, ImageURL: part.ImageURL, FileID: part.FileID, Detail: part.Detail})
+				case "input_audio":
+					if part.AudioURL == "" && part.FileID == "" {
+						continue
+					}
+					stable = append(stable, contentPart{Type: part.Type, AudioURL: part.AudioURL, FileID: part.FileID})
+				default:
+					continue
+				}
+			default:
+				continue
+			}
+		}
+		response.Content, _ = json.Marshal(stable)
+		response.Summary = nil
+	case "agent_message":
+		// AgentMessageInputContent also carries encrypted_content, which never enters progress identity.
+		var content []struct {
+			Type, Text string
+		}
+		if json.Unmarshal(response.Content, &content) != nil {
+			return rolloutEvent{}, false
+		}
+		stable := make([]struct{ Type, Text string }, 0, len(content))
+		for _, part := range content {
+			if part.Type != "input_text" || part.Text == "" {
+				continue
+			}
+			stable = append(stable, struct{ Type, Text string }{part.Type, part.Text})
+		}
+		response.Content, _ = json.Marshal(stable)
+		response.Summary = nil
+	case "reasoning":
+		response.Content = nil // Never hash raw reasoning.
+		var summary []struct{ Type, Text string }
+		if len(response.Summary) != 0 && json.Unmarshal(response.Summary, &summary) != nil {
+			return rolloutEvent{}, false
+		}
+		stable := make([]struct{ Type, Text string }, 0, len(summary))
+		for _, part := range summary {
+			if part.Type == "summary_text" && part.Text != "" {
+				stable = append(stable, part)
+			}
+		}
+		response.Summary, _ = json.Marshal(stable)
+	case "function_call_output", "custom_tool_call_output":
+		response.Summary = nil
+		var ok bool
+		if response.Output, ok = stableFunctionCallOutput(response.Output); !ok {
+			return rolloutEvent{}, false
+		}
+	default:
+		response.Summary = nil
+	}
+	snapshot, err := json.Marshal(response)
+	if err != nil {
+		return rolloutEvent{}, false
+	}
+	snapshot, ok := normalizeProgressJSON(snapshot)
+	if !ok {
+		return rolloutEvent{}, false
+	}
+	return rolloutEvent{Type: "response_item", Payload: snapshot}, true
+}
+
+func stableFunctionCallOutput(raw json.RawMessage) (json.RawMessage, bool) {
+	// Function output is a string or an array of known content items. The
+	// encrypted item carries no visible output and its ciphertext may change.
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return raw, true
+	}
+	var content []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL string `json:"image_url"`
+		FileID   string `json:"file_id"`
+		FileData string `json:"file_data"`
+		FileURL  string `json:"file_url"`
+		Filename string `json:"filename"`
+		Detail   string `json:"detail"`
+		AudioURL string `json:"audio_url"`
+	}
+	if json.Unmarshal(raw, &content) != nil {
+		return nil, false
+	}
+	stable, err := json.Marshal(content)
+	return stable, err == nil
+}
+
+func stableMCPToolEventResult(raw json.RawMessage) (json.RawMessage, bool) {
+	var result map[string]json.RawMessage
+	if json.Unmarshal(raw, &result) == nil {
+		if inner, wrapped := result["Ok"]; wrapped {
+			stable, ok := stableMCPResult(inner)
+			if !ok {
+				return nil, false
+			}
+			result["Ok"] = stable
+			encoded, err := json.Marshal(result)
+			return encoded, err == nil
+		}
+	}
+	return stableMCPResult(raw)
+}
+
+func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {
+	// MCP result, block, and embedded resource _meta are transport annotations.
+	// Preserve structuredContent and arbitrary nested tool data.
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return raw, true
+	}
+	var result map[string]json.RawMessage
+	if json.Unmarshal(raw, &result) != nil {
+		return nil, false
+	}
+	delete(result, "_meta")
+	if content := bytes.TrimSpace(result["content"]); len(content) != 0 && content[0] == '[' {
+		var blocks []json.RawMessage
+		if json.Unmarshal(content, &blocks) != nil {
+			return nil, false
+		}
+		for i, block := range blocks {
+			block = bytes.TrimSpace(block)
+			if len(block) == 0 || block[0] != '{' {
+				continue
+			}
+			var fields map[string]json.RawMessage
+			if json.Unmarshal(block, &fields) != nil {
+				return nil, false
+			}
+			delete(fields, "_meta")
+			delete(fields, "annotations")
+			var kind string
+			if json.Unmarshal(fields["type"], &kind) == nil && kind == "resource" {
+				resource := bytes.TrimSpace(fields["resource"])
+				if len(resource) != 0 && resource[0] == '{' {
+					var contents map[string]json.RawMessage
+					if json.Unmarshal(resource, &contents) != nil {
+						return nil, false
+					}
+					delete(contents, "_meta")
+					var err error
+					if fields["resource"], err = json.Marshal(contents); err != nil {
+						return nil, false
+					}
+				}
+			}
+			var err error
+			if blocks[i], err = json.Marshal(fields); err != nil {
+				return nil, false
+			}
+		}
+		var err error
+		if result["content"], err = json.Marshal(blocks); err != nil {
+			return nil, false
+		}
+	}
+	stable, err := json.Marshal(result)
+	return stable, err == nil
+}
+
+func (a *rolloutActivity) newNativeProgress(id string, event rolloutEvent, fields any, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
+	if event.Ordinal <= 0 {
+		var err error
+		event.Payload, err = json.Marshal(fields)
+		if err != nil {
+			return
+		}
+		var ok bool
+		event.Payload, ok = normalizeProgressJSON(event.Payload)
+		if !ok {
+			return
+		}
+	}
+	a.newProgress(id, event, event.Ordinal, progressed)
+}
+
+func (a *rolloutActivity) newProgress(id string, event rolloutEvent, ordinal int64, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
+	suppress := false
+	if a.rootProgressClosed != nil && a.rootProgressClosed.Load() && event.Type != "child_spawn" {
+		a.mu.Lock()
+		suppress = id != "" && id == a.rootID
+		a.mu.Unlock()
+	}
+	if ordinal > 0 {
+		// Rollout ordinals are appended in order. A cursor needs only its
+		// latest ordinal to distinguish fresh output from replay, even for a
+		// helper that emits more than maxUsageRecords output chunks.
+		if ordinal <= a.progressOrdinal[id] {
+			return
+		}
+		if a.progressOrdinal == nil {
+			a.progressOrdinal = make(map[string]int64)
+		}
+		a.progressOrdinal[id] = ordinal
+		if !suppress {
+			*progressed = true
+		}
+		return
+	}
+	a.newUnorderedProgress(progressIdentity(id, event), suppress, progressed)
+}
+
+func progressIdentity(id string, event rolloutEvent) [sha256.Size]byte {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(id))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(event.Type))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(event.Payload)
+	var digest [sha256.Size]byte
+	copy(digest[:], hash.Sum(nil))
+	return digest
+}
+
+func (a *rolloutActivity) newUnorderedProgress(digest [sha256.Size]byte, suppress bool, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
+	if a.progressEvents[digest] {
+		return
+	}
+	limit := maxUsageRecords
+	if a.progressEventLimit > 0 {
+		limit = min(limit, a.progressEventLimit)
+	}
+	if len(a.progressEvents) >= limit {
+		if !a.progressLimit {
+			a.progressLimit = true
+			if a.stopRun != nil {
+				a.stopRun()
+			}
+		}
+		return
+	}
+	if a.progressEvents == nil {
+		a.progressEvents = make(map[[sha256.Size]byte]bool)
+	}
+	a.progressEvents[digest] = true
+	if !suppress {
+		*progressed = true
+	}
+}
+
+// An unbounded fresh helper file may begin with copied parent history. Its
+// own thread and turn identify fresh work when no fork ordinal or prefix does.
+func (a *rolloutActivity) helperProgressProven(meta rolloutMeta, threadID, turnID string) bool {
+	if a.before[meta.ID] != nil {
+		return turnID != ""
+	}
+	if meta.HistoryStart != nil {
+		return true
+	}
+	return threadID == meta.ID && turnID != ""
+}
+
+// Response items omit thread_id, so retain turns identified by child-owned native events.
+func (a *rolloutActivity) proveHelperTurn(meta rolloutMeta, rootID string, cursor *rolloutActivityCursor, threadID, turnID string, uncertainOrdinal bool, progressed *bool) {
+	if meta.ID == rootID || meta.HistoryStart != nil || a.before[meta.ID] != nil ||
+		threadID != meta.ID || turnID == "" || uncertainOrdinal {
+		return
+	}
+	if cursor.provedTurns == nil {
+		cursor.provedTurns = make(map[string]bool)
+	}
+	if len(cursor.provedTurns) < maxUsageRecords {
+		cursor.provedTurns[turnID] = true
+	}
+	if digests, pending := cursor.pendingResponses[turnID]; pending {
+		delete(cursor.pendingResponses, turnID)
+		cursor.pendingResponseCount -= len(digests)
+		for _, digest := range digests {
+			a.newUnorderedProgress(digest, false, progressed)
+		}
+	}
+}
+
 func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, uncertainOrdinal bool, threadID, turnID string) bool {
 	if meta.ID == rootID {
 		return true
@@ -716,14 +1415,18 @@ func (a *rolloutActivity) spawnAttributable(meta rolloutMeta, rootID string, unc
 	return true
 }
 
-func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage, uncertainOrdinal bool) bool {
+func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage, uncertainOrdinal bool) (bool, string) {
 	var item struct {
 		Type, Role, Author, Recipient string
 		Metadata                      struct {
 			TurnID string `json:"turn_id"`
 		} `json:"internal_chat_message_metadata_passthrough"`
 		Content []struct {
-			Type, Text string
+			Type, Text       string
+			ImageURL         string `json:"image_url"`
+			AudioURL         string `json:"audio_url"`
+			FileID           string `json:"file_id"`
+			EncryptedContent string `json:"encrypted_content"`
 		} `json:"content"`
 		Summary []struct {
 			Type, Text string
@@ -731,14 +1434,15 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	}
 	if json.Unmarshal(raw, &item) != nil {
 		a.contentMissing(meta.ID)
-		return false
+		return false, ""
 	}
 	before := a.before[meta.ID]
 	if before != nil && item.Metadata.TurnID != "" && before.turns[item.Metadata.TurnID] {
-		return false
+		return false, ""
 	}
 	uncertain := uncertainOrdinal || before != nil && item.Metadata.TurnID == "" || meta.HistoryStart == nil && before == nil
 	kind, text := "", ""
+	hiddenContent, hasAttachment := false, false
 	switch item.Type {
 	case "message":
 		contentType := "output_text"
@@ -748,23 +1452,46 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		case "user":
 			kind, contentType = "user", "input_text"
 		case "developer", "system", "tool":
-			return false // Agent instructions and tool inputs are outside discussion capture.
+			return false, "" // Agent instructions and tool inputs are outside discussion capture.
 		default:
 			a.contentMissing(meta.ID) // A future visible role must not disappear silently.
-			return false
+			return false, ""
 		}
 		var parts []string
 		for _, content := range item.Content {
 			if content.Type != contentType {
+				if kind == "user" {
+					switch content.Type {
+					case "input_image":
+						if content.ImageURL == "" && content.FileID == "" {
+							if content.Text != "" || content.AudioURL != "" || content.EncryptedContent != "" {
+								a.contentMissing(meta.ID)
+							}
+							continue
+						}
+						hasAttachment = true
+					case "input_audio":
+						if content.AudioURL == "" && content.FileID == "" {
+							if content.Text != "" || content.ImageURL != "" || content.EncryptedContent != "" {
+								a.contentMissing(meta.ID)
+							}
+							continue
+						}
+						hasAttachment = true
+					}
+				}
 				a.contentMissing(meta.ID)
+				continue
+			}
+			if content.Text == "" {
+				if content.ImageURL != "" || content.AudioURL != "" || content.FileID != "" || content.EncryptedContent != "" {
+					a.contentMissing(meta.ID)
+				}
 				continue
 			}
 			parts = append(parts, content.Text)
 		}
 		text = strings.Join(parts, "\n")
-		if len(item.Content) != 0 && text == "" {
-			a.contentMissing(meta.ID)
-		}
 	case "reasoning":
 		kind = "reasoning_summary"
 		var parts []string
@@ -773,15 +1500,30 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 				a.contentMissing(meta.ID)
 				continue
 			}
-			parts = append(parts, summary.Text)
+			if summary.Text != "" {
+				parts = append(parts, summary.Text)
+			}
 		}
 		text = strings.Join(parts, "\n") // Never inspect raw or encrypted reasoning.
 	case "agent_message":
 		kind = "inter_agent_message"
 		var parts []string
 		for _, content := range item.Content {
+			if content.Type == "input_text" && content.Text == "" {
+				if content.EncryptedContent != "" {
+					a.contentMissing(meta.ID)
+				}
+				continue
+			}
+			if content.Type == "encrypted_content" && content.EncryptedContent == "" {
+				if content.Text != "" {
+					a.contentMissing(meta.ID)
+				}
+				continue
+			}
 			if content.Type != "input_text" {
 				a.contentMissing(meta.ID) // Encrypted or unknown content is unavailable.
+				hiddenContent = hiddenContent || content.Type == "encrypted_content" && content.EncryptedContent != ""
 				continue
 			}
 			parts = append(parts, content.Text)
@@ -795,10 +1537,10 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 	case "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "local_shell_call", "web_search_call", "computer_call", "tool_search_call", "tool_search_output", "image_generation_call":
 		kind, text = "tool", string(raw)
 	case "additional_tools", "configuration_update", "compaction", "context_compaction":
-		return false // Agent input and session metadata are not helper discussion.
+		return false, "" // Agent input and session metadata are not helper discussion.
 	default:
 		a.contentMissing(meta.ID)
-		return false
+		return false, ""
 	}
 	if meta.HistoryMode == "paginated" {
 		// Paginated response and completed-item records are independently
@@ -806,7 +1548,9 @@ func (a *rolloutActivity) consumeResponse(meta rolloutMeta, raw json.RawMessage,
 		kind += "_response_item"
 	}
 	a.emitVisible(meta.ID, kind, text, uncertain)
-	return true
+	return (before == nil || item.Metadata.TurnID != "") &&
+		(item.Type != "agent_message" || item.Author == meta.ID) &&
+		(text != "" || item.Type == "reasoning" || hiddenContent && item.Author == meta.ID || hasAttachment), item.Metadata.TurnID
 }
 
 func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {
@@ -826,7 +1570,7 @@ func (a *rolloutActivity) emitVisible(id, kind, text string, uncertain bool) {
 	}
 }
 
-func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string) {
+func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string, progressed *bool) {
 	if id == "" || len(id) > maxItemIDBytes {
 		a.contentMissing(meta.ID)
 		return
@@ -841,7 +1585,9 @@ func (a *rolloutActivity) rolloutSpawn(meta rolloutMeta, turnID, id string) {
 			return
 		}
 	}
-	a.child(id, true)
+	if a.child(id, true) {
+		a.newProgress(meta.ID, rolloutEvent{Type: "child_spawn", Payload: []byte(id)}, 0, progressed)
+	}
 }
 
 func (a *rolloutActivity) rolloutObserve(meta rolloutMeta, turnID, id string) {

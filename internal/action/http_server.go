@@ -45,7 +45,6 @@ type httpTransaction struct {
 
 	job            Job
 	credentials    WorkerCredentials
-	started        time.Time
 	binding        httpBinding
 	sink           Checkpoints
 	ctx            context.Context
@@ -170,7 +169,7 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 	budgetCtx, cancelBudget := context.WithDeadline(ctx, expires)
 	defer cancelBudget()
 	actionCtx, cancel := context.WithCancel(budgetCtx)
-	tx := &httpTransaction{job: job, started: started, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: cancelBudget, stopGrace: stopBudget,
+	tx := &httpTransaction{job: job, binding: httpJobBinding(job), sink: sink, ctx: actionCtx, budget: budgetCtx, cancel: cancel, stopBudget: cancelBudget, stopGrace: stopBudget,
 		stop: make(chan struct{}), done: make(chan struct{}), finished: make(chan struct{})}
 	if state != nil {
 		tx.onStop = state.onStop
@@ -648,8 +647,6 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 				err = errors.New("HTTP Status upload exceeds accepted callback facts")
 			} else if status.Phase != "upload" && status.Phase != "cleanup" && status.order(tx.job.rounds()) > tx.phaseCeiling {
 				err = errors.New("HTTP Status phase exceeds accepted callback facts")
-			} else if status.ProgressAge > time.Since(tx.started) {
-				err = errors.New("HTTP Status progress age exceeds elapsed action time")
 			} else if !e.statusAt.IsZero() {
 				err = status.follows(e.status, tx.job.rounds())
 			}

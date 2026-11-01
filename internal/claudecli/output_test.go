@@ -1,6 +1,7 @@
 package claudecli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -12,6 +13,60 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestAssistantContentHashTracksExecutionContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, original, metadataReplay, changed string
+	}{
+		{"text", `[{"type":"text","text":"hello","citations":[1]}]`,
+			`[{"type":"text","text":"hello","citations":[2]}]`, `[{"type":"text","text":"goodbye"}]`},
+		{"thinking", `[{"type":"thinking","thinking":"private","signature":"one"}]`,
+			`[{"type":"thinking","thinking":"private","signature":"two"}]`, `[{"type":"thinking","thinking":"new private"}]`},
+		{"redacted", `[{"type":"redacted_thinking","data":"opaque","metadata":1}]`,
+			`[{"type":"redacted_thinking","data":"opaque","metadata":2}]`, `[{"type":"redacted_thinking","data":"new opaque"}]`},
+		{"tool", `[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"pwd"},"caller":{"type":"direct"}}]`,
+			`[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"pwd"},"caller":{"type":"code"}}]`,
+			`[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"ls"}}]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			original, present := assistantContentHash(json.RawMessage(tc.original))
+			replay, replayPresent := assistantContentHash(json.RawMessage(tc.metadataReplay))
+			changed, changedPresent := assistantContentHash(json.RawMessage(tc.changed))
+			if !present || !replayPresent || !changedPresent || original != replay || original == changed {
+				t.Fatalf("metadata must replay; changed content must be fresh: present=%t/%t/%t replay=%t changed=%t",
+					present, replayPresent, changedPresent, original == replay, original != changed)
+			}
+		})
+	}
+	if _, present := assistantContentHash(json.RawMessage(`[{"type":"thinking","thinking":"","signature":"metadata"}]`)); present {
+		t.Fatal("signature-only block was counted as execution content")
+	}
+	for _, raw := range []string{
+		`{invalid`,
+		`{"type":"text","text":"unsupported object shape"}`,
+		`[{"type":"unknown","metadata":"changed"}]`,
+		`["metadata"]`,
+		`[{"type":"tool_use","name":"Bash","input":{"command":"pwd"}}]`,
+		`[{"type":"text","text":42}]`,
+		`[{"type":"thinking","thinking":42}]`,
+		`[{"type":"redacted_thinking","data":42}]`,
+		`42`,
+		`true`,
+	} {
+		if _, present := assistantContentHash(json.RawMessage(raw)); present {
+			t.Fatalf("unsupported content counted as execution: %s", raw)
+		}
+	}
+	text, present := assistantContentHash(json.RawMessage(`"text"`))
+	changedText, changedPresent := assistantContentHash(json.RawMessage(`"changed text"`))
+	if !present || !changedPresent || text == changedText {
+		t.Fatal("native string content change was missed")
+	}
+	textBlock, blockPresent := assistantContentHash(json.RawMessage(`[{"type":"text","text":"text"}]`))
+	if !blockPresent || text != textBlock {
+		t.Fatal("equivalent string and single text block have different replay identities")
+	}
+}
 
 func writeChunks(t *testing.T, output *jsonlOutput, data string) {
 	t.Helper()
@@ -224,10 +279,13 @@ func numberResultEvents(data string) string {
 }
 
 func TestOutputBackgroundTasks(t *testing.T) {
-	const ambient = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true}]}`
-	const worker = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
-	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const ambient = `{"type":"system","subtype":"background_tasks_changed","uuid":"ambient-list","tasks":[{"task_id":"housekeeping","ambient":true}]}`
+	const worker = `{"type":"system","subtype":"background_tasks_changed","uuid":"worker-list","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"reviewer-list","tasks":[{"task_id":"reviewer"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"empty-list","tasks":[]}`
+	const taggedFinish = `{"type":"system","subtype":"task_notification","task_id":"worker","run_id":"run-1","status":"completed"}`
+	const runlessFailure = `{"type":"system","subtype":"task_notification","task_id":"worker","status":"failed"}`
+	const syntheticFinish = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>worker</task-id><status>completed</status></task-notification>"}}`
 	for _, tc := range []struct {
 		name, before, after string
 		fails               bool
@@ -244,6 +302,16 @@ func TestOutputBackgroundTasks(t *testing.T) {
 		{name: "work after result needs new answer", after: pending + "\n" + empty, fails: true},
 		{name: "answer after new work", before: successfulResult + "\n" + pending + "\n" + empty},
 		{name: "failed command recovered", before: `{"type":"system","subtype":"task_notification","task_id":"test","status":"failed"}`},
+		{name: "late tagged completion needs new answer", after: taggedFinish, fails: true},
+		{name: "late runless failure needs new answer", after: runlessFailure, fails: true},
+		{name: "late synthetic completion needs new answer", after: syntheticFinish, fails: true},
+		{name: "answer after late tagged completion", after: taggedFinish + "\n" + successfulResult},
+		{name: "answer after late runless failure", after: runlessFailure + "\n" + successfulResult},
+		{name: "answer after late synthetic completion", after: syntheticFinish + "\n" + successfulResult},
+		{name: "tagged finish replay after answer", before: taggedFinish, after: taggedFinish},
+		{name: "runless failure without replay ID needs new answer", before: runlessFailure, after: runlessFailure, fails: true},
+		{name: "synthetic finish without replay ID needs new answer", before: syntheticFinish, after: syntheticFinish, fails: true},
+		{name: "synthetic notice cannot prove tagged finish replay", before: taggedFinish, after: syntheticFinish, fails: true},
 		{name: "user text is not task state", after: `{"type":"user","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,9 +328,38 @@ func TestOutputBackgroundTasks(t *testing.T) {
 	}
 }
 
+func TestOutputTaskNoticeRequiresUniqueReplayIdentity(t *testing.T) {
+	const bare = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	const uuidA = `{"type":"system","subtype":"task_notification","uuid":"notice-a","task_id":"helper","status":"completed"}`
+	const uuidB = `{"type":"system","subtype":"task_notification","uuid":"notice-b","task_id":"helper","status":"completed"}`
+	const tagged = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const taggedUUID = `{"type":"system","subtype":"task_notification","uuid":"tagged-notice","task_id":"helper","run_id":"run-1","status":"completed"}`
+	const synthetic = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	const syntheticTaggedUUID = `{"type":"user","isSynthetic":true,"uuid":"tagged-notice","message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
+	for _, tc := range []struct {
+		name, before, after string
+		valid               bool
+	}{
+		{"same uuid replay", uuidA, uuidA, true},
+		{"new uuid same task", uuidA, uuidB, false},
+		{"missing uuid repeat", bare, bare, false},
+		{"synthetic without uuid repeat", synthetic, synthetic, false},
+		{"tagged run proves replay and records new uuid", tagged, taggedUUID + "\n" + syntheticTaggedUUID, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.before+"\n"+successfulResult+"\n"+tc.after+"\n")
+			o.finish()
+			if o.completed != tc.valid || (o.err == nil) != tc.valid {
+				t.Fatalf("notice replay: completed=%t error=%v, valid=%t", o.completed, o.err, tc.valid)
+			}
+		})
+	}
+}
+
 func TestOutputNativeTurnResults(t *testing.T) {
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"worker"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	const structured = `{"answer":"published","refutations":"private"}`
 	waiting := strings.Replace(successfulResult, "final answer", "waiting", 1)
 	empty := strings.Replace(successfulResult, "final answer", "", 1)
@@ -376,8 +473,8 @@ func TestOutputWholeTreeUsage(t *testing.T) {
 }
 
 func TestOutputPreservesRecordedUsage(t *testing.T) {
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"reviewer"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	const models = `"modelUsage":{"main":{"inputTokens":13,"cacheCreationInputTokens":17,"cacheReadInputTokens":19,"outputTokens":23},"helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}`
 	const aggregate = `{"type":"result","subtype":"success","result":"answer",` + models + `}`
 	const fallback = `"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}`

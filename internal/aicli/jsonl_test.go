@@ -95,6 +95,23 @@ func TestJSONLAcceptsExactTotalLimits(t *testing.T) {
 	}
 }
 
+func TestJSONLPartialFramesReachByteLimitBeforeEventLimit(t *testing.T) {
+	frame := []byte("{\"type\":\"stream_event\",\"event\":{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"x\"}}}\n")
+	if int64(maxEvents)*int64(len(frame)) <= maxJSONLOutputBytes {
+		t.Fatalf("%d-byte partial frames hit the event cap before the byte cap", len(frame))
+	}
+	const previousLimit = 100000
+	var dispatched int
+	output := JSONL{events: previousLimit, total: int64(previousLimit * len(frame)),
+		Line: func([]byte) { dispatched++ }, Fail: func(err error) { t.Fatal(err) }}
+	if _, err := output.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	if dispatched != 1 || output.events != previousLimit+1 {
+		t.Fatalf("dispatched %d frames at event %d", dispatched, output.events)
+	}
+}
+
 func TestJSONLDispatchesCompleteEventsBeforeTotalLimit(t *testing.T) {
 	var lines []string
 	failures := 0

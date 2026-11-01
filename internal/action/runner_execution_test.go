@@ -54,7 +54,7 @@ func TestRunnerReportsCleanupAfterModel(t *testing.T) {
 	var phases []string
 	runner := Runner{
 		WorkRoot: t.TempDir(),
-		statusUpdate: func(phase string, _ int, _ string) {
+		phaseUpdate: func(phase string, _ int, _ string) {
 			phases = append(phases, phase)
 		},
 		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -69,7 +69,7 @@ func TestRunnerReportsCleanupAfterModel(t *testing.T) {
 	if _, err := runner.Run(t.Context(), testJob(command.Comment)); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"main", "native", "main", "main", "cleanup"}; !slices.Equal(phases, want) {
+	if want := []string{"main", "native", "cleanup"}; !slices.Equal(phases, want) {
 		t.Fatalf("Runner phase order = %v, want %v", phases, want)
 	}
 }
@@ -91,10 +91,20 @@ func TestRunnerFailedStartKeepsOrdinalWithoutRetry(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	var before, after []CallCheckpoint
 	nativeCalls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		nativeCalls++
-		return aicli.Result{}, exec.ErrNotFound
-	}}
+	progress := 0
+	runner := Runner{WorkRoot: t.TempDir(), statusActivity: func() { progress++ },
+		aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+			beforeCall := progress
+			call, err := next(ctx, request)
+			if progress != beforeCall {
+				t.Fatalf("failed model start credited progress: before=%d after=%d", beforeCall, progress)
+			}
+			return call, err
+		},
+		runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			nativeCalls++
+			return aicli.Result{}, exec.ErrNotFound
+		}}
 	checkpoints := runnerExecutionCheckpoints{
 		before: func(value CallCheckpoint) error { before = append(before, value); return nil },
 		after:  func(value CallCheckpoint) error { after = append(after, value); return nil },

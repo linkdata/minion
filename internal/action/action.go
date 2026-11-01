@@ -70,6 +70,8 @@ type Orchestrator struct {
 	ValidatePublication func(context.Context, monitor.Job, bool) error
 	// MaxRuntime selects config.DefaultMaxRuntime when zero.
 	MaxRuntime time.Duration
+	// InactivityTimeout selects config.DefaultInactivityTimeout when zero.
+	InactivityTimeout time.Duration
 	// PublicationGrace bounds reconciliation of an already-issued GitHub write.
 	PublicationGrace time.Duration
 	// MaxGitHubContextBytes limits combined GitHub text.

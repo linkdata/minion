@@ -74,6 +74,76 @@ func TestReviewSnapshotFixFreezesOnlyExportedCandidate(t *testing.T) {
 	}
 }
 
+func TestReviewSnapshotFixCreditsCopiedFilesAndStopsOnCancellation(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Source.Files = []workspace.File{
+		{Path: "first.txt", Mode: workspace.Regular, Data: []byte("first\n")},
+		{Path: "second.txt", Mode: workspace.Regular, Data: []byte("second\n")},
+	}
+	attachRepository(t, &job)
+	index, source := offlineIndexFixture(t, job.Source.Files)
+	workRoot := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	firstOnly := false
+	snapshot, err := freezeReviewSnapshot(ctx, workRoot, job, source, "", index, func() {
+		paths, globErr := filepath.Glob(filepath.Join(workRoot, "minion-review-*"))
+		if globErr != nil || len(paths) != 1 {
+			t.Fatalf("frozen source path: %v, %v", paths, globErr)
+		}
+		_, firstErr := os.Stat(filepath.Join(paths[0], "first.txt"))
+		_, secondErr := os.Stat(filepath.Join(paths[0], "second.txt"))
+		if firstErr == nil && errors.Is(secondErr, os.ErrNotExist) {
+			firstOnly = true
+			cancel()
+		}
+	}, "")
+	if snapshot != nil {
+		if closeErr := snapshot.close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}
+	if !firstOnly || !errors.Is(err, context.Canceled) {
+		t.Fatalf("critic copy did not expose completed file and stop: firstOnly=%t error=%v", firstOnly, err)
+	}
+}
+
+func TestReviewSnapshotFixCreditsRepositoryImportCommands(t *testing.T) {
+	job := testJob(command.Fix)
+	job.Source.Files = []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}}
+	attachRepository(t, &job)
+	index, source := offlineIndexFixture(t, job.Source.Files)
+	workRoot := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	progress := 0
+	creditedImport := false
+	var callbackErr error
+	snapshot, err := freezeReviewSnapshot(ctx, workRoot, job, source, "", index, func() {
+		progress++
+		paths, globErr := filepath.Glob(filepath.Join(workRoot, "minion-review-*"))
+		if globErr != nil || len(paths) != 1 {
+			callbackErr = fmt.Errorf("frozen repository path: %v, %v", paths, globErr)
+			cancel()
+			return
+		}
+		if ref, readErr := os.ReadFile(filepath.Join(paths[0], ".git", "refs", "heads", "main")); readErr == nil && strings.TrimSpace(string(ref)) == job.Source.Head {
+			creditedImport = true
+			cancel()
+		}
+	})
+	if snapshot != nil {
+		t.Cleanup(func() {
+			if err := snapshot.close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if callbackErr != nil || !errors.Is(err, context.Canceled) || !creditedImport || progress < 2 {
+		t.Fatalf("frozen import cancellation was not observed: progress=%d credited=%t callback=%v error=%v", progress, creditedImport, callbackErr, err)
+	}
+}
+
 func TestReviewSnapshotFixFreezesFinalReplacementLayout(t *testing.T) {
 	job := testJob(command.Fix)
 	unchanged := job.Source.Files[0]
@@ -178,7 +248,7 @@ func TestReviewSnapshotRejectsOversizedReports(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeSparseFixtureFile(t, output, "findings.json", maxAuditArtifactBytes+1)
-	snapshot, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, output, nil, "")
+	snapshot, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, output, nil, nil, "")
 	if snapshot != nil {
 		t.Cleanup(func() {
 			if err := snapshot.close(); err != nil {
@@ -214,7 +284,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			if stage == "addition" {
 				writeFixtureFile(t, source, name, []byte("added"))
 			}
-			control, err := freezeReviewSnapshot(t.Context(), t.TempDir(), job, source, "", index, "")
+			control, err := freezeReviewSnapshot(t.Context(), t.TempDir(), job, source, "", index, nil, "")
 			if err != nil {
 				t.Fatalf("valid candidate failed under short root: %v", err)
 			}
@@ -228,7 +298,7 @@ func TestReviewSnapshotCleansFailedFixCandidateMaterialization(t *testing.T) {
 			if err := os.MkdirAll(workRoot, 0700); err != nil {
 				t.Fatal(err)
 			}
-			failed, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, "", index, "")
+			failed, err := freezeReviewSnapshot(t.Context(), workRoot, job, source, "", index, nil, "")
 			if failed == nil || !failed.ownedSource || !errors.Is(err, syscall.ENAMETOOLONG) {
 				t.Fatalf("expected %s filesystem failure: snapshot=%v error=%v", stage, failed, err)
 			}

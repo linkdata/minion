@@ -50,6 +50,8 @@ func TestSessionUnlaunchedCallsHaveCompleteZeroUsage(t *testing.T) {
 func TestSessionStartFailureDoesNotPoisonFreshRetry(t *testing.T) {
 	binary := installFakeCodex(t, "#!/missing-minion-fixture-interpreter\n")
 	var session Session
+	progress := 0
+	session.OnProgress = func() { progress++ }
 	t.Cleanup(func() {
 		if err := session.Close(); err != nil {
 			t.Error(err)
@@ -57,9 +59,10 @@ func TestSessionStartFailureDoesNotPoisonFreshRetry(t *testing.T) {
 	})
 	dir := t.TempDir()
 	result, err := session.Run(t.Context(), dir, "first", false, "", config.CodexConfig{})
-	if !errors.Is(err, os.ErrNotExist) || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) {
-		t.Fatalf("unstarted exec: %+v error=%v", result, err)
+	if !errors.Is(err, os.ErrNotExist) || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || progress != 0 {
+		t.Fatalf("unstarted exec: %+v error=%v progress=%d", result, err, progress)
 	}
+	session.OnProgress = nil
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}' '{\"type\":\"turn.completed\"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}

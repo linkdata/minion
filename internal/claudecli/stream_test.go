@@ -84,8 +84,8 @@ func TestStreamEventMarksDroppedRedactionIncomplete(t *testing.T) {
 }
 
 func TestSessionStreamFinalRequiresSuccessfulLifecycle(t *testing.T) {
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"worker"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	for _, tc := range []struct {
 		name, stream string
 		wantFinal    bool

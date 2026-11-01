@@ -1,8 +1,10 @@
 package codexcli
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -198,7 +201,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		cmd.Env = append(cmd.Env, "CODEX_API_KEY="+settings.APIKey)
 	}
 	cmd.Stdin = strings.NewReader(prompt)
-	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent,
+	output := jsonlOutput{cancel: cancelRun, expectedID: s.threadID, onEvent: s.OnEvent, onProgress: s.OnProgress,
 		redact:          func(text string) string { return redactCodexText(text, settings) },
 		allowIncomplete: !slices.ContainsFunc(codexSecrets(settings), func(secret string) bool { return secret != "" }),
 	}
@@ -249,6 +252,8 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			emit(event)
 		}
 		activity = newRolloutActivity(ctx, codexHome, started, s.accounting.known, provedKnown, s.accounting.before, s.excludedRollouts, emitRollout, s.OnProgress)
+		activity.rootProgressClosed = &output.progressClosed
+		activity.stopRun = cancelRun
 		if s.threadID != "" {
 			activity.root(s.threadID)
 		}
@@ -258,10 +263,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			}
 			emit(event)
 		}
-		output.onChild = func(ids []string, spawned bool) {
+		output.onChild = func(ids []string, spawned bool) bool {
+			fresh := false
 			for _, id := range ids {
-				activity.child(id, spawned)
+				fresh = activity.child(id, spawned) || fresh
 			}
+			return fresh
 		}
 	}
 	if s.OnInput != nil {
@@ -279,16 +286,20 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			s.OnEvent(aicli.StreamEvent{Kind: "identity_unavailable"})
 		}
 	}()
+	executil.Prepare(cmd)
+	if err := cmd.Start(); err != nil {
+		s.accounting.before = nil
+		return result, fmt.Errorf("codex exec: %w", err)
+	}
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
+	}
 	if activity != nil {
 		activity.start()
 	}
-	runErr := executil.Run(cmd)
-	if cmd.Process == nil {
-		if activity != nil {
-			activity.finish()
-		}
-		s.accounting.before = nil
-		return result, fmt.Errorf("codex exec: %w", runErr)
+	runErr := cmd.Wait()
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
 	}
 	s.used = true
 	output.stream.Finish()
@@ -344,6 +355,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("codex exec: %w", errors.Join(err, runErr))
+	}
+	if activity != nil && activity.progressLimit {
+		result.UsageComplete = false
+		return result, fmt.Errorf("codex exec: %w: rollout progress identity limit reached", aicli.ErrOutputLimit)
 	}
 	if output.stopErr != nil {
 		return result, fmt.Errorf("codex exec: %w", errors.Join(output.stopErr, runErr))
@@ -483,33 +498,53 @@ type pendingCodexItem struct {
 	order int
 }
 
+type progressCodexItem struct {
+	generation    uint64
+	completed     bool
+	spawnAdmitted bool
+}
+
+type progressCodexSnapshot struct {
+	generation uint64
+	snapshot   [sha256.Size]byte
+	completed  bool
+}
+
 type jsonlOutput struct {
-	cancel          context.CancelFunc
-	onEvent         func(aicli.StreamEvent)
-	onChild         func([]string, bool)
-	redact          func(string) string
-	allowIncomplete bool
-	gapSent         bool
-	missingSent     bool
-	threadID        string
-	expectedID      string
-	conflictingID   string
-	tokens          *usage.Tokens
-	children        []string
-	observationOnly map[string]bool
-	spawns          map[string]bool
-	stopErr         error
-	stream          aicli.JSONL
-	parseErr        error
-	finalMessage    string
-	completed       bool
-	failed          bool
-	failureReason   string
-	diagnostics     []aicli.ProviderDiagnostic
-	pending         map[string]pendingCodexItem
-	pendingBytes    int
-	nextPending     int
-	completedItems  map[string]bool
+	cancel            context.CancelFunc
+	onEvent           func(aicli.StreamEvent)
+	onChild           func([]string, bool) bool
+	onProgress        func()
+	redact            func(string) string
+	allowIncomplete   bool
+	gapSent           bool
+	missingSent       bool
+	threadID          string
+	expectedID        string
+	conflictingID     string
+	tokens            *usage.Tokens
+	children          []string
+	observationOnly   map[string]bool
+	spawns            map[string]bool
+	stopErr           error
+	stream            aicli.JSONL
+	parseErr          error
+	finalMessage      string
+	completed         bool
+	progressClosed    atomic.Bool // Terminal turns stay closed despite late items until turn.started.
+	failed            bool
+	failureReason     string
+	diagnostics       []aicli.ProviderDiagnostic
+	pending           map[string]pendingCodexItem
+	pendingBytes      int
+	nextPending       int
+	completedItems    map[string]bool
+	progressItems     map[string]progressCodexItem
+	progressItemLimit int // Tests lower the cap; zero uses maxUsageRecords.
+	// Each snapshot comes from one aicli.JSONL event, which caps records per call.
+	progressSnapshots      map[progressCodexSnapshot]bool
+	nextProgressGeneration uint64
+	spawnFresh             bool
 }
 
 func (o *jsonlOutput) Write(p []byte) (int, error) {
@@ -579,6 +614,16 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 		if o.stopErr != nil {
 			return
 		}
+		closed := o.progressClosed.Load()
+		// A newly admitted helper can keep working after the root turn ends.
+		freshChild := closed && o.onChild != nil && o.spawnFresh && event.Item != nil &&
+			event.Item.Type == "collab_tool_call" && event.Item.Tool == "spawn_agent"
+		if !closed || freshChild {
+			o.recordExecutionProgress(event, line)
+			if o.stopErr != nil {
+				return
+			}
+		}
 		if event.Type == "item.started" || event.Type == "item.updated" {
 			o.recordProgress(event, line)
 			return
@@ -615,6 +660,172 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 			o.gap("unknown_item")
 		}
 	}
+}
+
+// A JSONL item snapshot can be repeated without any new work. Changed root
+// output, completed reasoning, and tool lifecycle renew the inactivity timer.
+func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
+	if o.onProgress == nil || o.threadID == "" || event.Item == nil ||
+		(event.ThreadID != "" && event.ThreadID != o.threadID) {
+		return
+	}
+	item := event.Item
+	tool := codexToolItem(item.Type) && item.Type != "error" && item.Type != "web_search" &&
+		(item.Type != "collab_tool_call" || codexCollabWorkTool(item.Tool))
+	output := (item.Type == "agent_message" || item.Type == "reasoning") && item.Text != ""
+	if !tool && !output && !(item.Type == "reasoning" && event.Type == "item.completed") {
+		return
+	}
+	if len(item.ID) > maxItemIDBytes {
+		return
+	}
+	switch event.Type {
+	case "item.started", "item.updated", "item.completed":
+	default:
+		return
+	}
+	var selected struct {
+		Item json.RawMessage `json:"item"`
+	}
+	if json.Unmarshal(line, &selected) != nil || len(selected.Item) == 0 {
+		return
+	}
+	var visible struct {
+		Type             string          `json:"type"`
+		Tool             string          `json:"tool"`
+		Command          json.RawMessage `json:"command"`
+		Server           string          `json:"server"`
+		Arguments        json.RawMessage `json:"arguments"`
+		Text             string          `json:"text"`
+		AggregatedOutput string          `json:"aggregated_output"`
+		Output           json.RawMessage `json:"output"`
+		Result           json.RawMessage `json:"result"`
+		Changes          json.RawMessage `json:"changes"`
+	}
+	if json.Unmarshal(selected.Item, &visible) != nil {
+		return
+	}
+	if item.Type == "mcp_tool_call" {
+		var ok bool
+		if visible.Result, ok = stableMCPResult(visible.Result); !ok {
+			return
+		}
+	}
+	if !nonemptyProgressJSON(visible.Changes) {
+		visible.Changes = nil // An empty change list is not new tool output.
+	}
+	key := "id:" + item.ID
+	if item.ID == "" {
+		var ok bool
+		if visible.Command, ok = normalizeProgressJSON(visible.Command); !ok {
+			return
+		}
+		if visible.Arguments, ok = normalizeProgressJSON(visible.Arguments); !ok {
+			return
+		}
+		identity, err := json.Marshal(struct {
+			Type      string          `json:"type"`
+			Tool      string          `json:"tool"`
+			Command   json.RawMessage `json:"command"`
+			Server    string          `json:"server"`
+			Arguments json.RawMessage `json:"arguments"`
+		}{visible.Type, visible.Tool, visible.Command, visible.Server, visible.Arguments})
+		if err != nil {
+			return
+		}
+		digest := sha256.Sum256(identity)
+		key = "legacy:" + string(digest[:])
+	}
+	if item.ID == "" || !tool {
+		visible.Command, visible.Arguments = nil, nil
+	}
+	// Native IDs distinguish changed input. ID-less items use input as identity.
+	visible.Type, visible.Tool, visible.Server = "", "", ""
+	content, err := json.Marshal(visible)
+	if err != nil {
+		return
+	}
+	content, ok := normalizeProgressJSON(content)
+	if !ok {
+		return
+	}
+	snapshot := sha256.Sum256(content)
+	prior, seen := o.progressItems[key]
+	spawnAdmitted := item.Type == "collab_tool_call" && item.Tool == "spawn_agent" &&
+		len(item.ReceiverThreadIDs) != 0 && o.spawnFresh
+	// The child observer proves each new receiver. Without it, only the first
+	// receiver transition can be distinguished from a repeated item snapshot.
+	newChildAdmission := seen && spawnAdmitted &&
+		(o.onChild != nil || (!prior.completed && !prior.spawnAdmitted))
+	if item.Type == "collab_tool_call" && item.Tool == "spawn_agent" && len(item.ReceiverThreadIDs) != 0 &&
+		!o.spawnFresh && !(seen && !prior.completed && prior.spawnAdmitted) {
+		return // The rollout already credited this child; stdout did not admit it earlier.
+	}
+	if seen {
+		if item.ID != "" && prior.completed && !newChildAdmission {
+			return
+		}
+		// An ID-less partial item without new output cannot prove another cycle.
+		if item.ID == "" && prior.completed && !newChildAdmission && event.Type != "item.completed" &&
+			visible.Text == "" && visible.AggregatedOutput == "" &&
+			!nonemptyProgressJSON(visible.Output) && !nonemptyProgressJSON(visible.Result) &&
+			!nonemptyProgressJSON(visible.Changes) {
+			return
+		}
+		if item.ID == "" && !newChildAdmission && event.Type != "item.completed" &&
+			o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot, true}] {
+			return // A completed-only snapshot cannot prove a later partial cycle.
+		}
+		if !newChildAdmission && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot, event.Type == "item.completed"}] {
+			return
+		}
+	}
+	if o.progressItems == nil {
+		o.progressItems = make(map[string]progressCodexItem)
+	}
+	limit := maxUsageRecords
+	if o.progressItemLimit > 0 {
+		limit = min(limit, o.progressItemLimit)
+	}
+	if _, exists := o.progressItems[key]; !exists && len(o.progressItems) >= limit {
+		o.stop(fmt.Errorf("%w: Codex progress identity limit reached", aicli.ErrOutputLimit))
+		return
+	}
+	admitted := spawnAdmitted || seen && !prior.completed && prior.spawnAdmitted
+	if prior.generation == 0 {
+		o.nextProgressGeneration++
+		prior.generation = o.nextProgressGeneration
+	}
+	identity := progressCodexSnapshot{prior.generation, snapshot, event.Type == "item.completed"}
+	if !o.progressSnapshots[identity] {
+		if o.progressSnapshots == nil {
+			o.progressSnapshots = make(map[progressCodexSnapshot]bool)
+		}
+		o.progressSnapshots[identity] = true
+	}
+	prior.completed, prior.spawnAdmitted = event.Type == "item.completed", admitted
+	o.progressItems[key] = prior
+	o.onProgress()
+}
+
+func normalizeProgressJSON(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return nil, false
+	}
+	canonical, err := json.Marshal(value)
+	return canonical, err == nil
+}
+
+func nonemptyProgressJSON(raw json.RawMessage) bool {
+	raw, ok := normalizeProgressJSON(raw)
+	return ok && len(raw) != 0 && !bytes.Equal(raw, []byte("null")) &&
+		!bytes.Equal(raw, []byte(`""`)) && !bytes.Equal(raw, []byte("[]")) && !bytes.Equal(raw, []byte("{}"))
 }
 
 // Progress events contain full snapshots. Keep only the latest bounded item.
@@ -753,6 +964,14 @@ func codexToolItem(kind string) bool {
 	return false
 }
 
+func codexCollabWorkTool(tool string) bool {
+	switch tool {
+	case "spawn_agent", "send_input", "resume_agent", "send_message", "followup_task", "interrupt_agent":
+		return true
+	}
+	return false
+}
+
 func (o *jsonlOutput) gap(kind string) {
 	if o.onEvent != nil && !o.gapSent {
 		o.gapSent = true
@@ -790,6 +1009,7 @@ func (o *jsonlOutput) emit(kind, text string) {
 }
 
 func (o *jsonlOutput) accept(event codexEvent) {
+	o.spawnFresh = true
 	if event.Item != nil && event.Item.Type == "collab_tool_call" {
 		if o.observationOnly == nil {
 			o.observationOnly = make(map[string]bool)
@@ -814,7 +1034,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 			if event.Item.Tool == "spawn_agent" {
 				// A started spawn can already have a live helper. This only permits
 				// discussion capture; rollout cleanup still needs completed proof.
-				o.onChild(event.Item.ReceiverThreadIDs, true)
+				o.spawnFresh = o.onChild(event.Item.ReceiverThreadIDs, true)
 			} else if event.Type == "item.completed" || observation {
 				o.onChild(event.Item.ReceiverThreadIDs, false)
 			}
@@ -839,6 +1059,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		}
 	case "turn.started":
 		o.completed, o.finalMessage = false, ""
+		o.progressClosed.Store(false)
 	case "item.completed":
 		if event.Item != nil && event.Item.Type == "agent_message" {
 			o.finalMessage = event.Item.Text
@@ -846,12 +1067,14 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		}
 	case "turn.completed":
 		o.completed = true
+		o.progressClosed.Store(true)
 		o.tokens = nil
 		if tokens, valid := event.Usage.tokens(); valid {
 			o.tokens = &tokens
 		}
 	case "turn.failed":
 		o.failed = true
+		o.progressClosed.Store(true)
 		o.failureReason = eventReason(event)
 		o.observe("turn_failed", o.failureReason)
 	case "error":

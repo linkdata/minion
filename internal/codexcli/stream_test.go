@@ -60,7 +60,7 @@ func TestJSONLOutputStreamsCompleteItemsAndMarksUnboundProgress(t *testing.T) {
 		t.Fatalf("tool payload fields lost: %+v", got)
 	}
 	if output.threadID != "native-root" || !output.completed || output.finalMessage != "complete message" {
-		t.Fatalf("streaming changed native accounting: %+v", output)
+		t.Fatalf("streaming changed native accounting: thread=%q completed=%t final=%q", output.threadID, output.completed, output.finalMessage)
 	}
 }
 
@@ -75,11 +75,12 @@ func writeCodexStreamEvent(t *testing.T, output *jsonlOutput, event any) {
 
 func TestJSONLOutputObservesOpenWaitAndCloseWithoutSpawning(t *testing.T) {
 	var observed []string
-	output := jsonlOutput{onChild: func(ids []string, spawned bool) {
+	output := jsonlOutput{onChild: func(ids []string, spawned bool) bool {
 		if spawned {
 			t.Fatalf("wait/close observation claimed spawn ownership: %v", ids)
 		}
 		observed = append(observed, ids...)
+		return false
 	}}
 	writeCodexStreamEvent(t, &output, map[string]any{"type": "thread.started", "thread_id": "root"})
 	for _, item := range []struct{ event, tool, id string }{

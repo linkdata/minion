@@ -10,7 +10,7 @@ import (
 const (
 	MaxEventBytes       = 4 << 20
 	maxJSONLOutputBytes = 64 << 20
-	maxEvents           = 100000
+	maxEvents           = 750000 // A 104-byte text delta reaches 64 MiB in about 645,000 events.
 )
 
 // JSONL frames bounded provider output; adapters retain their own event policy.

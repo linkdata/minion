@@ -128,11 +128,13 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var failureTimer *time.Timer
-	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
-		// Let the CLI flush a final result and cumulative accounting, then stop
-		// a managed retry watchdog without renewing the action deadline.
-		failureTimer = time.AfterFunc(time.Second, cancel)
-	}}
+	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, onProgress: s.OnProgress, progressSeen: s.progressSeen, assistantHistory: s.assistantHistory, taskProgress: s.taskProgress,
+		runlessPending: s.runlessPending, runlessExplicit: s.runlessExplicit, runlessAmbiguous: s.runlessAmbiguous, runlessCount: s.runlessCount, anonymousPending: s.anonymousPending,
+		progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+			// Let the CLI flush a final result and cumulative accounting, then stop
+			// a managed retry watchdog without renewing the action deadline.
+			failureTimer = time.AfterFunc(time.Second, cancel)
+		}}
 	diagnostics := bounded.Tail{}
 	ceilingMatched, ceilingOverflow := false, false
 	ceiling := bounded.Lines{Limit: bounded.DiagnosticBytes, Line: func(line []byte) {
@@ -147,10 +149,17 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		s.OnInput(aicli.PreparedInput{NativeID: s.id, Mode: mode, Path: cmd.Path,
 			Args: slices.Clone(cmd.Args), Dir: cmd.Dir, Stdin: prompt, Schema: settings.OutputSchema})
 	}
-	err = executil.Run(cmd)
-	if cmd.Process == nil {
+	executil.Prepare(cmd)
+	if err = cmd.Start(); err != nil {
 		// No CLI started, so no provider usage or resumable turn exists.
 		return result, fmt.Errorf("claude: %w", err)
+	}
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
+	}
+	err = cmd.Wait()
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
 	}
 	s.started = true
 	ceiling.Finish()
@@ -164,6 +173,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		err = fmt.Errorf("%w: %q", err, cmp.Or(aicli.RedactTail(&diagnostics, settings.APIKey), "no further diagnostics"))
 	}
 	output.finish()
+	s.progressSeen = output.progressSeen
+	s.assistantHistory = output.assistantHistory
+	s.taskProgress = output.taskProgress
+	s.runlessPending, s.runlessExplicit, s.runlessAmbiguous = output.runlessPending, output.runlessExplicit, output.runlessAmbiguous
+	s.runlessCount, s.anonymousPending = output.runlessCount, output.anonymousPending
+	s.progressBytes, s.progressEntries = output.progressBytes, output.progressEntries
 	if ceilingMatched {
 		output.observe("wait_ceiling", "background tasks stopped by Claude's wait ceiling")
 	}
@@ -205,7 +220,9 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 
 func arguments(policy string) []string {
 	return []string{
-		"-p", "--verbose", "--output-format", "stream-json",
+		// Live deltas let the inactivity timer observe model output before a full message.
+		// JSONL still caps their total bytes and event count.
+		"-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages",
 		"--permission-mode", "dontAsk", "--permission-prompts", "none",
 		"--safe-mode", "--setting-sources=", "--disable-slash-commands",
 		"--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`,

@@ -185,10 +185,22 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	defer stopDeadline()
 	actionCtx, cancelAction := context.WithCancelCause(deadlineCtx)
 	defer cancelAction(context.Canceled)
+	inactivity := startInactivityTimer(started, job.InactivityTimeout, cancelAction)
+	defer inactivity.stop()
 	startStop := sync.OnceFunc(func() { shortenControl(assignment.StopGrace) })
 	stopOnAction := context.AfterFunc(actionCtx, startStop)
 	defer stopOnAction()
 	checkpoints.action = actionCtx
+	if err := context.Cause(actionCtx); err != nil {
+		startStop()
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = errors.Join(monitor.ErrTerminalJob, err)
+		}
+		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		clearCredentials()
+		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
+	}
+	jobRunner.executionProgress = inactivity.progress
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)
 	if err != nil {
@@ -198,8 +210,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	// Bound admission only; the held body must survive model expiry for paid receipts.
 	headerErr := fmt.Errorf("cancellation watch admission timed out: %w", context.DeadlineExceeded)
+	headerWait := min(httpControlTimeout, time.Until(expires))
+	if remaining := time.Until(started.Add(job.InactivityTimeout)); remaining < headerWait {
+		headerWait = max(0, remaining)
+		headerErr = fmt.Errorf("cancellation watch admission timed out: %w", errExecutorInactivity)
+	}
 	headerDone := make(chan struct{})
-	headerTimer := time.AfterFunc(min(httpControlTimeout, time.Until(expires)), func() {
+	headerTimer := time.AfterFunc(headerWait, func() {
 		stopWatch(headerErr)
 		close(headerDone)
 	})
@@ -207,22 +224,24 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if !headerTimer.Stop() {
 		<-headerDone
 	}
-	if context.Cause(watchCtx) == headerErr {
+	watchAdmissionTimedOut := context.Cause(watchCtx) == headerErr
+	if watchAdmissionTimedOut {
 		if watchResponse != nil {
 			_ = watchResponse.Body.Close()
 		}
 		err = headerErr
-		if !time.Now().Before(expires) {
+		if errors.Is(err, errExecutorInactivity) || !time.Now().Before(expires) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		} else {
 			err = errors.Join(monitor.ErrRequestTransport, err)
 		}
 	}
 	if err != nil {
-		protocolFailed = true
+		protocolFailed = !watchAdmissionTimedOut || !errors.Is(err, monitor.ErrTerminalJob)
 		stopWatch(errHTTPWatchStopped)
 		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = admissionFailure(err, actionCtx, inactivity)
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
@@ -247,12 +266,13 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 		watchDone <- err
 	}()
-	statusFeed := newWorkerStatus(job)
+	statusFeed := newWorkerStatus(job, started)
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
 	eventCtx, cancelEvents := context.WithCancel(controlCtx)
 	defer cancelEvents()
-	jobRunner.statusUpdate = statusFeed.progress
+	jobRunner.phaseUpdate = statusFeed.phase
+	jobRunner.statusActivity = statusFeed.activity
 	events := newProviderEventQueue(func(event attemptRecord) error {
 		return statusFeed.emit(eventCtx, transport, event, assignedSecrets...)
 	})
@@ -264,8 +284,11 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	var runErr error
 	// Preparation consumes the accepted runtime.
 	job.RuntimeBudget = time.Until(expires)
+	inactivity.expire()
 	if job.RuntimeBudget <= 0 {
 		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	} else if actionCtx.Err() != nil {
+		runErr = context.Cause(actionCtx)
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
@@ -284,21 +307,22 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			break
 		}
 	}
-	cause := context.Cause(actionCtx)
-	if runErr == nil && httpWatchUncertainty(cause) {
-		// A completed result can resolve independent watch uncertainty through its receipt.
-		cause = nil
-	}
-	// A watch can cancel the child first; retain independent caller and budget failures.
-	cause = errors.Join(cause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
-	if errors.Is(cause, context.DeadlineExceeded) {
-		cause = errors.Join(cause, monitor.ErrTerminalJob)
-	}
-	runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
 	if checkpoints.failure == nil && (job.Critic == nil && len(result.Calls) != 0 || job.Critic != nil && result.CriticStopReason != "") {
-		jobRunner.statusUpdate("upload", 0, "")
+		jobRunner.phaseUpdate("upload", 0, "")
 	}
 	outcomeErr := statusFeed.finish(actionCtx, transport, func() error {
+		inactivity.stop() // Result upload begins; Status drain and upload are not progress.
+		cause := context.Cause(actionCtx)
+		if runErr == nil && httpWatchUncertainty(cause) {
+			// A completed result can resolve independent watch uncertainty through its receipt.
+			cause = nil
+		}
+		// A watch can cancel the child first; retain independent caller and budget failures.
+		cause = errors.Join(cause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
+		if errors.Is(cause, context.DeadlineExceeded) {
+			cause = errors.Join(cause, monitor.ErrTerminalJob)
+		}
+		runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
 		err := checkpoints.outcome(result, runErr)
 		cancelStatus() // Keep heartbeats available throughout the final Result upload.
 		cancelEvents() // Optional logs cannot hold the worker after the required outcome.
@@ -329,6 +353,15 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		runErr = errors.Join(runErr, errHTTPWorkerCleanup)
 	}
 	return redactActionError(errors.Join(runErr, outcomeErr, watchErr, callerErr), assignedSecrets...)
+}
+
+func admissionFailure(err error, actionCtx context.Context, inactivity *inactivityTimer) error {
+	inactivity.stop() // Expiry can precede the timer callback when admission returns.
+	cause := context.Cause(actionCtx)
+	if errors.Is(cause, context.DeadlineExceeded) {
+		cause = errors.Join(monitor.ErrTerminalJob, cause)
+	}
+	return errors.Join(err, cause)
 }
 
 func httpClientUnknown(kind string, err error) error {

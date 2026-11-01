@@ -46,9 +46,11 @@ type Runner struct {
 	Logger      *log.Logger
 	WorkRoot    string
 	// recordReview synchronously persists borrowed evidence without mutating it.
-	recordReview func([]CallUsage, []Refutation, string) error
-	statusUpdate func(string, int, string)
-	eventSink    func(attemptRecord)
+	recordReview      func([]CallUsage, []Refutation, string) error
+	phaseUpdate       func(string, int, string)
+	statusActivity    func()
+	executionProgress func()
+	eventSink         func(attemptRecord)
 }
 
 // NewRemoteRunner validates each assignment's CLI after its credentials arrive.
@@ -231,6 +233,7 @@ func (r *Runner) Execute(ctx context.Context, job Job, checkpoints Checkpoints) 
 }
 
 func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (result Result, resultErr error) {
+	started := time.Now()
 	result = Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head}
 	defer func() {
 		resultErr = redactActionError(resultErr, r.secretValues()...)
@@ -246,13 +249,28 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, job.RuntimeBudget)
+	ctx, cancel := context.WithDeadline(ctx, started.Add(job.RuntimeBudget))
 	defer cancel()
+	configured := *r
+	var inactivity *inactivityTimer
+	if configured.executionProgress == nil {
+		var cancelInactivity context.CancelCauseFunc
+		ctx, cancelInactivity = context.WithCancelCause(ctx)
+		defer cancelInactivity(nil)
+		inactivity = startInactivityTimer(started, job.InactivityTimeout, cancelInactivity)
+		configured.executionProgress = inactivity.progress
+	}
 	// Final status runs after resource cleanup so cleanup diagnostics survive.
 	defer func() {
+		if inactivity != nil {
+			inactivity.stop()
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			result.Answer, result.Changes = "", nil
 			resultErr = errors.Join(monitor.ErrTerminalJob, ctx.Err(), resultErr)
+		} else if errors.Is(context.Cause(ctx), errExecutorInactivity) {
+			result.Answer, result.Changes = "", nil
+			resultErr = errors.Join(context.Cause(ctx), resultErr)
 		} else if ctx.Err() != nil && !errors.Is(resultErr, monitor.ErrTerminalJob) {
 			resultErr = errors.Join(ctx.Err(), resultErr)
 		}
@@ -260,7 +278,26 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "audit_incomplete", Message: "The audit failed; collected artifacts are incomplete and must not be published."})
 		}
 	}()
-	configured := *r
+	if inactivity != nil && time.Since(started) >= job.InactivityTimeout {
+		inactivity.stop()
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	noteProgress := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		if configured.executionProgress != nil {
+			configured.executionProgress()
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if configured.statusActivity != nil {
+			configured.statusActivity()
+		}
+	}
 	checkpointReview := func(history []Refutation) error {
 		result.Refutations = history
 		if checkpoints != nil {
@@ -323,8 +360,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	cleanupFailed := false
 	var cleanupDetail string
 	markCleanup := sync.OnceFunc(func() {
-		if r.statusUpdate != nil {
-			r.statusUpdate("cleanup", 0, "")
+		if r.phaseUpdate != nil {
+			r.phaseUpdate("cleanup", 0, "")
 		}
 	})
 	// Remove owned paths after sessions, report collection, and review snapshots close.
@@ -358,14 +395,14 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err := workspace.CheckRoot(source); err != nil {
 		return result, preparationFailure("check source workspace", err)
 	}
-	if err := workspace.Materialize(source, job.Source.Files); err != nil {
+	if err := workspace.MaterializeWithProgress(ctx, source, job.Source.Files, noteProgress); err != nil {
 		return result, preparationFailure("materialize source", err)
 	}
-	repository, err := gitwork.MaterializeRepository(ctx, source, job.Source)
+	repository, err := gitwork.MaterializeRepositoryWithProgress(ctx, source, job.Source, noteProgress)
 	if err != nil {
 		return result, preparationFailure("materialize repository", err)
 	}
-	if err := materializeContext(contextDir, job.Source); err != nil {
+	if err := materializeContext(ctx, contextDir, job.Source, noteProgress); err != nil {
 		return result, preparationFailure("materialize context", err)
 	}
 	var index *gitwork.OfflineIndex
@@ -375,7 +412,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, preparationFailure("create private index", err)
 		}
 		owned = append(owned, metadataDir)
-		index, err = gitwork.NewOfflineIndex(ctx, metadataDir, source, job.Source.Files)
+		index, err = gitwork.NewOfflineIndexWithProgress(ctx, metadataDir, source, job.Source.Files, noteProgress)
 		if err != nil {
 			// Native Git can refuse a source that passed portable path validation.
 			if errors.Is(err, gitwork.ErrUnsupportedSource) {
@@ -420,7 +457,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			var err error
 			if !reviewCurrent {
 				if review == nil {
-					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, configured.secretValues()...)
+					review, err = freezeReviewSnapshot(ctx, workRoot, job, source, outputDir, index, noteProgress, configured.secretValues()...)
 				} else {
 					err = review.refresh(ctx)
 				}
@@ -482,7 +519,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			record := attemptRecord{Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role,
 				Round: request.round, ReviewPhase: request.reviewPhase, Provider: request.provider, Model: request.model}
 			if configured.eventSink != nil {
-				hasConfiguredSecret := slices.ContainsFunc(configured.secretValues(), func(secret string) bool { return secret != "" })
 				request.onInput = func(input aicli.PreparedInput) {
 					text, unavailable := preparedInputText(input, configured.secretValues()...)
 					if unavailable != "" {
@@ -500,6 +536,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 						configured.eventSink(gap)
 					}
 				}
+				hasConfiguredSecret := slices.ContainsFunc(configured.secretValues(), func(secret string) bool { return secret != "" })
 				request.onEvent = func(event aicli.StreamEvent) {
 					if hasConfiguredSecret && (event.Kind == "assistant_incomplete" || event.Kind == "tool_incomplete") {
 						event.Kind, event.Text = "content_missing", ""
@@ -515,9 +552,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 					configured.eventSink(streamRecord)
 				}
 			}
-			if r.statusUpdate != nil {
-				request.onProgress = func() { r.statusUpdate(request.role, request.round, request.reviewPhase) }
-				r.statusUpdate(request.role, request.round, request.reviewPhase)
+			request.onProgress = noteProgress
+			if r.phaseUpdate != nil && ctx.Err() == nil {
+				r.phaseUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
 			secrets := configured.secretValues()
@@ -577,9 +614,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				if checkpointErr := checkpoints.AfterCall(checkpoint); checkpointErr != nil {
 					err = errors.Join(err, fmt.Errorf("%w: checkpoint model usage: %w", monitor.ErrTerminalJob, checkpointErr))
 				}
-			}
-			if r.statusUpdate != nil {
-				r.statusUpdate(request.role, request.round, request.reviewPhase)
 			}
 			return call, err
 		}
@@ -669,7 +703,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, false, configured.secretValues()...)
+			files, _, err = readAuditArtifactsWithProgress(outputDir, false, noteProgress, configured.secretValues()...)
 			if err != nil {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
@@ -679,7 +713,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
 		}
 		owned = append(owned, validationDir)
-		if err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head); err != nil {
+		err = validateAuditFiles(ctx, files, validationDir, auditSkill, tools, job.Identity.Repository, source, job.Source.Head, noteProgress)
+		if err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 		if result.Artifacts, err = normalizeAuditArtifacts(files, job, auditSkill, configured.secretValues()...); err != nil {
@@ -759,7 +794,7 @@ func preparationFailure(stage string, err error) error {
 	return fmt.Errorf("%w: %s: %w", monitor.ErrTerminalJob, stage, err)
 }
 
-func materializeContext(root string, snapshot workspace.Snapshot) error {
+func materializeContext(ctx context.Context, root string, snapshot workspace.Snapshot, progress func()) error {
 	omittedScope := "head"
 	if snapshot.Base != "" {
 		omittedScope = "head_and_base"
@@ -778,15 +813,24 @@ func materializeContext(root string, snapshot workspace.Snapshot) error {
 		return err
 	}
 	for name, data := range map[string][]byte{"source.json": metadata, "comparison.diff": snapshot.Diff} {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
 			return err
 		}
+		if progress != nil && ctx.Err() == nil {
+			progress()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	base := filepath.Join(root, "base")
 	if err := os.Mkdir(base, 0700); err != nil {
 		return err
 	}
-	return workspace.Materialize(base, snapshot.BaseFiles)
+	return workspace.MaterializeWithProgress(ctx, base, snapshot.BaseFiles, progress)
 }
 
 func modelGitCommand() string {
