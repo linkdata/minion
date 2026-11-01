@@ -127,7 +127,7 @@ func TestReviewSnapshotFixCreditsRepositoryImportCommands(t *testing.T) {
 			cancel()
 			return
 		}
-		if _, statErr := os.Stat(filepath.Join(paths[0], ".git", "HEAD")); statErr == nil {
+		if ref, readErr := os.ReadFile(filepath.Join(paths[0], ".git", "refs", "heads", "main")); readErr == nil && strings.TrimSpace(string(ref)) == job.Source.Head {
 			creditedImport = true
 			cancel()
 		}

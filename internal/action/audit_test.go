@@ -562,6 +562,24 @@ func TestPrivateAuditReportUsesRawByteLimit(t *testing.T) {
 	}
 }
 
+func TestAuditArtifactReadProgressOnlyForAcceptedFiles(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	root := t.TempDir()
+	for _, file := range auditArtifactsFixture(job, sourceIdentity(job), "Audit report\n") {
+		writeFixtureFile(t, root, file.Path, file.Data)
+	}
+	progress := 0
+	files, _, err := readAuditArtifactsWithProgress(root, false, func() { progress++ })
+	if err != nil || len(files) != len(auditArtifacts) || progress != len(auditArtifacts) {
+		t.Fatalf("accepted artifacts: files=%d progress=%d error=%v", len(files), progress, err)
+	}
+	writeFixtureFile(t, root, "run-metadata.json", []byte("{"))
+	progress = 0
+	if _, _, err := readAuditArtifactsWithProgress(root, false, func() { progress++ }); err == nil || progress != 0 {
+		t.Fatalf("invalid first artifact: progress=%d error=%v", progress, err)
+	}
+}
+
 func TestInvalidUTF8AuditArtifactBoundaries(t *testing.T) {
 	job := testJob(command.SecurityAudit)
 	invalidJSON := []byte{'"', 0xff, '"'}

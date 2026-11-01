@@ -291,3 +291,26 @@ func TestContextCreditsEachUnpackedBaseFileAndStopsOnCancellation(t *testing.T) 
 		t.Fatalf("base unpacking did not expose completed file and stop: firstOnly=%t error=%v", firstOnly, err)
 	}
 }
+
+func TestContextCreditsFirstMetadataFileBeforeSecondWrite(t *testing.T) {
+	job := testJob(command.Review)
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	progress := 0
+	err := materializeContext(ctx, root, job.Source, func() {
+		progress++
+		cancel()
+	})
+	written := 0
+	for _, name := range []string{"source.json", "comparison.diff"} {
+		if _, statErr := os.Stat(filepath.Join(root, name)); statErr == nil {
+			written++
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal(statErr)
+		}
+	}
+	if !errors.Is(err, context.Canceled) || progress != 1 || written != 1 {
+		t.Fatalf("first metadata write: progress=%d written=%d error=%v", progress, written, err)
+	}
+}

@@ -46,9 +46,6 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			if s.repository, err = gitwork.MaterializeRepositoryWithProgress(ctx, s.source, job.Source, progress); err != nil {
 				return err
 			}
-			if progress != nil {
-				progress()
-			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -56,7 +53,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			s.source = source
 		}
 		if outputDir != "" {
-			if s.artifacts, _, err = readAuditArtifacts(outputDir, false, secrets...); err != nil {
+			if s.artifacts, _, err = readAuditArtifactsWithProgress(outputDir, false, progress, secrets...); err != nil {
 				return err
 			}
 			if s.outputDir, err = resetReviewDirectory(s.outputDir, workRoot, ".minion-review-reports-"); err != nil {

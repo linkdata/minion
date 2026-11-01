@@ -62,6 +62,10 @@ func TestAssistantContentHashTracksExecutionContent(t *testing.T) {
 	if !present || !changedPresent || text == changedText {
 		t.Fatal("native string content change was missed")
 	}
+	textBlock, blockPresent := assistantContentHash(json.RawMessage(`[{"type":"text","text":"text"}]`))
+	if !blockPresent || text != textBlock {
+		t.Fatal("equivalent string and single text block have different replay identities")
+	}
 }
 
 func writeChunks(t *testing.T, output *jsonlOutput, data string) {

@@ -1656,6 +1656,41 @@ func TestRootSpawnProgressDedupesRolloutAndStdout(t *testing.T) {
 	}
 }
 
+func TestRootSpawnProgressIgnoresHistoricalReceiverOnResume(t *testing.T) {
+	progress := 0
+	activity := newRolloutActivity(t.Context(), t.TempDir(), time.Now(),
+		map[string]rolloutMeta{"old-child": {ID: "old-child"}}, nil, nil, nil, nil, nil)
+	activity.root("root")
+	output := jsonlOutput{onProgress: func() { progress++ }, onChild: func(ids []string, spawned bool) bool {
+		fresh := false
+		for _, id := range ids {
+			fresh = activity.child(id, spawned) || fresh
+		}
+		return fresh
+	}}
+	write := func(line string, want int) {
+		t.Helper()
+		if _, err := output.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		if progress != want {
+			t.Fatalf("after %s: progress=%d, want %d", line, progress, want)
+		}
+	}
+	write(`{"type":"thread.started","thread_id":"root"}`, 0)
+	for _, event := range []string{"item.started", "item.completed"} {
+		write(fmt.Sprintf(`{"type":%q,"item":{"type":"collab_tool_call","id":"old-spawn","tool":"spawn_agent","receiver_thread_ids":["old-child"]}}`, event), 0)
+		if output.spawnFresh {
+			t.Fatal("historical receiver was admitted as a fresh spawn")
+		}
+	}
+	if !activity.announced["old-child"] || !activity.spawned["old-child"] {
+		t.Fatal("historical receiver was lost from discussion capture")
+	}
+	write(`{"type":"item.started","item":{"type":"collab_tool_call","id":"new-spawn","tool":"spawn_agent","receiver_thread_ids":["new-child"]}}`, 1)
+	write(`{"type":"item.completed","item":{"type":"collab_tool_call","id":"new-spawn","tool":"spawn_agent","receiver_thread_ids":["new-child"]}}`, 2)
+}
+
 func TestRootSpawnProgressDoesNotReplayAfterStdoutStartWithoutChildID(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", rolloutSpawn(9, "child"))

@@ -166,6 +166,9 @@ auto = false
 	}
 	var omitted bytes.Buffer
 	for _, entry := range parts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		header, name, ok := bytes.Cut(entry, []byte{'\t'})
 		fields := strings.Fields(string(header))
 		if !ok || len(fields) != 3 || fields[2] != "0" {
@@ -177,6 +180,7 @@ auto = false
 			}
 			omitted.Write(name)
 			omitted.WriteByte(0)
+			index.completed(ctx)
 			continue
 		}
 		file, exists := files[string(name)]
@@ -184,6 +188,10 @@ auto = false
 			return nil, errors.New("source files differ from pinned repository")
 		}
 		delete(files, string(name))
+		index.completed(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(files) != 0 {
 		return nil, errors.New("source files absent from pinned repository")

@@ -1164,6 +1164,7 @@ func (o *jsonlOutput) finishTaskRun(id, runID string, credit bool) {
 	if o.err != nil {
 		return
 	}
+	delete(o.taskProgress, key)
 	if o.taskRuns[key] {
 		o.taskRunCounts[id]--
 		if o.taskRunCounts[id] == 0 {
@@ -1571,6 +1572,7 @@ func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
 		if typed == "" {
 			return [32]byte{}, false
 		}
+		value = []any{map[string]any{"type": "text", "text": typed}}
 	case []any:
 		if len(typed) == 0 {
 			return [32]byte{}, false

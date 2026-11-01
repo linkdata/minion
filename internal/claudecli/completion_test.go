@@ -192,13 +192,15 @@ func TestEarlierAssistantAddedContentInvalidatesCurrentResult(t *testing.T) {
 	}
 }
 
-func TestEarlierAssistantEmptyAndReorderedContentAreReplays(t *testing.T) {
+func TestEarlierAssistantEquivalentContentAreReplays(t *testing.T) {
 	for _, tc := range []struct {
 		name, first, later string
 	}{
 		{"empty list", `{"id":"old"}`, `{"id":"old","content":[]}`},
 		{"empty object", `{"id":"old"}`, `{"id":"old","content":{}}`},
 		{"empty string", `{"id":"old"}`, `{"id":"old","content":""}`},
+		{"string to text block", `{"id":"old","content":"hello"}`, `{"id":"old","content":[{"type":"text","text":"hello"}]}`},
+		{"text block to string", `{"id":"old","content":[{"type":"text","text":"hello"}]}`, `{"id":"old","content":"hello"}`},
 		{"reordered keys", `{"id":"old","content":[{"type":"tool_use","id":"tool","input":{"a":1,"b":2}}]}`,
 			`{"id":"old","content":[{"id":"tool","input":{"b":2,"a":1},"type":"tool_use"}]}`},
 	} {

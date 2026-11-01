@@ -1184,8 +1184,9 @@ func TestFinishedTaggedRunIgnoresDelayedUsageAndReplay(t *testing.T) {
 	const delayed = `{"type":"system","subtype":"task_progress","task_id":"helper","run_id":"run-1","usage":{"total_tokens":5}}`
 	const stale = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-1"}]}`
 	writeChunks(t, &o, started+"\n"+usage+"\n"+finished+"\n"+delayed+"\n"+stale+"\n"+started+"\n")
-	if o.err != nil || progress != 3 || o.pending != 0 || o.taskProgress[taskRunKey("helper", "run-1")].totalTokens != 1 {
-		t.Fatalf("finished run replayed: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+	_, retained := o.taskProgress[taskRunKey("helper", "run-1")]
+	if o.err != nil || progress != 3 || o.pending != 0 || retained {
+		t.Fatalf("finished run replayed or retained counters: progress=%d pending=%d retained=%t error=%v", progress, o.pending, retained, o.err)
 	}
 }
 

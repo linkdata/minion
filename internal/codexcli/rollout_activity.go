@@ -119,7 +119,8 @@ func (a *rolloutActivity) child(id string, spawned bool) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if len(a.announced) < maxCodexChildren || a.announced[id] {
-		newSpawn := spawned && !a.spawned[id]
+		_, known := a.known[id]
+		newSpawn := spawned && !a.spawned[id] && !known
 		if !a.announced[id] || spawned && !a.spawned[id] {
 			a.refresh = true
 		}

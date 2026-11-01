@@ -402,7 +402,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if err != nil {
 		return result, preparationFailure("materialize repository", err)
 	}
-	noteProgress()
 	if err := materializeContext(ctx, contextDir, job.Source, noteProgress); err != nil {
 		return result, preparationFailure("materialize context", err)
 	}
@@ -704,7 +703,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if review != nil {
 			files = review.artifacts
 		} else {
-			files, _, err = readAuditArtifacts(outputDir, false, configured.secretValues()...)
+			files, _, err = readAuditArtifactsWithProgress(outputDir, false, noteProgress, configured.secretValues()...)
 			if err != nil {
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
@@ -820,9 +819,9 @@ func materializeContext(ctx context.Context, root string, snapshot workspace.Sna
 		if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
 			return err
 		}
-	}
-	if progress != nil {
-		progress()
+		if progress != nil && ctx.Err() == nil {
+			progress()
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return err

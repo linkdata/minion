@@ -13,7 +13,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 )
 
-func TestAuditValidationReportsStartedAndCompletedScripts(t *testing.T) {
+func TestAuditValidationReportsCopiesAndScriptLifecycle(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
 		findings, coverage int
@@ -22,13 +22,14 @@ func TestAuditValidationReportsStartedAndCompletedScripts(t *testing.T) {
 		wantProgress       int
 		wantFailedScript   string
 	}{
-		{name: "first fails", findings: 7, wantProgress: 2, wantFailedScript: "validate-findings.cjs"},
-		{name: "second fails", coverage: 7, wantProgress: 4, wantFailedScript: "validate-coverage-ledger.cjs"},
-		{name: "both finish", wantProgress: 4},
-		{name: "start fails", missingBinary: true, wantFailedScript: "validate-findings.cjs"},
-		{name: "canceled after start", cancelAfter: 1, wantProgress: 1},
-		{name: "canceled after first finish", cancelAfter: 2, wantProgress: 2},
-		{name: "canceled after final finish", cancelAfter: 4, wantProgress: 4},
+		{name: "first fails", findings: 7, wantProgress: 3, wantFailedScript: "validate-findings.cjs"},
+		{name: "second fails", coverage: 7, wantProgress: 6, wantFailedScript: "validate-coverage-ledger.cjs"},
+		{name: "both finish", wantProgress: 6},
+		{name: "start fails", missingBinary: true, wantProgress: 1, wantFailedScript: "validate-findings.cjs"},
+		{name: "canceled after copy", cancelAfter: 1, wantProgress: 1},
+		{name: "canceled after start", cancelAfter: 2, wantProgress: 2},
+		{name: "canceled after first finish", cancelAfter: 3, wantProgress: 3},
+		{name: "canceled after final finish", cancelAfter: 6, wantProgress: 6},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in *validate-findings.cjs*) exit %d;; *validate-coverage-ledger.cjs*) exit %d;; esac\nexit 99\n", tc.findings, tc.coverage)
