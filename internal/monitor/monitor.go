@@ -1384,7 +1384,8 @@ func decideAccepted(store *state.Store, job Job, outcome string, at time.Time) (
 		if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
 			return fmt.Errorf("accepted action changed before terminal decision")
 		}
-		if outcome != "canceled" && !at.Before(job.Deadline) {
+		// An unverified execution stays lost; an earlier saved stop still wins below.
+		if outcome != "canceled" && outcome != "lost" && !at.Before(job.Deadline) {
 			outcome = "expired"
 		}
 		var err error

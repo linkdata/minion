@@ -692,6 +692,7 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadline: true, want: "canceled"},
 		{name: "original hard cap", result: testExecutorInactivity{}, late: true, want: "expired"},
 		{name: "unknown execution", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), want: "lost"},
+		{name: "late missing call receipt", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), late: true, want: "lost"},
 		{name: "parent checkpoint failure", result: errors.Join(ErrTerminalJob, testExecutorInactivity{}), want: "failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
