@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
@@ -1038,11 +1039,11 @@ func TestSessionRunDeliversNativeProgress(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	var progress int
-	session.OnProgress = func() { progress++ }
+	var progress atomic.Int32
+	session.OnProgress = func() { progress.Add(1) }
 	result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err != nil || result.Answer != "final answer" || progress != 1 {
-		t.Fatalf("Run=%+v, %v; progress=%d, want 1", result, err, progress)
+	if err != nil || result.Answer != "final answer" || progress.Load() != 3 {
+		t.Fatalf("Run=%+v, %v; progress=%d, want start, native output, and exit", result, err, progress.Load())
 	}
 }
 
@@ -1063,13 +1064,13 @@ printf '%s\n' '`+successfulResult+`'
 			t.Error(err)
 		}
 	})
-	progress := 0
-	session.OnProgress = func() { progress++ }
+	var progress atomic.Int32
+	session.OnProgress = func() { progress.Add(1) }
 	workspace := t.TempDir()
 	for call := 1; call <= 2; call++ {
 		result, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{})
-		if err != nil || result.Answer != "final answer" || progress != call {
-			t.Fatalf("call %d: result=%+v error=%v progress=%d", call, result, err, progress)
+		if err != nil || result.Answer != "final answer" || progress.Load() != int32(3*call) {
+			t.Fatalf("call %d: result=%+v error=%v progress=%d", call, result, err, progress.Load())
 		}
 	}
 }

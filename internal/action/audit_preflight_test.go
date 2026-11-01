@@ -187,8 +187,8 @@ func TestRunnerMissingAuditArtifactDoesNotReportValidatorProgress(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "audit REPORT.md is missing or empty") || len(result.Calls) != 1 {
 		t.Fatalf("missing artifact was accepted before validation: calls=%d error=%v", len(result.Calls), err)
 	}
-	if got := progress - progressAtModelExit; got != 1 {
-		t.Fatalf("progress after model exit=%d, want only model completion", got)
+	if got := progress - progressAtModelExit; got != 0 {
+		t.Fatalf("progress after stub model exit=%d, want none without a CLI process", got)
 	}
 }
 

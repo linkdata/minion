@@ -340,7 +340,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			roles = append(roles, *job.Critic)
 		}
 		for _, role := range roles {
-			noteProgress() // Selected CLI validation is starting.
 			message, err := checkSelectedRoleCLI(ctx, &configured, role, true, noteProgress)
 			if err != nil {
 				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
@@ -522,7 +521,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			record := attemptRecord{Call: strconv.Itoa(checkpoint.Ordinal), Role: request.role,
 				Round: request.round, ReviewPhase: request.reviewPhase, Provider: request.provider, Model: request.model}
 			request.onInput = func(input aicli.PreparedInput) {
-				noteProgress()
 				if configured.eventSink == nil {
 					return
 				}
@@ -560,12 +558,10 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				}
 			}
 			request.onProgress = noteProgress
-			request.onProgress() // A real main or critic invocation is starting.
 			if r.phaseUpdate != nil && ctx.Err() == nil {
 				r.phaseUpdate(request.role, request.round, request.reviewPhase)
 			}
 			call, err := next(ctx, request)
-			noteProgress() // The invocation finished, even if it returned an error.
 			secrets := configured.secretValues()
 			if configured.eventSink != nil {
 				for _, diagnostic := range call.Diagnostics {

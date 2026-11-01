@@ -99,6 +99,8 @@ printf '%s\n' '`+successfulResult+`'
 		t.Fatal(err)
 	}
 	var session Session
+	progress := 0
+	session.OnProgress = func() { progress++ }
 	t.Cleanup(func() {
 		if err := session.Close(); err != nil {
 			t.Error(err)
@@ -110,9 +112,10 @@ printf '%s\n' '`+successfulResult+`'
 	if _, err := session.Run(t.Context(), workspace, "first", false, "", config.ClaudeConfig{}); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed Start error = %v", err)
 	}
-	if len(inputs) != 1 || inputs[0].Mode != "fresh" || inputs[0].NativeID == "" || session.started {
-		t.Fatalf("failed Start advanced conversation or lost prepared input: inputs=%+v started=%t", inputs, session.started)
+	if len(inputs) != 1 || inputs[0].Mode != "fresh" || inputs[0].NativeID == "" || session.started || progress != 0 {
+		t.Fatalf("failed Start advanced conversation or lost prepared input: inputs=%+v started=%t progress=%d", inputs, session.started, progress)
 	}
+	session.OnProgress = nil
 	if _, err := os.Stat(binary + ".count"); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed Start ran CLI: %v", err)
 	}

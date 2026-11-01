@@ -24,7 +24,8 @@ type Session struct {
 	OnEvent func(aicli.StreamEvent)
 	// OnInput receives prepared stdin and command metadata before the CLI starts.
 	OnInput func(aicli.PreparedInput)
-	// OnProgress receives fresh native execution activity while Run is active.
+	// OnProgress receives process start and exit plus fresh native execution activity.
+	// Stdout may call it concurrently with process lifecycle callbacks.
 	OnProgress                   func()
 	workspace, binary, outputDir string
 	writable                     bool

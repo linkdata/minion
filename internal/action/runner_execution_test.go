@@ -91,10 +91,20 @@ func TestRunnerFailedStartKeepsOrdinalWithoutRetry(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	var before, after []CallCheckpoint
 	nativeCalls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		nativeCalls++
-		return aicli.Result{}, exec.ErrNotFound
-	}}
+	progress := 0
+	runner := Runner{WorkRoot: t.TempDir(), statusActivity: func() { progress++ },
+		aroundModel: func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+			beforeCall := progress
+			call, err := next(ctx, request)
+			if progress != beforeCall {
+				t.Fatalf("failed model start credited progress: before=%d after=%d", beforeCall, progress)
+			}
+			return call, err
+		},
+		runModel: func(context.Context, modelRun) (aicli.Result, error) {
+			nativeCalls++
+			return aicli.Result{}, exec.ErrNotFound
+		}}
 	checkpoints := runnerExecutionCheckpoints{
 		before: func(value CallCheckpoint) error { before = append(before, value); return nil },
 		after:  func(value CallCheckpoint) error { after = append(after, value); return nil },

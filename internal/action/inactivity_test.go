@@ -170,26 +170,46 @@ func TestRunnerExecuteProgressRenewsInactivity(t *testing.T) {
 	})
 }
 
-func TestDirectRunnerPreparedInputRenewsInactivity(t *testing.T) {
+func TestDirectRunnerPreparedInputDoesNotRenewInactivity(t *testing.T) {
 	for _, execute := range []bool{false, true} {
 		t.Run(map[bool]string{false: "Run", true: "Execute"}[execute], func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				job := testJob(command.Comment)
 				job.RuntimeBudget = time.Minute
 				job.InactivityTimeout = 5 * time.Second
+				prepared := false
+				var progressAtDispatch int
+				progress := 0
 				runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
-					if request.onInput == nil {
-						t.Fatal("direct model has no prepared-input progress callback")
+					if request.onInput == nil || progress != progressAtDispatch {
+						t.Fatalf("dispatch credited an unstarted model: progress=%d at dispatch=%d", progress, progressAtDispatch)
 					}
 					time.Sleep(4 * time.Second)
 					request.onInput(aicli.PreparedInput{Path: "/fixture/cli", Args: []string{"cli"}, Dir: request.dir, Stdin: request.prompt})
-					time.Sleep(4 * time.Second)
-					synctest.Wait()
-					if ctx.Err() != nil {
-						t.Fatalf("prepared input did not renew inactivity: %v", context.Cause(ctx))
+					if progress != progressAtDispatch {
+						t.Fatalf("prepared input credited an unstarted model: progress=%d at dispatch=%d", progress, progressAtDispatch)
 					}
-					return aicli.Result{Answer: "Completed."}, nil
+					time.Sleep(2 * time.Second)
+					synctest.Wait()
+					if !errors.Is(context.Cause(ctx), errExecutorInactivity) {
+						t.Fatalf("prepared input renewed inactivity: %v", context.Cause(ctx))
+					}
+					return aicli.Result{}, ctx.Err()
 				}}
+				runner.statusActivity = func() { progress++ }
+				runner.eventSink = func(event attemptRecord) {
+					if event.EventSource == "codex.input.prepared" {
+						prepared = true
+					}
+				}
+				runner.aroundModel = func(ctx context.Context, request modelRun, next modelCall) (aicli.Result, error) {
+					progressAtDispatch = progress
+					call, err := next(ctx, request)
+					if progress != progressAtDispatch {
+						t.Fatalf("unstarted model return credited progress: progress=%d at dispatch=%d", progress, progressAtDispatch)
+					}
+					return call, err
+				}
 				var result Result
 				var err error
 				if execute {
@@ -197,8 +217,8 @@ func TestDirectRunnerPreparedInputRenewsInactivity(t *testing.T) {
 				} else {
 					result, err = runner.Run(t.Context(), job)
 				}
-				if err != nil || result.Answer != "Completed." || len(result.Calls) != 1 {
-					t.Fatalf("direct Runner prepared input: result=%+v error=%v", result, err)
+				if !errors.Is(err, errExecutorInactivity) || result.Answer != "" || len(result.Calls) != 1 || !prepared {
+					t.Fatalf("direct Runner prepared input: result=%+v error=%v prepared=%t", result, err, prepared)
 				}
 			})
 		})

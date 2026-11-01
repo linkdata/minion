@@ -128,9 +128,9 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 	if !liveMessage || !liveTool {
 		t.Fatalf("live helper credential redaction or tool JSON lost: message=%t tool=%t events=%s", liveMessage, liveTool, safeEvents())
 	}
-	// The pre-gate root spawn contributes one callback. Require another from
-	// the helper rollout before allowing the CLI to finish.
-	for range 2 {
+	// Process start and the pre-gate root spawn each contribute one callback.
+	// Require another from the helper rollout before allowing the CLI to finish.
+	for range 3 {
 		select {
 		case <-progress:
 		case result := <-done:

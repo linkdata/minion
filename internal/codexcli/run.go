@@ -286,16 +286,20 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			s.OnEvent(aicli.StreamEvent{Kind: "identity_unavailable"})
 		}
 	}()
+	executil.Prepare(cmd)
+	if err := cmd.Start(); err != nil {
+		s.accounting.before = nil
+		return result, fmt.Errorf("codex exec: %w", err)
+	}
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
+	}
 	if activity != nil {
 		activity.start()
 	}
-	runErr := executil.Run(cmd)
-	if cmd.Process == nil {
-		if activity != nil {
-			activity.finish()
-		}
-		s.accounting.before = nil
-		return result, fmt.Errorf("codex exec: %w", runErr)
+	runErr := cmd.Wait()
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
 	}
 	s.used = true
 	output.stream.Finish()

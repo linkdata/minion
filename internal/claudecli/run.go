@@ -147,10 +147,17 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		s.OnInput(aicli.PreparedInput{NativeID: s.id, Mode: mode, Path: cmd.Path,
 			Args: slices.Clone(cmd.Args), Dir: cmd.Dir, Stdin: prompt, Schema: settings.OutputSchema})
 	}
-	err = executil.Run(cmd)
-	if cmd.Process == nil {
+	executil.Prepare(cmd)
+	if err = cmd.Start(); err != nil {
 		// No CLI started, so no provider usage or resumable turn exists.
 		return result, fmt.Errorf("claude: %w", err)
+	}
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
+	}
+	err = cmd.Wait()
+	if s.OnProgress != nil && ctx.Err() == nil {
+		s.OnProgress()
 	}
 	s.started = true
 	ceiling.Finish()

@@ -19,9 +19,9 @@ func TestSelectedRoleCLIReportsCompletedChecks(t *testing.T) {
 		wantProgress                     int
 	}{
 		{name: "login failure", script: "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 7;; esac\nexit 99\n", wantMessage: preflightCodexLoginUnavailable},
-		{name: "boundary failure", script: "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') exit 7;; esac\nexit 99\n", wantMessage: preflightCodexBoundaryUnavailable, wantProgress: 1},
-		{name: "model failure", script: preflightCodexCLI, model: "missing-model", wantMessage: preflightCodexInvocationUnsupported, wantProgress: 3},
-		{name: "ready", script: preflightCodexCLI, wantProgress: 13},
+		{name: "boundary failure", script: "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') exit 7;; esac\nexit 99\n", wantMessage: preflightCodexBoundaryUnavailable},
+		{name: "model failure", script: preflightCodexCLI, model: "missing-model", wantMessage: preflightCodexInvocationUnsupported, wantProgress: 2},
+		{name: "ready", script: preflightCodexCLI, wantProgress: 12},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CODEX_HOME", t.TempDir())

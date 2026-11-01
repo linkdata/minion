@@ -165,7 +165,6 @@ func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSett
 		if err := codexcli.CheckLogin(ctx, settings); err != nil {
 			return preflightCodexLoginUnavailable, fmt.Errorf("codex login: %w", err)
 		}
-		progress()
 		if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
 			return preflightCodexBoundaryUnavailable, fmt.Errorf("codex instruction boundary: %w", err)
 		}
