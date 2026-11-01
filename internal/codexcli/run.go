@@ -658,7 +658,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		return
 	}
 	item := event.Item
-	tool := codexToolItem(item.Type) && item.Type != "error" &&
+	tool := codexToolItem(item.Type) && item.Type != "error" && item.Type != "web_search" &&
 		!(item.Type == "collab_tool_call" && (item.Tool == "wait" || item.Tool == "close_agent"))
 	output := (item.Type == "agent_message" || item.Type == "reasoning") && item.Text != ""
 	if !tool && !output && !(item.Type == "reasoning" && event.Type == "item.completed") {
@@ -686,7 +686,6 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		AggregatedOutput string          `json:"aggregated_output"`
 		Output           json.RawMessage `json:"output"`
 		Result           json.RawMessage `json:"result"`
-		Results          json.RawMessage `json:"results"`
 		Changes          json.RawMessage `json:"changes"`
 	}
 	if json.Unmarshal(selected.Item, &visible) != nil {
@@ -716,10 +715,10 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	prior, seen := o.progressItems[key]
 	spawnAdmitted := item.Type == "collab_tool_call" && item.Tool == "spawn_agent" &&
 		len(item.ReceiverThreadIDs) != 0 && o.spawnFresh
-	if seen && !prior.completed && spawnAdmitted {
-		prior.spawnAdmitted = true
-		o.progressItems[key] = prior
-	}
+	// The child observer proves each new receiver. Without it, only the first
+	// receiver transition can be distinguished from a repeated item snapshot.
+	newChildAdmission := seen && !prior.completed && spawnAdmitted &&
+		(!prior.spawnAdmitted || o.onChild != nil)
 	if item.Type == "collab_tool_call" && item.Tool == "spawn_agent" && len(item.ReceiverThreadIDs) != 0 &&
 		!o.spawnFresh && !(seen && !prior.completed && prior.spawnAdmitted) {
 		return // The rollout already credited this child; stdout did not admit it earlier.
@@ -731,7 +730,7 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		// An identical ID-less completion could be a new command or a replay.
 		// Without a distinguishable lifecycle event, it cannot prove fresh work.
 		freshCycle := item.ID == "" && prior.completed && event.Type == "item.started"
-		if !freshCycle && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
+		if !freshCycle && !newChildAdmission && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
 			(event.Type != "item.completed" || prior.completed) {
 			return
 		}

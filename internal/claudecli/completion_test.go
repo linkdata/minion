@@ -123,8 +123,8 @@ func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
 	const fresh = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"new"}}`
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"tests"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"tests"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	const stop = `{"type":"system","subtype":"task_notification","status":"stopped","summary":"Background command tests was stopped"}`
 	notice, _ := json.Marshal(`<task-notification><task-id>tests</task-id><status>killed</status><summary>Tests stopped</summary></task-notification>`)
 	synthetic := `{"type":"user","isSynthetic":true,"message":{"content":` + string(notice) + `}}`

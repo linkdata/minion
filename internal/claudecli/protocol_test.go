@@ -134,8 +134,8 @@ func TestOutputLateOverflowForCoveredAssistant(t *testing.T) {
 }
 
 func TestOutputRetainsNewCallsAfterProvisionalAggregate(t *testing.T) {
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"worker"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	const rootOnly = `{"type":"result","subtype":"success","result":"answer","usage":{"input_tokens":900,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":400}}`
 	full := func(input, cached, output int64) string {
 		return fmt.Sprintf(`{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":%d,"outputTokens":%d}}}`, input-cached, cached, output)

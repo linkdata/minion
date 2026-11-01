@@ -147,6 +147,7 @@ type jsonlOutput struct {
 	taskProgress        map[string]taskProgressState
 	taskRuns            map[string]bool
 	runlessPending      map[string]int
+	runlessExplicit     map[string]bool // Presence records a start or usage; true means a start was seen.
 	runlessAmbiguous    map[string]bool
 	runlessCount        int
 	anonymousPending    int
@@ -338,19 +339,29 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.fail(errors.New("invalid Claude background task list"))
 			return
 		}
-		o.runlessPending = make(map[string]int)
-		o.runlessCount = 0
-		o.anonymousPending = 0
+		// Native list UUIDs identify exact replays. A list with no UUID can add
+		// pending work, but its disappearance cannot prove that work stopped.
+		if e.UUID != "" && !o.rememberProgress("task_list_uuid:"+e.UUID) {
+			return
+		}
+		if o.err != nil {
+			return
+		}
+		listed := make(map[string]int)
+		anonymous := 0
 		for _, task := range tasks {
 			if task.Ambient {
 				continue
 			}
 			switch {
 			case task.TaskID == "":
-				o.anonymousPending++
+				anonymous++
 			case task.RunID == "":
-				o.runlessPending[task.TaskID]++
-				o.runlessCount++
+				listed[task.TaskID]++
+				if _, explicit := o.runlessExplicit[task.TaskID]; explicit {
+					// This row may describe a second task with the same ID.
+					o.markRunlessAmbiguous(task.TaskID)
+				}
 			default:
 				o.observeTaskRun(task.TaskID, task.RunID, "task_seen:", false)
 				if o.err != nil {
@@ -358,12 +369,24 @@ func (o *jsonlOutput) finishLine(line []byte) {
 				}
 			}
 		}
+		if e.UUID == "" {
+			for id, count := range o.runlessPending {
+				listed[id] = max(listed[id], count)
+			}
+			anonymous = max(anonymous, o.anonymousPending)
+		}
+		// An ID-only start or usage is independent evidence of pending work.
+		// A later list may be stale even when it has a different UUID.
+		for id := range o.runlessExplicit {
+			listed[id] = max(listed[id], 1)
+		}
+		o.runlessPending = listed
+		o.runlessCount = 0
+		o.anonymousPending = anonymous
 		for id, count := range o.runlessPending {
+			o.runlessCount += count
 			if count > 1 {
-				if o.runlessAmbiguous == nil {
-					o.runlessAmbiguous = make(map[string]bool)
-				}
-				o.runlessAmbiguous[id] = true
+				o.markRunlessAmbiguous(id)
 			}
 		}
 		for id := range o.runlessAmbiguous {
@@ -708,7 +731,7 @@ func (o *jsonlOutput) recordProgress(e event) {
 	if e.Type == "system" {
 		switch e.Subtype {
 		case "task_started":
-			o.recordTaskProgress(e.TaskID, e.RunID, "started", "")
+			o.recordTaskProgress(e.TaskID, e.RunID, "started", e.UUID)
 			return
 		case "task_notification":
 			o.recordTaskProgress(e.TaskID, e.RunID, e.Status, e.UUID)
@@ -973,6 +996,13 @@ func (o *jsonlOutput) updateTaskPending() {
 	}
 }
 
+func (o *jsonlOutput) markRunlessAmbiguous(id string) {
+	if o.runlessAmbiguous == nil {
+		o.runlessAmbiguous = make(map[string]bool)
+	}
+	o.runlessAmbiguous[id] = true
+}
+
 func (o *jsonlOutput) observeTaskRun(id, runID, identity string, credit bool) {
 	key := taskRunKey(id, runID)
 	if o.progressSeen["task_finish:"+key] {
@@ -1026,6 +1056,9 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 			if o.err != nil {
 				return
 			}
+			if seenNotice && runID == "" {
+				return // A replay cannot finish a later ID-only start.
+			}
 			replay = replay || seenNotice
 		}
 		if o.completed && !replay {
@@ -1034,6 +1067,20 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 	}
 	if runID == "" {
 		if status == "started" {
+			if noticeUUID != "" && !o.rememberProgress("task_start_uuid:"+noticeUUID) {
+				return
+			}
+			if o.err != nil {
+				return
+			}
+			if o.runlessExplicit == nil {
+				o.runlessExplicit = make(map[string]bool)
+			}
+			if o.runlessPending[id] > 0 {
+				// A prior list row or usage may describe a different task.
+				o.markRunlessAmbiguous(id)
+			}
+			o.runlessExplicit[id] = true
 			if o.runlessPending == nil {
 				o.runlessPending = make(map[string]int)
 			}
@@ -1044,6 +1091,7 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 		} else if o.runlessPending[id] == 1 && !o.runlessAmbiguous[id] {
 			// Once duplicated, an ID-only notice cannot identify the remaining task.
 			delete(o.runlessPending, id)
+			delete(o.runlessExplicit, id)
 			o.runlessCount--
 		}
 		o.updateTaskPending()
@@ -1062,7 +1110,25 @@ func (o *jsonlOutput) recordTaskUsageProgress(e event) {
 	}
 	if e.RunID == "" {
 		// ID-only usage proves pending work but cannot prove fresh work for the timer.
-		o.recordTaskProgress(e.TaskID, "", "started", "")
+		if o.runlessExplicit == nil {
+			o.runlessExplicit = make(map[string]bool)
+		}
+		started, seen := o.runlessExplicit[e.TaskID]
+		if o.runlessPending[e.TaskID] > 0 && (!seen || started) {
+			// Repeated usage is a snapshot; a start or list is not correlated.
+			o.markRunlessAmbiguous(e.TaskID)
+		}
+		if !seen {
+			o.runlessExplicit[e.TaskID] = false
+		}
+		if o.runlessPending == nil {
+			o.runlessPending = make(map[string]int)
+		}
+		if o.runlessPending[e.TaskID] == 0 {
+			o.runlessPending[e.TaskID] = 1
+			o.runlessCount++
+		}
+		o.updateTaskPending()
 		return
 	}
 	key := taskRunKey(e.TaskID, e.RunID)

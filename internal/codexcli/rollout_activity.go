@@ -585,7 +585,6 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			// One lifecycle transition of each kind belongs to a turn, even if replayed at a new ordinal.
 			a.newProgress(meta.ID, rolloutEvent{Type: payload.Type, Payload: []byte(payload.TurnID)}, 0, progressed)
 		case "patch_apply_begin", "patch_apply_end", "mcp_tool_call_begin", "mcp_tool_call_end",
-			"web_search_begin", "web_search_end", "image_generation_begin", "image_generation_end",
 			"exec_command_begin", "exec_command_end":
 			a.newToolProgress(meta.ID, event.Payload, progressed)
 		case "user_message", "agent_message":
@@ -689,8 +688,8 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 			if item.Text != "" || len(item.Content) != 0 || item.Type == "AgentMessage" && len(item.Questions) != 0 {
 				a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 			}
-		case "Reasoning", "CommandExecution", "DynamicToolCall", "WebSearch",
-			"FileChange", "McpToolCall", "FunctionCallOutput", "ImageGeneration", "Extension", "ImageView":
+		case "Reasoning", "CommandExecution", "DynamicToolCall", "FileChange",
+			"McpToolCall", "FunctionCallOutput", "Extension", "ImageView":
 			a.newItemProgress(meta.ID, payload.TurnID, payload.Item, progressed)
 		case "CollabAgentToolCall":
 			if item.Tool != "wait" && item.Tool != "close_agent" {
@@ -865,45 +864,38 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progressed *bool) {
 	// A call ID proves a new tool call; identical ID-less events cannot prove one.
 	var tool struct {
-		Type                  string          `json:"type"`
-		TurnID                string          `json:"turn_id"`
-		CallID                string          `json:"call_id"`
-		ID                    string          `json:"id"`
-		Name                  json.RawMessage `json:"name"`
-		Server                json.RawMessage `json:"server"`
-		Tool                  json.RawMessage `json:"tool"`
-		Invocation            json.RawMessage `json:"invocation"`
-		Status                json.RawMessage `json:"status"`
-		Command               json.RawMessage `json:"command"`
-		CWD                   json.RawMessage `json:"cwd"`
-		ParsedCmd             json.RawMessage `json:"parsed_cmd"`
-		Source                json.RawMessage `json:"source"`
-		InteractionInput      json.RawMessage `json:"interaction_input"`
-		Arguments             json.RawMessage `json:"arguments"`
-		Input                 json.RawMessage `json:"input"`
-		Output                json.RawMessage `json:"output"`
-		Stdout                json.RawMessage `json:"stdout"`
-		Stderr                json.RawMessage `json:"stderr"`
-		AggregatedOutput      json.RawMessage `json:"aggregated_output"`
-		FormattedOutput       json.RawMessage `json:"formatted_output"`
-		Result                json.RawMessage `json:"result"`
-		Results               json.RawMessage `json:"results"`
-		Response              json.RawMessage `json:"response"`
-		Changes               json.RawMessage `json:"changes"`
-		Success               json.RawMessage `json:"success"`
-		ExitCode              json.RawMessage `json:"exit_code"`
-		Query                 json.RawMessage `json:"query"`
-		Action                json.RawMessage `json:"action"`
-		Prompt                json.RawMessage `json:"prompt"`
-		RevisedPrompt         json.RawMessage `json:"revised_prompt"`
-		Path                  json.RawMessage `json:"path"`
-		SavedPath             json.RawMessage `json:"saved_path"`
-		Image                 json.RawMessage `json:"image"`
-		InputImages           json.RawMessage `json:"input_images"`
-		TransparentBackground json.RawMessage `json:"transparent_background"`
-		GenerationID          json.RawMessage `json:"generation_id"`
-		Failure               json.RawMessage `json:"failure"`
-		Error                 json.RawMessage `json:"error"`
+		Type             string          `json:"type"`
+		TurnID           string          `json:"turn_id"`
+		CallID           string          `json:"call_id"`
+		ID               string          `json:"id"`
+		Name             json.RawMessage `json:"name"`
+		Server           json.RawMessage `json:"server"`
+		Tool             json.RawMessage `json:"tool"`
+		Invocation       json.RawMessage `json:"invocation"`
+		Status           json.RawMessage `json:"status"`
+		Command          json.RawMessage `json:"command"`
+		CWD              json.RawMessage `json:"cwd"`
+		ParsedCmd        json.RawMessage `json:"parsed_cmd"`
+		Source           json.RawMessage `json:"source"`
+		InteractionInput json.RawMessage `json:"interaction_input"`
+		Arguments        json.RawMessage `json:"arguments"`
+		Input            json.RawMessage `json:"input"`
+		Output           json.RawMessage `json:"output"`
+		Stdout           json.RawMessage `json:"stdout"`
+		Stderr           json.RawMessage `json:"stderr"`
+		AggregatedOutput json.RawMessage `json:"aggregated_output"`
+		FormattedOutput  json.RawMessage `json:"formatted_output"`
+		Result           json.RawMessage `json:"result"`
+		Results          json.RawMessage `json:"results"`
+		Response         json.RawMessage `json:"response"`
+		Changes          json.RawMessage `json:"changes"`
+		Success          json.RawMessage `json:"success"`
+		ExitCode         json.RawMessage `json:"exit_code"`
+		Query            json.RawMessage `json:"query"`
+		Prompt           json.RawMessage `json:"prompt"`
+		Path             json.RawMessage `json:"path"`
+		Image            json.RawMessage `json:"image"`
+		Error            json.RawMessage `json:"error"`
 	}
 	if json.Unmarshal(raw, &tool) != nil {
 		return
@@ -917,15 +909,6 @@ func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progre
 		tool.Invocation, _ = json.Marshal(invocation)
 	} else {
 		tool.Invocation = nil
-	}
-	var failure *struct {
-		Type    string `json:"type"`
-		LimitID string `json:"limit_id"`
-	}
-	if json.Unmarshal(tool.Failure, &failure) == nil && failure != nil {
-		tool.Failure, _ = json.Marshal(failure)
-	} else {
-		tool.Failure = nil
 	}
 	snapshot, err := json.Marshal(tool)
 	if err != nil {
@@ -956,9 +939,7 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 		Changes   json.RawMessage `json:"changes"`
 		Query     json.RawMessage `json:"query"`
 		Results   json.RawMessage `json:"results"`
-		Action    json.RawMessage `json:"action"`
 		Tools     json.RawMessage `json:"tools"`
-		Images    json.RawMessage `json:"images"`
 		Path      json.RawMessage `json:"path"`
 		Prompt    json.RawMessage `json:"prompt"`
 		Status    json.RawMessage `json:"status"`

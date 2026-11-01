@@ -405,15 +405,158 @@ func TestRunLessTaskMetadataTracksPendingWithoutTimerCredit(t *testing.T) {
 	}
 }
 
+func TestRunLessDistinctStartsRemainAmbiguousAfterIDOnlyCompletion(t *testing.T) {
+	progress := 0
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
+	const finish = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, first+"\n"+second+"\n"+finish+"\n"+successfulResult+"\n")
+	if o.err != nil || progress != 0 || o.pending == 0 || o.completed {
+		t.Fatalf("distinct starts cleared by one ID-only finish: pending=%d completed=%t progress=%d error=%v", o.pending, o.completed, progress, o.err)
+	}
+}
+
+func TestRunLessListBeforeStartCannotProveSameTask(t *testing.T) {
+	o := jsonlOutput{}
+	const listed = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-1","tasks":[{"task_id":"helper"}]}`
+	const started = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const finished = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	// A list and later start may describe one task or two tasks reusing the ID.
+	// With no run identity, one finish cannot prove that both possibilities ended.
+	writeChunks(t, &o, listed+"\n"+started+"\n"+finished+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending == 0 || o.completed {
+		t.Fatalf("list-first work cleared by one ID-only finish: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessStartUUIDReplayCanBeCleared(t *testing.T) {
+	o := jsonlOutput{}
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const finish = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, first+"\n"+first+"\n"+finish+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 0 || !o.completed {
+		t.Fatalf("replayed start became a second task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessStartWithoutUUIDRepeatedIsAmbiguous(t *testing.T) {
+	o := jsonlOutput{}
+	const start = `{"type":"system","subtype":"task_started","task_id":"helper"}`
+	const finish = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, start+"\n"+start+"\n"+finish+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("unidentified duplicate start cleared: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessUncorrelatedSignalsStayAmbiguous(t *testing.T) {
+	const listed = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-1","tasks":[{"task_id":"helper"}]}`
+	const usage = `{"type":"system","subtype":"task_progress","task_id":"helper","usage":{"total_tokens":1}}`
+	const started = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const finished = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	for _, tc := range []struct{ name, first, second string }{
+		{"list then usage", listed, usage},
+		{"usage then start", usage, started},
+		{"start then usage", started, usage},
+		{"start then list", started, listed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.first+"\n"+tc.second+"\n"+finished+"\n"+successfulResult+"\n")
+			if o.err != nil || o.pending == 0 || o.completed {
+				t.Fatalf("overlapping ID-only evidence cleared by one notice: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestRunLessNoticeUUIDReplayCannotFinishLaterStart(t *testing.T) {
+	o := jsonlOutput{}
+	const first = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const second = `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`
+	const finish = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, first+"\n"+finish+"\n"+second+"\n"+finish+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("replayed finish cleared later start: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessStartSurvivesReplayedEmptyList(t *testing.T) {
+	o := jsonlOutput{}
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`
+	const start = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const finish = `{"type":"system","subtype":"task_notification","uuid":"finish-1","task_id":"helper","status":"completed"}`
+	writeChunks(t, &o, empty+"\n"+start+"\n"+empty+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("replayed empty list cleared start: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+	writeChunks(t, &o, finish+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 0 || !o.completed {
+		t.Fatalf("attributable finish did not clear start: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessFreshListCanClearListOnlyTask(t *testing.T) {
+	o := jsonlOutput{}
+	const listed = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-open-1","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`
+	writeChunks(t, &o, listed+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("list did not open task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+	writeChunks(t, &o, empty+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 0 || !o.completed {
+		t.Fatalf("fresh empty list did not clear list-only task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessUnidentifiedListCannotClearPending(t *testing.T) {
+	o := jsonlOutput{}
+	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	writeChunks(t, &o, listed+"\n"+empty+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("unidentified list cleared task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessFreshListCannotClearExplicitStart(t *testing.T) {
+	o := jsonlOutput{}
+	const started = `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`
+	writeChunks(t, &o, started+"\n"+empty+"\n"+successfulResult+"\n")
+	if o.err != nil || o.pending != 1 || o.completed {
+		t.Fatalf("list without start identity cleared task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
+	}
+}
+
+func TestRunLessUUIDHistoryIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second string
+	}{
+		{"starts", `{"type":"system","subtype":"task_started","uuid":"start-1","task_id":"helper"}`, `{"type":"system","subtype":"task_started","uuid":"start-2","task_id":"helper"}`},
+		{"lists", `{"type":"system","subtype":"background_tasks_changed","uuid":"list-1","tasks":[]}`, `{"type":"system","subtype":"background_tasks_changed","uuid":"list-2","tasks":[]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{progressEntryLimit: 1}
+			writeChunks(t, &o, tc.first+"\n"+tc.second+"\n")
+			if !errors.Is(o.err, aicli.ErrOutputLimit) || o.progressEntries != 1 {
+				t.Fatalf("UUID history escaped bound: entries=%d error=%v", o.progressEntries, o.err)
+			}
+		})
+	}
+}
+
 func TestRunLessListCountsConcurrentSameIDTasks(t *testing.T) {
 	o := jsonlOutput{}
-	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"},{"task_id":"helper"}]}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-two-1","tasks":[{"task_id":"helper"},{"task_id":"helper"}]}`
 	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
 	writeChunks(t, &o, listed+"\n"+finished+"\n"+finished+"\n"+successfulResult+"\n")
 	if o.err != nil || o.pending != 2 || o.completed {
 		t.Fatalf("ambiguous notices cleared runless tasks: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
 	}
-	writeChunks(t, &o, `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`+"\n")
+	writeChunks(t, &o, `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`+"\n")
 	if o.err != nil || o.pending != 0 {
 		t.Fatalf("empty list did not clear tasks: pending=%d error=%v", o.pending, o.err)
 	}
@@ -421,10 +564,10 @@ func TestRunLessListCountsConcurrentSameIDTasks(t *testing.T) {
 
 func TestRunLessListShrinkKeepsReusedIDPending(t *testing.T) {
 	o := jsonlOutput{}
-	const two = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"},{"task_id":"helper"}]}`
-	const one = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
+	const two = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-two-1","tasks":[{"task_id":"helper"},{"task_id":"helper"}]}`
+	const one = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-one-1","tasks":[{"task_id":"helper"}]}`
 	const finished = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
-	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`
 	writeChunks(t, &o, two+"\n"+one+"\n"+finished+"\n"+successfulResult+"\n")
 	if o.err != nil || o.pending != 1 || o.completed {
 		t.Fatalf("delayed finish cleared remaining same-ID task: pending=%d completed=%t error=%v", o.pending, o.completed, o.err)
@@ -458,8 +601,8 @@ func TestTaggedListAndSyntheticNoticeCannotClearOpenRun(t *testing.T) {
 }
 
 func TestRunLessFinishCannotCompleteLaterTaggedRun(t *testing.T) {
-	const listed = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper"}]}`
-	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const listed = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-one-1","tasks":[{"task_id":"helper"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"list-empty-1","tasks":[]}`
 	const notice = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>helper</task-id><status>completed</status></task-notification>"}}`
 	const later = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"helper","run_id":"run-2"}]}`
 	for _, tc := range []struct{ name, first string }{{"list", listed + "\n" + empty}, {"notice", notice}} {
@@ -492,20 +635,25 @@ func TestRunLessStartDoesNotReplayTaggedStart(t *testing.T) {
 	}
 }
 
-func TestRunLessStartBeforeTaggedRunNeedsListClear(t *testing.T) {
+func TestRunLessStartBeforeTaggedRunNeedsOwnNotice(t *testing.T) {
 	progress := 0
 	o := jsonlOutput{onProgress: func() { progress++ }}
 	const runlessStart = `{"type":"system","subtype":"task_started","task_id":"helper"}`
 	const taggedStart = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
 	const taggedFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","run_id":"run-1","status":"completed"}`
 	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const runlessFinish = `{"type":"system","subtype":"task_notification","task_id":"helper","status":"completed"}`
 	writeChunks(t, &o, runlessStart+"\n"+taggedStart+"\n"+taggedFinish+"\n"+successfulResult+"\n")
 	if o.err != nil || progress != 2 || o.pending != 1 || o.completed {
 		t.Fatalf("unidentified run cleared without proof: progress=%d pending=%d completed=%t error=%v", progress, o.pending, o.completed, o.err)
 	}
 	writeChunks(t, &o, empty+"\n")
+	if o.err != nil || o.pending != 1 {
+		t.Fatalf("empty list cleared distinct runless pending: pending=%d error=%v", o.pending, o.err)
+	}
+	writeChunks(t, &o, runlessFinish+"\n")
 	if o.err != nil || o.pending != 0 {
-		t.Fatalf("authoritative empty list did not clear runless pending: pending=%d error=%v", o.pending, o.err)
+		t.Fatalf("own notice did not clear runless pending: pending=%d error=%v", o.pending, o.err)
 	}
 }
 
@@ -578,7 +726,7 @@ func TestRunLessUsageKeepsTaskPendingWithoutTimerCredit(t *testing.T) {
 	}{
 		{"unfinished", usage + "\n" + successfulResult, 1},
 		{"completion", usage + "\n" + finished + "\n" + successfulResult, 0},
-		{"empty list", usage + "\n" + empty + "\n" + successfulResult, 0},
+		{"empty list", usage + "\n" + empty + "\n" + successfulResult, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			progress := 0

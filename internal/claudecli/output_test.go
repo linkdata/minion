@@ -224,10 +224,10 @@ func numberResultEvents(data string) string {
 }
 
 func TestOutputBackgroundTasks(t *testing.T) {
-	const ambient = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true}]}`
-	const worker = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
-	const empty = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const ambient = `{"type":"system","subtype":"background_tasks_changed","uuid":"ambient-list","tasks":[{"task_id":"housekeeping","ambient":true}]}`
+	const worker = `{"type":"system","subtype":"background_tasks_changed","uuid":"worker-list","tasks":[{"task_id":"housekeeping","ambient":true},{"task_id":"worker"}]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"reviewer-list","tasks":[{"task_id":"reviewer"}]}`
+	const empty = `{"type":"system","subtype":"background_tasks_changed","uuid":"empty-list","tasks":[]}`
 	const taggedFinish = `{"type":"system","subtype":"task_notification","task_id":"worker","run_id":"run-1","status":"completed"}`
 	const runlessFailure = `{"type":"system","subtype":"task_notification","task_id":"worker","status":"failed"}`
 	const syntheticFinish = `{"type":"user","isSynthetic":true,"message":{"content":"<task-notification><task-id>worker</task-id><status>completed</status></task-notification>"}}`
@@ -303,8 +303,8 @@ func TestOutputTaskNoticeRequiresUniqueReplayIdentity(t *testing.T) {
 }
 
 func TestOutputNativeTurnResults(t *testing.T) {
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"worker"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"worker"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	const structured = `{"answer":"published","refutations":"private"}`
 	waiting := strings.Replace(successfulResult, "final answer", "waiting", 1)
 	empty := strings.Replace(successfulResult, "final answer", "", 1)
@@ -418,8 +418,8 @@ func TestOutputWholeTreeUsage(t *testing.T) {
 }
 
 func TestOutputPreservesRecordedUsage(t *testing.T) {
-	const pending = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"reviewer"}]}`
-	const clear = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`
+	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"reviewer"}]}`
+	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
 	const models = `"modelUsage":{"main":{"inputTokens":13,"cacheCreationInputTokens":17,"cacheReadInputTokens":19,"outputTokens":23},"helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}`
 	const aggregate = `{"type":"result","subtype":"success","result":"answer",` + models + `}`
 	const fallback = `"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}`

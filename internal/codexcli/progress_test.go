@@ -138,28 +138,6 @@ func TestJSONLOutputMetadataOnlyUpdatesDoNotRenewProgress(t *testing.T) {
 	}
 }
 
-func TestJSONLOutputWebSearchResultsRenewProgress(t *testing.T) {
-	progress := 0
-	output := jsonlOutput{onProgress: func() { progress++ }}
-	for i, step := range []struct {
-		line string
-		want int
-	}{
-		{`{"type":"thread.started","thread_id":"root"}`, 0},
-		{`{"type":"item.started","item":{"id":"search","type":"web_search","query":"example"}}`, 1},
-		{`{"type":"item.updated","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"one"}]}}`, 2},
-		{`{"type":"item.updated","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"one"}],"elapsed_time_ms":100}}`, 2},
-		{`{"type":"item.updated","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"two"}]}}`, 3},
-		{`{"type":"item.completed","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"two"}]}}`, 4},
-		{`{"type":"item.completed","item":{"id":"search","type":"web_search","query":"example","results":[{"title":"three"}]}}`, 4},
-	} {
-		_, _ = output.Write([]byte(step.line + "\n"))
-		if progress != step.want {
-			t.Fatalf("step %d: progress=%d, want %d", i, progress, step.want)
-		}
-	}
-}
-
 func TestJSONLOutputNonAdjacentSnapshotReplayDoesNotRenewProgress(t *testing.T) {
 	progress := 0
 	output := jsonlOutput{onProgress: func() { progress++ }}
@@ -893,12 +871,6 @@ func TestRolloutActivityToolLifecycleNativeOutputRenewsProgress(t *testing.T) {
 		{"exec aggregate", "exec_command_end", `"aggregated_output":"one"`, `"aggregated_output":"two"`},
 		{"exec formatted output", "exec_command_end", `"formatted_output":"one"`, `"formatted_output":"two"`},
 		{"patch success", "patch_apply_end", `"success":false`, `"success":true`},
-		{"web action", "web_search_end", `"action":{"search_query":"one"}`, `"action":{"search_query":"two"}`},
-		{"image revised prompt", "image_generation_end", `"revised_prompt":"one"`, `"revised_prompt":"two"`},
-		{"image failure", "image_generation_end", `"failure":{"type":"usage_limit_exceeded","limit_id":"one","resets_at":100}`, `"failure":{"type":"usage_limit_exceeded","limit_id":"two","resets_at":200}`},
-		{"image saved path", "image_generation_end", `"saved_path":"one.png"`, `"saved_path":"two.png"`},
-		{"image result", "image_generation_end", `"image":{"type":"inline","result":"one"}`, `"image":{"type":"inline","result":"two"}`},
-		{"malformed optional failure", "image_generation_end", `"failure":"malformed"`, `"failure":"malformed","status":"completed"`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home, started := t.TempDir(), time.Now()
@@ -912,11 +884,7 @@ func TestRolloutActivityToolLifecycleNativeOutputRenewsProgress(t *testing.T) {
 			activity.root("root")
 			activity.child("child", true)
 			activity.poll()
-			replayed := test.first
-			if test.name == "image failure" {
-				replayed = strings.Replace(test.first, `"resets_at":100`, `"resets_at":200`, 1)
-			}
-			appendUsageEvents(t, child, toolEnd(10, 200, replayed))
+			appendUsageEvents(t, child, toolEnd(10, 200, test.first))
 			activity.poll()
 			if *progress != 1 {
 				t.Fatalf("metadata replay progress=%d, want 1", *progress)
@@ -1143,6 +1111,115 @@ func TestRootSpawnProgressDoesNotReplayAfterStdoutStartWithoutChildID(t *testing
 	_, _ = output.Write([]byte(`{"type":"item.completed","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child"]}}` + "\n"))
 	if *progress != 2 {
 		t.Fatalf("stdout completion replayed rollout child start: %d", *progress)
+	}
+}
+
+func TestRootSpawnProgressCreditsDelayedChildIDOnce(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		rolloutFirst bool
+	}{
+		{name: "stdout first"},
+		{name: "rollout first", rolloutFirst: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home, started := t.TempDir(), time.Now()
+			writeUsageRollout(t, home, "root", "", rolloutSpawn(9, "child"))
+			activity, _, progress := newActivityTestRecorder(t, home, started)
+			activity.root("root")
+			output := jsonlOutput{onProgress: func() { *progress++ }, onChild: func(ids []string, spawned bool) bool {
+				fresh := false
+				for _, id := range ids {
+					fresh = activity.child(id, spawned) || fresh
+				}
+				return fresh
+			}}
+			write := func(line string) {
+				t.Helper()
+				if _, err := output.Write([]byte(line + "\n")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write(`{"type":"thread.started","thread_id":"root"}`)
+			write(`{"type":"item.started","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent"}}`)
+			if *progress != 1 {
+				t.Fatalf("spawn start progress=%d, want 1", *progress)
+			}
+			if test.rolloutFirst {
+				activity.poll()
+			}
+			update := `{"type":"item.updated","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child"]}}`
+			write(update)
+			if *progress != 2 {
+				t.Fatalf("first child admission progress=%d, want 2", *progress)
+			}
+			write(update)
+			activity.poll()
+			if *progress != 2 {
+				t.Fatalf("replayed child admission progress=%d, want 2", *progress)
+			}
+			write(`{"type":"item.completed","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child"]}}`)
+			want := 3
+			if test.rolloutFirst {
+				want = 2
+			}
+			if *progress != want {
+				t.Fatalf("spawn completion progress=%d, want %d", *progress, want)
+			}
+		})
+	}
+}
+
+func TestRootSpawnProgressCreditsEachNewReceiverID(t *testing.T) {
+	progress := 0
+	children := make(map[string]bool)
+	output := jsonlOutput{
+		onProgress: func() { progress++ },
+		onChild: func(ids []string, spawned bool) bool {
+			fresh := false
+			for _, id := range ids {
+				if !children[id] {
+					children[id], fresh = true, true
+				}
+			}
+			return fresh
+		},
+	}
+	write := func(line string, want int) {
+		t.Helper()
+		if _, err := output.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		if progress != want {
+			t.Fatalf("after %s: progress=%d, want %d", line, progress, want)
+		}
+	}
+	write(`{"type":"thread.started","thread_id":"root"}`, 0)
+	write(`{"type":"item.started","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent"}}`, 1)
+	first := `{"type":"item.updated","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child-1"]}}`
+	write(first, 2)
+	write(first, 2)
+	second := `{"type":"item.updated","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child-1","child-2"]}}`
+	write(second, 3)
+	write(second, 3)
+}
+
+func TestRootSpawnProgressWithoutChildObserverDoesNotReplayReceiverIDs(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for _, line := range []string{
+		`{"type":"thread.started","thread_id":"root"}`,
+		`{"type":"item.started","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent"}}`,
+		`{"type":"item.updated","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child-1"]}}`,
+		`{"type":"item.updated","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child-1"]}}`,
+		`{"type":"item.updated","item":{"type":"collab_tool_call","id":"spawn","tool":"spawn_agent","receiver_thread_ids":["child-1","child-2"]}}`,
+	} {
+		if _, err := output.Write([]byte(line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if progress != 2 {
+		t.Fatalf("unobserved receiver IDs renewed progress: got %d, want 2", progress)
 	}
 }
 
