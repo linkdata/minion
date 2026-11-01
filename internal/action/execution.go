@@ -373,10 +373,9 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 			result.CriticStopReason == c.review.CriticStopReason
 		var inactivity *workerFailureError
 		errors.As(runErr, &inactivity)
-		knownInactivity := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil &&
-			matching && inactivity != nil && inactivity.failure.Inactivity
-		knownCancellation := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil &&
-			matching && c.assignmentContext != nil && errors.Is(c.assignmentContext.Err(), context.Canceled) &&
+		checkpointedSelectedResult := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil && matching
+		knownInactivity := checkpointedSelectedResult && inactivity != nil && inactivity.failure.Inactivity
+		knownCancellation := checkpointedSelectedResult && c.assignmentContext != nil && errors.Is(c.assignmentContext.Err(), context.Canceled) &&
 			errors.Is(runErr, context.Canceled) && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
