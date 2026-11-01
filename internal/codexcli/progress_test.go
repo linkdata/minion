@@ -759,6 +759,39 @@ func TestRolloutActivityCompletedQuestionsOnlyMessageRenewsProgress(t *testing.T
 	}
 }
 
+func TestRolloutActivityCompletedEmptyOptionalCollectionsDoNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, changed string
+	}{
+		{"agent content", `{"type":"AgentMessage","id":"message","text":"working"}`,
+			`{"type":"AgentMessage","id":"message","text":"working","content":[]}`,
+			`{"type":"AgentMessage","id":"message","text":"working","content":[{"type":"Text","text":"more"}]}`},
+		{"agent questions", `{"type":"AgentMessage","id":"message","text":"working"}`,
+			`{"type":"AgentMessage","id":"message","text":"working","questions":[]}`,
+			`{"type":"AgentMessage","id":"message","text":"working","questions":[{"question":"Which target?"}]}`},
+		{"user content", `{"type":"UserMessage","id":"message","text":"inspect"}`,
+			`{"type":"UserMessage","id":"message","text":"inspect","content":[]}`,
+			`{"type":"UserMessage","id":"message","text":"inspect","content":[{"type":"text","text":"more"}]}`},
+		{"reasoning summary", `{"type":"Reasoning","id":"thought"}`,
+			`{"type":"Reasoning","id":"thought","summary_text":[]}`,
+			`{"type":"Reasoning","id":"thought","summary_text":["visible summary"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &rolloutActivity{progress: func() {}}
+			for i, step := range []struct {
+				raw  string
+				want bool
+			}{{tc.first, true}, {tc.replay, false}, {tc.changed, true}} {
+				progressed := false
+				a.newItemProgress("child", "turn", []byte(step.raw), &progressed)
+				if progressed != step.want {
+					t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+				}
+			}
+		})
+	}
+}
+
 func TestRolloutActivityCompletedItemHiddenReplayDoesNotRenewProgress(t *testing.T) {
 	for _, tc := range []struct {
 		name, first, replay, changed string

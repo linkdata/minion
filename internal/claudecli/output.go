@@ -140,6 +140,12 @@ type progressStream struct {
 	sealedIndex int
 	hasSealed   bool
 	tools       map[int]uint8 // 1 started, 2 stopped.
+	deltas      map[streamDelta]bool
+}
+
+type streamDelta struct {
+	uuid, kind, content string
+	index               int
 }
 
 type taskProgressState struct {
@@ -341,8 +347,8 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
 	if stop && !o.acceptTaskStop(e.TaskID, e.RunID, e.UUID, e.Summary) {
 		if e.TaskID != "" && e.RunID != "" {
-			// A duplicate notice can still carry the tagged run's only finish.
-			o.finishTaskRun(e.TaskID, e.RunID, false)
+			// An ambiguous notice can share this UUID without proving the tagged finish.
+			o.finishTaskRun(e.TaskID, e.RunID, true)
 		}
 		return
 	}
@@ -1010,15 +1016,15 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 		switch native.Delta.Type {
 		case "text_delta":
 			if native.Delta.Text != "" {
-				o.markStreamProgress(state)
+				o.markStreamDelta(state, e.UUID, index, native.Delta.Type, native.Delta.Text)
 			}
 		case "thinking_delta":
 			if native.Delta.Thinking != "" {
-				o.markStreamProgress(state)
+				o.markStreamDelta(state, e.UUID, index, native.Delta.Type, native.Delta.Thinking)
 			}
 		case "input_json_delta":
 			if native.Delta.PartialJSON != "" {
-				o.markStreamProgress(state)
+				o.markStreamDelta(state, e.UUID, index, native.Delta.Type, native.Delta.PartialJSON)
 			}
 		}
 	case "content_block_stop":
@@ -1027,6 +1033,21 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 			o.markStreamProgress(state)
 		}
 	}
+}
+
+func (o *jsonlOutput) markStreamDelta(state *progressStream, uuid string, index int, kind, content string) {
+	if uuid != "" && o.onProgress != nil {
+		// Keep distinct chunks if the CLI reuses a UUID within one message.
+		key := streamDelta{uuid: uuid, index: index, kind: kind, content: content}
+		if state.deltas[key] {
+			return
+		}
+		if state.deltas == nil {
+			state.deltas = make(map[streamDelta]bool)
+		}
+		state.deltas[key] = true
+	}
+	o.markStreamProgress(state)
 }
 
 func (o *jsonlOutput) markStreamProgress(state *progressStream) {
@@ -1204,7 +1225,7 @@ func (o *jsonlOutput) recordTaskProgress(id, runID, status, noticeUUID string) {
 			if seenNotice && runID == "" {
 				return // A replay cannot finish a later ID-only start.
 			}
-			replay = replay || seenNotice
+			// A tagged run is fresh proof even when an ID-only notice used this UUID.
 		}
 		creditFinish = !replay
 		if o.completed && !replay {

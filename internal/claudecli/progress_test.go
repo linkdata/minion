@@ -200,6 +200,40 @@ func TestProgressFollowsFreshExecutionEvents(t *testing.T) {
 	}
 }
 
+func TestUUIDBearingPartialReplayDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second string
+	}{
+		{"text", `"type":"text_delta","text":"first"`, `"type":"text_delta","text":"second"`},
+		{"thinking", `"type":"thinking_delta","thinking":"first"`, `"type":"thinking_delta","thinking":"second"`},
+		{"tool input", `"type":"input_json_delta","partial_json":"first"`, `"type":"input_json_delta","partial_json":"second"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			progress := 0
+			o := jsonlOutput{sessionID: "native-id", onProgress: func() { progress++ }}
+			const start = `{"type":"stream_event","session_id":"native-id","event":{"type":"message_start","message":{"id":"message-1"}}}`
+			frame := func(uuid, delta string) string {
+				return `{"type":"stream_event","session_id":"native-id",` + uuid + `"event":{"type":"content_block_delta","index":0,"delta":{` + delta + `}}}`
+			}
+			first := frame(`"uuid":"delta-1",`, tc.first)
+			second := frame(`"uuid":"delta-1",`, tc.second)
+			writeChunks(t, &o, start+"\n"+first+"\n"+first+"\n")
+			if o.err != nil || progress != 1 {
+				t.Fatalf("exact UUID replay: progress=%d error=%v", progress, o.err)
+			}
+			writeChunks(t, &o, second+"\n"+second+"\n")
+			if o.err != nil || progress != 2 {
+				t.Fatalf("distinct content sharing UUID: progress=%d error=%v", progress, o.err)
+			}
+			unidentified := frame("", tc.first)
+			writeChunks(t, &o, unidentified+"\n"+unidentified+"\n")
+			if o.err != nil || progress != 4 {
+				t.Fatalf("unidentified deltas are ambiguous: progress=%d error=%v", progress, o.err)
+			}
+		})
+	}
+}
+
 func TestProgressFromPrivateAssistantBlocks(t *testing.T) {
 	var progress int
 	var events []aicli.StreamEvent
@@ -445,7 +479,7 @@ func TestSharedCompletionUUIDKeepsDistinctRunlessTaskPending(t *testing.T) {
 	}
 }
 
-func TestSharedTaskNoticeUUIDDoesNotRenewTaggedFinish(t *testing.T) {
+func TestSharedTaskNoticeUUIDStillCreditsTaggedFinish(t *testing.T) {
 	const started = `{"type":"system","subtype":"task_started","task_id":"helper","run_id":"run-1"}`
 	for _, status := range []string{"completed", "failed", "stopped", "killed"} {
 		for _, array := range []bool{false, true} {
@@ -463,9 +497,9 @@ func TestSharedTaskNoticeUUIDDoesNotRenewTaggedFinish(t *testing.T) {
 				if o.err != nil || progress != 1 || o.pending != 1 {
 					t.Fatalf("synthetic notice: progress=%d pending=%d error=%v", progress, o.pending, o.err)
 				}
-				writeChunks(t, &o, tagged+"\n")
-				if o.err != nil || progress != 1 || o.pending != 0 {
-					t.Fatalf("replayed tagged finish: progress=%d pending=%d error=%v", progress, o.pending, o.err)
+				writeChunks(t, &o, tagged+"\n"+tagged+"\n")
+				if o.err != nil || progress != 2 || o.pending != 0 {
+					t.Fatalf("identified tagged finish: progress=%d pending=%d error=%v", progress, o.pending, o.err)
 				}
 			})
 		}

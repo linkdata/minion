@@ -912,7 +912,11 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 			if len(stable) == 0 && item.Text == "" {
 				return
 			}
-			item.Content, _ = json.Marshal(stable)
+			if len(stable) == 0 {
+				item.Content = nil
+			} else {
+				item.Content, _ = json.Marshal(stable)
+			}
 		}
 	case "AgentMessage":
 		// Ciphertext and per-part timing can change when the same message reappears.
@@ -934,10 +938,20 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 			if len(stable) == 0 && item.Text == "" && !nonemptyProgressJSON(item.Questions) {
 				return
 			}
-			item.Content, _ = json.Marshal(stable)
+			if len(stable) == 0 {
+				item.Content = nil
+			} else {
+				item.Content, _ = json.Marshal(stable)
+			}
+		}
+		if !nonemptyProgressJSON(item.Questions) {
+			item.Questions = nil
 		}
 	case "Reasoning":
 		item.Content = nil // Raw reasoning is not stable visible progress.
+		if !nonemptyProgressJSON(item.Summary) {
+			item.Summary = nil
+		}
 	case "FunctionCallOutput":
 		var ok bool
 		if item.Output, ok = stableFunctionCallOutput(item.Output); !ok {
