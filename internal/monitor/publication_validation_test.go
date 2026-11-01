@@ -723,17 +723,20 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 
 func TestAssignedRecoveryRecordsLostWorkerOutcome(t *testing.T) {
 	for _, test := range []struct {
-		overdue, nonregularSidecar bool
+		overdue, nonregularSidecar, resultReady bool
 	}{
 		{},
 		{nonregularSidecar: true},
+		{resultReady: true},
 		{overdue: true},
 		{overdue: true, nonregularSidecar: true},
+		{overdue: true, resultReady: true},
 	} {
-		t.Run(fmt.Sprintf("overdue=%t/nonregular=%t", test.overdue, test.nonregularSidecar), func(t *testing.T) {
+		t.Run(fmt.Sprintf("overdue=%t/nonregular=%t/ready=%t", test.overdue, test.nonregularSidecar, test.resultReady), func(t *testing.T) {
 			m, store, job, gh, path := assignmentValidationFixture(t)
 			accepted := store.Data.Accepted
 			accepted.Assigned = true
+			accepted.ResultReady = test.resultReady
 			if test.overdue {
 				accepted.AcceptedAt = time.Now().UTC().Add(-8 * time.Minute)
 				accepted.Deadline = accepted.AcceptedAt.Add(7 * time.Minute)
