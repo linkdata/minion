@@ -2403,10 +2403,12 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 	}); err != nil {
 		return "", fmt.Errorf("%w: inspect result after worker completion: %w", ErrAcceptanceState, err)
 	}
+	// The cause is sampled after completedAt; a deadline may fire between them.
+	beforeDeadlines := completedAt.Before(job.Deadline) &&
+		(parentDeadline.IsZero() || completedAt.Before(parentDeadline))
 	if result == nil {
-		if errors.Is(cause, context.DeadlineExceeded) && completedAt.Before(job.Deadline) &&
-			(parentDeadline.IsZero() || !parentDeadline.Before(job.Deadline)) {
-			return "succeeded", nil // The original deadline fired after the run returned.
+		if errors.Is(cause, context.DeadlineExceeded) && beforeDeadlines {
+			return "succeeded", nil // The deadline fired after the run returned.
 		}
 		if assigned {
 			return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
@@ -2425,10 +2427,10 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 	}
 	var inactivity interface{ ExecutorInactivity() bool }
 	if assigned && !errors.Is(result, ErrTerminalJob) && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {
-		if cause != nil {
-			return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
+		if cause == nil || errors.Is(cause, context.DeadlineExceeded) && beforeDeadlines {
+			return "inactivity", nil
 		}
-		return "inactivity", nil
+		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
 	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
 		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {

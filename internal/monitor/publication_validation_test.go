@@ -665,6 +665,11 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 	if err != nil || outcome != "succeeded" {
 		t.Fatalf("pre-deadline completion lost to later deadline signal: outcome=%q err=%v", outcome, err)
 	}
+	earlyCompletedAt := job.Deadline.Add(-time.Second)
+	outcome, err = selectedCompletedOutcome(store, job, nil, context.DeadlineExceeded, earlyCompletedAt, earlyCompletedAt.Add(time.Nanosecond))
+	if err != nil || outcome != "succeeded" {
+		t.Fatalf("pre-parent-deadline completion lost to later deadline signal: outcome=%q err=%v", outcome, err)
+	}
 	outcome, err = selectedCompletedOutcome(store, job, nil, context.DeadlineExceeded, completedAt, completedAt.Add(-time.Second))
 	if err != nil || outcome != "canceled" {
 		t.Fatalf("earlier parent deadline lost to completion: outcome=%q err=%v", outcome, err)
@@ -686,15 +691,18 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 
 func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 	for _, test := range []struct {
-		name           string
-		result, cause  error
-		parentDeadline bool
-		late           bool
-		want           string
+		name                string
+		result, cause       error
+		parentDeadlineDelta time.Duration
+		late                bool
+		want                string
 	}{
 		{name: "worker inactivity", result: testExecutorInactivity{}, want: "inactivity"},
 		{name: "parent cancellation", result: testExecutorInactivity{}, cause: context.Canceled, want: "canceled"},
-		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadline: true, want: "canceled"},
+		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: -time.Second, want: "canceled"},
+		{name: "hard deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, want: "inactivity"},
+		{name: "parent deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: time.Second, want: "inactivity"},
+		{name: "hard deadline at completion", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, late: true, want: "expired"},
 		{name: "original hard cap", result: testExecutorInactivity{}, late: true, want: "expired"},
 		{name: "unknown execution", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), want: "lost"},
 		{name: "late missing call receipt", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), late: true, want: "lost"},
@@ -711,8 +719,8 @@ func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
 				completedAt = job.Deadline
 			}
 			var parentDeadline time.Time
-			if test.parentDeadline {
-				parentDeadline = completedAt.Add(-time.Second)
+			if test.parentDeadlineDelta != 0 {
+				parentDeadline = completedAt.Add(test.parentDeadlineDelta)
 			}
 			outcome, err := selectedCompletedOutcome(store, job, test.result, test.cause, completedAt, parentDeadline)
 			if err != nil {
