@@ -691,6 +691,12 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	if json.Unmarshal(selected.Item, &visible) != nil {
 		return
 	}
+	if item.Type == "mcp_tool_call" {
+		var ok bool
+		if visible.Result, ok = stableMCPResult(visible.Result); !ok {
+			return
+		}
+	}
 	key := "id:" + item.ID
 	if item.ID == "" {
 		identity, err := json.Marshal(struct {

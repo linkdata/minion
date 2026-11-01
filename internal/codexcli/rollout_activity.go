@@ -910,6 +910,12 @@ func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progre
 	} else {
 		tool.Invocation = nil
 	}
+	if tool.Type == "mcp_tool_call_end" {
+		var ok bool
+		if tool.Result, ok = stableMCPToolEventResult(tool.Result); !ok {
+			return
+		}
+	}
 	snapshot, err := json.Marshal(tool)
 	if err != nil {
 		return
@@ -981,7 +987,7 @@ func (a *rolloutActivity) newResponseProgress(id string, raw json.RawMessage, pr
 			}
 			response.Summary, _ = json.Marshal(summary)
 		}
-	case "function_call_output":
+	case "function_call_output", "custom_tool_call_output":
 		response.Summary = nil
 		var ok bool
 		if response.Output, ok = stableFunctionCallOutput(response.Output); !ok {
@@ -1009,6 +1015,9 @@ func stableFunctionCallOutput(raw json.RawMessage) (json.RawMessage, bool) {
 		Text     string `json:"text"`
 		ImageURL string `json:"image_url"`
 		FileID   string `json:"file_id"`
+		FileData string `json:"file_data"`
+		FileURL  string `json:"file_url"`
+		Filename string `json:"filename"`
 		Detail   string `json:"detail"`
 		AudioURL string `json:"audio_url"`
 	}
@@ -1017,6 +1026,22 @@ func stableFunctionCallOutput(raw json.RawMessage) (json.RawMessage, bool) {
 	}
 	stable, err := json.Marshal(content)
 	return stable, err == nil
+}
+
+func stableMCPToolEventResult(raw json.RawMessage) (json.RawMessage, bool) {
+	var result map[string]json.RawMessage
+	if json.Unmarshal(raw, &result) == nil {
+		if inner, wrapped := result["Ok"]; wrapped {
+			stable, ok := stableMCPResult(inner)
+			if !ok {
+				return nil, false
+			}
+			result["Ok"] = stable
+			encoded, err := json.Marshal(result)
+			return encoded, err == nil
+		}
+	}
+	return stableMCPResult(raw)
 }
 
 func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {

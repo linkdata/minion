@@ -128,12 +128,16 @@ printf '%s\n' '{"type":"item.completed","item":{"id":"spawn","type":"collab_tool
 	if !liveMessage || !liveTool {
 		t.Fatalf("live helper credential redaction or tool JSON lost: message=%t tool=%t events=%s", liveMessage, liveTool, safeEvents())
 	}
-	select {
-	case <-progress:
-	case result := <-done:
-		t.Fatalf("CLI exited without live progress: result=%+v err=%v", result.result, result.err)
-	case <-ctx.Done():
-		t.Fatalf("helper activity did not advance progress: %v", ctx.Err())
+	// The pre-gate root spawn contributes one callback. Require another from
+	// the helper rollout before allowing the CLI to finish.
+	for range 2 {
+		select {
+		case <-progress:
+		case result := <-done:
+			t.Fatalf("CLI exited without live helper progress: result=%+v err=%v", result.result, result.err)
+		case <-ctx.Done():
+			t.Fatalf("helper activity did not advance progress: %v", ctx.Err())
+		}
 	}
 	var gateFD int
 	gateReady := time.NewTicker(10 * time.Millisecond)

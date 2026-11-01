@@ -898,6 +898,77 @@ func TestRolloutActivityToolLifecycleNativeOutputRenewsProgress(t *testing.T) {
 	}
 }
 
+func TestRolloutMCPToolResultMetadataDoesNotRenewProgress(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, replay, changed string
+	}{
+		{
+			name:    "Ok result",
+			first:   `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"Ok":{"_meta":{"trace":"one"},"content":[{"type":"text","text":"same","annotations":{"priority":0.1},"_meta":{"trace":"one"}}],"structuredContent":{"status":"same"}}}}`,
+			replay:  `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"Ok":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"same","annotations":{"priority":0.9},"_meta":{"trace":"two"}}],"structuredContent":{"status":"same"}}}}`,
+			changed: `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"Ok":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"same","annotations":{"priority":0.9},"_meta":{"trace":"two"}}],"structuredContent":{"status":"changed"}}}}`,
+		},
+		{
+			name:    "direct result",
+			first:   `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"_meta":{"trace":"one"},"content":[{"type":"text","text":"same","annotations":{"priority":0.1}}]}}`,
+			replay:  `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"same","annotations":{"priority":0.9}}]}}`,
+			changed: `{"type":"mcp_tool_call_end","turn_id":"turn","call_id":"call","result":{"_meta":{"trace":"two"},"content":[{"type":"text","text":"changed","annotations":{"priority":0.9}}]}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := &rolloutActivity{progress: func() {}}
+			for i, step := range []struct {
+				raw  string
+				want bool
+			}{{tc.first, true}, {tc.replay, false}, {tc.changed, true}} {
+				progressed := false
+				a.newToolProgress("child", []byte(step.raw), &progressed)
+				if progressed != step.want {
+					t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+				}
+			}
+		})
+	}
+}
+
+func TestRolloutCustomToolOutputCiphertextDoesNotRenewProgress(t *testing.T) {
+	a := &rolloutActivity{progress: func() {}}
+	for i, step := range []struct {
+		raw  string
+		want bool
+	}{
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_text","text":"same"},{"type":"encrypted_content","encrypted_content":"cipher-one"}]}`, true},
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_text","text":"same"},{"type":"encrypted_content","encrypted_content":"cipher-two"}]}`, false},
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_text","text":"changed"},{"type":"encrypted_content","encrypted_content":"cipher-two"}]}`, true},
+	} {
+		progressed := false
+		a.newResponseProgress("child", []byte(step.raw), &progressed)
+		if progressed != step.want {
+			t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+		}
+	}
+}
+
+func TestRolloutCustomToolFileOutputRenewsProgress(t *testing.T) {
+	a := &rolloutActivity{progress: func() {}}
+	for i, step := range []struct {
+		raw  string
+		want bool
+	}{
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_file","file_data":"first","file_url":"https://example.invalid/first","filename":"one.txt"}]}`, true},
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_file","file_data":"first","file_url":"https://example.invalid/first","filename":"one.txt","prompt_cache_breakpoint":{"ttl":"30m"}}]}`, false},
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_file","file_data":"second","file_url":"https://example.invalid/first","filename":"one.txt"}]}`, true},
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_file","file_data":"second","file_url":"https://example.invalid/second","filename":"one.txt"}]}`, true},
+		{`{"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_file","file_data":"second","file_url":"https://example.invalid/second","filename":"two.txt"}]}`, true},
+	} {
+		progressed := false
+		a.newResponseProgress("child", []byte(step.raw), &progressed)
+		if progressed != step.want {
+			t.Fatalf("step %d: progressed=%t, want %t", i, progressed, step.want)
+		}
+	}
+}
+
 func TestRolloutActivityTaskLifecycleDedupesAcrossOrdinals(t *testing.T) {
 	home, started := t.TempDir(), time.Now()
 	writeUsageRollout(t, home, "root", "", usageEventAt(8, "task_started", "root-turn"))

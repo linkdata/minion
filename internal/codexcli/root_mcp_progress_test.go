@@ -1,0 +1,25 @@
+package codexcli
+
+import "testing"
+
+func TestRootMCPResultMetadataReplayDoesNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for _, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"mcp","type":"mcp_tool_call","result":{"_meta":{"trace":"first"},"content":[{"type":"text","text":"one","annotations":{"priority":1},"_meta":{"trace":"first"}}],"structuredContent":{"state":"same"}}}}`, 1},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","result":{"_meta":{"trace":"second"},"content":[{"type":"text","text":"one","annotations":{"priority":2},"_meta":{"trace":"second"}}],"structuredContent":{"state":"same"}}}}`, 1},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","result":{"_meta":{"trace":"second"},"content":[{"type":"text","text":"two","annotations":{"priority":2},"_meta":{"trace":"second"}}],"structuredContent":{"state":"same"}}}}`, 2},
+		{`{"type":"item.completed","item":{"id":"mcp","type":"mcp_tool_call","result":{"_meta":{"trace":"second"},"content":[{"type":"text","text":"two","annotations":{"priority":2},"_meta":{"trace":"second"}}],"structuredContent":{"state":"same"}}}}`, 3},
+	} {
+		if _, err := output.Write([]byte(step.line + "\n")); err != nil {
+			t.Fatal(err)
+		}
+		if progress != step.want {
+			t.Fatalf("after %s: progress=%d, want %d", step.line, progress, step.want)
+		}
+	}
+}
