@@ -262,12 +262,8 @@ fi
 		t.Fatalf("resolved Claude model failed preflight: %v", err)
 	}
 	selected.Main.Model = "default"
-	progress := 0
-	if message, err := checkSelectedRoleCLI(t.Context(), runner, selected.Main, true, func() { progress++ }); err != nil || message != "" {
+	if message, err := checkSelectedRoleCLI(t.Context(), runner, selected.Main, true); err != nil || message != "" {
 		t.Fatalf("remote Claude alias failed CLI validation: message=%q error=%v", message, err)
-	}
-	if progress != 5 {
-		t.Fatalf("Claude preflight progress = %d; want one callback per accepted probe", progress)
 	}
 }
 

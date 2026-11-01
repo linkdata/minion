@@ -13,34 +13,6 @@ import (
 	"github.com/linkdata/minion/internal/command"
 )
 
-func TestSelectedRoleCLIReportsCompletedChecks(t *testing.T) {
-	for _, tc := range []struct {
-		name, script, model, wantMessage string
-		wantProgress                     int
-	}{
-		{name: "login failure", script: "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 7;; esac\nexit 99\n", wantMessage: preflightCodexLoginUnavailable},
-		{name: "boundary failure", script: "#!/bin/sh\ncase \"$1 $2\" in 'login status') exit 0;; 'debug prompt-input') exit 7;; esac\nexit 99\n", wantMessage: preflightCodexBoundaryUnavailable},
-		{name: "model failure", script: preflightCodexCLI, model: "missing-model", wantMessage: preflightCodexInvocationUnsupported, wantProgress: 2},
-		{name: "ready", script: preflightCodexCLI, wantProgress: 12},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("CODEX_HOME", t.TempDir())
-			t.Setenv("CODEX_API_KEY", "")
-			t.Setenv("CODEX_ACCESS_TOKEN", "")
-			fakeOnPath(t, "codex", tc.script)
-			role := remoteCLIJob().Main
-			if tc.model != "" {
-				role.Model = tc.model
-			}
-			progress := 0
-			message, err := checkSelectedRoleCLI(t.Context(), NewRemoteRunner(t.TempDir()), role, true, func() { progress++ })
-			if progress != tc.wantProgress || message != tc.wantMessage || (err != nil) != (tc.wantMessage != "") {
-				t.Fatalf("completed checks=%d, message=%q, error=%v; want %d, %q", progress, message, err, tc.wantProgress, tc.wantMessage)
-			}
-		})
-	}
-}
-
 func TestAuditValidationReportsStartedAndCompletedScripts(t *testing.T) {
 	for _, tc := range []struct {
 		name               string

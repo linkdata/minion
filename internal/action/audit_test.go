@@ -313,7 +313,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		t.Helper()
 		files, _, err := readAuditArtifacts(root, false, "")
 		if err == nil {
-			err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head)
+			err = validateAuditFiles(t.Context(), files, validationDir, filepath.Join(skillDir, "SKILL.md"), tools, "o/r", target, head, nil)
 		}
 		if err == nil {
 			byPath := make(map[string][]byte, len(files))

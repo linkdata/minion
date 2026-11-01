@@ -37,15 +37,9 @@ type modelInfo struct {
 // start an inference turn. Temporary-directory cleanup failures return an error.
 // A nonempty APIKey in settings selects API authentication for discovery without
 // changing the stored CLI login.
-// onProgress reports each completed native check, including expected rejections.
-func Validate(ctx context.Context, settings config.CodexConfig, onProgress ...func()) (resolved config.CodexConfig, resultErr error) {
+func Validate(ctx context.Context, settings config.CodexConfig) (resolved config.CodexConfig, resultErr error) {
 	settings = CaptureAmbientNativeCredentials(settings)
 	defer func() { resultErr = redactCodexError(resultErr, settings) }()
-	progress := func() {
-		if ctx.Err() == nil && len(onProgress) != 0 && onProgress[0] != nil {
-			onProgress[0]()
-		}
-	}
 	home, err := HomePath()
 	if err != nil {
 		return settings, err
@@ -57,7 +51,6 @@ func Validate(ctx context.Context, settings config.CodexConfig, onProgress ...fu
 	if err != nil {
 		return settings, fmt.Errorf("cannot validate Codex settings: %w", err)
 	}
-	progress()
 	var selected *modelInfo
 	var names []string
 	for i := range models {
@@ -86,7 +79,7 @@ func Validate(ctx context.Context, settings config.CodexConfig, onProgress ...fu
 		if effort != "" && supported.ReasoningEffort == effort {
 			settings.Model = selected.Model
 			settings.ReasoningEffort = effort
-			if err := validateExecCapabilities(ctx, settings, progress); err != nil {
+			if err := validateExecCapabilities(ctx, settings); err != nil {
 				return settings, fmt.Errorf("cannot validate Codex settings: %w", err)
 			}
 			return settings, nil
@@ -96,7 +89,7 @@ func Validate(ctx context.Context, settings config.CodexConfig, onProgress ...fu
 }
 
 // Check selected config and both exec parsers without starting an inference turn.
-func validateExecCapabilities(ctx context.Context, settings config.CodexConfig, progress func()) (err error) {
+func validateExecCapabilities(ctx context.Context, settings config.CodexConfig) (err error) {
 	binary, err := aicli.ExecutablePath("codex")
 	if err != nil {
 		return err
@@ -126,13 +119,11 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig, 
 			if _, probeErr := probe(args); probeErr != nil {
 				return fmt.Errorf("Codex selected effort config capability check (writable=%t): %w", writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 			}
-			progress()
 			const unknownKey = "minion_unsupported_capability_probe"
 			invalid := append(append([]string(nil), args...), "-c", unknownKey+"=true")
 			if _, probeErr := probe(invalid); !capabilityRejected(probeErr, unknownKey) {
 				return fmt.Errorf("Codex selected effort config capability check (writable=%t) did not reject an unknown key: %v", writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 			}
-			progress()
 		}
 	}
 	for _, command := range []struct {
@@ -159,7 +150,6 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig, 
 			if probeErr != nil {
 				return fmt.Errorf("Codex %s capability check (writable=%t): %w", command.name, writable, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 			}
-			progress()
 			fullArgs = args
 		}
 		const unknownOption = "--minion-unsupported-capability-probe"
@@ -168,7 +158,6 @@ func validateExecCapabilities(ctx context.Context, settings config.CodexConfig, 
 		if !capabilityRejected(probeErr, unknownOption) {
 			return fmt.Errorf("Codex %s capability check did not reject an unknown option: %v", command.name, probeErr) //nolint:staticcheck // -- Codex is a proper noun.
 		}
-		progress()
 	}
 	return nil
 }
