@@ -210,12 +210,12 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return fmt.Errorf("encode cancellation admission: %w", err)
 	}
 	// Bound admission only; the held body must survive model expiry for paid receipts.
+	headerDeadline, inactivityFirst := watchAdmissionDeadline(expires, started.Add(job.InactivityTimeout), time.Now().Add(httpControlTimeout))
 	headerErr := fmt.Errorf("cancellation watch admission timed out: %w", context.DeadlineExceeded)
-	headerWait := min(httpControlTimeout, time.Until(expires))
-	if remaining := time.Until(started.Add(job.InactivityTimeout)); remaining < headerWait {
-		headerWait = max(0, remaining)
+	if inactivityFirst {
 		headerErr = fmt.Errorf("cancellation watch admission timed out: %w", errExecutorInactivity)
 	}
+	headerWait := max(0, time.Until(headerDeadline))
 	headerDone := make(chan struct{})
 	headerTimer := time.AfterFunc(headerWait, func() {
 		stopWatch(headerErr)
@@ -354,6 +354,17 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		runErr = errors.Join(runErr, errHTTPWorkerCleanup)
 	}
 	return redactActionError(errors.Join(runErr, outcomeErr, watchErr, callerErr), assignedSecrets...)
+}
+
+func watchAdmissionDeadline(hard, idle, control time.Time) (time.Time, bool) {
+	deadline := hard
+	if control.Before(deadline) {
+		deadline = control
+	}
+	if idle.Before(deadline) {
+		return idle, true
+	}
+	return deadline, false
 }
 
 func admissionFailure(err error, actionCtx context.Context, inactivity *inactivityTimer) error {

@@ -115,6 +115,29 @@ func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	}
 }
 
+func TestWatchAdmissionDeadlineUsesAbsoluteOrder(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, test := range []struct {
+		name                string
+		hard, idle, control time.Duration
+		want                time.Duration
+		inactivityFirst     bool
+	}{
+		{"hard before idle by a nanosecond", 10 * time.Second, 10*time.Second + time.Nanosecond, 30 * time.Second, 10 * time.Second, false},
+		{"hard and idle tie", 10 * time.Second, 10 * time.Second, 30 * time.Second, 10 * time.Second, false},
+		{"idle before hard", 10*time.Second + time.Nanosecond, 10 * time.Second, 30 * time.Second, 10 * time.Second, true},
+		{"control first", time.Minute, time.Minute, 30 * time.Second, 30 * time.Second, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, inactivityFirst := watchAdmissionDeadline(now.Add(test.hard), now.Add(test.idle), now.Add(test.control))
+			if !got.Equal(now.Add(test.want)) || inactivityFirst != test.inactivityFirst {
+				t.Fatalf("watch admission deadline=%v inactivity=%t, want deadline=%v inactivity=%t",
+					got, inactivityFirst, now.Add(test.want), test.inactivityFirst)
+			}
+		})
+	}
+}
+
 func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)
