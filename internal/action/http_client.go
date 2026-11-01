@@ -188,6 +188,9 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job)}
 	if !time.Now().Before(expires) {
 		err := errors.Join(monitor.ErrTerminalJob, deadlineCause)
+		if limit := selectWorkerLimit(nil, time.Now(), expires, started.Add(job.InactivityTimeout), ownRuntimeCap); limit != workerLimitNone {
+			err = limit.err()
+		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
@@ -409,7 +412,7 @@ func selectWorkerLimit(cause error, at, hard, idle time.Time, ownRuntimeCap bool
 			return workerLimitNone // An earlier parent or transport stop keeps its cause.
 		}
 	}
-	if !at.Before(idle) && idle.Before(hard) {
+	if !idle.IsZero() && !at.Before(idle) && idle.Before(hard) {
 		return workerLimitInactivity
 	}
 	if ownRuntimeCap && !at.Before(hard) {
