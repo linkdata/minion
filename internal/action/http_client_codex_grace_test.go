@@ -95,8 +95,8 @@ exec sleep 30
 	}()
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
+	startupDeadline := time.NewTimer(10 * time.Second)
+	defer startupDeadline.Stop()
 	for {
 		if _, err := os.Stat(ready); err == nil {
 			close(started)
@@ -108,16 +108,18 @@ exec sleep 30
 		case err := <-done:
 			t.Fatalf("Codex exited before deadline: %v", err)
 		case <-ticker.C:
-		case <-deadline.C:
+		case <-startupDeadline.C:
 			t.Fatal("Codex did not start")
 		}
 	}
+	completionDeadline := time.NewTimer(10 * time.Second)
+	defer completionDeadline.Stop()
 	select {
 	case err := <-done:
 		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) {
 			t.Fatalf("deadline did not stop the model: %v", err)
 		}
-	case <-deadline.C:
+	case <-completionDeadline.C:
 		t.Fatal("worker did not finish within the stop grace")
 	}
 	if len(after) != 1 || len(outcomes) != 1 {
