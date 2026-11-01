@@ -191,10 +191,38 @@ func TestJSONLOutputIDLessRepeatedToolCycles(t *testing.T) {
 		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 2},
 		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 3},
 		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 3},
-		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 4},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 3},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 3},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 3},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 3},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"MORE"}}`, 4},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"MORE"}}`, 5},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 5},
 		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 5},
-		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 6},
-		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 6},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 5},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
+func TestJSONLOutputIdentifiedToolInputChangesRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.started","item":{"id":"command","type":"command_execution","command":"go test"}}`, 1},
+		{`{"type":"item.updated","item":{"id":"command","type":"command_execution","command":"go test ./..."}}`, 2},
+		{`{"type":"item.updated","item":{"id":"command","type":"command_execution","command":"go test ./...","elapsed_time_ms":100}}`, 2},
+		{`{"type":"item.started","item":{"id":"mcp","type":"mcp_tool_call","server":"repo","tool":"search","arguments":{"query":"one","limit":2}}}`, 3},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","server":"repo","tool":"search","arguments":{"limit":2,"query":"one"}}}`, 3},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","server":"repo","tool":"search","arguments":{"limit":2,"query":"two"}}}`, 4},
+		{`{"type":"item.updated","item":{"id":"mcp","type":"mcp_tool_call","server":"repo","tool":"search","arguments":{"query":"two","limit":2},"elapsed_time_ms":200}}`, 4},
 	} {
 		_, _ = output.Write([]byte(step.line + "\n"))
 		if progress != step.want {
@@ -233,6 +261,43 @@ func TestJSONLOutputIDLessCompletedOnlyCommandReplayDoesNotStopRun(t *testing.T)
 				t.Fatalf("ambiguous completion stopped the run or renewed progress: progress=%d cancellations=%d stop=%v events=%+v", progress, cancellations, output.stopErr, events)
 			}
 		})
+	}
+}
+
+func TestJSONLOutputIDLessCompletedOnlyCycleReplayDoesNotRenewProgress(t *testing.T) {
+	progress := 0
+	output := jsonlOutput{onProgress: func() { progress++ }}
+	for i, step := range []struct {
+		line string
+		want int
+	}{
+		{`{"type":"thread.started","thread_id":"root"}`, 0},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 1},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command"}}`, 1},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 1},
+		{`{"type":"item.started","item":{"type":"command_execution","command":"same command"}}`, 1},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 1},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"PASS"}}`, 1},
+		{`{"type":"item.updated","item":{"type":"command_execution","command":"same command","aggregated_output":"MORE"}}`, 2},
+		{`{"type":"item.completed","item":{"type":"command_execution","command":"same command","aggregated_output":"MORE"}}`, 3},
+	} {
+		_, _ = output.Write([]byte(step.line + "\n"))
+		if progress != step.want {
+			t.Fatalf("step %d progress=%d, want %d", i, progress, step.want)
+		}
+	}
+}
+
+func TestNonemptyProgressJSON(t *testing.T) {
+	for _, raw := range []string{`null`, `""`, `[ ]`, `{ }`} {
+		if nonemptyProgressJSON([]byte(raw)) {
+			t.Fatalf("empty JSON counted as output: %s", raw)
+		}
+	}
+	for _, raw := range []string{`"text"`, `[1]`, `{"status":"done"}`} {
+		if !nonemptyProgressJSON([]byte(raw)) {
+			t.Fatalf("nonempty JSON lost output: %s", raw)
+		}
 	}
 }
 

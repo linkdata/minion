@@ -700,32 +700,33 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 			return
 		}
 	}
+	var ok bool
+	if visible.Command, ok = normalizeProgressJSON(visible.Command); !ok {
+		return
+	}
+	if visible.Arguments, ok = normalizeProgressJSON(visible.Arguments); !ok {
+		return
+	}
 	key := "id:" + item.ID
 	if item.ID == "" {
-		var arguments any
-		if len(visible.Arguments) != 0 {
-			decoder := json.NewDecoder(bytes.NewReader(visible.Arguments))
-			decoder.UseNumber()
-			if decoder.Decode(&arguments) != nil {
-				return
-			}
-		}
 		identity, err := json.Marshal(struct {
 			Type      string          `json:"type"`
 			Tool      string          `json:"tool"`
 			Command   json.RawMessage `json:"command"`
 			Server    string          `json:"server"`
-			Arguments any             `json:"arguments"`
-		}{visible.Type, visible.Tool, visible.Command, visible.Server, arguments})
+			Arguments json.RawMessage `json:"arguments"`
+		}{visible.Type, visible.Tool, visible.Command, visible.Server, visible.Arguments})
 		if err != nil {
 			return
 		}
 		digest := sha256.Sum256(identity)
 		key = "legacy:" + string(digest[:])
 	}
-	// Native IDs or the stable legacy signature identify the item. Metadata
-	// changes are not evidence of new output or execution.
-	visible.Type, visible.Tool, visible.Command, visible.Server, visible.Arguments = "", "", nil, "", nil
+	if item.ID == "" || !tool {
+		visible.Command, visible.Arguments = nil, nil
+	}
+	// Native IDs distinguish changed input. ID-less items use input as identity.
+	visible.Type, visible.Tool, visible.Server = "", "", ""
 	content, err := json.Marshal(visible)
 	if err != nil {
 		return
@@ -746,16 +747,16 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 		if item.ID != "" && prior.completed {
 			return
 		}
-		// An identical ID-less completion could be a new command or a replay.
-		// Without a distinguishable lifecycle event, it cannot prove fresh work.
-		freshCycle := item.ID == "" && prior.completed && event.Type == "item.started"
-		if !freshCycle && !newChildAdmission && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
-			(event.Type != "item.completed" || prior.completed) {
+		// An ID-less partial item without new output cannot prove another cycle.
+		if item.ID == "" && prior.completed && event.Type != "item.completed" &&
+			visible.Text == "" && visible.AggregatedOutput == "" &&
+			!nonemptyProgressJSON(visible.Output) && !nonemptyProgressJSON(visible.Result) &&
+			!nonemptyProgressJSON(visible.Changes) {
 			return
 		}
-		if freshCycle {
-			prior.generation = 0
-			prior.spawnAdmitted = false
+		if !newChildAdmission && o.progressSnapshots[progressCodexSnapshot{prior.generation, snapshot}] &&
+			(event.Type != "item.completed" || prior.completed) {
+			return
 		}
 	}
 	if o.progressItems == nil {
@@ -784,6 +785,26 @@ func (o *jsonlOutput) recordExecutionProgress(event codexEvent, line []byte) {
 	prior.completed, prior.spawnAdmitted = event.Type == "item.completed", admitted
 	o.progressItems[key] = prior
 	o.onProgress()
+}
+
+func normalizeProgressJSON(raw json.RawMessage) (json.RawMessage, bool) {
+	if len(raw) == 0 {
+		return nil, true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return nil, false
+	}
+	canonical, err := json.Marshal(value)
+	return canonical, err == nil
+}
+
+func nonemptyProgressJSON(raw json.RawMessage) bool {
+	raw, ok := normalizeProgressJSON(raw)
+	return ok && len(raw) != 0 && !bytes.Equal(raw, []byte("null")) &&
+		!bytes.Equal(raw, []byte(`""`)) && !bytes.Equal(raw, []byte("[]")) && !bytes.Equal(raw, []byte("{}"))
 }
 
 // Progress events contain full snapshots. Keep only the latest bounded item.

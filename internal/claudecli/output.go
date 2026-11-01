@@ -1020,9 +1020,6 @@ func (o *jsonlOutput) reserveProgress(entries, bytes int) bool {
 }
 
 func taskRunKey(id, runID string) string {
-	if runID == "" {
-		return id
-	}
 	return id + "\x00" + runID
 }
 
