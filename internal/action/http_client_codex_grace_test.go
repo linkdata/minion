@@ -76,7 +76,11 @@ exec sleep 30
 		case "status":
 			var status httpObservation
 			if err := httpDecode(r.Body, httpControlBytes, &status); err != nil {
-				t.Error(err)
+				// The deadline may cancel a best-effort Status upload mid-body.
+				if r.Context().Err() == nil {
+					t.Error(err)
+				}
+				return
 			}
 			httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: status.Status.Sequence})
 		case "outcome":
