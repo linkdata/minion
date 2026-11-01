@@ -1478,10 +1478,10 @@ func (m *Monitor) discardAccepted(store *state.Store) error {
 		store.Data.Accepted = accepted
 		return err
 	}
+	m.logf("discard accepted job=%s outcome=%s", accepted.JobID, decision.Outcome)
 	if err := store.ClearAcceptedResult(); err != nil {
 		return fmt.Errorf("%w: clear discarded result: %w", ErrAcceptanceState, err)
 	}
-	m.logf("discard accepted job=%s outcome=%s", accepted.JobID, decision.Outcome)
 	return nil
 }
 
