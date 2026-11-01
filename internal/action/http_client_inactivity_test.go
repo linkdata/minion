@@ -109,7 +109,8 @@ func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	}
 	got := f.parent.result(t)
 	var reported *workerFailureError
-	if !errors.As(got.err, &reported) || !reported.failure.Terminal || reported.failure.Deadline || len(got.result.Calls) != 1 {
+	if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Inactivity ||
+		reported.failure.Deadline || len(got.result.Calls) != 1 {
 		t.Fatalf("parent lost terminal inactivity outcome: error=%v result=%+v", got.err, got.result)
 	}
 }
@@ -121,7 +122,7 @@ func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
 	err := admissionFailure(errors.Join(monitor.ErrRequestTransport, errors.New("watch failed")), ctx, inactivity)
 	failure := newHTTPFailure(err)
 	if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
-		failure == nil || !failure.Terminal || failure.Deadline || !failure.RequestTransport {
+		failure == nil || !failure.Terminal || !failure.Inactivity || failure.Deadline || !failure.RequestTransport {
 		t.Fatalf("overdue admission failure lost terminal inactivity: error=%v failure=%+v", err, failure)
 	}
 }
@@ -173,7 +174,7 @@ func TestRunHTTPExpiredAssignmentSkipsWatchAndModel(t *testing.T) {
 		}
 		if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
 			errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrRequestTransport) ||
-			outcome.Failure == nil || !outcome.Failure.Terminal || outcome.Failure.Deadline ||
+			outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Inactivity || outcome.Failure.Deadline ||
 			outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown {
 			t.Fatalf("overdue assignment lost terminal inactivity: error=%v outcome=%+v", err, outcome)
 		}
@@ -329,7 +330,7 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
-		if !errors.As(got.err, &reported) || !reported.failure.Deadline || len(got.result.Calls) != 1 {
+		if !errors.As(got.err, &reported) || !reported.failure.Deadline || reported.failure.Inactivity || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
 		}
 	})

@@ -54,6 +54,8 @@ Complete `REPORT.md` must contain non-ignorable text, including when it is only 
 
 A failed request gets at most three execution attempts, with these exceptions. The table distinguishes another execution attempt from replaying publication of a saved complete result. Once an assignment is delivered, a failed worker outcome is terminal even if no model-call start was acknowledged; only parent-proven failures before delivery can receive another execution attempt. An HTTP worker's failure classifications are diagnostic claims, not proof of an exception.
 
+The saved terminal outcome and service log distinguish executor `inactivity` from the accepted hard-cap `expired`, user `canceled`, and unreachable-worker `lost`. A worker's typed inactivity report only labels a bound failed outcome; it cannot override a parent stop or change retry and capacity policy. The fixed GitHub failure reply remains generic.
+
 | Failure | Policy |
 | --- | --- |
 | Unknown execution or outcome, including joined cancellation, URL transport or response-body read/decode errors | No further attempts; never automatically repeat paid model work. |

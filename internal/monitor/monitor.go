@@ -2393,6 +2393,13 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		(errors.Is(result, context.DeadlineExceeded) && errors.Is(cause, context.DeadlineExceeded))) {
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
+	var inactivity interface{ ExecutorInactivity() bool }
+	if assigned && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {
+		if cause != nil {
+			return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
+		}
+		return "inactivity", nil
+	}
 	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
 		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {
 		return "", nil // A canceled unused reservation still refunds its attempt.
@@ -2907,11 +2914,15 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 	}
 	var access state.AccessDisposition
 	var accessAttemptID string
+	outcome := "failed"
 	err = store.WithLock(func() error {
 		processed, hadProcessed := store.Data.Processed[job.ID]
 		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
 		previousAccepted := store.Data.Accepted
 		previousDecision := store.Data.TerminalDecisions[job.ID]
+		if previousDecision.Outcome != "" {
+			outcome = previousDecision.Outcome
+		}
 		accessChanged := false
 		if accepted != nil && unresolvedReason != "" {
 			if previousDecision.AttemptID != accepted.AttemptID || accepted.SourceKey == "" {
@@ -2964,7 +2975,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
 			}
 		}
-		m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
+		m.logf("stop retrying failed %s from %s outcome=%s", job.Command.Action, itemLocation(job.Source), outcome)
 	}
 	return err
 }

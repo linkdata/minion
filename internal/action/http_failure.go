@@ -23,6 +23,7 @@ type httpFailure struct {
 	Terminal          bool   `json:"terminal,omitempty"`
 	Canceled          bool   `json:"canceled,omitempty"`
 	Deadline          bool   `json:"deadline,omitempty"`
+	Inactivity        bool   `json:"inactivity,omitempty"`
 	Unsafe            bool   `json:"unsafe,omitempty"`
 	OutcomeUnknown    bool   `json:"outcome_unknown,omitempty"`
 	RequestTransport  bool   `json:"request_transport,omitempty"`
@@ -40,7 +41,8 @@ func newHTTPFailure(err error) *httpFailure {
 	failure := &httpFailure{
 		Message:  httpFailureDiagnostic(err.Error()),
 		Terminal: errors.Is(err, monitor.ErrTerminalJob), Canceled: errors.Is(err, context.Canceled),
-		Deadline: errors.Is(err, context.DeadlineExceeded), Unsafe: errors.Is(err, workroot.ErrUnsafe),
+		Deadline: errors.Is(err, context.DeadlineExceeded), Inactivity: errors.Is(err, errExecutorInactivity),
+		Unsafe:            errors.Is(err, workroot.ErrUnsafe),
 		OutcomeUnknown:    errors.Is(err, monitor.ErrExecutionOutcomeUnknown),
 		RequestTransport:  errors.Is(err, monitor.ErrRequestTransport) || errors.As(err, &network),
 		MissingExecutable: errors.Is(err, exec.ErrNotFound), NoSpace: errors.Is(err, syscall.ENOSPC),
@@ -99,6 +101,9 @@ type workerFailureError struct{ failure httpFailure }
 func (*workerFailureError) Error() string {
 	return "worker execution failed"
 }
+
+// ExecutorInactivity exposes only the worker's outcome label, not policy causes.
+func (e *workerFailureError) ExecutorInactivity() bool { return e.failure.Inactivity }
 
 // Worker diagnostics do not establish parent process, retry or capacity policy.
 func (f *httpFailure) workerErr() error {

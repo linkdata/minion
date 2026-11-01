@@ -77,6 +77,19 @@ func TestHTTPFailurePreservesFiniteCauses(t *testing.T) {
 	}
 }
 
+func TestHTTPFailureCarriesOnlyInactivityLabelFromWorker(t *testing.T) {
+	failure := roundTripHTTPFailure(t, newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity)))
+	if !failure.Inactivity || !failure.Terminal || failure.Deadline {
+		t.Fatalf("inactivity changed across wire: %+v", failure)
+	}
+	workerErr := failure.workerErr()
+	var claim interface{ ExecutorInactivity() bool }
+	if !errors.As(workerErr, &claim) || !claim.ExecutorInactivity() ||
+		errors.Is(workerErr, monitor.ErrTerminalJob) || errors.Is(workerErr, context.DeadlineExceeded) {
+		t.Fatalf("worker claim gained parent policy authority: %v", workerErr)
+	}
+}
+
 func TestHTTPFailurePreservesRequestTransportPolicyWithoutReconstructingURL(t *testing.T) {
 	for _, unknown := range []bool{false, true} {
 		t.Run(fmt.Sprint(unknown), func(t *testing.T) {
