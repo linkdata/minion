@@ -1784,6 +1784,15 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		}
 		return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
 	}
+	resolveLost := func() error {
+		// Without a saved stop or result, delivered work is unverified after restart.
+		at := m.now().UTC()
+		decision, err := decideAccepted(store, job, "lost", at)
+		if err != nil {
+			return err
+		}
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+	}
 	if !time.Now().Before(job.Deadline) {
 		if accepted.FixedRefusal == "" && (accepted.Assigned || failure.ModelCallStarted) {
 			stored, err := store.HasAcceptedResult()
@@ -1791,13 +1800,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 				return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
 			}
 			if !stored || !accepted.ResultReady {
-				// Without a saved stop or result, delivered work is unverified after restart.
-				at := m.now().UTC()
-				decision, err := decideAccepted(store, job, "lost", at)
-				if err != nil {
-					return err
-				}
-				return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+				return resolveLost()
 			}
 		}
 		return m.terminalAccepted(ctx, store, job, failure)
@@ -1812,7 +1815,10 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if stored && accepted.ResultReady {
 		return m.recoverStoredResult(ctx, store, job)
 	}
-	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
+	if accepted.Assigned || failure.ModelCallStarted {
+		return resolveLost()
+	}
+	if accepted.Terminal || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
