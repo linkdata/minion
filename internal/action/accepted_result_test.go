@@ -254,6 +254,22 @@ func TestSelectedInactivityWithRejectedCallReceiptStaysLost(t *testing.T) {
 	}
 }
 
+func TestSelectedInactivityWithUncheckpointedClaimedCallStaysLost(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	outcome := f.outcome(1, nil)
+	outcome.Result.Calls = []CallUsage{f.call(1).Checkpoint.Call}
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(final, monitor.ErrTerminalJob) {
+		t.Fatalf("uncheckpointed claimed call became a known failure: %v", final)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
 func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {
 	var data []byte
 	err := store.WithLock(func() error {
