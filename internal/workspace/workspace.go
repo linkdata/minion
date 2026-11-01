@@ -503,7 +503,7 @@ func CheckUnchanged(ctx context.Context, root string, base []File) error {
 	return CheckUnchangedWithProgress(ctx, root, base, nil)
 }
 
-// CheckUnchangedWithProgress reports each successfully verified path.
+// CheckUnchangedWithProgress reports each successfully verified file.
 func CheckUnchangedWithProgress(ctx context.Context, root string, base []File, progress func()) error {
 	if err := validateFiles(base); err != nil {
 		return err
@@ -517,7 +517,7 @@ func CheckChangesUnchanged(ctx context.Context, root string, base []File, change
 	return CheckChangesUnchangedWithProgress(ctx, root, base, changes, nil)
 }
 
-// CheckChangesUnchangedWithProgress reports each successfully verified path.
+// CheckChangesUnchangedWithProgress reports each successfully verified file.
 func CheckChangesUnchangedWithProgress(ctx context.Context, root string, base []File, changes []Change, progress func()) error {
 	files, err := changedFiles(base, changes)
 	if err != nil {
@@ -542,9 +542,6 @@ func checkUnchanged(ctx context.Context, root string, base []File, repository bo
 		}
 		if entry.IsDir() {
 			// Empty directories carry no versioned source state; still inspect their entries.
-			if progress != nil && ctx.Err() == nil {
-				progress()
-			}
 			return nil
 		}
 		old, exists := prior[rel]
@@ -640,6 +637,9 @@ func walkWithLimit(ctx context.Context, root string, repository bool, limit int,
 					return readErr
 				}
 				for _, entry := range batch {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					if repository && dir == root && entry.Name() == ".git" && entry.IsDir() {
 						continue
 					}

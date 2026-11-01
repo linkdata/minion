@@ -30,6 +30,8 @@ func TestOfflineGitProgressStartPrecedesHeldChildExit(t *testing.T) {
 		t.Fatal(ctx.Err())
 	}
 	select {
+	case <-progress:
+		t.Fatal("Git reported finish before child exit")
 	case err := <-done:
 		t.Fatalf("Git returned before release: %v", err)
 	default:

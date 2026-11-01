@@ -27,13 +27,13 @@ func TestCheckUnchangedWithProgressCreditsOnlyVerifiedFiles(t *testing.T) {
 	}
 }
 
-func TestCheckUnchangedWithProgressCreditsDirectoryTraversal(t *testing.T) {
+func TestCheckUnchangedWithProgressDoesNotCreditDirectoryTraversal(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	progress := 0
-	if err := CheckUnchangedWithProgress(t.Context(), root, nil, func() { progress++ }); err != nil || progress != 1 {
+	if err := CheckUnchangedWithProgress(t.Context(), root, nil, func() { progress++ }); err != nil || progress != 0 {
 		t.Fatalf("directory traversal: progress=%d error=%v", progress, err)
 	}
 }

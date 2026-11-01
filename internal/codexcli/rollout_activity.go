@@ -600,6 +600,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 	a.proveHelperTurn(meta, rootID, cursor, payload.ThreadID, payload.TurnID, uncertainOrdinal, progressed)
 	proven := meta.ID == rootID || a.helperProgressProven(meta, payload.ThreadID, payload.TurnID) || cursor.provedTurns[payload.TurnID]
 	nativeProgress := func() {
+		if a.progress == nil {
+			return
+		}
 		fields := struct {
 			Type, TurnID, Message, Text, Chunk string
 			Images                             []json.RawMessage `json:"images,omitempty"`
@@ -849,6 +852,9 @@ func (a *rolloutActivity) consume(meta rolloutMeta, rootID string, cursor *rollo
 }
 
 func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
 	// Hash item identity, lifecycle, and known output fields; timing metadata can change on replay.
 	type progressItem struct {
 		ID               string          `json:"id"`
@@ -958,6 +964,9 @@ func (a *rolloutActivity) newItemProgress(id, turnID string, raw json.RawMessage
 }
 
 func (a *rolloutActivity) newToolProgress(id string, raw json.RawMessage, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
 	// A call ID proves a new tool call; identical ID-less events cannot prove one.
 	var tool struct {
 		Type             string          `json:"type"`
@@ -1258,6 +1267,9 @@ func stableMCPResult(raw json.RawMessage) (json.RawMessage, bool) {
 }
 
 func (a *rolloutActivity) newNativeProgress(id string, event rolloutEvent, fields any, progressed *bool) {
+	if a.progress == nil {
+		return
+	}
 	if event.Ordinal <= 0 {
 		var err error
 		event.Payload, err = json.Marshal(fields)

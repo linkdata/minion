@@ -48,7 +48,7 @@ func NewOfflineIndex(ctx context.Context, dir, source string, files []workspace.
 	return NewOfflineIndexWithProgress(ctx, dir, source, files, nil)
 }
 
-// NewOfflineIndexWithProgress reports Git command starts, accepted finishes, and completed scans.
+// NewOfflineIndexWithProgress reports Git command starts, accepted finishes, and verified files.
 func NewOfflineIndexWithProgress(ctx context.Context, dir, source string, files []workspace.File, progress func()) (*OfflineIndex, error) {
 	if workspace.Within(source, dir) || workspace.Within(dir, source) {
 		return nil, errors.New("offline index and source directories overlap")
@@ -119,9 +119,7 @@ func (index *OfflineIndex) changesWithControlLimit(ctx context.Context, limit in
 		}
 		size := index.tracked[name]
 		filename := filepath.Join(index.source, filepath.FromSlash(name))
-		parentErr := workspace.CheckRoot(filepath.Dir(filename))
-		index.completed(ctx)
-		if err := parentErr; err != nil {
+		if err := workspace.CheckRoot(filepath.Dir(filename)); err != nil {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) {
 				// Git selects the replacement; this baseline descendant no longer exists.
 				continue
@@ -152,6 +150,7 @@ func (index *OfflineIndex) changesWithControlLimit(ctx context.Context, limit in
 			}
 			total += info.Size()
 		}
+		index.completed(ctx)
 	}
 	// Rebuild baseline entries without cached worktree stats before each capture.
 	if _, err := index.run(ctx, 1024, nil, "read-tree", index.baseline); err != nil {
@@ -312,7 +311,7 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 	directories := map[string]map[string][]string{}
 	scanned := 0
 	var stale []byte
-	for i, name := range slices.Sorted(maps.Keys(index.tracked)) {
+	for _, name := range slices.Sorted(maps.Keys(index.tracked)) {
 		actual := "."
 		found := true
 		for _, part := range strings.Split(name, "/") {
@@ -357,9 +356,6 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 						_ = f.Close()
 						return nil, fmt.Errorf("inspect fix directory %q: %w", actual, readErr)
 					}
-					if len(entries) != 0 {
-						index.completed(ctx)
-					}
 					if remaining == 0 || errors.Is(readErr, io.EOF) {
 						break
 					}
@@ -392,9 +388,6 @@ func (index *OfflineIndex) caseRenamedPaths(ctx context.Context, limit int) ([]b
 		if found && actual != name {
 			stale = append(stale, name...)
 			stale = append(stale, 0)
-		}
-		if (i+1)%128 == 0 {
-			index.completed(ctx)
 		}
 	}
 	return stale, ctx.Err()
@@ -509,24 +502,22 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 						return err
 					}
 				}
+				index.completed(ctx)
 			}
 			if current.ignored {
 				// Git cannot export untracked descendants of an excluded directory.
 				for _, name := range trackedChildren[dir] {
 					info, err := os.Lstat(filepath.Join(index.source, filepath.FromSlash(name)))
 					if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-						index.completed(ctx)
 						continue
 					}
 					if err != nil {
 						return fmt.Errorf("tracked fix directory %q: %w", name, err)
 					}
-					index.completed(ctx)
 					if info.IsDir() {
 						next = append(next, directory{parent: dir, name: path.Base(name), ignored: true})
 					}
 				}
-				index.completed(ctx)
 				continue
 			}
 			f, err := workspace.OpenDirectory(absolute)
@@ -558,9 +549,6 @@ func (index *OfflineIndex) checkControlFilesWithLimit(ctx context.Context, limit
 						if err := enqueue(name); err != nil {
 							return err
 						}
-					}
-					if len(batch) != 0 {
-						index.completed(ctx)
 					}
 					if errors.Is(err, io.EOF) {
 						return nil

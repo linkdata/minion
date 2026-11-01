@@ -74,7 +74,7 @@ func TestOfflineIndexKeepsProgressAcrossChangeCaptures(t *testing.T) {
 	}
 }
 
-func TestOfflineIndexCreditsFilesystemScansBeforeGit(t *testing.T) {
+func TestOfflineIndexCreditsVerifiedFilesButNotScans(t *testing.T) {
 	source := t.TempDir()
 	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("x"), 0600); err != nil {
 		t.Fatal(err)
@@ -82,11 +82,11 @@ func TestOfflineIndexCreditsFilesystemScansBeforeGit(t *testing.T) {
 	events := 0
 	index := &OfflineIndex{source: source, tracked: map[string]int64{"tracked.txt": 1},
 		progress: func() { events++ }}
-	if err := index.checkControlFilesWithLimit(t.Context(), 2); err != nil || events != 1 {
+	if err := index.checkControlFilesWithLimit(t.Context(), 2); err != nil || events != 0 {
 		t.Fatalf("control-file scan: events=%d error=%v", events, err)
 	}
 	events = 0
-	if stale, err := index.caseRenamedPaths(t.Context(), 2); err != nil || len(stale) != 0 || events != 1 {
+	if stale, err := index.caseRenamedPaths(t.Context(), 2); err != nil || len(stale) != 0 || events != 0 {
 		t.Fatalf("case scan: events=%d stale=%q error=%v", events, stale, err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -94,11 +94,11 @@ func TestOfflineIndexCreditsFilesystemScansBeforeGit(t *testing.T) {
 	events = 0
 	index.progress = func() {
 		events++
-		if events == 2 {
+		if events == 1 {
 			cancel()
 		}
 	}
-	if _, err := index.Changes(ctx); !errors.Is(err, context.Canceled) || events != 2 {
+	if _, err := index.Changes(ctx); !errors.Is(err, context.Canceled) || events != 1 {
 		t.Fatalf("tracked scan before Git: events=%d error=%v", events, err)
 	}
 }

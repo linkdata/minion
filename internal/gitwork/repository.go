@@ -300,9 +300,6 @@ func repositoryDigestWithProgress(ctx context.Context, dir string, limit int, pr
 					for _, entry := range batch {
 						children = append(children, entry.Name())
 					}
-					if len(batch) != 0 && progress != nil && ctx.Err() == nil {
-						progress()
-					}
 					if errors.Is(err, io.EOF) {
 						return nil
 					}

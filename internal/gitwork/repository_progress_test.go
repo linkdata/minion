@@ -23,12 +23,12 @@ func TestRepositoryDigestAndVerifyReportCompletedReads(t *testing.T) {
 	progress := 0
 	report := func() { progress++ }
 	digest, err := repositoryDigestWithProgress(t.Context(), dir, workspace.MaxEntries, report)
-	if err != nil || progress != 4 {
-		t.Fatalf("initial digest progress=%d error=%v; want 2 directory batches and 2 files", progress, err)
+	if err != nil || progress != 2 {
+		t.Fatalf("initial digest progress=%d error=%v; want 2 verified files", progress, err)
 	}
 	repo := &Repository{dir: dir, digest: digest, progress: report}
 	for i := 1; i <= 2; i++ {
-		if err := repo.Verify(t.Context()); err != nil || progress != 4*(i+1) {
+		if err := repo.Verify(t.Context()); err != nil || progress != 2*(i+1) {
 			t.Fatalf("verification %d progress=%d error=%v", i, progress, err)
 		}
 	}
@@ -37,10 +37,10 @@ func TestRepositoryDigestAndVerifyReportCompletedReads(t *testing.T) {
 	progress = 0
 	if _, err := repositoryDigestWithProgress(ctx, dir, workspace.MaxEntries, func() {
 		progress++
-		if progress == 4 {
+		if progress == 2 {
 			cancel()
 		}
-	}); !errors.Is(err, context.Canceled) || progress != 4 {
+	}); !errors.Is(err, context.Canceled) || progress != 2 {
 		t.Fatalf("final-read cancellation progress=%d error=%v", progress, err)
 	}
 }
