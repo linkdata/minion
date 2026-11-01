@@ -1341,6 +1341,25 @@ func TestHTTPExecutorStatusReceiptRevivesWithoutInventingProgress(t *testing.T) 
 	})
 }
 
+func TestHTTPExecutorAcceptsRemoteProgressAgeIndependentOfParentElapsed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		f := newHTTPServerTestInMemory(t, t.Context(), job, runnerExecutionCheckpoints{})
+		f.pull(t)
+		status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+			Sequence: 1, ProgressSequence: 1, ProgressAge: 10*time.Minute + 60*time.Millisecond,
+			WorkerState: "busy", Phase: "prepare"}
+		f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 1)
+		status.Sequence = 2
+		status.ProgressAge = time.Hour
+		f.ack(t, "/status", httpObservation{Status: status}, http.StatusOK, 2)
+		f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+		if got := f.result(t); got.err != nil {
+			t.Fatal(got.err)
+		}
+	})
+}
+
 func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(t *testing.T) {
 	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(30*time.Second))
 	defer cancel()
@@ -1350,9 +1369,6 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	job.CriticMaxRounds = 2
 	f := newHTTPServerTestWithRoot(t, ctx, job, runnerExecutionCheckpoints{}, t.TempDir())
 	f.pull(t)
-	f.tx.mu.Lock()
-	f.tx.started = f.tx.started.Add(-time.Second) // Keep synthetic nanosecond ages below measured elapsed time on Windows.
-	f.tx.mu.Unlock()
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Sequence: 3, ProgressSequence: 4, ProgressAge: 2 * time.Nanosecond, LogSequence: 3, WorkerState: "busy", Phase: "prepare"}
 	record := func(sequence uint64) attemptRecord {
@@ -1380,7 +1396,6 @@ func TestHTTPExecutorRejectsStaleAndRegressingStatusWithoutChangingPaidSequence(
 	reject("replay", func(s *Status) { s.Sequence = status.Sequence })
 	reject("stale", func(s *Status) { s.Sequence = status.Sequence - 1 })
 	reject("foreign attempt", func(s *Status) { s.Identity.AttemptID = "foreign" })
-	reject("impossible progress age", func(s *Status) { s.ProgressAge = time.Hour })
 	reject("critic before call", func(s *Status) { s.Phase, s.Round, s.ReviewPhase = "critic", 1, reviewFull })
 	reject("upload before completion", func(s *Status) { s.Phase = "upload" })
 	var paidSequence uint64
