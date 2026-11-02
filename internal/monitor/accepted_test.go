@@ -387,13 +387,15 @@ func TestSelectedInfrastructureFailureRefundsUnassignedAttempt(t *testing.T) {
 		permission: github.Permission{Permission: "write"}}
 	store := openState(t, at.Add(-time.Minute))
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { return ErrRequestTransport }))
+	cleanupCalls := 0
+	m.AfterAcceptedCleanup = func() { cleanupCalls++ }
 	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrRequestTransport) {
 		t.Fatalf("infrastructure error = %v", err)
 	}
 	failure := store.Data.JobFailures[jobID(item.Key, "review")]
-	if store.Data.Accepted != nil || failure.Attempts != 0 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() ||
+	if store.Data.Accepted != nil || cleanupCalls != 1 || failure.Attempts != 0 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() ||
 		len(store.Data.Processed) != 0 || len(gh.comments) != 0 {
-		t.Fatalf("infrastructure failure consumed an unassigned attempt: %+v", store.Data)
+		t.Fatalf("infrastructure failure consumed an unassigned attempt: cleanupCalls=%d state=%+v", cleanupCalls, store.Data)
 	}
 }
 
@@ -446,12 +448,16 @@ func TestSelectedExpiredOriginalDeadlineNeverReaccepts(t *testing.T) {
 				t.Fatal(err)
 			}
 			m := selectedMonitor(t, scanAt, gh, selectedHandler(func(Job) error { t.Fatal("expired action dispatched"); return nil }))
+			cleanupCalls := 0
+			if held {
+				m.AfterAcceptedCleanup = func() { cleanupCalls++ }
+			}
 			if _, err := m.RunOnce(t.Context(), store); err != nil {
 				t.Fatal(err)
 			}
 			if len(gh.reactions) != 0 || len(gh.comments) != 1 || store.Data.Accepted != nil ||
-				len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
-				t.Fatalf("expired deadline renewed: reactions=%v comments=%+v state=%+v", gh.reactions, gh.comments, store.Data)
+				len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || held && cleanupCalls != 1 {
+				t.Fatalf("expired deadline renewed: reactions=%v comments=%+v cleanupCalls=%d state=%+v", gh.reactions, gh.comments, cleanupCalls, store.Data)
 			}
 		})
 	}

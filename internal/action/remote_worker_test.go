@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -424,5 +425,113 @@ func TestRemoteWorkerRunsOneAuthenticatedAssignment(t *testing.T) {
 	}
 	if err := <-workerDone; err != nil {
 		t.Fatalf("remote worker failed after outcome: %v", err)
+	}
+}
+
+func TestRemoteWorkerCleanupFailureClosesEndpoint(t *testing.T) {
+	certificate, leaf := testRemoteCertificate(t)
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{3}, 32))
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := ListenRemoteExecution(executor, "127.0.0.1:0", certificate, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	origin := "https://" + endpoint.Addr().String()
+	client, err := NewRemoteExecutionClient(origin, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	client.Transport.(*authenticatedExecutionTransport).TLSClientConfig.RootCAs = roots
+	base, err := url.Parse(origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &httpExecutionClient{client: client, base: base}
+	job := testJob(command.Comment)
+	job.Identity.ExecutorID = "remote"
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: "remote"}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type pullResult struct {
+		assignment httpAssignment
+		err        error
+	}
+	pulled := make(chan pullResult, 1)
+	go func() {
+		var assignment httpAssignment
+		err := transport.post(ctx, "next", pull, httpJobBytes, &assignment, httpBinding{}, 0)
+		pulled <- pullResult{assignment, err}
+	}()
+	worker := &remoteWorker{executor: executor, endpoint: endpoint}
+	if err := worker.WaitCapacity(ctx); err != nil {
+		t.Fatalf("authenticated held pull was unavailable: %v", err)
+	}
+	type executionResult struct {
+		result Result
+		err    error
+	}
+	executed := make(chan executionResult, 1)
+	go func() {
+		result, err := worker.Execute(ctx, job, runnerExecutionCheckpoints{})
+		executed <- executionResult{result, err}
+	}()
+	if got := <-pulled; got.err != nil || !sameAssignmentJob(job, got.assignment.Job) {
+		t.Fatalf("remote assignment was not delivered: %+v", got)
+	}
+	outcome := httpOutcome{Sequence: 1, Result: Result{Version: ProtocolVersion, Identity: job.Identity,
+		SourceRef: job.Source.Head, Diagnostics: []Diagnostic{{Code: "cleanup_failed", Message: "cleanup failed"}}}}
+	body, err := httpEncode(outcome, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack httpAcknowledgement
+	if err := transport.post(ctx, "outcome", body, httpControlBytes, &ack, httpJobBinding(job), 1); err != nil || ack.Kind != "outcome" || ack.Failure != nil {
+		t.Fatalf("cleanup outcome was not acknowledged: ack=%+v error=%v", ack, err)
+	}
+	var got executionResult
+	select {
+	case got = <-executed:
+	case <-ctx.Done():
+		t.Fatalf("remote cleanup-failure execution did not finish: %v", ctx.Err())
+	}
+	if got.err != nil || len(got.result.Diagnostics) != 1 || got.result.Diagnostics[0].Code != "cleanup_failed" {
+		t.Fatalf("cleanup failure was not retained: %+v", got)
+	}
+	select {
+	case <-endpoint.Done():
+	default:
+		t.Fatal("cleanup failure left the remote listener open")
+	}
+	if err := worker.WaitCapacity(ctx); !errors.Is(err, ErrRemoteWorkerUnavailable) {
+		t.Fatalf("closed endpoint advertised capacity: %v", err)
+	}
+	for _, request := range []struct {
+		path string
+		body any
+	}{
+		{"/next", httpPull{Version: ProtocolVersion, ExecutorID: "remote"}},
+		{"/status", httpObservation{Status: Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1}}},
+	} {
+		body, err := httpEncode(request.body, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := &httpRepullRecorder{httptest.NewRecorder()}
+		httpRequest := httptest.NewRequest(http.MethodPost, request.path, bytes.NewReader(body))
+		httpRequest.Header.Set("Content-Type", "application/json")
+		executor.ServeHTTP(recorder, httpRequest)
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("stale %s was accepted after cleanup: status=%d body=%s", request.path, recorder.Code, recorder.Body.String())
+		}
 	}
 }

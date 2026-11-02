@@ -125,6 +125,7 @@ type Monitor struct {
 	Now                    func() time.Time
 	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
 	SelectedExecutorID     string          // Nonempty only while a selected worker owns actions.
+	AfterAcceptedCleanup   func()          // Called after an accepted reservation is durably released.
 	afterSelectedRunReturn func()          // Test seam after the worker's terminal decision.
 	afterInvitationCheck   func()          // Test seam after the invitation context check.
 }
@@ -194,16 +195,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			m.prunePrivateRecords(ctx, store)
 		}
 	}()
-	if store.Data.Accepted == nil {
-		// A completed attempt may leave its sidecar after a crash or failed unlink.
-		// Remove it before a new reservation can pair with this stale sidecar.
-		if present, err := store.HasAcceptedResult(); err != nil {
-			return store.Data.NextPollAt, fmt.Errorf("%w: inspect completed result: %w", ErrAcceptanceState, err)
-		} else if present {
-			if err := store.ClearAcceptedResult(); err != nil {
-				return store.Data.NextPollAt, fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
-			}
-		}
+	if err := m.ClearOrphanAcceptedResult(store); err != nil {
+		return store.Data.NextPollAt, err
 	}
 	activeJobID := ""
 	activeWriteChecked := false
@@ -771,7 +764,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			clearResolvedTerminalFailures()
 			if err := executeErr; err != nil {
 				if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
-					return stop() // The refused assignment retired this worker.
+					return stop() // The refused assignment ended this scan; its pull must be renewed.
 				}
 				if errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil || ctx.Err() != nil {
 					return stop(err)
@@ -833,6 +826,27 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return stop(err)
 	}
 	return stop()
+}
+
+// ClearOrphanAcceptedResult removes a completed result left after its reservation was cleared.
+func (m *Monitor) ClearOrphanAcceptedResult(store *state.Store) error {
+	if store.Data.Accepted != nil {
+		return nil
+	}
+	// A completed attempt may leave its sidecar after a crash or failed unlink.
+	// Remove it before a new reservation can pair with this stale sidecar.
+	present, err := store.HasAcceptedResult()
+	if err != nil {
+		return fmt.Errorf("%w: inspect completed result: %w", ErrAcceptanceState, err)
+	}
+	if !present {
+		return nil
+	}
+	if err := store.ClearAcceptedResult(); err != nil {
+		return fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
+	}
+	m.acceptedCleanupFinished()
+	return nil
 }
 
 func (m *Monitor) now() time.Time {
@@ -1491,6 +1505,12 @@ func (m *Monitor) completeTerminalUsage(job Job, decision state.TerminalDecision
 	}
 }
 
+func (m *Monitor) acceptedCleanupFinished() {
+	if m.AfterAcceptedCleanup != nil {
+		m.AfterAcceptedCleanup()
+	}
+}
+
 func (m *Monitor) discardAccepted(store *state.Store) error {
 	accepted := store.Data.Accepted
 	if accepted == nil {
@@ -1525,6 +1545,7 @@ func (m *Monitor) discardAccepted(store *state.Store) error {
 	if err := store.ClearAcceptedResult(); err != nil {
 		return fmt.Errorf("%w: clear discarded result: %w", ErrAcceptanceState, err)
 	}
+	m.acceptedCleanupFinished()
 	return nil
 }
 
@@ -2746,6 +2767,9 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 	if saveErr := saveAcceptanceState(store); saveErr != nil {
 		return errors.Join(failureErr, saveErr)
 	}
+	if !accepted.Assigned {
+		m.acceptedCleanupFinished()
+	}
 	if interrupted {
 		m.logf("%s from %s interrupted: %v", job.Command.Action, itemLocation(job.Source), err)
 		return failureErr
@@ -2785,6 +2809,7 @@ func (m *Monitor) finalizeSelectedSuccess(ctx context.Context, store *state.Stor
 	if err := store.ClearAcceptedResult(); err != nil {
 		return fmt.Errorf("%w: clear completed result: %w", ErrAcceptanceState, err)
 	}
+	m.acceptedCleanupFinished()
 	return ctx.Err()
 }
 
@@ -3067,6 +3092,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 			if clearErr := store.ClearAcceptedResult(); clearErr != nil {
 				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
 			}
+			m.acceptedCleanupFinished()
 		}
 	}
 	return err

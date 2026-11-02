@@ -28,7 +28,7 @@ func runExecuteMode() int {
 
 func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) (code int) {
 	if terminalRecoveryPending(store) {
-		code = recoverTerminalService(ctx, watcher, store, loop, logger)
+		code = recoverAcceptedService(ctx, watcher, store, loop, nil, logger)
 		if code != 0 || !loop || ctx.Err() != nil {
 			return code
 		}
@@ -84,13 +84,14 @@ func terminalRecoveryPendingAt(store *state.Store, now time.Time) bool {
 		return false
 	}
 	_, decided := store.Data.TerminalDecisions[accepted.JobID]
-	return accepted.Assigned || accepted.Terminal || decided || store.Data.JobFailures[accepted.JobID].ModelCallStarted || !now.Before(accepted.Deadline)
+	return accepted.Assigned || accepted.Terminal || accepted.FixedRefusal != "" || decided ||
+		store.Data.JobFailures[accepted.JobID].ModelCallStarted || !now.Before(accepted.Deadline)
 }
 
-func recoverTerminalService(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger) int {
+func recoverAcceptedService(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger) int {
 	if err := store.SyncPathAncestors(); err != nil {
 		logger.Printf("sync selected state path: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
-	return runMonitorLoop(ctx, watcher, store, loop, nil, logger, true)
+	return runMonitorLoop(ctx, watcher, store, loop, workerExited, logger, true)
 }

@@ -40,6 +40,27 @@ func TestRunHTTPLoopStopsOnInvalidNext(t *testing.T) {
 	}
 }
 
+func TestRunHTTPLoopRepullsRetiredNext(t *testing.T) {
+	var pulls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/next" {
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			return
+		}
+		if pulls.Add(1) == 1 {
+			httpServerReject(w, "next", http.StatusTooEarly, httpBinding{}, 0, errors.New("retired pull"))
+			return
+		}
+		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, context.Canceled)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := RunHTTPLoop(ctx, server.Client(), server.URL, "local", &Runner{runModel: forbidModel(t)}); err != nil || pulls.Load() != 2 {
+		t.Fatalf("retired pull did not repull once: pulls=%d error=%v", pulls.Load(), err)
+	}
+}
+
 func TestRunHTTPLoopCanceledBeforePullIsCleanShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

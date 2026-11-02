@@ -85,7 +85,7 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 func (w *remoteWorker) WaitCapacity(ctx context.Context) error {
 	for {
 		w.executor.mu.Lock()
-		pull, pullDone, active := w.executor.pull, w.executor.pullDone, w.executor.active
+		pull, pullDone, stale, active := w.executor.pull, w.executor.pullDone, w.executor.pullStale, w.executor.active
 		closed, unavailable, changed := w.executor.closed, w.executor.unavailable, w.executor.changed
 		w.executor.mu.Unlock()
 		select {
@@ -99,7 +99,7 @@ func (w *remoteWorker) WaitCapacity(ctx context.Context) error {
 		if closed || unavailable {
 			return ErrRemoteWorkerUnavailable
 		}
-		if active == nil && pull && pullDone != nil {
+		if active == nil && pull && !stale && pullDone != nil {
 			select {
 			case <-pullDone:
 			default:
@@ -122,7 +122,7 @@ func (w *remoteWorker) heldPull() <-chan struct{} {
 	}
 	w.executor.mu.Lock()
 	defer w.executor.mu.Unlock()
-	if !w.executor.pull || w.executor.pullDone == nil || w.executor.closed || w.executor.unavailable || w.executor.active != nil {
+	if !w.executor.pull || w.executor.pullDone == nil || w.executor.pullStale || w.executor.closed || w.executor.unavailable || w.executor.active != nil {
 		return nil
 	}
 	select {

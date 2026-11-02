@@ -36,6 +36,7 @@ func attachSelectedRemoteWorker(owner *action.Orchestrator, watcher *monitor.Mon
 	watcher.Handler = owner
 	watcher.SelectedExecutorID = remote.ExecutorID
 	watcher.SelectedCommands = commands
+	watcher.AfterAcceptedCleanup = endpoint.RequireFreshPull
 	return endpoint, nil
 }
 
@@ -58,8 +59,18 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 			code = 1
 		}
 	}()
-	readyCtx, cancel := context.WithTimeout(ctx, readyTimeout)
-	err := owner.WaitCapacity(readyCtx)
+	if err := watcher.ClearOrphanAcceptedResult(store); err != nil {
+		logger.Printf("clear completed remote result: %s", monitor.InertLogText(err.Error()))
+		return 1
+	}
+	if store.Data.Accepted != nil {
+		code = recoverAcceptedService(ctx, watcher, store, true, endpoint.Done(), logger)
+		if code != 0 || !loop || ctx.Err() != nil {
+			return code
+		}
+	}
+	capacityCtx, cancel := context.WithTimeout(ctx, readyTimeout)
+	err := owner.WaitCapacity(capacityCtx)
 	cancel()
 	if err != nil {
 		logger.Printf("wait for selected remote worker: %s", monitor.InertLogText(err.Error()))
