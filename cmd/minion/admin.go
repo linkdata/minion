@@ -1,16 +1,20 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/webserv"
 )
 
 // adminServer owns the dashboard listener and the JaWS processing loop.
@@ -18,19 +22,49 @@ type adminServer struct {
 	listener  net.Listener
 	server    *http.Server
 	jaws      *jaws.Jaws
+	cancel    context.CancelFunc
 	serveDone chan struct{}
 	jawsDone  chan struct{}
 	serveErr  error // read only after serveDone closes
 }
 
 func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, error) {
-	certificate, err := loadAdminCertificate(cfg)
-	if err != nil {
-		return nil, err
+	service := &webserv.Config{Address: cfg.Listen}
+	var fallbackTLS *tls.Config
+	if cfg.TLSCertFile != "" {
+		certFile, err := filepath.Abs(cfg.TLSCertFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve admin TLS certificate path: %w", err)
+		}
+		keyFile, err := filepath.Abs(cfg.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve admin TLS key path: %w", err)
+		}
+		certDir := filepath.Dir(certFile)
+		relKey, err := filepath.Rel(certDir, keyFile)
+		// webserv expands CertDir and cannot join files across Windows volumes.
+		if err != nil || strings.Contains(certDir, "$") {
+			certificate, err := loadAdminCertificate(cfg)
+			if err != nil {
+				return nil, err
+			}
+			fallbackTLS = &tls.Config{
+				MinVersion:   tls.VersionTLS13,
+				Certificates: []tls.Certificate{*certificate},
+				NextProtos:   []string{"h2", "http/1.1"},
+			}
+		} else {
+			service.CertDir = certDir
+			service.FullchainPem = filepath.Base(certFile)
+			service.PrivkeyPem = relKey
+		}
 	}
-	listener, err := net.Listen("tcp", cfg.Listen)
+	listener, err := service.Listen()
 	if err != nil {
 		return nil, fmt.Errorf("listen for admin dashboard: %w", err)
+	}
+	if fallbackTLS != nil {
+		listener = tls.NewListener(listener, fallbackTLS)
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -43,28 +77,21 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 	mux.Handle("/jaws/", jw)
 	server := &http.Server{
 		Handler:                      jw.SecureHeadersMiddleware(adminGuard(mux, nil)),
+		TLSConfig:                    fallbackTLS,
 		ReadHeaderTimeout:            5 * time.Second,
 		ReadTimeout:                  30 * time.Second,
 		IdleTimeout:                  time.Minute,
 		MaxHeaderBytes:               128 << 10,
 		DisableGeneralOptionsHandler: true,
 	}
-	if certificate != nil {
-		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*certificate}}
-	}
-	a := &adminServer{listener: listener, server: server, jaws: jw, serveDone: make(chan struct{}), jawsDone: make(chan struct{})}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{})}
 	go func() {
 		defer close(a.jawsDone)
 		jw.Serve()
 	}()
 	go func() {
-		var err error
-		if server.TLSConfig != nil {
-			err = server.ServeTLS(listener, "", "")
-		} else {
-			err = server.Serve(listener)
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := adminServeFailure(service.ServeWith(serveCtx, server, listener)); err != nil {
 			a.serveErr = err
 			if onFailure != nil {
 				onFailure()
@@ -73,6 +100,25 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		close(a.serveDone)
 	}()
 	return a, nil
+}
+
+func adminServeFailure(err error) error {
+	if err == context.Canceled {
+		return nil
+	}
+	if !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var failures []error
+		for _, part := range joined.Unwrap() {
+			if part != nil && part != context.Canceled {
+				failures = append(failures, part)
+			}
+		}
+		return errors.Join(failures...)
+	}
+	return err
 }
 
 func loadAdminCertificate(cfg config.AdminConfig) (*tls.Certificate, error) {
@@ -112,8 +158,9 @@ func (deniedAdminAuth) IsAdmin() bool        { return false }
 
 func (a *adminServer) Close() error {
 	a.jaws.Close()
-	err := a.server.Close()
+	a.cancel()
 	<-a.serveDone
+	err := a.server.Close()
 	<-a.jawsDone
 	return errors.Join(err, a.serveErr)
 }

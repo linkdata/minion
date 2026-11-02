@@ -6,11 +6,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -157,6 +160,49 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	}
 }
 
+func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
+	t.Parallel()
+	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	certDir := filepath.Join(t.TempDir(), "literal$certs")
+	if err := os.Mkdir(certDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile = filepath.Join(certDir, filepath.Base(certFile))
+	if err := os.WriteFile(certFile, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := startAdminServer(config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := admin.Close(); err != nil {
+			t.Errorf("close admin server: %v", err)
+		}
+	})
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, ForceAttemptHTTP2: true}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 2 {
+		t.Fatalf("HTTPS response = %s %d, want HTTP/2 403", resp.Proto, resp.StatusCode)
+	}
+}
+
 func TestAdminServerReportsListenerFailure(t *testing.T) {
 	t.Parallel()
 	failed := make(chan struct{})
@@ -175,6 +221,32 @@ func TestAdminServerReportsListenerFailure(t *testing.T) {
 	}
 	if err := admin.Close(); err == nil {
 		t.Fatal("Close did not report the listener failure")
+	}
+}
+
+func TestAdminServeFailure(t *testing.T) {
+	serveFailure := errors.New("serve failed")
+	wrappedCancellation := fmt.Errorf("serve panic: %w", context.Canceled)
+	for _, tc := range []struct {
+		name         string
+		input, want  error
+		wantCanceled bool
+	}{
+		{name: "nil"},
+		{name: "canceled", input: context.Canceled},
+		{name: "joined cancellation", input: errors.Join(context.Canceled, nil)},
+		{name: "joined failure", input: errors.Join(context.Canceled, serveFailure), want: serveFailure},
+		{name: "wrapped cancellation failure", input: wrappedCancellation, want: wrappedCancellation, wantCanceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := adminServeFailure(tc.input)
+			if (got == nil) != (tc.want == nil) || tc.want != nil && !errors.Is(got, tc.want) {
+				t.Fatalf("failure = %v, want %v", got, tc.want)
+			}
+			if errors.Is(got, context.Canceled) != tc.wantCanceled {
+				t.Fatalf("failure = %v, want canceled=%t", got, tc.wantCanceled)
+			}
+		})
 	}
 }
 
