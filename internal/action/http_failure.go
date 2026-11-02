@@ -16,6 +16,8 @@ import (
 
 const httpFailureMessageLimit = 8 << 10
 
+var errRemoteCaptureLimit = errors.New("remote attempt record store full")
+
 // httpFailure carries finite wire details. Parent ACKs keep typed causes;
 // worker outcome fields are diagnostic claims at the receiver.
 type httpFailure struct {
@@ -33,6 +35,7 @@ type httpFailure struct {
 	NoSpace           bool   `json:"no_space,omitempty"`
 	QuotaExceeded     bool   `json:"quota_exceeded,omitempty"`
 	OutputLimit       bool   `json:"output_limit,omitempty"`
+	CaptureLimit      bool   `json:"capture_limit,omitempty"`
 }
 
 func newHTTPFailure(err error) *httpFailure {
@@ -93,6 +96,7 @@ func (f *httpFailure) err() error {
 		{f.RequestTransport, monitor.ErrRequestTransport},
 		{f.MissingExecutable, exec.ErrNotFound}, {f.NoSpace, syscall.ENOSPC},
 		{f.QuotaExceeded, syscall.EDQUOT}, {f.OutputLimit, aicli.ErrOutputLimit},
+		{f.CaptureLimit, errRemoteCaptureLimit},
 	} {
 		if fact.present {
 			causes = append(causes, fact.cause)

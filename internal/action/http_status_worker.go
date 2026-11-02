@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -26,6 +27,8 @@ type workerStatus struct {
 	supplied           bool
 	incomplete         bool
 	closed             bool
+	captureLimited     atomic.Bool
+	onCaptureLimit     func()
 }
 
 func newWorkerStatus(job Job, started time.Time) *workerStatus {
@@ -114,6 +117,15 @@ func (s *workerStatus) sendLocked(ctx context.Context, transport *httpExecutionC
 	var ack httpAcknowledgement
 	if err := transport.post(requestCtx, "status", data, httpControlBytes, &ack,
 		httpBinding{Version: status.Version, Identity: status.Identity, SourceRef: status.SourceRef}, status.Sequence); err != nil {
+		if errors.Is(err, errRemoteCaptureLimit) && s.pending != nil && s.pending.Sequence == s.ack+1 {
+			// The typed refusal proves the parent saved the stop marker at this sequence.
+			s.ack = s.pending.Sequence
+			s.pending = nil
+			s.incomplete = true
+			if s.captureLimited.CompareAndSwap(false, true) && s.onCaptureLimit != nil {
+				s.onCaptureLimit()
+			}
+		}
 		return err
 	}
 	if ack.httpBinding != (httpBinding{Version: status.Version, Identity: status.Identity, SourceRef: status.SourceRef}) ||
@@ -225,6 +237,9 @@ func (s *workerStatus) emit(ctx context.Context, transport *httpExecutionClient,
 		}
 		s.pending = &record
 		if err := s.sendLocked(ctx, transport); err != nil {
+			if errors.Is(err, errRemoteCaptureLimit) {
+				return fail(err)
+			}
 			// Retry a lost ACK with fresh Status.Sequence and unchanged record.
 			if retryErr := s.sendLocked(ctx, transport); retryErr != nil {
 				return fail(retryErr)

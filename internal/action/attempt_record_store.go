@@ -39,6 +39,7 @@ const (
 )
 
 var errAttemptRecordsFull = errors.New("attempt record store full")
+var errAttemptRecordStoreFull = fmt.Errorf("%w: total store cap reached", errAttemptRecordsFull)
 var errAttemptRecordUncertain = errors.New("attempt record write uncertain; reopen to reconcile")
 var errAttemptRecordConflict = errors.New("attempt record conflicts with saved attempt")
 
@@ -398,7 +399,7 @@ func (s *attemptRecordStore) Append(record attemptRecord, secrets ...string) (ui
 		reserve += s.coverSpace
 	}
 	if s.size+int64(len(data))+reserve > s.limit {
-		return 0, errAttemptRecordsFull
+		return 0, errAttemptRecordStoreFull
 	}
 	n, err := s.writeAt(data, s.size)
 	if err != nil {

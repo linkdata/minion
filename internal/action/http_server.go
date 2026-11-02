@@ -17,6 +17,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+var errConfirmedCaptureLimit = errors.New("attempt record capture limit confirmed")
+
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
 	mu             sync.Mutex
@@ -60,6 +62,7 @@ type httpTransaction struct {
 	records        *attemptRecordStore
 	recordRoot     string
 	recordSecrets  []string
+	captureLimit   bool // recordSync protects the saved stop marker and this flag.
 
 	ready              bool
 	delivered          bool
@@ -208,6 +211,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		if !stopWatch() {
 			<-stopWatchDone
 		}
+		tx.recordSync.Lock()
+		captureLimited := tx.captureLimit
+		tx.recordSync.Unlock()
 		tx.mu.Lock()
 		stopCancel := tx.stopCancel
 		if state != nil {
@@ -225,6 +231,9 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 		} else if tx.transportErr != nil && !errors.Is(runErr, tx.transportErr) {
 			// A pre-delivery save can finish after the canceled Execute body.
 			runErr = errors.Join(runErr, tx.transportErr)
+		}
+		if captureLimited {
+			result = withCaptureLimitDiagnostic(result)
 		}
 		if tx.requiredControlErr != nil {
 			if !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) {
@@ -659,6 +668,20 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 			e.mu.Unlock()
 			if err == nil {
 				logSequence, err = tx.appendStatusLogs(status, observation.Logs, httpStatusBearerToken(r))
+				if errors.Is(err, errAttemptRecordStoreFull) {
+					marker := attemptRecord{Identity: tx.job.Identity, SourceRef: tx.job.Source.Head,
+						Sequence: observation.Logs[0].Sequence, Kind: attemptRecordStop, Text: "capture_limit"}
+					if _, markerErr := tx.records.Append(marker); markerErr == nil {
+						tx.captureLimit = true
+						err = errConfirmedCaptureLimit
+					} else {
+						if tx.records.uncertain {
+							markerErr = errors.Join(markerErr, tx.records.Close())
+							tx.records = nil
+						}
+						err = errors.Join(err, markerErr)
+					}
+				}
 				appendFailed = err != nil
 				if err == nil {
 					e.mu.Lock()
@@ -686,6 +709,9 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	observationLocked = false
 	// Observation delivery never admits paid work or changes its sequence or outcome.
 	if err != nil {
+		if errors.Is(err, errConfirmedCaptureLimit) {
+			tx.stopExecution(nil, false)
+		}
 		httpServerReject(w, "status", code, binding, status.Sequence, err, tx)
 		return
 	}
@@ -722,6 +748,13 @@ func (tx *httpTransaction) appendStatusLogs(status Status, logs []attemptRecord,
 		}
 	}
 	highest := uint64(len(tx.records.lines))
+	if tx.captureLimit && len(logs) != 0 {
+		if len(logs) == 1 && logs[0].Sequence == highest && status.LogSequence == highest &&
+			logs[0].Identity == tx.job.Identity && logs[0].SourceRef == tx.job.Source.Head && logs[0].validateShape() == nil {
+			return highest, errConfirmedCaptureLimit // Retry after a lost cap rejection.
+		}
+		return highest, errAttemptRecordConflict
+	}
 	if len(logs) == 0 && status.LogSequence != highest {
 		return highest, errAttemptRecordConflict
 	}
@@ -918,7 +951,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			// An entered Status save may continue after its request is canceled.
 			tx.recordSync.Lock()
 			defer tx.recordSync.Unlock()
+			if tx.captureLimit {
+				outcome.Result = withCaptureLimitDiagnostic(outcome.Result)
+			}
 			var terminalResult error
+			if tx.captureLimit && !failedOutcome {
+				terminalResult = errors.Join(monitor.ErrTerminalJob, errConfirmedCaptureLimit)
+			}
 			assignment, selected := tx.sink.(assignmentCheckpoint)
 			selected = selected && assignment.AssignmentRequired()
 			if selected {
@@ -967,6 +1006,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			}
 			tx.mu.Lock()
 			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), terminalResult)
+			if tx.captureLimit {
+				tx.runErr = errors.Join(tx.runErr, monitor.ErrTerminalJob, errConfirmedCaptureLimit)
+			}
 			if failedOutcome && selected && tx.checkpointErr != nil {
 				tx.quarantine = true
 			}
@@ -1184,7 +1226,12 @@ func httpServerReject(w http.ResponseWriter, kind string, status int, binding ht
 	// Do not let net/http drain an unfinished rejected body before or after the ACK.
 	w.Header().Set("Connection", "close")
 	err = errors.Join(err, http.NewResponseController(w).SetReadDeadline(time.Now()))
-	_ = httpServerWrite(w, status, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: sequence, Failure: newHTTPFailure(err)}, transaction...)
+	failure := newHTTPFailure(err)
+	if kind == "status" && errors.Is(err, errConfirmedCaptureLimit) {
+		failure.CaptureLimit = true
+		failure.Message = errAttemptRecordsFull.Error()
+	}
+	_ = httpServerWrite(w, status, httpAcknowledgement{httpBinding: binding, Kind: kind, Sequence: sequence, Failure: failure}, transaction...)
 }
 
 func httpServerWrite(w http.ResponseWriter, status int, value any, transaction ...*httpTransaction) error {
