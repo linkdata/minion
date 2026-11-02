@@ -53,9 +53,18 @@ func TestRunHTTPCaptureLimitStopsModelAndFailsWithoutCoverage(t *testing.T) {
 		runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
 			request.onProgress()
 			request.onEvent(aicli.StreamEvent{NativeID: "session", Kind: "assistant", Text: privateText})
-			<-ctx.Done()
-			modelCause <- context.Cause(ctx)
-			return aicli.Result{}, ctx.Err()
+			// This timer is only a failure bound. A working cap cancels promptly.
+			timer := time.NewTimer(10 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				modelCause <- context.Cause(ctx)
+				return aicli.Result{}, ctx.Err()
+			case <-timer.C:
+				err := errors.New("capture cap did not stop the model")
+				modelCause <- err
+				return aicli.Result{}, err
+			}
 		}}
 	err = RunHTTP(t.Context(), &client, f.server.URL, job.Identity.ExecutorID, runner)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errRemoteCaptureLimit) {
@@ -103,10 +112,10 @@ func TestWorkerStatusConclusiveCaptureLimitKeepsStatusWithoutCoverage(t *testing
 		received = append(received, observation)
 		ack := httpAcknowledgement{httpBinding: httpJobBinding(job), Kind: "status", Sequence: observation.Status.Sequence,
 			LogSequence: observation.Status.LogSequence}
-		if len(received) == 1 {
+		if len(received) == 2 {
 			return nil, errors.New("connection closed before the parent acknowledged Status")
 		}
-		if len(received) == 2 {
+		if len(received) == 3 {
 			ack.Failure = &httpFailure{Message: "record store reached limit", CaptureLimit: true}
 			return respond(http.StatusInternalServerError, ack)
 		}
@@ -121,10 +130,14 @@ func TestWorkerStatusConclusiveCaptureLimitKeepsStatusWithoutCoverage(t *testing
 	}
 	transport := &httpExecutionClient{client: client, base: base}
 	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion,
+		Agent: "native", Text: "saved prefix"}); err != nil {
+		t.Fatalf("acknowledged prefix: %v", err)
+	}
+	if err := status.emit(t.Context(), transport, attemptRecord{Kind: attemptRecordDiscussion,
 		Agent: "native", Text: "private record content"}); !errors.Is(err, errRemoteCaptureLimit) {
 		t.Fatalf("conclusive store refusal = %v", err)
 	}
-	if stops != 1 || !status.captureLimited.Load() || !status.incomplete || status.pending != nil || status.ack != 1 {
+	if stops != 1 || !status.captureLimited.Load() || !status.incomplete || status.pending != nil || status.ack != 2 {
 		t.Fatalf("cap did not stop capture and advance over saved marker: stops=%d limited=%t incomplete=%t pending=%+v ack=%d",
 			stops, status.captureLimited.Load(), status.incomplete, status.pending, status.ack)
 	}
@@ -132,14 +145,15 @@ func TestWorkerStatusConclusiveCaptureLimitKeepsStatusWithoutCoverage(t *testing
 	if err := status.send(t.Context(), transport); err != nil {
 		t.Fatalf("bounded Status after cap: %v", err)
 	}
-	if len(received) != 3 || len(received[0].Logs) != 1 || len(received[1].Logs) != 1 ||
-		received[0].Logs[0] != received[1].Logs[0] ||
-		received[0].Status.Sequence == received[1].Status.Sequence ||
-		len(received[2].Logs) != 0 || received[2].Status.LogSequence != 1 ||
-		received[2].Status.WorkerState != "stopping" || received[2].Status.Phase != "cleanup" {
+	if len(received) != 4 || len(received[0].Logs) != 1 || received[0].Logs[0].Sequence != 1 ||
+		received[0].Logs[0].Text != "saved prefix" || len(received[1].Logs) != 1 ||
+		len(received[2].Logs) != 1 || received[1].Logs[0] != received[2].Logs[0] ||
+		received[1].Logs[0].Sequence != 2 || received[1].Status.Sequence == received[2].Status.Sequence ||
+		len(received[3].Logs) != 0 || received[3].Status.LogSequence != 2 ||
+		received[3].Status.WorkerState != "stopping" || received[3].Status.Phase != "cleanup" {
 		t.Fatalf("Status lost or replayed rejected private text: %+v", received)
 	}
-	if err := status.drain(t.Context(), transport); err == nil || len(received) != 3 {
+	if err := status.drain(t.Context(), transport); err == nil || len(received) != 4 {
 		t.Fatalf("cap falsely wrote coverage: error=%v requests=%d", err, len(received))
 	}
 }

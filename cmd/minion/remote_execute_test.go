@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,6 +74,24 @@ func TestRemoteExecuteChecksWorkerGitBeforePull(t *testing.T) {
 	var logs bytes.Buffer
 	if code := runRemoteExecuteMode(configPath, log.New(&logs, "", 0)); code != 1 || !strings.Contains(logs.String(), "remote worker Git preflight: git readiness requires git") {
 		t.Fatalf("missing worker Git reached the pull: exit=%d logs=%q", code, logs.String())
+	}
+}
+
+type remoteWorkerFailureTransport struct{ err error }
+
+func (t remoteWorkerFailureTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
+}
+
+func TestRemoteWorkerLoopDoesNotLogPrivateFailureText(t *testing.T) {
+	const privateText = "private model discussion returned in a worker error"
+	client := &http.Client{Transport: remoteWorkerFailureTransport{err: errors.New(privateText)}}
+	var logs bytes.Buffer
+	code := runRemoteWorkerLoop(t.Context(), remoteWorkerConfig{
+		BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
+	}, client, log.New(&logs, "", 0))
+	if code != 1 || logs.String() != "remote worker: execution or protocol failure\n" || strings.Contains(logs.String(), privateText) {
+		t.Fatalf("remote worker exposed untrusted error text: exit=%d logs=%q", code, logs.String())
 	}
 }
 

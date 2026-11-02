@@ -2,14 +2,18 @@ package action
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
@@ -125,6 +129,84 @@ func TestHTTPStatusCapWorkerLossKeepsDiagnosticAndUnknown(t *testing.T) {
 		!bytes.Contains(records, []byte(`"text":"capture_limit"`)) || bytes.Contains(records, []byte(`"kind":"coverage"`)) ||
 		strings.Contains(got.err.Error(), privateText) {
 		t.Fatalf("worker loss erased the bounded cap evidence or changed unknown classification: result=%+v err=%v records=%q", got.result, got.err, records)
+	}
+}
+
+func TestHTTPStatusCapMarkerSyncFencesConcurrentSuccess(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	receiver := &capResultReceiver{}
+	f := newHTTPServerTestWithRoot(t, t.Context(), job, receiver, root)
+	f.pull(t)
+	store, err := openAttemptRecordStoreWithLimit(root, job.Identity, job.Source.Head, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.limit = store.stopSpace + store.coverSpace + 1
+	f.tx.records = store
+	enteredSync, releaseSync := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(releaseSync) })
+	defer release()
+	store.syncFile = func() error {
+		close(enteredSync)
+		<-releaseSync
+		return store.file.Sync()
+	}
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
+	statusDone := make(chan httpServerTestExchange, 1)
+	go func() {
+		statusDone <- f.request("/status", httpObservation{Status: status,
+			Logs: []attemptRecord{httpTestRecord(job, 1, "private rejected content")}})
+	}()
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	select {
+	case <-enteredSync:
+	case reply := <-statusDone:
+		t.Fatalf("Status returned before the cap marker Sync: %+v", reply)
+	case <-waitCtx.Done():
+		t.Fatal("Status did not enter the cap marker Sync")
+	}
+	outcome := f.outcome(1, nil)
+	outcome.Result.Answer = "would publish"
+	outcomeDone := make(chan httpServerTestExchange, 1)
+	go func() { outcomeDone <- f.request("/outcome", outcome) }()
+	// The Outcome has entered mutation admission while the marker Sync still owns
+	// recordSync. Its successful Result must wait for the marker's cap decision.
+	for {
+		f.tx.mu.Lock()
+		sequence, received := f.tx.sequence, f.tx.outcome
+		f.tx.mu.Unlock()
+		if sequence == 1 {
+			if received {
+				t.Fatal("successful Outcome crossed the unsynced cap marker")
+			}
+			break
+		}
+		select {
+		case reply := <-outcomeDone:
+			t.Fatalf("Outcome returned before marker Sync: %+v", reply)
+		case <-waitCtx.Done():
+			t.Fatal("Outcome did not enter mutation admission")
+		default:
+			runtime.Gosched()
+		}
+	}
+	release()
+	statusReply, outcomeReply := <-statusDone, <-outcomeDone
+	if statusReply.err != nil || statusReply.status != http.StatusInternalServerError ||
+		statusReply.ack.Failure == nil || !statusReply.ack.Failure.CaptureLimit ||
+		outcomeReply.err != nil || outcomeReply.status != http.StatusInternalServerError ||
+		outcomeReply.ack.Failure == nil || receiver.received {
+		t.Fatalf("concurrent success crossed the cap: status=%+v outcome=%+v published=%t",
+			statusReply, outcomeReply, receiver.received)
+	}
+	got := f.result(t)
+	if !errors.Is(got.err, monitor.ErrTerminalJob) ||
+		got.result.Answer != "" || len(got.result.Diagnostics) != 1 ||
+		got.result.Diagnostics[0] != (Diagnostic{Code: "capture_limit", Message: captureLimitMessage}) {
+		t.Fatalf("cap race lost fixed terminal Result: result=%+v err=%v", got.result, got.err)
 	}
 }
 
