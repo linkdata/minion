@@ -392,6 +392,10 @@ The service starts recording usage after command validation, duplicate-reply che
 # Daily totals by repository.
 ./bin/minion usage -group-by day,repo
 
+./bin/minion usage -group-by service,requester_id
+
+./bin/minion usage -service codex -requester-id 123 -json
+
 # Export attempts with model, effort, outcome and source URL.
 # Executor and source commit are present when a model call was recorded.
 ./bin/minion usage -group-by none -json > usage.json
@@ -401,9 +405,11 @@ The service starts recording usage after command validation, duplicate-reply che
 ./bin/minion usage -dir ./var/usage -group-by month,user -json
 ```
 
-Both the service and the usage command default to `config.local.json` when `-config` is omitted. `-repo` and `-user` match case-insensitively. `-from` is inclusive and `-to` is exclusive; both filter the attempt's start time. Dates use midnight UTC, and RFC3339 timestamps are also accepted. When both are supplied, `-from` must be strictly earlier than `-to`. `-group-by` accepts a comma-separated combination of `repo`, `user`, `action`, `day`, and `month`; day and month groups use UTC. Use `none` for one row per attempt. JSON includes the applied filters, grouped summaries or individual attempts, and overall totals.
+Both the service and the usage command default to `config.local.json` when `-config` is omitted. `-repo` and `-user` match case-insensitively; `-requester-id` selects a positive numeric requester identity. `-service` selects `codex`, `claude`, or `unknown` usage. `-from` is inclusive and `-to` is exclusive; both filter the attempt's start time. Dates use midnight UTC, and RFC3339 timestamps are also accepted. When both are supplied, `-from` must be strictly earlier than `-to`. `-group-by` accepts a comma-separated combination of `repo`, `user`, `requester_id`, `service`, `action`, `day`, and `month`; day and month groups use UTC. Use `none` for one row per attempt. JSON includes the applied filters, grouped summaries or individual attempts, and overall totals.
 
 Reports combine both providers and all main/critic rounds, track `succeeded`, `failed` and `running` attempts, and count incomplete usage. New per-attempt JSON records (`-group-by none -json`) include numeric `repository_id` and `requester_id`, main/critic models and efforts, and ordered `calls` once a pre-call checkpoint is saved. That checkpoint may precede acknowledgment. Older records may omit the numeric IDs and `calls`. A call's 1-based `ordinal` together with its enclosing `job_id` and attempt `id` is its stable identity. Each call has its own start time, optional return time, provider, model, effort, role, round, review phase, token categories and coverage.
+
+Service summaries allocate new call receipts by each call's provider. Attempt totals without call rows, including legacy records, appear under service `unknown`; their tokens are unallocated, while legacy call counters retain their provider labels. A missing or zero requester ID means the identity is unknown. With a service filter, JSON detail records retain the full original attempt and add `selected_usage`; table token columns show the selected service, and named-service call columns show its calls. `usage_recorded_actions` counts distinct job IDs in the usage files, separately from running and terminal attempt counts. It is not an exact count of all accepted actions: `action_coverage` is `unknown` because actions without usage files cannot be counted. A mixed-provider attempt can repeat attempt, status and incomplete-usage counts across service groups. Retries can repeat one job's distinct-action count across service, date or label groups. Use overall totals, which count each recorded job and attempt once. Usage files remain after private discussion and report artifacts are pruned.
 
 A call without `finished_at` has no saved return receipt: it may have incurred a charge, but the pending checkpoint does not prove one. An acknowledged call attempt remains recorded even if the native CLI fails before process start. When that error has no tokens and no usage report, the returned entry has unknown, partial coverage; zero reported tokens do not prove a free call.
 

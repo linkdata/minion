@@ -185,39 +185,80 @@ func TestStoreAtomicUpdates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".record-interrupted"), []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
+	writerDone := make(chan struct{})
+	firstSaved := make(chan error, 1)
+	readerProgress := make(chan struct{}, 2)
+	var writerErr error
 	go func() {
+		defer close(writerDone)
 		for i := 1; i <= 30; i++ {
 			record.CodexCalls = i
 			record.Tokens = Tokens{Input: int64(i), CachedInput: int64(i / 2), Output: int64(i * 2)}
 			record.UsageSource = "executor_reported"
-			if err := store.Save(record); err != nil {
-				done <- err
+			err := store.Save(record)
+			if i == 1 {
+				firstSaved <- err
+				if err == nil {
+					<-readerProgress
+					<-readerProgress // Both readers query before the writer can finish.
+				}
+			}
+			if err != nil {
+				writerErr = err
 				return
 			}
 		}
-		done <- nil
 	}()
-	for {
+	if err := <-firstSaved; err != nil {
+		t.Fatal(err)
+	}
+	checkRead := func() {
 		records, err := ReadAll(dir)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		if len(records) != 1 || records[0].Tokens.Input != int64(records[0].CodexCalls) || records[0].Tokens.Output != 2*records[0].Tokens.Input {
-			t.Fatalf("partial or duplicate record: %+v", records)
+			t.Errorf("partial or duplicate record: %+v", records)
 		}
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
-			}
-			records, err := ReadAll(dir)
-			if err != nil || len(records) != 1 || records[0].CodexCalls != 30 {
-				t.Fatalf("final record=%+v err=%v", records, err)
-			}
-			return
-		default:
+		query, err := store.Query(Filter{}, nil, true)
+		if err != nil || len(query.Attempts) != 1 || query.Totals.Tokens != query.Attempts[0].Record.Tokens ||
+			query.Attempts[0].Usage.Tokens != query.Attempts[0].Record.Tokens {
+			t.Errorf("query totals and details disagree: %+v, error=%v", query, err)
 		}
+	}
+	readersReady := make(chan struct{}, 2)
+	startReaders := make(chan struct{})
+	readersDone := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			defer func() { readersDone <- struct{}{} }()
+			readersReady <- struct{}{}
+			<-startReaders
+			checkRead()
+			readerProgress <- struct{}{}
+			for range 30 {
+				select {
+				case <-writerDone:
+					return
+				default:
+					checkRead()
+				}
+			}
+		}()
+	}
+	<-readersReady
+	<-readersReady
+	close(startReaders)
+	<-writerDone
+	<-readersDone
+	<-readersDone
+	if writerErr != nil {
+		t.Fatal(writerErr)
+	}
+	records, err := ReadAll(dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 30 {
+		t.Fatalf("final record=%+v err=%v", records, err)
 	}
 }
 
@@ -515,8 +556,9 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("incorrect order or grouping: %+v", groups)
 	}
 	got := groups[1]
-	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 2, ClaudeCalls: 2,
-		IncompleteUsage: 2, Tokens: Tokens{Input: 300, CachedInput: 240, Output: 60}, TotalTokens: 360}
+	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, UsageRecordedActions: 1, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 2, ClaudeCalls: 2,
+		IncompleteUsage: 2, Tokens: Tokens{Input: 300, CachedInput: 240, Output: 60},
+		UnallocatedTokens: Tokens{Input: 300, CachedInput: 240, Output: 60}, TotalTokens: 360}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("summary=%+v want=%+v", got, want)
 	}
@@ -679,5 +721,152 @@ func TestSummarizeAggregateBounds(t *testing.T) {
 				t.Fatalf("exact aggregate boundary failed: groups=%+v err=%v", groups, err)
 			}
 		})
+	}
+}
+
+func testMixedServiceRecord(t *testing.T) Record {
+	t.Helper()
+	record := testRecord()
+	record.RepositoryID, record.RequesterID = 12, 7
+	record.CriticProvider = "claude"
+	record.CodexCalls, record.Tokens, record.UsageSource = 0, Tokens{}, ""
+	record.UsageCoverage, record.UsageComplete = Coverage{Scope: "attempt"}, true
+	for ordinal, spec := range []struct {
+		provider, role, phase string
+		tokens                Tokens
+	}{
+		{"codex", "main", "", Tokens{Input: 100, CachedInput: 25, Output: 10}},
+		{"claude", "critic", "full", Tokens{Input: 30, Output: 5}},
+	} {
+		started := record.StartedAt.Add(time.Duration(ordinal+1) * time.Second)
+		call := Call{Ordinal: ordinal + 1, StartedAt: started, Provider: spec.provider, Model: "default",
+			Role: spec.role, Round: 1, ReviewPhase: spec.phase}
+		if _, err := record.BeginCall(call); err != nil {
+			t.Fatal(err)
+		}
+		finished := started.Add(time.Second)
+		call.FinishedAt, call.Tokens = &finished, spec.tokens
+		call.UsageCoverage, call.Complete = Coverage{Scope: "invocation"}, true
+		if _, err := record.FinishCall(call); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return record
+}
+
+func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
+	store := Store{Dir: t.TempDir()}
+	mixed := testMixedServiceRecord(t)
+	legacy := testRecord()
+	legacy.ID = strings.Repeat("b", 32)
+	legacy.RequesterID = 7
+	legacy.Status, legacy.UsageComplete = "failed", false
+	for _, record := range []Record{mixed, legacy} {
+		if err := store.Save(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full, err := store.Query(Filter{}, []string{"service"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.ActionCoverage != "unknown" || full.Totals.Attempts != 2 || full.Totals.UsageRecordedActions != 1 || full.Totals.TotalTokens != 265 ||
+		full.Totals.UnallocatedTokens != legacy.Tokens || len(full.Groups) != 3 {
+		t.Fatalf("grand totals or service groups: %+v", full)
+	}
+	want := map[string]struct {
+		tokens        Tokens
+		unallocated   Tokens
+		codex, claude int
+	}{
+		"codex":   {Tokens{Input: 100, CachedInput: 25, Output: 10}, Tokens{}, 1, 0},
+		"claude":  {Tokens{Input: 30, Output: 5}, Tokens{}, 0, 1},
+		"unknown": {legacy.Tokens, legacy.Tokens, 1, 0},
+	}
+	for _, group := range full.Groups {
+		expected, found := want[group.Service]
+		if !found || group.Attempts != 1 || group.UsageRecordedActions != 1 || group.Tokens != expected.tokens ||
+			group.UnallocatedTokens != expected.unallocated || group.CodexCalls != expected.codex || group.ClaudeCalls != expected.claude {
+			t.Fatalf("service group %q: %+v", group.Service, group)
+		}
+		delete(want, group.Service)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing service groups: %+v", want)
+	}
+	selected, err := store.Query(Filter{Service: "claude", RequesterID: 7}, nil, true)
+	if err != nil || selected.Totals.Attempts != 1 || selected.Totals.TotalTokens != 35 || selected.Totals.CodexCalls != 0 ||
+		selected.Totals.ClaudeCalls != 1 || len(selected.Attempts) != 1 || selected.Attempts[0].Record.Tokens != mixed.Tokens ||
+		selected.Attempts[0].Usage.Tokens != (Tokens{Input: 30, Output: 5}) || selected.Attempts[0].Usage.Service != "claude" {
+		t.Fatalf("selected service projection: %+v, error=%v", selected, err)
+	}
+	unfiltered, err := store.Query(Filter{}, nil, true)
+	if err != nil || len(unfiltered.Attempts) != 2 || unfiltered.Attempts[0].Usage.Tokens != mixed.Tokens {
+		t.Fatalf("unfiltered attempt projection: %+v, error=%v", unfiltered, err)
+	}
+	withGroups, err := store.Query(Filter{}, []string{"service"}, true)
+	if err != nil || len(withGroups.Groups) != 3 || len(withGroups.Attempts) != 2 || withGroups.Totals != full.Totals {
+		t.Fatalf("combined groups and details: %+v, error=%v", withGroups, err)
+	}
+	unknown, err := store.Query(Filter{Service: "unknown"}, nil, true)
+	if err != nil || unknown.Totals.Attempts != 1 || unknown.Totals.UnallocatedTokens != legacy.Tokens ||
+		len(unknown.Attempts) != 1 || unknown.Attempts[0].Record.ID != legacy.ID {
+		t.Fatalf("legacy service selection: %+v, error=%v", unknown, err)
+	}
+}
+
+func TestQueryRequesterAndUTCBoundaries(t *testing.T) {
+	store := Store{Dir: t.TempDir()}
+	first := testRecord()
+	first.ID, first.JobID, first.RequesterID = strings.Repeat("b", 32), "first", 10
+	first.StartedAt = time.Date(2026, 11, 1, 0, 30, 0, 0, time.FixedZone("UTC+2", 2*60*60))
+	finish := first.StartedAt.Add(time.Minute)
+	first.FinishedAt = &finish
+	second := testRecord()
+	second.ID, second.JobID, second.RequesterID = strings.Repeat("c", 32), "second", 2
+	second.StartedAt = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	secondFinish := second.StartedAt.Add(time.Minute)
+	second.FinishedAt = &secondFinish
+	for _, record := range []Record{first, second} {
+		if err := store.Save(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := store.Query(Filter{Since: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)}, []string{"requester_id", "day"}, false)
+	if err != nil || result.Totals.Attempts != 1 || len(result.Groups) != 1 ||
+		result.Groups[0].RequesterID != 10 || result.Groups[0].Day != "2026-10-31" {
+		t.Fatalf("UTC boundary: %+v, error=%v", result, err)
+	}
+	result, err = store.Query(Filter{}, []string{"requester_id"}, false)
+	if err != nil || len(result.Groups) != 2 || result.Groups[0].RequesterID != 2 || result.Groups[1].RequesterID != 10 {
+		t.Fatalf("numeric requester order: %+v, error=%v", result, err)
+	}
+	for _, filter := range []Filter{{Service: "other"}, {RequesterID: -1}, {Since: second.StartedAt, Until: second.StartedAt}} {
+		if _, err := store.Query(filter, nil, false); err == nil {
+			t.Fatalf("invalid filter accepted: %+v", filter)
+		}
+	}
+	if _, err := store.Query(Filter{}, []string{"service", "service"}, false); err == nil {
+		t.Fatal("duplicate service group accepted")
+	}
+}
+
+func TestQueryPreservesOverflowedCallAttribution(t *testing.T) {
+	store := Store{Dir: t.TempDir()}
+	record := testMixedServiceRecord(t)
+	record.Calls[0].Tokens = Tokens{Input: math.MaxInt64/2 + 1}
+	record.Calls[1].Tokens = Tokens{Input: math.MaxInt64/2 + 1}
+	if err := record.reconcileCalls(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.Query(Filter{}, []string{"service"}, false)
+	if err != nil || result.Totals.TotalTokens != math.MaxInt64/2+1 || len(result.Groups) != 2 ||
+		result.Groups[0].Tokens != (Tokens{}) || result.Groups[1].Tokens != record.Tokens ||
+		result.Groups[0].IncompleteUsage != 1 {
+		t.Fatalf("overflowed service accounting: %+v, error=%v", result, err)
 	}
 }

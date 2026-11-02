@@ -475,49 +475,211 @@ func readRecord(root *os.Root, name string) (Record, error) {
 
 type Filter struct {
 	Repo, User   string
+	Service      string
+	RequesterID  int64
 	Since, Until time.Time
 }
 
 func (f Filter) Match(record Record) bool {
 	return (f.Repo == "" || strings.EqualFold(f.Repo, record.Repo)) &&
 		(f.User == "" || strings.EqualFold(f.User, record.User)) &&
+		(f.RequesterID == 0 || f.RequesterID == record.RequesterID) &&
+		(f.Service == "" || f.Service == "unknown" && len(record.Calls) == 0 ||
+			slices.ContainsFunc(record.Calls, func(call Call) bool { return call.Provider == f.Service })) &&
 		(f.Since.IsZero() || !record.StartedAt.Before(f.Since)) &&
 		(f.Until.IsZero() || record.StartedAt.Before(f.Until))
 }
 
-// Summary aggregates action attempts and token usage across both providers.
+// Summary aggregates action attempts and their attributed or unallocated usage.
 type Summary struct {
-	Repo            string `json:"repo,omitempty"`
-	User            string `json:"user,omitempty"`
-	Action          string `json:"action,omitempty"`
-	Day             string `json:"day,omitempty"`
-	Month           string `json:"month,omitempty"`
-	Attempts        int    `json:"attempts"`
-	Succeeded       int    `json:"succeeded"`
-	Failed          int    `json:"failed"`
-	Running         int    `json:"running"`
-	CodexCalls      int    `json:"codex_calls"`
-	ClaudeCalls     int    `json:"claude_calls,omitempty"`
-	IncompleteUsage int    `json:"incomplete_usage"`
-	Tokens          Tokens `json:"tokens"`
-	TotalTokens     int64  `json:"total_tokens"`
+	Repo                 string `json:"repo,omitempty"`
+	User                 string `json:"user,omitempty"`
+	Action               string `json:"action,omitempty"`
+	Day                  string `json:"day,omitempty"`
+	Month                string `json:"month,omitempty"`
+	Service              string `json:"service,omitempty"`
+	RequesterID          int64  `json:"requester_id,omitempty"`
+	Attempts             int    `json:"attempts"`
+	UsageRecordedActions int    `json:"usage_recorded_actions"`
+	Succeeded            int    `json:"succeeded"`
+	Failed               int    `json:"failed"`
+	Running              int    `json:"running"`
+	CodexCalls           int    `json:"codex_calls"`
+	ClaudeCalls          int    `json:"claude_calls,omitempty"`
+	IncompleteUsage      int    `json:"incomplete_usage"`
+	Tokens               Tokens `json:"tokens"`
+	UnallocatedTokens    Tokens `json:"unallocated_tokens"`
+	TotalTokens          int64  `json:"total_tokens"`
+}
+
+// AttemptDetail retains the source record and separately reports the selected
+// service's usage. A mixed-provider record is never rewritten for a filter.
+type AttemptDetail struct {
+	Record Record  `json:"record"`
+	Usage  Summary `json:"usage"`
+}
+
+type QueryResult struct {
+	ActionCoverage string          `json:"action_coverage"`
+	Totals         Summary         `json:"totals"`
+	Groups         []Summary       `json:"groups"`
+	Attempts       []AttemptDetail `json:"attempts"`
+}
+
+// Query reads records once and produces totals, groups, and optional details.
+func (s Store) Query(filter Filter, groupBy []string, details bool) (QueryResult, error) {
+	if err := validateQuery(filter, groupBy); err != nil {
+		return QueryResult{}, err
+	}
+	records, err := ReadAll(s.Dir)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	result := QueryResult{ActionCoverage: "unknown", Groups: []Summary{}, Attempts: []AttemptDetail{}}
+	totals, err := Summarize(records, filter, nil)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	if len(totals) != 0 {
+		result.Totals = totals[0]
+	}
+	if !details || len(groupBy) != 0 {
+		if len(groupBy) == 0 {
+			result.Groups = totals
+		} else {
+			result.Groups, err = Summarize(records, filter, groupBy)
+			if err != nil {
+				return QueryResult{}, err
+			}
+		}
+	}
+	if details {
+		for _, record := range records {
+			if !filter.Match(record) {
+				continue
+			}
+			usage, err := Summarize([]Record{record}, filter, nil)
+			if err != nil {
+				return QueryResult{}, err
+			}
+			usage[0].Service = filter.Service
+			result.Attempts = append(result.Attempts, AttemptDetail{Record: record, Usage: usage[0]})
+		}
+	}
+	return result, nil
+}
+
+func validateQuery(filter Filter, groupBy []string) error {
+	if !filter.Since.IsZero() && !filter.Until.IsZero() && !filter.Since.Before(filter.Until) {
+		return fmt.Errorf("since must precede until")
+	}
+	if filter.RequesterID < 0 {
+		return fmt.Errorf("requester ID must be positive")
+	}
+	if filter.Service != "" && filter.Service != "codex" && filter.Service != "claude" && filter.Service != "unknown" {
+		return fmt.Errorf("invalid usage service %q", filter.Service)
+	}
+	seen := map[string]bool{}
+	for _, group := range groupBy {
+		switch group {
+		case "repo", "user", "action", "day", "month", "service", "requester_id":
+		default:
+			return fmt.Errorf("invalid or duplicate usage group %q", group)
+		}
+		if seen[group] {
+			return fmt.Errorf("invalid or duplicate usage group %q", group)
+		}
+		seen[group] = true
+	}
+	return nil
+}
+
+type summaryKey struct {
+	repo, user, action, day, month, service string
+	requesterID                             int64
+}
+
+func (k summaryKey) value(group string) string {
+	switch group {
+	case "repo":
+		return k.repo
+	case "user":
+		return k.user
+	case "action":
+		return k.action
+	case "day":
+		return k.day
+	case "month":
+		return k.month
+	case "service":
+		return k.service
+	}
+	return ""
+}
+
+type serviceUsage struct {
+	service                 string
+	tokens, unallocated     Tokens
+	codexCalls, claudeCalls int
+	incomplete              bool
+}
+
+// recordServiceUsage partitions only the tokens accepted by callTotals. An
+// overflowing receipt remains in Calls, but contributes no aggregate tokens.
+func recordServiceUsage(record Record) ([]serviceUsage, error) {
+	if len(record.Calls) == 0 {
+		return []serviceUsage{{service: "unknown", tokens: record.Tokens, unallocated: record.Tokens,
+			codexCalls: record.CodexCalls, claudeCalls: record.ClaudeCalls, incomplete: !record.UsageComplete}}, nil
+	}
+	parts := [2]serviceUsage{{service: "codex"}, {service: "claude"}}
+	var accepted Tokens
+	for _, call := range record.Calls {
+		index := 0
+		if call.Provider == "claude" {
+			index = 1
+		}
+		part := &parts[index]
+		if index == 0 {
+			part.codexCalls++
+		} else {
+			part.claudeCalls++
+		}
+		if call.FinishedAt == nil || !call.Complete {
+			part.incomplete = true
+		}
+		if call.FinishedAt != nil {
+			var valid bool
+			if accepted, valid = accepted.AddChecked(call.Tokens); !valid {
+				part.incomplete = true
+				continue
+			}
+			part.tokens, valid = part.tokens.AddChecked(call.Tokens)
+			if !valid {
+				return nil, errors.New("usage service token counts exceed integer limit")
+			}
+		}
+	}
+	if accepted != record.Tokens {
+		return nil, errors.New("usage service tokens differ from attempt tokens")
+	}
+	result := make([]serviceUsage, 0, 2)
+	for _, part := range parts {
+		if part.codexCalls != 0 || part.claudeCalls != 0 {
+			result = append(result, part)
+		}
+	}
+	return result, nil
 }
 
 // Summarize aggregates matching records and rejects invalid matches, filters, groups
 // and unrepresentable aggregate counts.
 func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, error) {
-	if !filter.Since.IsZero() && !filter.Until.IsZero() && !filter.Since.Before(filter.Until) {
-		return nil, fmt.Errorf("since must precede until")
+	if err := validateQuery(filter, groupBy); err != nil {
+		return nil, err
 	}
-	indices := make([]int, 0, len(groupBy))
-	for _, group := range groupBy {
-		index := slices.Index([]string{"repo", "user", "action", "day", "month"}, group)
-		if index < 0 || slices.Contains(indices, index) {
-			return nil, fmt.Errorf("invalid or duplicate usage group %q", group)
-		}
-		indices = append(indices, index)
-	}
-	groups := map[[5]string]*Summary{}
+	groups := map[summaryKey]*Summary{}
+	jobs := map[summaryKey]map[string]bool{}
+	serviceGrouped := slices.Contains(groupBy, "service")
 	for _, record := range records {
 		if !filter.Match(record) {
 			continue
@@ -525,48 +687,94 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 		if err := record.validate(); err != nil {
 			return nil, err
 		}
-		values := [5]string{strings.ToLower(record.Repo), strings.ToLower(record.User), record.Action, record.StartedAt.UTC().Format("2006-01-02"), record.StartedAt.UTC().Format("2006-01")}
-		var key [5]string
-		for _, i := range indices {
-			key[i] = values[i]
+		parts := []serviceUsage{{tokens: record.Tokens, codexCalls: record.CodexCalls,
+			claudeCalls: record.ClaudeCalls, incomplete: !record.UsageComplete}}
+		if len(record.Calls) == 0 {
+			parts[0].unallocated = record.Tokens
 		}
-		summary := groups[key]
-		if summary == nil {
-			summary = &Summary{Repo: key[0], User: key[1], Action: key[2], Day: key[3], Month: key[4]}
-			groups[key] = summary
+		if serviceGrouped || filter.Service != "" {
+			var err error
+			parts, err = recordServiceUsage(record)
+			if err != nil {
+				return nil, err
+			}
 		}
-		summary.Attempts++
-		switch record.Status {
-		case "succeeded":
-			summary.Succeeded++
-		case "failed":
-			summary.Failed++
-		case "running":
-			summary.Running++
+		for _, part := range parts {
+			if filter.Service != "" && part.service != filter.Service {
+				continue
+			}
+			key := summaryKey{}
+			for _, group := range groupBy {
+				switch group {
+				case "repo":
+					key.repo = strings.ToLower(record.Repo)
+				case "user":
+					key.user = strings.ToLower(record.User)
+				case "action":
+					key.action = record.Action
+				case "day":
+					key.day = record.StartedAt.UTC().Format("2006-01-02")
+				case "month":
+					key.month = record.StartedAt.UTC().Format("2006-01")
+				case "service":
+					key.service = part.service
+				case "requester_id":
+					key.requesterID = record.RequesterID
+				}
+			}
+			summary := groups[key]
+			if summary == nil {
+				summary = &Summary{Repo: key.repo, User: key.user, Action: key.action, Day: key.day,
+					Month: key.month, Service: key.service, RequesterID: key.requesterID}
+				groups[key] = summary
+				jobs[key] = map[string]bool{}
+			}
+			// These counts cannot exceed len(records), which is bounded by int.
+			summary.Attempts++
+			if !jobs[key][record.JobID] {
+				jobs[key][record.JobID] = true
+				summary.UsageRecordedActions++
+			}
+			switch record.Status {
+			case "succeeded":
+				summary.Succeeded++
+			case "failed":
+				summary.Failed++
+			case "running":
+				summary.Running++
+			}
+			if part.codexCalls > math.MaxInt-summary.CodexCalls || part.claudeCalls > math.MaxInt-summary.ClaudeCalls {
+				return nil, errors.New("usage call counts exceed integer limit")
+			}
+			summary.CodexCalls += part.codexCalls
+			summary.ClaudeCalls += part.claudeCalls
+			if part.incomplete || record.Status == "running" {
+				summary.IncompleteUsage++
+			}
+			var valid bool
+			if summary.Tokens, valid = summary.Tokens.AddChecked(part.tokens); !valid {
+				return nil, errors.New("usage token counts are invalid or exceed integer limit")
+			}
+			if summary.UnallocatedTokens, valid = summary.UnallocatedTokens.AddChecked(part.unallocated); !valid {
+				return nil, errors.New("usage unallocated token counts exceed integer limit")
+			}
+			summary.TotalTokens = summary.Tokens.Total()
 		}
-		if record.CodexCalls > math.MaxInt-summary.CodexCalls || record.ClaudeCalls > math.MaxInt-summary.ClaudeCalls {
-			return nil, errors.New("usage call counts exceed integer limit")
-		}
-		summary.CodexCalls += record.CodexCalls
-		summary.ClaudeCalls += record.ClaudeCalls
-		if !record.UsageComplete || record.Status == "running" {
-			summary.IncompleteUsage++
-		}
-		tokens, valid := summary.Tokens.AddChecked(record.Tokens)
-		if !valid {
-			return nil, errors.New("usage token counts are invalid or exceed integer limit")
-		}
-		summary.Tokens = tokens
-		summary.TotalTokens = tokens.Total()
 	}
-	keys := make([][5]string, 0, len(groups))
+	keys := make([]summaryKey, 0, len(groups))
 	for key := range groups {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		for _, column := range indices {
-			if keys[i][column] != keys[j][column] {
-				return keys[i][column] < keys[j][column]
+		for _, group := range groupBy {
+			if group == "requester_id" {
+				if keys[i].requesterID != keys[j].requesterID {
+					return keys[i].requesterID < keys[j].requesterID
+				}
+				continue
+			}
+			if keys[i].value(group) != keys[j].value(group) {
+				return keys[i].value(group) < keys[j].value(group)
 			}
 		}
 		return false

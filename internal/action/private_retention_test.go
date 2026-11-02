@@ -173,6 +173,9 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 	if got, found, err := usageStore.Load(cutoffID); err != nil || !found || !reflect.DeepEqual(got, usageRecord) {
 		t.Fatalf("billing record changed: found=%t record=%+v error=%v", found, got, err)
 	}
+	if report, err := usageStore.Query(usage.Filter{}, nil, false); err != nil || report.Totals.Attempts != 1 || report.Totals.UsageRecordedActions != 1 || report.Totals.Tokens != usageRecord.Tokens {
+		t.Fatalf("usage query lost pruned action: report=%+v error=%v", report, err)
+	}
 	if data, err := os.ReadFile(resultPath); err != nil || string(data) != "keep" {
 		t.Fatalf("result sidecar changed: %q, %v", data, err)
 	}
