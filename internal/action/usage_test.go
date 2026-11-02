@@ -400,38 +400,54 @@ func TestUsageCheckpointMarksUnfinishedCallPartial(t *testing.T) {
 }
 
 func TestUsageCheckpointKeepsReturnedReceiptAfterSaveError(t *testing.T) {
-	store := &usage.Store{Dir: t.TempDir()}
-	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex"})
-	if _, err := tracked.trackUsage(usageJob()); err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := tracked.usageCheckpoint
-	checkpoint.record.ExecutorID, checkpoint.record.SourceRef = "local", strings.Repeat("a", 40)
-	call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Model: "model-a"}
-	if err := checkpoint.beforeCall(1, call); err != nil {
-		t.Fatal(err)
-	}
-	call.Tokens, call.UsageCoverage, call.Complete = usage.Tokens{Input: 11, Output: 2}, usage.Coverage{Scope: "invocation"}, true
-	persist := checkpoint.save
-	saveErr := errors.New("post-replacement sync failed")
-	checkpoint.save = func() error {
-		if err := persist(); err != nil {
-			return err
-		}
-		return saveErr
-	}
-	if err := checkpoint.afterCall(1, call); !errors.Is(err, saveErr) || !errors.Is(err, monitor.ErrTerminalJob) {
-		t.Fatalf("returned receipt save error lost: %v", err)
-	}
-	checkpoint.save = func() error { t.Fatal("replay tried to save a duplicate receipt"); return nil }
-	if err := checkpoint.afterCall(1, call); err != nil {
-		t.Fatalf("identical replay was rejected: %v", err)
-	}
-	stored, found, err := store.Load(tracked.attemptID)
-	if err != nil || !found || len(stored.Calls) != 1 || stored.Calls[0].FinishedAt == nil ||
-		stored.CodexCalls != 1 || stored.Tokens != call.Tokens || !stored.UsageComplete ||
-		checkpoint.record.Tokens != stored.Tokens {
-		t.Fatalf("returned receipt was duplicated or lost: stored=%+v memory=%+v found=%t error=%v", stored, checkpoint.record, found, err)
+	for _, test := range []struct {
+		name        string
+		postReplace bool
+	}{
+		{"before replacement", false},
+		{"after replacement", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &usage.Store{Dir: t.TempDir()}
+			tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex"})
+			if _, err := tracked.trackUsage(usageJob()); err != nil {
+				t.Fatal(err)
+			}
+			checkpoint := tracked.usageCheckpoint
+			checkpoint.record.ExecutorID, checkpoint.record.SourceRef = "local", strings.Repeat("a", 40)
+			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Model: "model-a"}
+			if err := checkpoint.beforeCall(1, call); err != nil {
+				t.Fatal(err)
+			}
+			call.Tokens, call.UsageCoverage, call.Complete = usage.Tokens{Input: 11, Output: 2}, usage.Coverage{Scope: "invocation"}, true
+			persist := checkpoint.save
+			saveErr := errors.New("receipt save failed")
+			checkpoint.save = func() error {
+				if test.postReplace {
+					if err := persist(); err != nil {
+						return err
+					}
+				}
+				return saveErr
+			}
+			if err := checkpoint.afterCall(1, call); !errors.Is(err, saveErr) || !errors.Is(err, monitor.ErrTerminalJob) {
+				t.Fatalf("returned receipt save error lost: %v", err)
+			}
+			stored, found, err := store.Load(tracked.attemptID)
+			if err != nil || !found || len(stored.Calls) != 1 || (stored.Calls[0].FinishedAt != nil) != test.postReplace {
+				t.Fatalf("wrong disk state after failed receipt save: %+v found=%t error=%v", stored, found, err)
+			}
+			checkpoint.save = persist
+			if err := checkpoint.afterCall(1, call); err != nil {
+				t.Fatalf("identical replay was rejected: %v", err)
+			}
+			stored, found, err = store.Load(tracked.attemptID)
+			if err != nil || !found || len(stored.Calls) != 1 || stored.Calls[0].FinishedAt == nil ||
+				stored.CodexCalls != 1 || stored.Tokens != call.Tokens || !stored.UsageComplete ||
+				checkpoint.record.Tokens != stored.Tokens {
+				t.Fatalf("returned receipt was duplicated or lost: stored=%+v memory=%+v found=%t error=%v", stored, checkpoint.record, found, err)
+			}
+		})
 	}
 }
 

@@ -56,10 +56,7 @@ func (c *usageCheckpoint) afterCall(ordinal int, call CallUsage) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
-	if !added {
-		return nil
-	}
-	if !valid {
+	if added && !valid {
 		c.logf("action usage counters invalid or overflowed; retaining previous reported totals for attempt %s", c.record.ID)
 	}
 	if err := c.save(); err != nil {

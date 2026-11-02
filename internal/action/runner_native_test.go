@@ -11,7 +11,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
+func TestRunnerMissingProviderIsNotTerminalAndRecordsIncompleteUsage(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			t.Setenv("PATH", gitOnlyPath(t))
