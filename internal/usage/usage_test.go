@@ -24,6 +24,17 @@ func testRecord() Record {
 	}
 }
 
+func TestCoverageFinalReportGaps(t *testing.T) {
+	gaps := Coverage{Scope: "known_subset", MissingFinalReport: true, MalformedFinalReport: true}
+	if gaps.ValidForCall(false) {
+		t.Fatal("one call cannot both lack and have a malformed final report")
+	}
+	gaps.Scope = "attempt"
+	if !gaps.ValidForAttempt(false) {
+		t.Fatal("separate calls in one attempt can have different final-report gaps")
+	}
+}
+
 func TestStoreAtomicUpdates(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "usage")
 	store := Store{Dir: dir}

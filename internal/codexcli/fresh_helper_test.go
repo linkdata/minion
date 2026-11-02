@@ -89,6 +89,18 @@ func TestRunCancelsMalformedOutputAndRetainsParseCause(t *testing.T) {
 	}
 }
 
+func TestRunLabelsMalformedTurnUsageAfterParseFailure(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"turn.started\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":\"invalid\",\"cached_input_tokens\":0,\"output_tokens\":1}}'\n")
+	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	if err == nil || !strings.Contains(err.Error(), "invalid JSONL event") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) {
+		t.Fatalf("malformed turn usage did not fail with retained counters: result=%+v err=%v", result, err)
+	}
+	if coverage := result.UsageCoverage; coverage.Scope != "known_subset" || coverage.MissingFinalReport || !coverage.MalformedFinalReport || !coverage.PartialReport {
+		t.Fatalf("malformed turn usage mislabeled: %+v", coverage)
+	}
+}
+
 func TestRunCancelsJSONLOutputLimit(t *testing.T) {
 	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}'\nprintf '%*s\\n' "+strconv.Itoa(aicli.MaxEventBytes+1)+" ''\nexec sleep 30\n")
 	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))

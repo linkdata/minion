@@ -488,7 +488,7 @@ func TestOutputUsageCoverage(t *testing.T) {
 		{"malformed model fallback", `,"usage":` + root + `,"modelUsage":{"main":{"inputTokens":"bad"}}`, false, usage.Coverage{Scope: "root_only", PartialReport: true, MalformedFinalReport: true}},
 		{"missing report", "", false, usage.Coverage{Scope: "unknown", MissingFinalReport: true}},
 		{"malformed root report", `,"usage":{"input_tokens":"bad"}`, false, usage.Coverage{Scope: "unknown", MalformedFinalReport: true}},
-		{"unattributed cumulative model report", `,"usage":` + root + `,"modelUsage":` + models, true, usage.Coverage{Scope: "known_subset", PartialReport: true, CumulativeUnattributed: true}},
+		{"unattributed cumulative model report", `,"usage":` + root + `,"modelUsage":` + models, true, usage.Coverage{Scope: "root_only", PartialReport: true, CumulativeUnattributed: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			o := jsonlOutput{baselineUnknown: tc.baselineUnknown}

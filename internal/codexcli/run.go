@@ -604,6 +604,14 @@ func (o *jsonlOutput) acceptLine(line []byte) {
 	}
 	var event codexEvent
 	if err := json.Unmarshal(line, &event); err != nil {
+		var envelope struct {
+			Type  string          `json:"type"`
+			Usage json.RawMessage `json:"usage"`
+		}
+		if json.Unmarshal(line, &envelope) == nil && envelope.Type == "turn.completed" &&
+			len(envelope.Usage) != 0 && !bytes.Equal(bytes.TrimSpace(envelope.Usage), []byte("null")) {
+			o.usageSeen = true
+		}
 		if o.parseErr == nil {
 			o.parseErr = fmt.Errorf("invalid JSONL event: %w", err)
 			o.gap("invalid_json")

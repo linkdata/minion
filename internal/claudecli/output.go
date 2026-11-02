@@ -321,7 +321,7 @@ func (o *jsonlOutput) finish() {
 	switch {
 	case o.result.UsageComplete:
 		coverage.Scope = "invocation"
-	case o.finalTopUsage && !o.finalModelUsage && o.result.Tokens == o.finalTopTokens:
+	case o.finalTopUsage && (!o.finalModelUsage || o.cumulativeUnattributed && o.aggregateGeneration == 0) && o.result.Tokens == o.finalTopTokens:
 		coverage.Scope = "root_only"
 	case o.result.Tokens != (usage.Tokens{}):
 		coverage.Scope = "known_subset"

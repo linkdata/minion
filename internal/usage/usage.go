@@ -87,7 +87,7 @@ func (c Coverage) Valid() bool {
 // final CLI report can coexist with complete rollout accounting, and a resumed
 // cumulative report can be ignored when a current-turn delta is proven.
 func (c Coverage) ValidForCall(complete bool) bool {
-	return c.Valid() && c.Scope != "attempt" &&
+	return c.Valid() && c.Scope != "attempt" && !(c.MissingFinalReport && c.MalformedFinalReport) &&
 		(!complete || (c.Scope == "" || c.Scope == "invocation") && !c.UnverifiedHelpers && !c.PartialReport)
 }
 
