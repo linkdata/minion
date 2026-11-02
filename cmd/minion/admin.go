@@ -28,7 +28,7 @@ type adminServer struct {
 	serveErr  error // read only after serveDone closes
 }
 
-func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, error) {
+func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure func()) (*adminServer, error) {
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
 	if cfg.TLSCertFile != "" {
@@ -42,8 +42,9 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		}
 		certDir := filepath.Dir(certFile)
 		relKey, err := filepath.Rel(certDir, keyFile)
-		// webserv expands CertDir and cannot join files across Windows volumes.
-		if err != nil || strings.Contains(certDir, "$") {
+		// webserv expands CertDir and cleans paths; Windows volumes may differ.
+		if err != nil || strings.Contains(certDir, "$") ||
+			filepath.Clean(cfg.TLSCertFile) != cfg.TLSCertFile || filepath.Clean(cfg.TLSKeyFile) != cfg.TLSKeyFile {
 			certificate, err := loadAdminCertificate(cfg)
 			if err != nil {
 				return nil, err
@@ -51,7 +52,8 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 			fallbackTLS = &tls.Config{
 				MinVersion:   tls.VersionTLS13,
 				Certificates: []tls.Certificate{*certificate},
-				NextProtos:   []string{"h2", "http/1.1"},
+				// A manually wrapped listener cannot follow net/http's HTTP/2 policy.
+				NextProtos: []string{"http/1.1"},
 			}
 		} else {
 			service.CertDir = certDir
@@ -61,7 +63,7 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 	}
 	listener, err := service.Listen()
 	if err != nil {
-		return nil, fmt.Errorf("listen for admin dashboard: %w", err)
+		return nil, fmt.Errorf("listen: %w", err)
 	}
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
@@ -72,7 +74,6 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
 	jw.Logger = slog.Default()
-	jw.MakeAuth = func(*jaws.Request) jaws.Auth { return deniedAdminAuth{} }
 	mux := http.NewServeMux()
 	mux.Handle("/jaws/", jw)
 	server := &http.Server{
@@ -84,14 +85,14 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		MaxHeaderBytes:               128 << 10,
 		DisableGeneralOptionsHandler: true,
 	}
-	serveCtx, cancel := context.WithCancel(context.Background())
+	serveCtx, cancel := context.WithCancel(ctx)
 	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{})}
 	go func() {
 		defer close(a.jawsDone)
 		jw.Serve()
 	}()
 	go func() {
-		if err := adminServeFailure(service.ServeWith(serveCtx, server, listener)); err != nil {
+		if err := service.ServeWith(serveCtx, server, listener); err != nil && serveCtx.Err() == nil {
 			a.serveErr = err
 			if onFailure != nil {
 				onFailure()
@@ -100,25 +101,6 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		close(a.serveDone)
 	}()
 	return a, nil
-}
-
-func adminServeFailure(err error) error {
-	if err == context.Canceled {
-		return nil
-	}
-	if !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		var failures []error
-		for _, part := range joined.Unwrap() {
-			if part != nil && part != context.Canceled {
-				failures = append(failures, part)
-			}
-		}
-		return errors.Join(failures...)
-	}
-	return err
 }
 
 func loadAdminCertificate(cfg config.AdminConfig) (*tls.Certificate, error) {
@@ -139,7 +121,6 @@ func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handle
 		if allowed == nil || !allowed(r) {
 			controller := http.NewResponseController(w)
 			if r.ProtoMajor == 1 && r.ContentLength != 0 {
-				w.Header().Set("Connection", "close")
 				_ = controller.SetReadDeadline(time.Now())
 			}
 			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
@@ -149,12 +130,6 @@ func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handle
 		next.ServeHTTP(w, r)
 	})
 }
-
-type deniedAdminAuth struct{}
-
-func (deniedAdminAuth) Data() map[string]any { return nil }
-func (deniedAdminAuth) Email() string        { return "" }
-func (deniedAdminAuth) IsAdmin() bool        { return false }
 
 func (a *adminServer) Close() error {
 	a.jaws.Close()

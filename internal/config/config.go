@@ -108,7 +108,7 @@ type RemoteExecutorConfig struct {
 	Token       string `json:"token"`
 }
 
-// AdminConfig serves the optional admin API on the configured address.
+// AdminConfig serves the optional admin dashboard on the configured address.
 type AdminConfig struct {
 	Listen      string `json:"listen,omitempty"`
 	TLSCertFile string `json:"tls_cert_file,omitempty"`
@@ -314,8 +314,8 @@ func (c *Config) Validate(configDir string) error {
 		if err != nil {
 			return fmt.Errorf("admin.listen: %w", err)
 		}
-		number, err := strconv.Atoi(port)
-		if err != nil || number < 1 || number > 65535 || strings.Trim(port, "0123456789") != "" {
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || number == 0 {
 			return errors.New("admin.listen requires a numeric port from 1 to 65535")
 		}
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {

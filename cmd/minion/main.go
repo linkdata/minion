@@ -243,6 +243,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("preflight passed as @%s", user.Login)
 		return 0
 	}
+
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}
 	if terminalRecovery {
 		recovery := newOrchestrator(cfg, client, store, logger, checkWorkRoot)

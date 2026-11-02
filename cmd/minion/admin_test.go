@@ -6,8 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
-	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -25,7 +23,7 @@ import (
 
 func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	t.Parallel()
-	admin, err := startAdminServer(config.AdminConfig{Listen: "127.0.0.1:0"}, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +63,9 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusForbidden {
 				t.Fatalf("status = %d, want 403", resp.StatusCode)
+			}
+			if resp.Header.Get("Content-Security-Policy") == "" {
+				t.Fatal("denied response lacks Content-Security-Policy")
 			}
 		})
 	}
@@ -106,8 +107,14 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusForbidden {
-			t.Fatalf("incomplete POST status = %d, want 403", resp.StatusCode)
+		if resp.StatusCode != http.StatusForbidden || !resp.Close {
+			t.Fatalf("incomplete POST status = %d close=%t, want 403 and close", resp.StatusCode, resp.Close)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Read(make([]byte, 1)); err != io.EOF {
+			t.Fatalf("server kept incomplete POST connection open: %v", err)
 		}
 	})
 }
@@ -115,7 +122,7 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
-	admin, err := startAdminServer(config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +182,7 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	if err := os.WriteFile(certFile, contents, 0600); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := startAdminServer(config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,15 +205,15 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 2 {
-		t.Fatalf("HTTPS response = %s %d, want HTTP/2 403", resp.Proto, resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 1 {
+		t.Fatalf("fallback HTTPS response = %s %d, want HTTP/1.1 403", resp.Proto, resp.StatusCode)
 	}
 }
 
 func TestAdminServerReportsListenerFailure(t *testing.T) {
 	t.Parallel()
 	failed := make(chan struct{})
-	admin, err := startAdminServer(config.AdminConfig{Listen: "127.0.0.1:0"}, func() { close(failed) })
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, func() { close(failed) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,29 +231,27 @@ func TestAdminServerReportsListenerFailure(t *testing.T) {
 	}
 }
 
-func TestAdminServeFailure(t *testing.T) {
-	serveFailure := errors.New("serve failed")
-	wrappedCancellation := fmt.Errorf("serve panic: %w", context.Canceled)
-	for _, tc := range []struct {
-		name         string
-		input, want  error
-		wantCanceled bool
-	}{
-		{name: "nil"},
-		{name: "canceled", input: context.Canceled},
-		{name: "joined cancellation", input: errors.Join(context.Canceled, nil)},
-		{name: "joined failure", input: errors.Join(context.Canceled, serveFailure), want: serveFailure},
-		{name: "wrapped cancellation failure", input: wrappedCancellation, want: wrappedCancellation, wantCanceled: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := adminServeFailure(tc.input)
-			if (got == nil) != (tc.want == nil) || tc.want != nil && !errors.Is(got, tc.want) {
-				t.Fatalf("failure = %v, want %v", got, tc.want)
-			}
-			if errors.Is(got, context.Canceled) != tc.wantCanceled {
-				t.Fatalf("failure = %v, want canceled=%t", got, tc.wantCanceled)
-			}
-		})
+func TestAdminServerStopsWithParentContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	failed := make(chan struct{}, 1)
+	admin, err := startAdminServer(ctx, config.AdminConfig{Listen: "127.0.0.1:0"}, func() { failed <- struct{}{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	cancel()
+	select {
+	case <-admin.serveDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("admin server did not stop after parent cancellation")
+	}
+	if admin.serveErr != nil {
+		t.Fatalf("parent cancellation reported as serving failure: %v", admin.serveErr)
+	}
+	select {
+	case <-failed:
+		t.Fatal("parent cancellation invoked serving failure callback")
+	default:
 	}
 }
 

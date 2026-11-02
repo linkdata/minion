@@ -28,7 +28,7 @@ func runExecuteMode() int {
 
 func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) (code int) {
 	if terminalRecoveryPending(store) {
-		code := recoverTerminalService(ctx, watcher, store, loop, logger)
+		code = recoverTerminalService(ctx, watcher, store, loop, logger)
 		if code != 0 || !loop || ctx.Err() != nil {
 			return code
 		}
@@ -45,7 +45,7 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		adminCtx, cancel := context.WithCancel(ctx)
 		ctx = adminCtx
 		defer cancel()
-		admin, err := startAdminServer(*watcher.Config.Admin, cancel)
+		admin, err := startAdminServer(ctx, *watcher.Config.Admin, cancel)
 		if err != nil {
 			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
 			return 1
