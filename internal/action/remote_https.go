@@ -56,6 +56,17 @@ func (e *RemoteEndpoint) Addr() net.Addr { return e.listener.Addr() }
 // Done closes when the HTTPS listener stops serving.
 func (e *RemoteEndpoint) Done() <-chan struct{} { return e.serveDone }
 
+// RequireFreshPull retires a pull held before accepted cleanup completed.
+func (e *RemoteEndpoint) RequireFreshPull() {
+	e.executor.mu.Lock()
+	e.executor.pullGeneration++
+	if e.executor.pull {
+		e.executor.pullStale = true
+		e.executor.notifyLocked()
+	}
+	e.executor.mu.Unlock()
+}
+
 // Close stops assignment and joins the HTTPS server.
 func (e *RemoteEndpoint) Close() error {
 	e.closeOnce.Do(func() {

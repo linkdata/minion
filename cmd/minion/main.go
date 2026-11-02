@@ -250,7 +250,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		recovery.BotID = user.ID
 		bindPublicationValidation(recovery, watcher)
 		watcher.Handler = recovery
-		code := recoverTerminalService(ctx, watcher, store, *loop && !failedPreflight, logger)
+		code := recoverAcceptedService(ctx, watcher, store, *loop && !failedPreflight, nil, logger)
 		if failedPreflight {
 			return 1
 		}

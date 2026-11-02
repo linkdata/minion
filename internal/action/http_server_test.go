@@ -327,17 +327,23 @@ func TestHTTPExecutorBeforeDeliveryFailureSendsNoAssignment(t *testing.T) {
 }
 
 func TestHTTPExecutorAssignmentRevalidationFailureSendsNoJobBytes(t *testing.T) {
-	for _, cause := range []error{monitor.ErrAcceptedDiscarded, monitor.ErrAcceptedRetry} {
-		t.Run(cause.Error(), func(t *testing.T) {
+	for _, tc := range []struct {
+		cause  error
+		status int
+	}{
+		{monitor.ErrAcceptedDiscarded, http.StatusTooEarly},
+		{monitor.ErrAcceptedRetry, http.StatusInternalServerError},
+	} {
+		t.Run(tc.cause.Error(), func(t *testing.T) {
 			f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 			f.tx.mu.Lock()
-			f.tx.beforeDelivery = func(Job) error { return cause }
+			f.tx.beforeDelivery = func(Job) error { return tc.cause }
 			f.tx.mu.Unlock()
 			reply := f.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: f.job.Identity.ExecutorID})
-			if reply.err != nil || reply.status != http.StatusInternalServerError || reply.ack.Kind != "next" || reply.ack.Failure == nil || f.tx.delivered {
+			if reply.err != nil || reply.status != tc.status || reply.ack.Kind != "next" || reply.ack.Failure == nil || f.tx.delivered {
 				t.Fatalf("failed final check sent assignment: reply=%+v delivered=%t", reply, f.tx.delivered)
 			}
-			if got := f.result(t); !errors.Is(got.err, cause) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+			if got := f.result(t); !errors.Is(got.err, tc.cause) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
 				t.Fatalf("pre-delivery refusal changed cause or claimed model work: %v", got.err)
 			}
 		})

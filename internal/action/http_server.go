@@ -19,6 +19,8 @@ import (
 
 var errConfirmedCaptureLimit = errors.New("attempt record capture limit confirmed")
 
+type pullGenerationContextKey struct{}
+
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
 	mu             sync.Mutex
@@ -29,6 +31,8 @@ type HTTPExecutor struct {
 	active         *httpTransaction
 	pull           bool
 	pullDone       <-chan struct{}
+	pullStale      bool
+	pullGeneration uint64
 	closed         bool
 	unavailable    bool
 	changed        chan struct{}
@@ -396,6 +400,10 @@ func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
 }
 
 func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, encode func(httpAssignment) ([]byte, error)) {
+	generation, captured := r.Context().Value(pullGenerationContextKey{}).(uint64)
+	if !captured {
+		generation = e.snapshotPullGeneration()
+	}
 	var pull httpPull
 	if err := httpServerRead(w, r, httpControlBytes, &pull); err != nil {
 		httpServerReject(w, "next", httpInputStatus(err), httpBinding{}, 0, err)
@@ -407,6 +415,26 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	e.mu.Lock()
+	// Keep a new pull pending while the pre-cleanup handler still owns its slot.
+	for e.pull && e.pullStale && !e.closed && !e.unavailable && generation == e.pullGeneration && r.Context().Err() == nil {
+		changed := e.changed
+		e.mu.Unlock()
+		select {
+		case <-changed:
+		case <-r.Context().Done():
+			return
+		}
+		e.mu.Lock()
+	}
+	if generation != e.pullGeneration {
+		e.mu.Unlock()
+		httpServerReject(w, "next", http.StatusTooEarly, httpBinding{}, 0, errors.New("HTTP pull predates accepted cleanup"))
+		return
+	}
+	if r.Context().Err() != nil {
+		e.mu.Unlock()
+		return
+	}
 	if e.pull || e.closed || e.unavailable {
 		rejection := errors.New("HTTP executor has no pull slot")
 		if e.closed && !e.pull {
@@ -416,20 +444,26 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, rejection)
 		return
 	}
-	if r.Context().Err() != nil {
-		e.mu.Unlock()
-		return
-	}
 	e.pull = true
 	e.pullDone = r.Context().Done()
+	e.pullStale = false
 	e.notifyLocked()
 	e.mu.Unlock()
 	var delivery, entered *httpTransaction
+	retired := false
+	releaseRetiredPullLocked := func() {
+		e.pull = false
+		e.pullDone = nil
+		e.pullStale = false
+		retired = true
+		e.notifyLocked()
+	}
 	defer func() {
-		if delivery == nil {
+		if delivery == nil && !retired {
 			e.mu.Lock()
 			e.pull = false
 			e.pullDone = nil
+			e.pullStale = false
 			e.notifyLocked()
 			e.mu.Unlock()
 		}
@@ -448,6 +482,13 @@ poll:
 		if e.unavailable {
 			e.mu.Unlock()
 			httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is unavailable"))
+			return
+		}
+		if e.pullStale {
+			// Release the old slot before the 425 ACK can make the worker repull.
+			releaseRetiredPullLocked()
+			e.mu.Unlock()
+			httpServerReject(w, "next", http.StatusTooEarly, httpBinding{}, 0, errors.New("HTTP pull predates accepted cleanup"))
 			return
 		}
 		tx, changed := e.active, e.changed
@@ -495,6 +536,21 @@ poll:
 						e.mu.Unlock()
 						return
 					}
+					if e.pullStale {
+						tx.mu.Unlock()
+						e.mu.Unlock()
+						if entered != nil {
+							entered.handlers.Done()
+							entered = nil
+						}
+						// Cleanup may finish while encoding, before this handler is counted.
+						<-tx.finished
+						e.mu.Lock()
+						releaseRetiredPullLocked()
+						e.mu.Unlock()
+						httpServerReject(w, "next", http.StatusTooEarly, httpBinding{}, 0, errors.New("HTTP pull predates accepted cleanup"))
+						return
+					}
 					if ctxErr := httpExecutionContextError(tx.ctx); ctxErr != nil {
 						tx.mu.Unlock()
 						e.mu.Unlock()
@@ -533,6 +589,20 @@ poll:
 						tx.mu.Unlock()
 						e.mu.Unlock()
 						tx.stopExecution(fmt.Errorf("save HTTP assignment: %w", saveErr), true)
+						if errors.Is(saveErr, monitor.ErrAcceptedDiscarded) && !errors.Is(saveErr, monitor.ErrAcceptanceState) {
+							// The reservation is gone. Let the undelivered transaction drain
+							// before its worker is told to make a new pull.
+							entered.handlers.Done()
+							entered = nil
+							<-tx.finished
+							e.mu.Lock()
+							releaseRetiredPullLocked()
+							e.mu.Unlock()
+							if r.Context().Err() == nil {
+								httpServerReject(w, "next", http.StatusTooEarly, httpBinding{}, 0, saveErr)
+							}
+							return
+						}
 						if r.Context().Err() == nil {
 							httpServerReject(w, "next", http.StatusInternalServerError, httpBinding{}, 0, saveErr)
 						}
@@ -565,6 +635,12 @@ poll:
 			return
 		}
 	}
+}
+
+func (e *HTTPExecutor) snapshotPullGeneration() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.pullGeneration
 }
 
 func (e *HTTPExecutor) transaction() *httpTransaction {

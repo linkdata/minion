@@ -1933,14 +1933,16 @@ func TestRunOnceRemovesCompletedResultSidecarAfterRestart(t *testing.T) {
 	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
 	handler := &recoveredResultHandler{}
 	monitor.Handler = handler
+	cleanupCalls := 0
+	monitor.AfterAcceptedCleanup = func() { cleanupCalls++ }
 	if _, err := monitor.RunOnce(t.Context(), reopened); err != nil {
 		t.Fatal(err)
 	}
 	if present, err := reopened.HasAcceptedResult(); err != nil || present ||
-		handler.executions != 0 || handler.publications != 0 ||
+		cleanupCalls != 1 || handler.executions != 0 || handler.publications != 0 ||
 		reopened.Data.Processed[accepted.JobID].IsZero() {
-		t.Fatalf("completed attempt retained a result or dispatched work: present=%t err=%v handler=%+v state=%+v",
-			present, err, handler, reopened.Data)
+		t.Fatalf("completed attempt retained a result or dispatched work: present=%t err=%v cleanupCalls=%d handler=%+v state=%+v",
+			present, err, cleanupCalls, handler, reopened.Data)
 	}
 }
 

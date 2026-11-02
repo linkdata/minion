@@ -91,7 +91,15 @@ func validExecutionToken(token string) bool {
 }
 
 func authenticatedExecutionHandler(executor *HTTPExecutor, token string) http.Handler {
+	return authenticatedExecutionHandlerWithServe(executor, token, executor.ServeHTTP)
+}
+
+func authenticatedExecutionHandlerWithServe(executor *HTTPExecutor, token string, serve func(http.ResponseWriter, *http.Request)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var generation uint64
+		if r.URL.Path == "/next" {
+			generation = executor.snapshotPullGeneration()
+		}
 		values := r.Header.Values("Authorization")
 		want := "Bearer " + token
 		if len(values) != 1 || len(values[0]) != len(want) || subtle.ConstantTimeCompare([]byte(values[0]), []byte(want)) != 1 {
@@ -101,7 +109,10 @@ func authenticatedExecutionHandler(executor *HTTPExecutor, token string) http.Ha
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		executor.ServeHTTP(w, r)
+		if r.URL.Path == "/next" {
+			r = r.WithContext(context.WithValue(r.Context(), pullGenerationContextKey{}, generation))
+		}
+		serve(w, r)
 	})
 }
 

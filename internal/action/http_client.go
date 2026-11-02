@@ -21,6 +21,7 @@ import (
 
 var errHTTPWatchStopped = errors.New("HTTP cancellation watch stopped after worker return")
 var errHTTPWorkerCleanup = errors.New("HTTP worker cleanup failed; worker is unavailable")
+var errPullRetired = errors.New("HTTP pull retired after accepted cleanup")
 var errExecutorRuntimeCap = fmt.Errorf("executor runtime cap: %w", context.DeadlineExceeded)
 
 const captureLimitMessage = "Discussion capture reached its limit; history is incomplete."
@@ -84,6 +85,9 @@ func RunHTTPLoop(ctx context.Context, client *http.Client, baseURL, executorID s
 		case httpRunAcknowledged:
 			continue
 		default:
+			if errors.Is(err, errPullRetired) {
+				continue
+			}
 			if err == nil {
 				return errors.New("HTTP worker ended without an acknowledged outcome")
 			}
@@ -626,6 +630,9 @@ func (c *httpExecutionClient) openObserved(ctx context.Context, kind string, dat
 		}
 		if err := ack.Failure.validate(); err != nil {
 			return nil, failure(err)
+		}
+		if kind == "next" && response.StatusCode == http.StatusTooEarly {
+			return nil, errPullRetired
 		}
 		return nil, ack.Failure.err()
 	}

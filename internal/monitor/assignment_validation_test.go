@@ -169,14 +169,16 @@ func TestRevalidateAssignmentRejectsExpiredOriginalDeadline(t *testing.T) {
 
 func TestExecuteSelectedAcceptsFinalDiscard(t *testing.T) {
 	m, store, job, gh, _ := assignmentValidationFixture(t)
+	cleanupCalls := 0
+	m.AfterAcceptedCleanup = func() { cleanupCalls++ }
 	gh.permission.Permission = "read"
 	m.Handler = selectedHandler(func(job Job) error { return m.RevalidateAssignment(t.Context(), store, job) })
-	if err := m.executeSelected(t.Context(), store, job, time.Now()); !errors.Is(err, ErrAcceptedDiscarded) || store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() {
-		t.Fatalf("final discard was not resolved: error=%v state=%+v", err, store.Data)
+	if err := m.executeSelected(t.Context(), store, job, time.Now()); !errors.Is(err, ErrAcceptedDiscarded) || cleanupCalls != 1 || store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() {
+		t.Fatalf("final discard was not resolved: error=%v cleanupCalls=%d state=%+v", err, cleanupCalls, store.Data)
 	}
 }
 
-func TestFinalDiscardStopsSelectedDiscoveryUntilWorkerRestarts(t *testing.T) {
+func TestFinalDiscardStopsCurrentSelectedScan(t *testing.T) {
 	at := time.Now().UTC()
 	first := selectedItem(at)
 	second := first
@@ -198,7 +200,7 @@ func TestFinalDiscardStopsSelectedDiscoveryUntilWorkerRestarts(t *testing.T) {
 		return ErrAcceptedDiscarded
 	})
 	if _, err := m.RunOnce(t.Context(), store); err != nil || calls != 1 || store.Data.Accepted != nil || len(store.Data.Processed) != 1 {
-		t.Fatalf("retired worker accepted another action: calls=%d error=%v state=%+v", calls, err, store.Data)
+		t.Fatalf("discard continued current scan: calls=%d error=%v state=%+v", calls, err, store.Data)
 	}
 }
 

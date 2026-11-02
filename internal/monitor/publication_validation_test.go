@@ -288,6 +288,8 @@ func TestSelectedStopOutcomePreservesFirstCause(t *testing.T) {
 func TestSelectedSuccessBeforeDeadlineSurvivesSlowInvitationCheck(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m, store, job, gh, _ := assignmentValidationFixture(t)
+		cleanupCalls := 0
+		m.AfterAcceptedCleanup = func() { cleanupCalls++ }
 		now := time.Now().UTC()
 		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = now, now.Add(time.Second)
 		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: now.Add(time.Second)}
@@ -316,9 +318,9 @@ func TestSelectedSuccessBeforeDeadlineSurvivesSlowInvitationCheck(t *testing.T) 
 		}
 		err := m.runSelectedWithControls(t.Context(), store, job, "", nil, run,
 			func(err error) error { return m.completeSelected(t.Context(), store, job, now, err) })
-		if err != nil || !decidedBeforeExpiry || store.Data.TerminalDecisions[job.ID].Outcome != "succeeded" ||
+		if err != nil || !decidedBeforeExpiry || cleanupCalls != 1 || store.Data.TerminalDecisions[job.ID].Outcome != "succeeded" ||
 			store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 0 {
-			t.Fatalf("published success was replaced by expiry during invitation check: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
+			t.Fatalf("published success was replaced by expiry during invitation check: err=%v cleanupCalls=%d state=%+v comments=%v", err, cleanupCalls, store.Data, gh.comments)
 		}
 	})
 }
