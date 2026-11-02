@@ -7,6 +7,7 @@ import (
 
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestSelectedFailedOutcomeChecksAcknowledgedCallBeforeACK(t *testing.T) {
@@ -90,5 +91,34 @@ func TestSelectedFailedOutcomeAfterRejectedBeforeQuarantinesWorker(t *testing.T)
 	}
 	if _, err := f.executor.Execute(t.Context(), f.job, f.tx.sink); err == nil {
 		t.Fatal("rejected BeforeCall allowed another assignment")
+	}
+}
+
+func TestSelectedFailedOutcomeRejectsJobInvalidResultBeforeACK(t *testing.T) {
+	f, _, _ := selectedHTTPResultFixture(t, nil)
+	outcome := f.outcome(1, errors.New("worker failed"))
+	outcome.Result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("changed\n")}}
+	if err := httpResultShape(outcome.Result); err != nil {
+		t.Fatalf("test Result is not wire-shaped: %v", err)
+	}
+	if err := outcome.Result.validate(f.job, false); err == nil {
+		t.Fatal("read-only Comment Result unexpectedly permits source changes")
+	}
+	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 1)
+	if ack.Failure == nil {
+		t.Fatal("job-invalid failed Outcome received success ACK")
+	}
+	got := f.result(t)
+	if got.err == nil {
+		t.Fatal("job-invalid failed Outcome was not rejected by the parent")
+	}
+	f.executor.mu.Lock()
+	unavailable := f.executor.unavailable
+	f.executor.mu.Unlock()
+	if !unavailable {
+		t.Fatal("job-invalid failed Outcome left the worker available")
+	}
+	if _, err := f.executor.Execute(t.Context(), f.job, f.tx.sink); err == nil {
+		t.Fatal("job-invalid failed Outcome left the worker reusable")
 	}
 }

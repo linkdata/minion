@@ -25,7 +25,7 @@ func TestPostPullOverdueWorkerLimitUsesFirstDeadline(t *testing.T) {
 		{name: "inactivity before runtime cap", hard: 7 * time.Second, idle: 5 * time.Second, ownCap: true, want: workerLimitInactivity},
 		{name: "runtime cap before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
 		{name: "runtime cap wins tie", hard: 5 * time.Second, idle: 5 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
-		{name: "caller deadline before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, want: workerLimitNone},
+		{name: "caller deadline before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, want: workerLimitCallerDeadline},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := selectWorkerLimit(nil, started.Add(8*time.Second), started.Add(test.hard), started.Add(test.idle), test.ownCap)

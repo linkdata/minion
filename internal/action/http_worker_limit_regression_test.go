@@ -24,8 +24,8 @@ func TestWorkerLimitKeepsEarlierCallerDeadlineWhenCallbacksLag(t *testing.T) {
 		idle  time.Duration
 		want  workerLimit
 	}{
-		{name: "caller before delayed inactivity callback", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, want: workerLimitNone},
-		{name: "caller and inactivity tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, want: workerLimitNone},
+		{name: "caller before delayed inactivity callback", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, want: workerLimitCallerDeadline},
+		{name: "caller and inactivity tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, want: workerLimitCallerDeadline},
 		{name: "inactivity before delayed caller callback", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 9 * time.Second, want: workerLimitInactivity},
 		{name: "inactivity before caller with no callback", hard: 10 * time.Second, idle: 9 * time.Second, want: workerLimitInactivity},
 	} {

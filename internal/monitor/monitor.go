@@ -53,6 +53,9 @@ var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
 // ErrCheckpointedWorkerRuntimeCap marks a worker cap claim bound to parent call receipts.
 var ErrCheckpointedWorkerRuntimeCap = errors.New("checkpointed worker runtime cap")
 
+// ErrCheckpointedParentDeadline marks a bound failed result after the parent's own deadline.
+var ErrCheckpointedParentDeadline = errors.New("checkpointed parent deadline")
+
 // ErrRequestTransport retains a request failure's infrastructure retry classification.
 var ErrRequestTransport = errors.New("request transport failure")
 
@@ -2452,6 +2455,9 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 			return "expired", nil
 		}
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
+	}
+	if assigned && errors.Is(result, ErrCheckpointedParentDeadline) {
+		return selectedStopOutcome(context.DeadlineExceeded, completedAt, job.Deadline, parentDeadline), nil
 	}
 	var inactivity interface{ ExecutorInactivity() bool }
 	if assigned && !errors.Is(result, ErrTerminalJob) && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {

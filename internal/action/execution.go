@@ -375,12 +375,21 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		knownInactivity := checkpointedSelectedResult && workerReport != nil && workerReport.failure.Inactivity
 		knownRuntimeCap := checkpointedSelectedResult && workerReport != nil && workerReport.failure.RuntimeCap &&
 			!errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
+		parentDeadlineElapsed := false
+		if c.assignmentContext != nil {
+			if deadline, ok := c.assignmentContext.Deadline(); ok {
+				parentDeadlineElapsed = !time.Now().Before(deadline)
+			}
+		}
+		knownParentDeadline := checkpointedSelectedResult && workerReport != nil && workerReport.failure.Deadline &&
+			!workerReport.failure.RuntimeCap && !workerReport.failure.Inactivity && parentDeadlineElapsed &&
+			!errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
 		knownCancellation := checkpointedSelectedResult && c.assignmentContext != nil && errors.Is(c.assignmentContext.Err(), context.Canceled) &&
 			errors.Is(runErr, context.Canceled) && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
 		if len(result.Calls) > expectedCalls || c.pending != nil && c.returned == nil ||
-			!errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity && !knownRuntimeCap && !knownCancellation && len(c.calls) != 0 {
+			!errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity && !knownRuntimeCap && !knownParentDeadline && !knownCancellation && len(c.calls) != 0 {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
 		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
@@ -393,6 +402,9 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		}
 		if knownRuntimeCap {
 			return errors.Join(runErr, monitor.ErrCheckpointedWorkerRuntimeCap)
+		}
+		if knownParentDeadline {
+			return errors.Join(runErr, monitor.ErrCheckpointedParentDeadline)
 		}
 		return runErr
 	}
@@ -419,7 +431,7 @@ func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
 
 // validateFailedResult checks parent-owned evidence before a failed Outcome is ACKed.
 func (c *executionCheckpoints) validateFailedResult(result Result) error {
-	if !c.matchesFailedResult(result) {
+	if !c.matchesFailedResult(result) || result.validate(c.job, false) != nil {
 		return checkpointContractError()
 	}
 	return nil

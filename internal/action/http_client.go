@@ -239,6 +239,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		close(headerDone)
 	})
 	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0)
+	admissionCause := context.Cause(actionCtx)
+	admissionObservedAt := time.Now()
 	if !headerTimer.Stop() {
 		<-headerDone
 	}
@@ -262,7 +264,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		if watchAdmissionTimedOut {
 			inactivity.stop() // The selected watch deadline wins later timer callbacks.
 		} else {
-			err = admissionFailure(err, actionCtx, inactivity)
+			err = admissionFailure(err, admissionCause, inactivity, admissionObservedAt, expires, ownRuntimeCap)
 		}
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
@@ -400,13 +402,20 @@ const (
 	workerLimitNone workerLimit = iota
 	workerLimitInactivity
 	workerLimitRuntimeCap
+	workerLimitCallerDeadline
 )
 
 func (limit workerLimit) err() error {
-	if limit == workerLimitInactivity {
+	switch limit {
+	case workerLimitInactivity:
 		return errors.Join(monitor.ErrTerminalJob, errExecutorInactivity)
+	case workerLimitRuntimeCap:
+		return errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap)
+	case workerLimitCallerDeadline:
+		return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	default:
+		return nil
 	}
-	return errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap)
 }
 
 func selectWorkerLimit(cause error, at, hard, idle time.Time, ownRuntimeCap bool) workerLimit {
@@ -419,15 +428,23 @@ func selectWorkerLimit(cause error, at, hard, idle time.Time, ownRuntimeCap bool
 	if !idle.IsZero() && !at.Before(idle) && idle.Before(hard) {
 		return workerLimitInactivity
 	}
-	if ownRuntimeCap && !at.Before(hard) {
-		return workerLimitRuntimeCap // The hard cap wins a tie.
+	if !at.Before(hard) {
+		if ownRuntimeCap {
+			return workerLimitRuntimeCap // The hard cap wins a tie.
+		}
+		return workerLimitCallerDeadline // The caller deadline wins a tie.
 	}
 	return workerLimitNone
 }
 
-func admissionFailure(err error, actionCtx context.Context, inactivity *inactivityTimer) error {
-	inactivity.stop() // Expiry can precede the timer callback when admission returns.
-	cause := context.Cause(actionCtx)
+func admissionFailure(err, cause error, inactivity *inactivityTimer, observedAt, hard time.Time, ownRuntimeCap bool) error {
+	// Select at the moment the transport failure was observed. Stopping the
+	// timer may invoke a later inactivity callback, which cannot replace it.
+	limit := selectWorkerLimit(cause, observedAt, hard, inactivity.deadline(), ownRuntimeCap)
+	inactivity.stop()
+	if limit != workerLimitNone {
+		cause = limit.err()
+	}
 	if errors.Is(cause, context.DeadlineExceeded) {
 		cause = errors.Join(monitor.ErrTerminalJob, cause)
 	}
@@ -665,7 +682,7 @@ func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) *httpFailure
 	failure.Terminal = true
 	failure.Inactivity = limit == workerLimitInactivity
 	failure.RuntimeCap = limit == workerLimitRuntimeCap
-	failure.Deadline = limit == workerLimitRuntimeCap
+	failure.Deadline = limit != workerLimitInactivity
 	failure.Message = selectedLimitDiagnostic(limit, failure.Message)
 	return failure
 }
@@ -676,6 +693,8 @@ func selectedLimitDiagnostic(limit workerLimit, prior string) string {
 	selected := errExecutorRuntimeCap.Error()
 	if limit == workerLimitInactivity {
 		selected = errExecutorInactivity.Error()
+	} else if limit == workerLimitCallerDeadline {
+		selected = context.DeadlineExceeded.Error()
 	}
 	parts := []string{selected}
 	for _, line := range strings.Split(prior, "\n") {

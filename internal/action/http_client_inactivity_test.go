@@ -152,7 +152,7 @@ func TestWorkerLimitUsesAbsoluteOrderAfterDelayedCallbacks(t *testing.T) {
 		{name: "hard elapsed first but inactivity callback won", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
 		{name: "hard wins exact tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, at: 10 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
 		{name: "only inactivity elapsed", hard: 11 * time.Second, idle: 9 * time.Second, at: 10 * time.Second, ownCap: true, want: workerLimitInactivity},
-		{name: "caller owns earlier hard deadline", cause: context.DeadlineExceeded, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitNone},
+		{name: "caller owns earlier hard deadline", cause: context.DeadlineExceeded, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
 		{name: "parent cancellation remains first", cause: context.Canceled, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitNone},
 		{name: "inner deadline before limits", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 11 * time.Second, at: 9 * time.Second, ownCap: true, want: workerLimitNone},
 	} {
@@ -169,7 +169,9 @@ func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)
 	inactivity := startInactivityTimer(time.Now().Add(-time.Minute), time.Second, cancel)
-	err := admissionFailure(errors.Join(monitor.ErrRequestTransport, errors.New("watch failed")), ctx, inactivity)
+	observedAt := time.Now()
+	err := admissionFailure(errors.Join(monitor.ErrRequestTransport, errors.New("watch failed")),
+		context.Cause(ctx), inactivity, observedAt, observedAt.Add(time.Minute), true)
 	failure := newHTTPFailure(err)
 	if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
 		failure == nil || !failure.Terminal || !failure.Inactivity || failure.Deadline || !failure.RequestTransport {
