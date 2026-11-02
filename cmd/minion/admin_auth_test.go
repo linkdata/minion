@@ -106,6 +106,9 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatalf("cross-origin logout: status=%d headers=%v", response.Code, response.Header())
 	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "http://admin.example"); response.Code != http.StatusForbidden {
+		t.Fatalf("HTTP origin on TLS logout: status=%d, want 403", response.Code)
+	}
 	if response := adminResponse(handler, http.MethodGet, "/admin/login", nil, cookie, ""); !strings.Contains(response.Body.String(), "Signed in") {
 		t.Fatal("cross-origin logout revoked the active session")
 	}
@@ -119,11 +122,13 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/jaws/.ping"},
 		{http.MethodPost, "/jaws/invalid-key"},
-		{http.MethodPost, "/admin/logout"},
 	} {
 		if response := adminResponse(handler, tc.method, tc.path, nil, cookie, ""); response.Code != http.StatusForbidden {
 			t.Errorf("revoked %s %s: status=%d, want 403", tc.method, tc.path, response.Code)
 		}
+	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("revoked logout: status=%d location=%q", response.Code, response.Header().Get("Location"))
 	}
 	wsRequest := httptest.NewRequest(http.MethodGet, "https://admin.example/jaws/test-websocket", nil)
 	wsRequest.TLS = &tls.ConnectionState{}
@@ -263,6 +268,8 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			headers: "Origin: http://other.example\r\n", want: http.StatusForbidden},
 		{name: "unsupported login body", method: http.MethodPost, path: "/admin/login",
 			headers: "Content-Type: text/plain\r\n", want: http.StatusBadRequest},
+		{name: "authenticated JaWS rejection", method: http.MethodPost, path: "/jaws/.ping",
+			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusMethodNotAllowed},
 		{name: "cross-origin logout", method: http.MethodPost, path: "/admin/logout",
 			headers: "Origin: http://other.example\r\nCookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
 		{name: "logout", method: http.MethodPost, path: "/admin/logout",
@@ -323,6 +330,9 @@ func TestAdminLoginBoundsAndCrossOrigin(t *testing.T) {
 	form := url.Values{"username": {"operator"}, "password": {"wrong-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatalf("cross-origin login: status=%d headers=%v", response.Code, response.Header())
+	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "http://admin.example"); response.Code != http.StatusForbidden {
+		t.Fatalf("HTTP origin on TLS login: status=%d, want 403", response.Code)
 	}
 	for range 5 {
 		if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusUnauthorized {
@@ -439,6 +449,9 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		time.Sleep(time.Minute + time.Second)
 		if response := adminResponse(handler, http.MethodGet, "/jaws/.ping", nil, cookie, ""); response.Code != http.StatusForbidden {
 			t.Fatalf("expired admin session: status=%d, want 403", response.Code)
+		}
+		if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
+			t.Fatalf("expired sign-out: status=%d location=%q, want login redirect", response.Code, response.Header().Get("Location"))
 		}
 	})
 }

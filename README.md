@@ -114,7 +114,7 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-To enable the admin dashboard, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+To enable admin sign-in, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
@@ -134,6 +134,8 @@ import getpass
 from argon2 import PasswordHasher
 
 password = getpass.getpass("Admin password: ")
+if not 1 <= len(password.encode("utf-8")) <= 4096:
+    raise SystemExit("Admin password must be 1 to 4096 UTF-8 bytes")
 print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
                      hash_len=32, salt_len=16).hash(password))
 PY
@@ -146,7 +148,17 @@ On native Windows, use PowerShell with Python installed:
 $adminHashEnv = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
 py -3 -m venv $adminHashEnv
 & "$adminHashEnv\Scripts\python.exe" -m pip install argon2-cffi
-& "$adminHashEnv\Scripts\python.exe" -c "import getpass; from argon2 import PasswordHasher; print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len=32, salt_len=16).hash(getpass.getpass('Admin password: ')))"
+$hashScript = @'
+import getpass
+from argon2 import PasswordHasher
+
+password = getpass.getpass("Admin password: ")
+if not 1 <= len(password.encode("utf-8")) <= 4096:
+    raise SystemExit("Admin password must be 1 to 4096 UTF-8 bytes")
+print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
+                     hash_len=32, salt_len=16).hash(password))
+'@
+& "$adminHashEnv\Scripts\python.exe" -c $hashScript
 Remove-Item -Recurse -Force $adminHashEnv
 ```
 

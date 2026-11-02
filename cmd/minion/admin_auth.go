@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -47,13 +48,33 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig) http.Handler {
 	mux.HandleFunc("GET /admin/login", access.loginPage)
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
-	mux.Handle("/", jw)
-	crossOrigin := http.NewCrossOriginProtection()
-	crossOrigin.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
+	// body-reading callback, which must not inherit an immediate read deadline.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		http.Error(w, "Forbidden", http.StatusForbidden)
-	}))
-	return jw.SecureHeadersMiddleware(adminGuard(crossOrigin.Handler(mux), access.allowed))
+		jw.ServeHTTP(w, r)
+	})
+	crossOrigin := http.NewCrossOriginProtection()
+	return jw.SecureHeadersMiddleware(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if crossSchemeAdminOrigin(r) || crossOrigin.Check(r) != nil {
+			closeUnreadAdminBody(w, r)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	}), access.allowed))
+}
+
+// CrossOriginProtection's legacy Origin fallback compares hosts but not schemes.
+func crossSchemeAdminOrigin(r *http.Request) bool {
+	if r.TLS == nil || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return false
+	}
+	if raw := r.Header.Get("Origin"); raw != "" {
+		origin, err := url.Parse(raw)
+		return err != nil || origin.Scheme != "https"
+	}
+	return false
 }
 
 func (a *adminAccess) sessionUsername(sess *jaws.Session) string {
@@ -69,6 +90,9 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		return false
 	}
 	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+		return true
+	}
+	if r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
 		return true
 	}
 	return a.sessionUsername(a.jaws.GetSession(r)) != ""
@@ -156,7 +180,7 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
 	sess.Clear()
