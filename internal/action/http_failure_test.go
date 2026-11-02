@@ -145,6 +145,13 @@ func TestHTTPFailureRejectsMalformedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestHTTPFailureRejectsConflictingWorkerLimits(t *testing.T) {
+	failure := &httpFailure{Message: "worker limit", Inactivity: true, RuntimeCap: true}
+	if err := failure.validate(); err == nil {
+		t.Fatal("conflicting worker limit claims accepted")
+	}
+}
+
 func TestHTTPFailureBoundsDiagnosticsWithoutChangingOrdinaryFailurePolicy(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -177,7 +184,7 @@ func TestHTTPFailureBoundsDiagnosticsWithoutChangingOrdinaryFailurePolicy(t *tes
 func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 	failure := &httpFailure{
 		Message:  strings.Repeat("\x01", httpFailureMessageLimit),
-		Terminal: true, Canceled: true, Deadline: true, Inactivity: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
+		Terminal: true, Canceled: true, Deadline: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
 		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true,
 	}
 	if err := failure.validate(); err != nil {

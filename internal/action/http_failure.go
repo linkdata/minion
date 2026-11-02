@@ -69,6 +69,9 @@ func (f *httpFailure) validate() error {
 		len(f.ObservedMessage) > httpFailureMessageLimit || !utf8.ValidString(f.ObservedMessage) {
 		return errors.New("invalid HTTP failure diagnostic")
 	}
+	if f.Inactivity && f.RuntimeCap {
+		return errors.New("conflicting HTTP worker limit claims")
+	}
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -139,6 +140,52 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 			transport.executor.mu.Unlock()
 			if unavailable {
 				t.Fatal("worker-only fallback uncertainty quarantined parent capacity")
+			}
+		})
+	}
+}
+
+func TestHTTPFailureFallbackRetainsCleanupQuarantine(t *testing.T) {
+	for _, foreign := range []bool{false, true} {
+		name := "matching result"
+		if foreign {
+			name = "foreign result"
+		}
+		t.Run(name, func(t *testing.T) {
+			job := testJob(command.Comment)
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			transport := newHTTPServerTestInMemory(t, ctx, job, runnerExecutionCheckpoints{})
+			transport.pull(t)
+			base, err := url.Parse(transport.server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &httpClientCheckpoints{transport: &httpExecutionClient{client: transport.server.Client(), base: base}, control: ctx, binding: httpJobBinding(job)}
+			result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+				Answer: strings.Repeat("x", maxOutputBytes+1),
+				Diagnostics: []Diagnostic{{Code: "cleanup_failed", Message: strings.Repeat("x", maxDiagnosticMessageBytes+1)},
+					{Code: "cleanup_recovery", Message: "untrusted recovery detail"}}}
+			if foreign {
+				result.Identity.AttemptID = "foreign"
+			}
+			if err := client.outcome(result, nil); !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("degraded Outcome did not report lost primary result: %v", err)
+			}
+			got := transport.result(t)
+			wantDiagnostic := Diagnostic{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}
+			if got.err == nil || !got.result.matchesJob(job) || !reflect.DeepEqual(got.result.Diagnostics, []Diagnostic{wantDiagnostic}) {
+				t.Fatalf("fallback lost bounded cleanup marker: result=%+v error=%v", got.result, got.err)
+			}
+			transport.executor.mu.Lock()
+			unavailable := transport.executor.unavailable
+			transport.executor.mu.Unlock()
+			if !unavailable {
+				t.Fatal("parent did not quarantine worker after degraded cleanup failure")
+			}
+			pull := transport.request("/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID})
+			if pull.err != nil || pull.status != http.StatusConflict {
+				t.Fatalf("quarantined executor accepted a later pull: %+v", pull)
 			}
 		})
 	}

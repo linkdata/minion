@@ -776,6 +776,12 @@ func (c *httpClientCheckpoints) outcomeWithCause(result Result, runErr, cause er
 		// Encode the one fallback before sending anything. Already acknowledged
 		// receipts remain the parent's evidence; no After is inferred from Result.
 		fallback := Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}
+		for _, diagnostic := range result.Diagnostics {
+			if diagnostic.Code == "cleanup_failed" {
+				fallback.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}}
+				break
+			}
+		}
 		if matchingBinding {
 			core := ReviewCheckpoint{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Calls: result.Calls}
 			if httpReviewShape(core) == nil {

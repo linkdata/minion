@@ -64,6 +64,29 @@ func TestSelectedFailedOutcomeChecksAcknowledgedCallBeforeACK(t *testing.T) {
 	}
 }
 
+func TestSelectedFailedOutcomeRejectsConflictingWorkerLimitsBeforeACK(t *testing.T) {
+	f, _, _ := selectedHTTPResultFixture(t, nil)
+	outcome := f.outcome(1, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	outcome.Failure.RuntimeCap = true
+	outcome.Failure.Deadline = true
+	ack := f.ack(t, "/outcome", outcome, http.StatusBadRequest, 1)
+	if ack.Failure == nil {
+		t.Fatal("conflicting worker limit claims received a success ACK")
+	}
+
+	outcome.Failure.RuntimeCap = false
+	outcome.Failure.Deadline = false
+	f.ack(t, "/outcome", outcome, http.StatusOK, 1)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	var inactivity interface{ ExecutorInactivity() bool }
+	if !errors.As(final, &inactivity) || !inactivity.ExecutorInactivity() ||
+		errors.Is(final, monitor.ErrCheckpointedWorkerRuntimeCap) {
+		t.Fatalf("valid inactivity retry lost its limit label: %v", final)
+	}
+}
+
 func TestSelectedFailedOutcomeAfterRejectedBeforeQuarantinesWorker(t *testing.T) {
 	f, _, _ := selectedHTTPResultFixture(t, nil)
 	bad := f.call(1)
