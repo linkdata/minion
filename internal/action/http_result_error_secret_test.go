@@ -124,12 +124,8 @@ func TestHostileHTTPResultValidationErrorRedactsProviderKey(t *testing.T) {
 				if tc.failed {
 					outcome.Failure = newHTTPFailure(errors.New("worker stopped after returning evidence"))
 				}
-				status := http.StatusInternalServerError
-				if tc.failed {
-					status = http.StatusOK
-				}
-				ack := f.ack(t, "/outcome", outcome, status, sequence)
-				if status != http.StatusOK && ack.Failure == nil {
+				ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, sequence)
+				if ack.Failure == nil {
 					t.Fatal("hostile result was acknowledged")
 				}
 				got := f.result(t)

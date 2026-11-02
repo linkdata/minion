@@ -1,10 +1,12 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -232,6 +234,28 @@ func TestRunOnceWithoutWorkerServicesTerminalReplyAndInvitationsOnly(t *testing.
 		!next.Equal(store.Data.NextInviteCheckAt) {
 		t.Fatalf("pre-worker controls changed action discovery: next=%s replies=%v invites=%v calls=%v jobs=%v state=%+v",
 			next, gh.comments, gh.accepted, gh.notificationCalls, handler.jobs, store.Data)
+	}
+}
+
+func TestQueuedExpiryWithoutDecisionDoesNotLogAnOutcome(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now.Add(-time.Minute))
+	due, id := queueTerminalControl(store, now.Add(-time.Second), 8,
+		state.JobFailure{Attempts: 1, AcceptedAt: now.Add(-8 * time.Minute), Deadline: now.Add(-time.Minute)}, time.Time{})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{
+		permission:  github.Permission{Permission: "write"},
+		threadItems: terminalThreads(map[int]github.Item{8: due}),
+	}
+	var logs bytes.Buffer
+	m := &Monitor{Config: testConfig(t), BotID: 8, GitHub: gh, Now: func() time.Time { return now },
+		Logger: log.New(&logs, "", 0)}
+	m.serviceTerminalControls(t.Context(), store)
+	if !terminalReplyRecorded(gh, store, id) || store.Data.TerminalDecisions[id].Outcome != "" ||
+		!strings.Contains(logs.String(), "stop retrying failed review") || strings.Contains(logs.String(), "outcome=") {
+		t.Fatalf("queued expiry invented a terminal outcome: logs=%q state=%+v", logs.String(), store.Data)
 	}
 }
 

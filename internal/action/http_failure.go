@@ -20,9 +20,12 @@ const httpFailureMessageLimit = 8 << 10
 // worker outcome fields are diagnostic claims at the receiver.
 type httpFailure struct {
 	Message           string `json:"message"`
+	ObservedMessage   string `json:"observed_message,omitempty"`
 	Terminal          bool   `json:"terminal,omitempty"`
 	Canceled          bool   `json:"canceled,omitempty"`
 	Deadline          bool   `json:"deadline,omitempty"`
+	Inactivity        bool   `json:"inactivity,omitempty"`
+	RuntimeCap        bool   `json:"runtime_cap,omitempty"`
 	Unsafe            bool   `json:"unsafe,omitempty"`
 	OutcomeUnknown    bool   `json:"outcome_unknown,omitempty"`
 	RequestTransport  bool   `json:"request_transport,omitempty"`
@@ -40,7 +43,9 @@ func newHTTPFailure(err error) *httpFailure {
 	failure := &httpFailure{
 		Message:  httpFailureDiagnostic(err.Error()),
 		Terminal: errors.Is(err, monitor.ErrTerminalJob), Canceled: errors.Is(err, context.Canceled),
-		Deadline: errors.Is(err, context.DeadlineExceeded), Unsafe: errors.Is(err, workroot.ErrUnsafe),
+		Deadline: errors.Is(err, context.DeadlineExceeded), Inactivity: errors.Is(err, errExecutorInactivity),
+		RuntimeCap:        errors.Is(err, errExecutorRuntimeCap),
+		Unsafe:            errors.Is(err, workroot.ErrUnsafe),
 		OutcomeUnknown:    errors.Is(err, monitor.ErrExecutionOutcomeUnknown),
 		RequestTransport:  errors.Is(err, monitor.ErrRequestTransport) || errors.As(err, &network),
 		MissingExecutable: errors.Is(err, exec.ErrNotFound), NoSpace: errors.Is(err, syscall.ENOSPC),
@@ -60,8 +65,12 @@ func (f *httpFailure) validate() error {
 	if f == nil {
 		return nil
 	}
-	if len(f.Message) > httpFailureMessageLimit || !utf8.ValidString(f.Message) {
+	if len(f.Message) > httpFailureMessageLimit || !utf8.ValidString(f.Message) ||
+		len(f.ObservedMessage) > httpFailureMessageLimit || !utf8.ValidString(f.ObservedMessage) {
 		return errors.New("invalid HTTP failure diagnostic")
+	}
+	if f.Inactivity && f.RuntimeCap {
+		return errors.New("conflicting HTTP worker limit claims")
 	}
 	return nil
 }
@@ -99,6 +108,9 @@ type workerFailureError struct{ failure httpFailure }
 func (*workerFailureError) Error() string {
 	return "worker execution failed"
 }
+
+// ExecutorInactivity exposes only the worker's outcome label, not policy causes.
+func (e *workerFailureError) ExecutorInactivity() bool { return e.failure.Inactivity }
 
 // Worker diagnostics do not establish parent process, retry or capacity policy.
 func (f *httpFailure) workerErr() error {

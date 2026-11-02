@@ -14,12 +14,13 @@ var errExecutorInactivity = errors.New("executor inactivity timeout")
 // inactivityTimer measures execution progress, not HTTP contact or Status delivery.
 // The caller supplies its origin so admission time counts before first progress.
 type inactivityTimer struct {
-	mu      sync.Mutex
-	timer   *time.Timer
-	last    time.Time
-	timeout time.Duration
-	cancel  context.CancelCauseFunc
-	stopped bool
+	mu                    sync.Mutex
+	timer                 *time.Timer
+	last                  time.Time
+	timeout               time.Duration
+	cancel                context.CancelCauseFunc
+	stopped               bool
+	stoppedBeforeDeadline bool
 }
 
 func startInactivityTimer(start time.Time, timeout time.Duration, cancel context.CancelCauseFunc) *inactivityTimer {
@@ -69,9 +70,20 @@ func (w *inactivityTimer) stop() {
 	if !w.stopped {
 		w.stopped = true
 		w.timer.Stop()
-		if !time.Now().Before(w.last.Add(w.timeout)) {
+		if time.Now().Before(w.last.Add(w.timeout)) {
+			w.stoppedBeforeDeadline = true
+		} else {
 			w.cancel(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
 		}
 	}
 	w.mu.Unlock()
+}
+
+func (w *inactivityTimer) deadline() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stoppedBeforeDeadline {
+		return time.Time{} // Completion ended the inactivity window.
+	}
+	return w.last.Add(w.timeout)
 }

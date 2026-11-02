@@ -21,6 +21,7 @@ import (
 
 var errHTTPWatchStopped = errors.New("HTTP cancellation watch stopped after worker return")
 var errHTTPWorkerCleanup = errors.New("HTTP worker cleanup failed; worker is unavailable")
+var errExecutorRuntimeCap = fmt.Errorf("executor runtime cap: %w", context.DeadlineExceeded)
 
 type httpExecutionClient struct {
 	client              *http.Client
@@ -54,12 +55,15 @@ func (b *httpPullBody) Close() error {
 }
 
 type httpClientCheckpoints struct {
-	transport *httpExecutionClient
-	control   context.Context
-	action    context.Context
-	binding   httpBinding
-	sequence  uint64
-	failure   error
+	transport     *httpExecutionClient
+	control       context.Context
+	action        context.Context
+	inactivity    *inactivityTimer
+	hardDeadline  time.Time
+	ownRuntimeCap bool
+	binding       httpBinding
+	sequence      uint64
+	failure       error
 }
 
 // RunHTTP pulls and executes one assignment. Returning does not prove process release.
@@ -160,9 +164,16 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return httpClientUnknown("next", errors.New("invalid assignment pull wait"))
 	}
 	transit := elapsed - min(elapsed, assignment.HeldFor)
-	expires := started.Add(job.RuntimeBudget - transit)
-	if deadline, ok := ctx.Deadline(); ok && deadline.Before(expires) {
+	workerExpires := started.Add(job.RuntimeBudget - transit)
+	expires := workerExpires
+	ownRuntimeCap := true
+	if deadline, ok := ctx.Deadline(); ok && !workerExpires.Before(deadline) {
 		expires = deadline
+		ownRuntimeCap = false
+	}
+	var deadlineCause error = context.DeadlineExceeded
+	if ownRuntimeCap {
+		deadlineCause = errExecutorRuntimeCap
 	}
 	controlCtx, cancelControl := context.WithDeadline(context.WithoutCancel(ctx), expires.Add(assignment.StopGrace))
 	defer cancelControl()
@@ -176,29 +187,45 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job)}
 	if !time.Now().Before(expires) {
-		err := errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+		cause := context.Cause(ctx)
+		err := cause
+		if limit := selectWorkerLimit(cause, time.Now(), expires, started.Add(job.InactivityTimeout), ownRuntimeCap); limit != workerLimitNone {
+			err = limit.err()
+		} else if err == nil {
+			err = errors.Join(monitor.ErrTerminalJob, deadlineCause)
+		}
+		if errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, monitor.ErrTerminalJob) {
+			err = errors.Join(monitor.ErrTerminalJob, err)
+		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
-	deadlineCtx, stopDeadline := context.WithDeadline(ctx, expires)
+	deadlineCtx, stopDeadline := context.WithDeadlineCause(ctx, expires, deadlineCause)
 	defer stopDeadline()
 	actionCtx, cancelAction := context.WithCancelCause(deadlineCtx)
 	defer cancelAction(context.Canceled)
 	inactivity := startInactivityTimer(started, job.InactivityTimeout, cancelAction)
 	defer inactivity.stop()
+	checkpoints.inactivity, checkpoints.hardDeadline, checkpoints.ownRuntimeCap = inactivity, expires, ownRuntimeCap
 	startStop := sync.OnceFunc(func() { shortenControl(assignment.StopGrace) })
 	stopOnAction := context.AfterFunc(actionCtx, startStop)
 	defer stopOnAction()
 	checkpoints.action = actionCtx
 	if err := context.Cause(actionCtx); err != nil {
 		startStop()
+		if limit := selectWorkerLimit(err, time.Now(), expires, inactivity.deadline(), ownRuntimeCap); limit != workerLimitNone {
+			err = limit.err()
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
+		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, err, context.Cause(actionCtx))
+		return redactActionError(errors.Join(selectedRunErr, outcomeErr), assignedSecrets...)
 	}
 	jobRunner.executionProgress = inactivity.progress
 	jobRunner.postCallContext = controlCtx
@@ -210,28 +237,29 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return fmt.Errorf("encode cancellation admission: %w", err)
 	}
 	// Bound admission only; the held body must survive model expiry for paid receipts.
+	headerDeadline, inactivityFirst := watchAdmissionDeadline(expires, started.Add(job.InactivityTimeout), time.Now().Add(httpControlTimeout))
 	headerErr := fmt.Errorf("cancellation watch admission timed out: %w", context.DeadlineExceeded)
-	headerWait := min(httpControlTimeout, time.Until(expires))
-	if remaining := time.Until(started.Add(job.InactivityTimeout)); remaining < headerWait {
-		headerWait = max(0, remaining)
+	if inactivityFirst {
 		headerErr = fmt.Errorf("cancellation watch admission timed out: %w", errExecutorInactivity)
+	} else if ownRuntimeCap && headerDeadline.Equal(expires) {
+		headerErr = fmt.Errorf("cancellation watch admission timed out: %w", errExecutorRuntimeCap)
 	}
-	headerDone := make(chan struct{})
+	headerWait := max(0, time.Until(headerDeadline))
+	admission := &watchAdmission{}
 	headerTimer := time.AfterFunc(headerWait, func() {
-		stopWatch(headerErr)
-		close(headerDone)
+		admission.expire(stopWatch, headerErr)
 	})
-	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0)
-	if !headerTimer.Stop() {
-		<-headerDone
-	}
-	watchAdmissionTimedOut := context.Cause(watchCtx) == headerErr
+	watchResponse, err := transport.openObserved(watchCtx, "cancel", watchBody, checkpoints.binding, 0, func() {
+		admission.observe(actionCtx, watchCtx)
+	})
+	headerTimer.Stop()
+	admissionObservedAt, admissionCause, watchAdmissionTimedOut := admission.finish(headerDeadline, stopWatch, headerErr)
 	if watchAdmissionTimedOut {
 		if watchResponse != nil {
 			_ = watchResponse.Body.Close()
 		}
 		err = headerErr
-		if errors.Is(err, errExecutorInactivity) || !time.Now().Before(expires) {
+		if inactivityFirst || headerDeadline.Equal(expires) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		} else {
 			err = errors.Join(monitor.ErrRequestTransport, err)
@@ -242,10 +270,15 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		stopWatch(errHTTPWatchStopped)
 		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
-		err = admissionFailure(err, actionCtx, inactivity)
+		if watchAdmissionTimedOut {
+			inactivity.stop() // The selected watch deadline wins later timer callbacks.
+		} else {
+			err = admissionFailure(err, admissionCause, inactivity, admissionObservedAt, expires, ownRuntimeCap)
+		}
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
+		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, err, err)
+		return redactActionError(errors.Join(selectedRunErr, outcomeErr), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
 	go func() {
@@ -286,10 +319,12 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	// Preparation consumes the accepted runtime.
 	job.RuntimeBudget = time.Until(expires)
 	inactivity.expire()
-	if job.RuntimeBudget <= 0 {
-		runErr = errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	if limit := selectWorkerLimit(context.Cause(actionCtx), time.Now(), expires, inactivity.deadline(), ownRuntimeCap); limit != workerLimitNone {
+		runErr = limit.err()
 	} else if actionCtx.Err() != nil {
 		runErr = context.Cause(actionCtx)
+	} else if job.RuntimeBudget <= 0 {
+		runErr = errors.Join(monitor.ErrTerminalJob, deadlineCause)
 	} else {
 		result, runErr = jobRunner.Execute(actionCtx, job, checkpoints)
 	}
@@ -313,21 +348,26 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	outcomeErr := statusFeed.finish(actionCtx, transport, func() error {
 		inactivity.stop() // Result upload begins; Status drain and upload are not progress.
-		cause := context.Cause(actionCtx)
-		if runErr == nil && httpWatchUncertainty(cause) {
+		stopCause := context.Cause(actionCtx)
+		if runErr == nil && httpWatchUncertainty(stopCause) {
 			// A completed result can resolve independent watch uncertainty through its receipt.
-			cause = nil
+			stopCause = nil
+		}
+		if limit := selectWorkerLimit(stopCause, time.Now(), expires, inactivity.deadline(), ownRuntimeCap); limit != workerLimitNone {
+			// Use deadline order even if a timer callback has not run yet.
+			stopCause = limit.err()
 		}
 		// A watch can cancel the child first; retain independent caller and budget failures.
-		cause = errors.Join(cause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
+		cause := errors.Join(stopCause, context.Cause(ctx), httpExecutionContextError(deadlineCtx))
 		if errors.Is(cause, context.DeadlineExceeded) {
 			cause = errors.Join(cause, monitor.ErrTerminalJob)
 		}
 		runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
-		err := checkpoints.outcome(result, runErr)
+		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, runErr, stopCause)
+		runErr = selectedRunErr
 		cancelStatus() // Keep heartbeats available throughout the final Result upload.
 		cancelEvents() // Optional logs cannot hold the worker after the required outcome.
-		return err
+		return outcomeErr
 	}, func() {
 		if !<-eventsDone {
 			statusFeed.markIncomplete()
@@ -356,9 +396,104 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	return redactActionError(errors.Join(runErr, outcomeErr, watchErr, callerErr), assignedSecrets...)
 }
 
-func admissionFailure(err error, actionCtx context.Context, inactivity *inactivityTimer) error {
-	inactivity.stop() // Expiry can precede the timer callback when admission returns.
-	cause := context.Cause(actionCtx)
+func watchAdmissionDeadline(hard, idle, control time.Time) (time.Time, bool) {
+	deadline := hard
+	if control.Before(deadline) {
+		deadline = control
+	}
+	if idle.Before(deadline) {
+		return idle, true
+	}
+	return deadline, false
+}
+
+// watchAdmission settles the first observed watch result against the header timer.
+// The timer cannot cancel a watch whose headers or error were already observed.
+type watchAdmission struct {
+	mu         sync.Mutex
+	observedAt time.Time
+	cause      error
+	watchCause error
+}
+
+func (a *watchAdmission) observe(action, watch context.Context) {
+	a.mu.Lock()
+	a.cause = context.Cause(action)
+	a.watchCause = context.Cause(watch)
+	a.observedAt = time.Now()
+	a.mu.Unlock()
+}
+
+func (a *watchAdmission) expire(cancel context.CancelCauseFunc, err error) {
+	a.mu.Lock()
+	expired := a.observedAt.IsZero()
+	a.mu.Unlock()
+	if expired {
+		cancel(err)
+	}
+}
+
+func (a *watchAdmission) finish(deadline time.Time, cancel context.CancelCauseFunc, err error) (time.Time, error, bool) {
+	a.mu.Lock()
+	observedAt, cause, watchCause := a.observedAt, a.cause, a.watchCause
+	a.mu.Unlock()
+	// A non-admission watch stop already selected by context keeps its cause.
+	timedOut := (watchCause == nil || watchCause == err) && !observedAt.Before(deadline)
+	if timedOut {
+		cancel(err) // The absolute deadline wins even if its callback was delayed.
+	}
+	return observedAt, cause, timedOut
+}
+
+type workerLimit uint8
+
+const (
+	workerLimitNone workerLimit = iota
+	workerLimitInactivity
+	workerLimitRuntimeCap
+	workerLimitCallerDeadline
+)
+
+func (limit workerLimit) err() error {
+	switch limit {
+	case workerLimitInactivity:
+		return errors.Join(monitor.ErrTerminalJob, errExecutorInactivity)
+	case workerLimitRuntimeCap:
+		return errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap)
+	case workerLimitCallerDeadline:
+		return errors.Join(monitor.ErrTerminalJob, context.DeadlineExceeded)
+	default:
+		return nil
+	}
+}
+
+func selectWorkerLimit(cause error, at, hard, idle time.Time, ownRuntimeCap bool) workerLimit {
+	if cause != nil && !errors.Is(cause, errExecutorInactivity) && !errors.Is(cause, errExecutorRuntimeCap) {
+		if ownRuntimeCap || !errors.Is(cause, context.DeadlineExceeded) ||
+			errors.Is(cause, monitor.ErrRequestTransport) || errors.Is(cause, monitor.ErrExecutionOutcomeUnknown) {
+			return workerLimitNone // An earlier parent or transport stop keeps its cause.
+		}
+	}
+	if !idle.IsZero() && !at.Before(idle) && idle.Before(hard) {
+		return workerLimitInactivity
+	}
+	if !at.Before(hard) {
+		if ownRuntimeCap {
+			return workerLimitRuntimeCap // The hard cap wins a tie.
+		}
+		return workerLimitCallerDeadline // The caller deadline wins a tie.
+	}
+	return workerLimitNone
+}
+
+func admissionFailure(err, cause error, inactivity *inactivityTimer, observedAt, hard time.Time, ownRuntimeCap bool) error {
+	// Select at the moment the transport failure was observed. Stopping the
+	// timer may invoke a later inactivity callback, which cannot replace it.
+	limit := selectWorkerLimit(cause, observedAt, hard, inactivity.deadline(), ownRuntimeCap)
+	inactivity.stop()
+	if limit != workerLimitNone {
+		cause = limit.err()
+	}
 	if errors.Is(cause, context.DeadlineExceeded) {
 		cause = errors.Join(monitor.ErrTerminalJob, cause)
 	}
@@ -384,6 +519,13 @@ func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte
 // open returns only after success headers. The held cancellation body is read
 // separately, so a registered watch is an admission barrier before Runner starts.
 func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64) (*http.Response, error) {
+	return c.openObserved(ctx, kind, data, binding, sequence, nil)
+}
+
+func (c *httpExecutionClient) openObserved(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64, observed func()) (*http.Response, error) {
+	if observed != nil {
+		defer observed() // Record completion before the caller can be descheduled.
+	}
 	var pullCancel context.CancelCauseFunc
 	if kind == "next" {
 		ctx, pullCancel = context.WithCancelCause(ctx)
@@ -519,12 +661,28 @@ func (c *httpClientCheckpoints) acknowledge(parent context.Context, kind string,
 	return nil
 }
 
+func (c *httpClientCheckpoints) beforeCallStop() error {
+	cause := context.Cause(c.action)
+	if !c.hardDeadline.IsZero() {
+		var idle time.Time
+		if c.inactivity != nil {
+			idle = c.inactivity.deadline()
+		}
+		if limit := selectWorkerLimit(cause, time.Now(), c.hardDeadline, idle, c.ownRuntimeCap); limit != workerLimitNone {
+			return limit.err()
+		}
+	}
+	return cause
+}
+
 func (c *httpClientCheckpoints) checkpoint(kind string, value CallCheckpoint) error {
 	if c.failure != nil {
 		return c.failure
 	}
-	if kind == "before" && c.action.Err() != nil {
-		return context.Cause(c.action)
+	if kind == "before" {
+		if err := c.beforeCallStop(); err != nil {
+			return err
+		}
 	}
 	if (httpBinding{Version: value.Version, Identity: value.Identity, SourceRef: value.SourceRef}) != c.binding {
 		c.failure = httpClientUnknown(kind, errors.New("checkpoint binding differs from assignment"))
@@ -540,6 +698,9 @@ func (c *httpClientCheckpoints) checkpoint(kind string, value CallCheckpoint) er
 		err = c.acknowledge(c.control, kind, data, sequence)
 	} else {
 		err = httpClientUnknown(kind, err)
+	}
+	if err == nil && kind == "before" {
+		err = c.beforeCallStop()
 	}
 	c.failure = err
 	return err
@@ -577,11 +738,40 @@ func (c *httpClientCheckpoints) Review(value ReviewCheckpoint) error {
 }
 
 func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
+	var cause error
+	if c.action != nil {
+		cause = context.Cause(c.action)
+	}
+	err, _ := c.outcomeWithCauseAndRunError(result, runErr, cause)
+	return err
+}
+
+func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) (*httpFailure, error) {
+	limit := workerLimitNone
+	if c.inactivity != nil {
+		limit = selectWorkerLimit(cause, time.Now(), c.hardDeadline, c.inactivity.deadline(), c.ownRuntimeCap)
+	}
+	if limit == workerLimitNone {
+		return newHTTPFailure(runErr), nil
+	}
+	limitErr := limit.err()
+	failure := newHTTPFailure(errors.Join(runErr, limitErr))
+	failure.Canceled = false // A selected limit outranks the model's later ctx.Err().
+	failure.Inactivity = limit == workerLimitInactivity
+	failure.RuntimeCap = limit == workerLimitRuntimeCap
+	failure.Deadline = limit != workerLimitInactivity
+	failure.ObservedMessage = failure.Message
+	failure.Message = httpFailureDiagnostic(limitErr.Error())
+	return failure, limitErr
+}
+
+func (c *httpClientCheckpoints) outcomeWithCauseAndRunError(result Result, runErr, cause error) (error, error) {
 	if err := c.control.Err(); err != nil {
-		return httpClientUnknown("outcome", err)
+		return httpClientUnknown("outcome", err), runErr
 	}
 	sequence := c.sequence + 1
-	outcome := httpOutcome{Sequence: sequence, Result: result, Failure: newHTTPFailure(runErr)}
+	failure, selectedLimit := c.outcomeFailure(runErr, cause)
+	outcome := httpOutcome{Sequence: sequence, Result: result, Failure: failure}
 	shapeErr := httpResultShape(result)
 	matchingBinding := (httpBinding{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef}) == c.binding
 	if !matchingBinding {
@@ -599,6 +789,12 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 		// Encode the one fallback before sending anything. Already acknowledged
 		// receipts remain the parent's evidence; no After is inferred from Result.
 		fallback := Result{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef}
+		for _, diagnostic := range result.Diagnostics {
+			if diagnostic.Code == "cleanup_failed" {
+				fallback.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}}
+				break
+			}
+		}
 		if matchingBinding {
 			core := ReviewCheckpoint{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Calls: result.Calls}
 			if httpReviewShape(core) == nil {
@@ -614,14 +810,17 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 		}
 		outcome.Result = fallback
 		omitted = httpClientUnknown("outcome", fmt.Errorf("primary HTTP outcome omitted: %w", err))
-		outcome.Failure = newHTTPFailure(errors.Join(runErr, omitted))
+		outcome.Failure, selectedLimit = c.outcomeFailure(errors.Join(runErr, omitted), cause)
 		data, err = httpEncode(outcome, httpOutcomeBytes)
 		if err != nil {
-			return httpClientUnknown("outcome", err)
+			return httpClientUnknown("outcome", err), runErr
 		}
 	}
 	if outcome.Failure != nil && outcome.Failure.OutcomeUnknown && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) {
 		omitted = errors.Join(omitted, monitor.ErrExecutionOutcomeUnknown)
 	}
-	return errors.Join(omitted, c.acknowledge(c.control, "outcome", data, sequence))
+	if selectedLimit != nil {
+		runErr = errors.Join(runErr, selectedLimit)
+	}
+	return errors.Join(omitted, c.acknowledge(c.control, "outcome", data, sequence)), runErr
 }

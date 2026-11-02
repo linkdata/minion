@@ -731,7 +731,7 @@ func TestRunHTTPRejectsAssignmentBeforeWatchOrRunner(t *testing.T) {
 					t.Fatalf("expired outcome ACK was lost or leaked assigned key: %v", err)
 				}
 				outcome := <-outcomes
-				if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Result.Answer != "" || len(outcome.Result.Calls) != 0 || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || outcome.Failure.OutcomeUnknown {
+				if outcome.Sequence != 1 || !outcome.Result.matchesJob(job) || outcome.Result.Answer != "" || len(outcome.Result.Calls) != 0 || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || !outcome.Failure.RuntimeCap || outcome.Failure.OutcomeUnknown {
 					t.Fatalf("expired assignment fabricated work or unknown execution: %+v", outcome)
 				}
 			} else if !errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || requests.Load() != 1 || len(outcomes) != 0 {
@@ -821,7 +821,7 @@ func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
 						t.Fatalf("idle long pull changed a successful action: error=%v outcome=%+v", err, outcome)
 					}
 				} else {
-					if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || len(outcome.Result.Calls) != 0 {
+					if !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, context.DeadlineExceeded) || outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Deadline || !outcome.Failure.RuntimeCap || len(outcome.Result.Calls) != 0 {
 						t.Fatalf("late response renewed action or lost no-work receipt: error=%v outcome=%+v", err, outcome)
 					}
 				}
@@ -990,48 +990,61 @@ func TestRunHTTPRequiresWatchAdmissionBeforeRunner(t *testing.T) {
 	}
 }
 
-func TestRunHTTPBoundsStalledWatchHeadersByAcceptedExpiry(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		job := testJob(command.Comment)
-		binding := httpJobBinding(job)
-		watchEntered := make(chan struct{}, 1)
-		outcomes := make(chan httpOutcome, 1)
-		server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch r.URL.Path {
-			case "/next":
-				short := job
-				short.RuntimeBudget = time.Second
-				httpClientTestJSON(t, w, httpAssignment{Job: short, StopGrace: httpControlTimeout})
-			case "/cancel":
-				var value httpBinding
-				if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value != binding {
-					t.Errorf("invalid stalled watch: binding=%+v error=%v", value, err)
+func TestRunHTTPBoundsStalledWatchHeadersByFirstDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		worker, caller time.Duration
+		wantRuntimeCap bool
+	}{
+		{name: "worker cap", worker: time.Second, caller: 5 * time.Second, wantRuntimeCap: true},
+		{name: "caller deadline", worker: 5 * time.Second, caller: time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				binding := httpJobBinding(job)
+				watchEntered := make(chan struct{}, 1)
+				outcomes := make(chan httpOutcome, 1)
+				server := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch r.URL.Path {
+					case "/next":
+						short := job
+						short.RuntimeBudget = test.worker
+						httpClientTestJSON(t, w, httpAssignment{Job: short, StopGrace: httpControlTimeout})
+					case "/cancel":
+						var value httpBinding
+						if err := httpDecode(r.Body, httpControlBytes, &value); err != nil || value != binding {
+							t.Errorf("invalid stalled watch: binding=%+v error=%v", value, err)
+						}
+						watchEntered <- struct{}{}
+						<-r.Context().Done() // Deliberately never admit the watch with response headers.
+					case "/outcome":
+						var outcome httpOutcome
+						if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+							t.Error(err)
+						}
+						outcomes <- outcome
+						httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+					default:
+						t.Errorf("worker continued while watch headers were stalled: %s", r.URL.Path)
+						http.NotFound(w, r)
+					}
+				}))
+				ctx, cancel := context.WithTimeout(t.Context(), test.caller)
+				defer cancel()
+				err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
+				if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) ||
+					(test.wantRuntimeCap && ctx.Err() != nil || !test.wantRuntimeCap && !errors.Is(ctx.Err(), context.DeadlineExceeded)) ||
+					len(watchEntered) != 1 || len(outcomes) != 1 {
+					t.Fatalf("stalled watch outlived the accepted runtime or ran models: error=%v caller=%v watch=%d outcome=%d", err, ctx.Err(), len(watchEntered), len(outcomes))
 				}
-				watchEntered <- struct{}{}
-				<-r.Context().Done() // Deliberately never admit the watch with response headers.
-			case "/outcome":
-				var outcome httpOutcome
-				if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
-					t.Error(err)
+				outcome := <-outcomes
+				if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || outcome.Failure.RequestTransport || !outcome.Failure.Deadline || outcome.Failure.RuntimeCap != test.wantRuntimeCap || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
+					t.Fatalf("stalled watch fabricated execution or lost its admission deadline: %+v", outcome)
 				}
-				outcomes <- outcome
-				httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
-			default:
-				t.Errorf("worker continued while watch headers were stalled: %s", r.URL.Path)
-				http.NotFound(w, r)
-			}
-		}))
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		defer cancel()
-		err := RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, &Runner{runModel: forbidModel(t)})
-		if errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || ctx.Err() != nil || len(watchEntered) != 1 || len(outcomes) != 1 {
-			t.Fatalf("stalled watch outlived the accepted runtime or ran models: error=%v caller=%v watch=%d outcome=%d", err, ctx.Err(), len(watchEntered), len(outcomes))
-		}
-		outcome := <-outcomes
-		if outcome.Failure == nil || outcome.Failure.OutcomeUnknown || outcome.Failure.RequestTransport || !outcome.Failure.Deadline || !outcome.Failure.Terminal || len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
-			t.Fatalf("stalled watch fabricated execution or lost its admission deadline: %+v", outcome)
-		}
-	})
+			})
+		})
+	}
 }
 
 func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {

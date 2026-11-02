@@ -50,6 +50,12 @@ var ErrTerminalJob = errors.New("terminal job failure")
 // Such work must not be automatically repeated.
 var ErrExecutionOutcomeUnknown = errors.New("execution outcome unknown")
 
+// ErrCheckpointedWorkerRuntimeCap marks a worker cap claim bound to parent call receipts.
+var ErrCheckpointedWorkerRuntimeCap = errors.New("checkpointed worker runtime cap")
+
+// ErrCheckpointedParentDeadline marks a bound failed result after the parent's own deadline.
+var ErrCheckpointedParentDeadline = errors.New("checkpointed parent deadline")
+
 // ErrRequestTransport retains a request failure's infrastructure retry classification.
 var ErrRequestTransport = errors.New("request transport failure")
 
@@ -1384,7 +1390,8 @@ func decideAccepted(store *state.Store, job Job, outcome string, at time.Time) (
 		if accepted == nil || !AssignmentMatchesAccepted(job, *accepted) {
 			return fmt.Errorf("accepted action changed before terminal decision")
 		}
-		if outcome != "canceled" && !at.Before(job.Deadline) {
+		// An unverified execution stays lost; an earlier saved stop still wins below.
+		if outcome != "canceled" && outcome != "lost" && !at.Before(job.Deadline) {
 			outcome = "expired"
 		}
 		var err error
@@ -1426,6 +1433,7 @@ func (m *Monitor) resolveSelectedDecision(ctx context.Context, store *state.Stor
 	}); err != nil {
 		return fmt.Errorf("%w: confirm terminal decision: %w", ErrAcceptanceState, err)
 	}
+	m.logf("confirmed accepted terminal decision job=%s outcome=%s", job.ID, decision.Outcome)
 	m.completeTerminalUsage(job, decision)
 	switch decision.Outcome {
 	case "succeeded":
@@ -1457,6 +1465,7 @@ func (m *Monitor) discardAccepted(store *state.Store) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 	}
+	m.logf("confirmed accepted terminal decision job=%s outcome=%s", accepted.JobID, decision.Outcome)
 	m.completeTerminalUsage(jobFromAccepted(*accepted), decision)
 	processed, hadProcessed := store.Data.Processed[accepted.JobID]
 	failure, hadFailure := store.Data.JobFailures[accepted.JobID]
@@ -1781,20 +1790,40 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		}
 		return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
 	}
-	if !time.Now().Before(job.Deadline) {
+	resolveLost := func() error {
+		// Without a saved stop or result, delivered work is unverified after restart.
+		at := m.now().UTC()
+		decision, err := decideAccepted(store, job, "lost", at)
+		if err != nil {
+			return err
+		}
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+	}
+	overdue := !time.Now().Before(job.Deadline)
+	if accepted.FixedRefusal != "" {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
-	if accepted.FixedRefusal != "" {
+	needsResult := accepted.Assigned || failure.ModelCallStarted
+	if needsResult && !accepted.ResultReady {
+		return resolveLost()
+	}
+	if overdue && !needsResult {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	stored, err := store.HasAcceptedResult()
 	if err != nil {
 		return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
 	}
+	if needsResult && !stored {
+		return resolveLost()
+	}
+	if overdue {
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
 	if stored && accepted.ResultReady {
 		return m.recoverStoredResult(ctx, store, job)
 	}
-	if accepted.Assigned || accepted.Terminal || failure.ModelCallStarted || !time.Now().Before(job.Deadline) {
+	if accepted.Terminal || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
@@ -1942,7 +1971,8 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	recordAssignedStop := func(stoppedAt time.Time, cause error) error {
 		parentDeadline, _ := ctx.Deadline()
 		outcome := selectedStopOutcome(cause, stoppedAt, job.Deadline, parentDeadline)
-		return store.WithLock(func() error {
+		var decision state.TerminalDecision
+		err := store.WithLock(func() error {
 			accepted := store.Data.Accepted
 			if accepted == nil {
 				// Assignment validation may have durably discarded this attempt
@@ -1960,12 +1990,17 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			if !accepted.Assigned {
 				return nil
 			}
-			_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, stoppedAt)
+			var err error
+			decision, err = store.DecideTerminalLocked(job.ID, job.AttemptID, outcome, stoppedAt)
 			if err != nil {
 				return fmt.Errorf("%w: %w", ErrAcceptanceState, err)
 			}
 			return nil
 		})
+		if err == nil && decision.Outcome != "" {
+			m.logf("saved accepted stop decision job=%s outcome=%s", job.ID, decision.Outcome)
+		}
+		return err
 	}
 	stopWorker := func(fallback error) error {
 		completionMu.Lock()
@@ -2347,6 +2382,9 @@ func selectedStopOutcome(cause error, stoppedAt, deadline, parentDeadline time.T
 // with retryable publication failure is left for the normal recovery path.
 func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, completedAt, parentDeadline time.Time) (string, error) {
 	if result == nil && cause == nil {
+		if !parentDeadline.IsZero() && parentDeadline.Before(job.Deadline) && !completedAt.Before(parentDeadline) {
+			return "canceled", nil // The earlier caller deadline passed before completion.
+		}
 		return "succeeded", nil
 	}
 	if errors.Is(result, ErrAcceptanceState) || errors.Is(result, ErrAcceptedDiscarded) || errors.Is(result, ErrAcceptedRetry) {
@@ -2373,10 +2411,12 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 	}); err != nil {
 		return "", fmt.Errorf("%w: inspect result after worker completion: %w", ErrAcceptanceState, err)
 	}
+	// The cause is sampled after completedAt; a deadline may fire between them.
+	beforeDeadlines := completedAt.Before(job.Deadline) &&
+		(parentDeadline.IsZero() || completedAt.Before(parentDeadline))
 	if result == nil {
-		if errors.Is(cause, context.DeadlineExceeded) && completedAt.Before(job.Deadline) &&
-			(parentDeadline.IsZero() || !parentDeadline.Before(job.Deadline)) {
-			return "succeeded", nil // The original deadline fired after the run returned.
+		if errors.Is(cause, context.DeadlineExceeded) && beforeDeadlines {
+			return "succeeded", nil // The deadline fired after the run returned.
 		}
 		if assigned {
 			return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
@@ -2389,13 +2429,35 @@ func selectedCompletedOutcome(store *state.Store, job Job, result, cause error, 
 		}
 		return "", nil
 	}
+	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
+		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {
+		return "", nil // A canceled unused reservation still refunds its attempt.
+	}
+	if assigned && !parentDeadline.IsZero() && parentDeadline.Before(job.Deadline) && !completedAt.Before(parentDeadline) {
+		return "canceled", nil // The earlier caller deadline passed before completion.
+	}
+	if errors.Is(cause, context.DeadlineExceeded) && beforeDeadlines {
+		cause = nil // The deadline signal arrived after the worker returned.
+	}
 	if assigned && (errors.Is(result, context.Canceled) || errors.Is(cause, context.Canceled) ||
 		(errors.Is(result, context.DeadlineExceeded) && errors.Is(cause, context.DeadlineExceeded))) {
 		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
-	if !assigned && !modelCallStarted && errors.Is(result, context.Canceled) &&
-		errors.Is(cause, context.Canceled) && !errors.Is(result, ErrPostModelPublication) {
-		return "", nil // A canceled unused reservation still refunds its attempt.
+	if assigned && errors.Is(result, ErrCheckpointedWorkerRuntimeCap) {
+		if beforeDeadlines {
+			return "expired", nil
+		}
+		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
+	}
+	if assigned && errors.Is(result, ErrCheckpointedParentDeadline) {
+		return selectedStopOutcome(context.DeadlineExceeded, completedAt, job.Deadline, parentDeadline), nil
+	}
+	var inactivity interface{ ExecutorInactivity() bool }
+	if assigned && !errors.Is(result, ErrTerminalJob) && errors.As(result, &inactivity) && inactivity.ExecutorInactivity() {
+		if beforeDeadlines && (cause == nil || errors.Is(cause, context.DeadlineExceeded)) {
+			return "inactivity", nil
+		}
+		return selectedStopOutcome(cause, completedAt, job.Deadline, parentDeadline), nil
 	}
 	if stored {
 		if !errors.Is(result, ErrTerminalJob) || errors.Is(result, context.Canceled) ||
@@ -2907,11 +2969,13 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 	}
 	var access state.AccessDisposition
 	var accessAttemptID string
+	var outcome string
 	err = store.WithLock(func() error {
 		processed, hadProcessed := store.Data.Processed[job.ID]
 		previousFailure, hadFailure := store.Data.JobFailures[job.ID]
 		previousAccepted := store.Data.Accepted
 		previousDecision := store.Data.TerminalDecisions[job.ID]
+		outcome = previousDecision.Outcome
 		accessChanged := false
 		if accepted != nil && unresolvedReason != "" {
 			if previousDecision.AttemptID != accepted.AttemptID || accepted.SourceKey == "" {
@@ -2959,12 +3023,16 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 				job.ID, access.Repository, access.SourceURL, access.SourceKey, accessAttemptID,
 				access.Reason, access.ReplyState, access.OperatorAction)
 		}
+		if outcome == "" {
+			m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
+		} else {
+			m.logf("stop retrying failed %s from %s outcome=%s", job.Command.Action, itemLocation(job.Source), outcome)
+		}
 		if accepted != nil {
 			if clearErr := store.ClearAcceptedResult(); clearErr != nil {
 				return fmt.Errorf("%w: clear terminal result: %w", ErrAcceptanceState, clearErr)
 			}
 		}
-		m.logf("stop retrying failed %s from %s", job.Command.Action, itemLocation(job.Source))
 	}
 	return err
 }

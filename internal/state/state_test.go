@@ -79,6 +79,7 @@ func TestTerminalDecisionsPersistAcrossOpen(t *testing.T) {
 	}
 	want := map[string]TerminalDecision{
 		"job-success": {AttemptID: "attempt-1", Outcome: "succeeded", DecidedAt: at},
+		"job-idle":    {AttemptID: "attempt-6", Outcome: "inactivity", DecidedAt: at},
 		"job-expiry":  {AttemptID: "attempt-2", Outcome: "expired", DecidedAt: at},
 		"job-stop":    {AttemptID: "attempt-3", Outcome: "canceled", DecidedAt: at},
 		"job-loss":    {AttemptID: "attempt-4", Outcome: "lost", DecidedAt: at},
@@ -313,7 +314,7 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 	var first, second TerminalDecision
 	if err := store.WithLock(func() error {
 		var err error
-		first, err = store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "expired", accepted.Deadline)
+		first, err = store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "inactivity", accepted.AcceptedAt.Add(time.Minute))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -325,7 +326,7 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Outcome != "expired" || !store.Data.Accepted.Terminal {
+	if first != second || first.Outcome != "inactivity" || !store.Data.Accepted.Terminal {
 		t.Fatalf("later outcome changed first terminal decision: first=%+v second=%+v accepted=%+v", first, second, store.Data.Accepted)
 	}
 	if err := store.WithLock(func() error {

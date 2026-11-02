@@ -129,7 +129,7 @@ type AccessDisposition struct {
 
 func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 	switch decision.Outcome {
-	case "succeeded", "expired", "canceled", "lost", "failed":
+	case "succeeded", "inactivity", "expired", "canceled", "lost", "failed":
 	default:
 		return false
 	}

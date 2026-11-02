@@ -77,6 +77,39 @@ func TestHTTPFailurePreservesFiniteCauses(t *testing.T) {
 	}
 }
 
+func TestHTTPFailureCarriesOnlyInactivityLabelFromWorker(t *testing.T) {
+	failure := roundTripHTTPFailure(t, newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity)))
+	if !failure.Inactivity || !failure.Terminal || failure.Deadline {
+		t.Fatalf("inactivity changed across wire: %+v", failure)
+	}
+	workerErr := failure.workerErr()
+	var claim interface{ ExecutorInactivity() bool }
+	if !errors.As(workerErr, &claim) || !claim.ExecutorInactivity() ||
+		errors.Is(workerErr, monitor.ErrTerminalJob) || errors.Is(workerErr, context.DeadlineExceeded) {
+		t.Fatalf("worker claim gained parent policy authority: %v", workerErr)
+	}
+}
+
+func TestHTTPFailureCarriesRuntimeCapOnlyAsWorkerClaim(t *testing.T) {
+	failure := roundTripHTTPFailure(t, newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap)))
+	if !failure.RuntimeCap || !failure.Deadline || !failure.Terminal || failure.Inactivity {
+		t.Fatalf("worker runtime cap changed across wire: %+v", failure)
+	}
+	workerErr := failure.workerErr()
+	var claim *workerFailureError
+	if !errors.As(workerErr, &claim) || !claim.failure.RuntimeCap ||
+		errors.Is(workerErr, monitor.ErrTerminalJob) || errors.Is(workerErr, context.DeadlineExceeded) {
+		t.Fatalf("worker cap claim gained parent policy authority: %v", workerErr)
+	}
+}
+
+func TestHTTPFailureGenericDeadlineIsNotRuntimeCap(t *testing.T) {
+	failure := roundTripHTTPFailure(t, newHTTPFailure(context.DeadlineExceeded))
+	if !failure.Deadline || failure.RuntimeCap {
+		t.Fatalf("generic deadline became worker runtime cap: %+v", failure)
+	}
+}
+
 func TestHTTPFailurePreservesRequestTransportPolicyWithoutReconstructingURL(t *testing.T) {
 	for _, unknown := range []bool{false, true} {
 		t.Run(fmt.Sprint(unknown), func(t *testing.T) {
@@ -96,17 +129,26 @@ func TestHTTPFailurePreservesRequestTransportPolicyWithoutReconstructingURL(t *t
 
 func TestHTTPFailureRejectsMalformedDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
-		name, message string
+		name, message, observed string
 	}{
-		{"oversized diagnostic", strings.Repeat("x", httpFailureMessageLimit+1)},
-		{"invalid diagnostic UTF8", "bad\xff"},
+		{name: "oversized diagnostic", message: strings.Repeat("x", httpFailureMessageLimit+1)},
+		{name: "invalid diagnostic UTF8", message: "bad\xff"},
+		{name: "oversized observed diagnostic", message: "limit", observed: strings.Repeat("x", httpFailureMessageLimit+1)},
+		{name: "invalid observed diagnostic UTF8", message: "limit", observed: "bad\xff"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			failure := &httpFailure{Message: tc.message}
+			failure := &httpFailure{Message: tc.message, ObservedMessage: tc.observed}
 			if failure.validate() == nil {
 				t.Fatal("malformed failure accepted")
 			}
 		})
+	}
+}
+
+func TestHTTPFailureRejectsConflictingWorkerLimits(t *testing.T) {
+	failure := &httpFailure{Message: "worker limit", Inactivity: true, RuntimeCap: true}
+	if err := failure.validate(); err == nil {
+		t.Fatal("conflicting worker limit claims accepted")
 	}
 }
 
@@ -141,16 +183,24 @@ func TestHTTPFailureBoundsDiagnosticsWithoutChangingOrdinaryFailurePolicy(t *tes
 
 func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 	failure := &httpFailure{
-		Message:  strings.Repeat("\x01", httpFailureMessageLimit),
-		Terminal: true, Canceled: true, Deadline: true, Unsafe: true, OutcomeUnknown: true,
+		Message:         strings.Repeat("\x01", httpFailureMessageLimit),
+		ObservedMessage: strings.Repeat("\x01", httpFailureMessageLimit),
+		Terminal:        true, Canceled: true, Deadline: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
 		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true,
 	}
 	if err := failure.validate(); err != nil {
 		t.Fatal(err)
 	}
-	encoded, err := json.Marshal(failure)
-	if err != nil || len(encoded)+1 > 128<<10 {
-		t.Fatalf("finite failure exceeds shared control cap including newline: bytes=%d error=%v", len(encoded)+1, err)
+	encoded, err := httpEncode(failure, httpControlBytes)
+	if err != nil {
+		t.Fatalf("finite failure exceeds shared control cap: %v", err)
+	}
+	var decoded httpFailure
+	if err := httpDecodeBytes(encoded, httpControlBytes, &decoded); err != nil {
+		t.Fatalf("finite failure failed control round trip: %v", err)
+	}
+	if decoded != *failure {
+		t.Fatal("finite failure changed across control round trip")
 	}
 }
 

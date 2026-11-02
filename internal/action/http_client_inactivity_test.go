@@ -109,8 +109,68 @@ func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	}
 	got := f.parent.result(t)
 	var reported *workerFailureError
-	if !errors.As(got.err, &reported) || !reported.failure.Terminal || reported.failure.Deadline || len(got.result.Calls) != 1 {
+	if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Inactivity ||
+		reported.failure.Deadline || len(got.result.Calls) != 1 {
 		t.Fatalf("parent lost terminal inactivity outcome: error=%v result=%+v", got.err, got.result)
+	}
+}
+
+func TestWatchAdmissionDeadlineUsesAbsoluteOrder(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, test := range []struct {
+		name                string
+		hard, idle, control time.Duration
+		want                time.Duration
+		inactivityFirst     bool
+	}{
+		{"hard before idle by a nanosecond", 10 * time.Second, 10*time.Second + time.Nanosecond, 30 * time.Second, 10 * time.Second, false},
+		{"hard and idle tie", 10 * time.Second, 10 * time.Second, 30 * time.Second, 10 * time.Second, false},
+		{"idle before hard", 10*time.Second + time.Nanosecond, 10 * time.Second, 30 * time.Second, 10 * time.Second, true},
+		{"control first", time.Minute, time.Minute, 30 * time.Second, 30 * time.Second, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, inactivityFirst := watchAdmissionDeadline(now.Add(test.hard), now.Add(test.idle), now.Add(test.control))
+			if !got.Equal(now.Add(test.want)) || inactivityFirst != test.inactivityFirst {
+				t.Fatalf("watch admission deadline=%v inactivity=%t, want deadline=%v inactivity=%t",
+					got, inactivityFirst, now.Add(test.want), test.inactivityFirst)
+			}
+		})
+	}
+}
+
+func TestWorkerLimitUsesAbsoluteDeadlineOrder(t *testing.T) {
+	start := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name       string
+		cause      error
+		hard, idle time.Duration
+		at         time.Duration
+		ownCap     bool
+		want       workerLimit
+	}{
+		{name: "inactivity elapsed first but hard callback won", cause: errExecutorRuntimeCap, hard: 10 * time.Second, idle: 9 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitInactivity},
+		{name: "hard elapsed first but inactivity callback won", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "hard wins exact tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, at: 10 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "only inactivity elapsed", hard: 11 * time.Second, idle: 9 * time.Second, at: 10 * time.Second, ownCap: true, want: workerLimitInactivity},
+		{name: "caller owns earlier hard deadline", cause: context.DeadlineExceeded, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
+		{name: "parent cancellation remains first", cause: context.Canceled, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitNone},
+		{name: "inner deadline before limits", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 11 * time.Second, at: 9 * time.Second, ownCap: true, want: workerLimitNone},
+		{name: "no callback after inactivity before runtime cap", hard: 7 * time.Second, idle: 5 * time.Second, at: 8 * time.Second, ownCap: true, want: workerLimitInactivity},
+		{name: "no callback after runtime cap before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, at: 8 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "no callback after runtime cap tie", hard: 5 * time.Second, idle: 5 * time.Second, at: 8 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "no callback after caller deadline before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, at: 8 * time.Second, want: workerLimitCallerDeadline},
+		{name: "caller before delayed inactivity callback", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
+		{name: "caller and inactivity tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
+		{name: "inactivity before delayed caller callback", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 9 * time.Second, at: 12 * time.Second, want: workerLimitInactivity},
+		{name: "inactivity before caller with no callback", hard: 10 * time.Second, idle: 9 * time.Second, at: 12 * time.Second, want: workerLimitInactivity},
+		{name: "only caller deadline elapsed with no callback", hard: 10 * time.Second, idle: 20 * time.Second, at: 11 * time.Second, want: workerLimitCallerDeadline},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := selectWorkerLimit(test.cause, start.Add(test.at), start.Add(test.hard), start.Add(test.idle), test.ownCap)
+			if got != test.want {
+				t.Fatalf("worker limit = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -118,10 +178,12 @@ func TestAdmissionFailureKeepsOverdueInactivity(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(t.Context())
 	defer cancel(nil)
 	inactivity := startInactivityTimer(time.Now().Add(-time.Minute), time.Second, cancel)
-	err := admissionFailure(errors.Join(monitor.ErrRequestTransport, errors.New("watch failed")), ctx, inactivity)
+	observedAt := time.Now()
+	err := admissionFailure(errors.Join(monitor.ErrRequestTransport, errors.New("watch failed")),
+		context.Cause(ctx), inactivity, observedAt, observedAt.Add(time.Minute), true)
 	failure := newHTTPFailure(err)
 	if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
-		failure == nil || !failure.Terminal || failure.Deadline || !failure.RequestTransport {
+		failure == nil || !failure.Terminal || !failure.Inactivity || failure.Deadline || !failure.RequestTransport {
 		t.Fatalf("overdue admission failure lost terminal inactivity: error=%v failure=%+v", err, failure)
 	}
 }
@@ -173,11 +235,96 @@ func TestRunHTTPExpiredAssignmentSkipsWatchAndModel(t *testing.T) {
 		}
 		if !errors.Is(err, errExecutorInactivity) || !errors.Is(err, monitor.ErrTerminalJob) ||
 			errors.Is(err, context.DeadlineExceeded) || errors.Is(err, monitor.ErrRequestTransport) ||
-			outcome.Failure == nil || !outcome.Failure.Terminal || outcome.Failure.Deadline ||
+			outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Inactivity || outcome.Failure.Deadline ||
 			outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown {
 			t.Fatalf("overdue assignment lost terminal inactivity: error=%v outcome=%+v", err, outcome)
 		}
 	})
+}
+
+func TestRunHTTPEarlyOutcomesKeepCallerCauseAndRedactKey(t *testing.T) {
+	const key = "assigned-key-leak-canary"
+	for _, test := range []struct {
+		name        string
+		cause       error
+		delay       time.Duration
+		cancelAfter time.Duration
+	}{
+		{name: "post-pull canceled", cause: context.Canceled, delay: 12 * time.Second, cancelAfter: time.Second},
+		{name: "post-pull deadline", cause: context.DeadlineExceeded, delay: 12 * time.Second, cancelAfter: time.Second},
+		{name: "pre-watch canceled", cause: context.Canceled, delay: time.Second, cancelAfter: time.Second / 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.RuntimeBudget = 10 * time.Second
+				job.InactivityTimeout = 5 * time.Second
+				binding := httpJobBinding(job)
+				pullClosed := make(chan struct{})
+				parent, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				// Deadline is queried after assignment validation; hold the seam across cancellation.
+				ctx := &delayedHTTPDeadlineContext{Context: parent, ready: pullClosed, delay: test.delay}
+				go func() {
+					<-pullClosed
+					time.Sleep(test.cancelAfter)
+					cancel(errors.Join(test.cause, errors.New("caller cause contains "+key)))
+				}()
+				var outcome httpOutcome
+				var outcomeWire []byte
+				var watchCalls, modelCalls int
+				respond := func(value any) (*http.Response, error) {
+					data, err := httpEncode(value, httpJobBytes)
+					if err != nil {
+						return nil, err
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(data))}, nil
+				}
+				client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					switch r.URL.Path {
+					case "/next":
+						response, err := respond(httpAssignment{Job: job, StopGrace: httpControlTimeout,
+							Credentials: WorkerCredentials{CodexAPIKey: key}})
+						if err == nil {
+							response.Body = &httpPullCloseSignal{ReadCloser: response.Body, ready: pullClosed}
+						}
+						return response, err
+					case "/cancel":
+						watchCalls++
+						return nil, errors.New("expired assignment opened cancellation watch")
+					case "/outcome":
+						var err error
+						outcomeWire, err = io.ReadAll(r.Body)
+						if err != nil {
+							return nil, err
+						}
+						if err := httpDecode(bytes.NewReader(outcomeWire), httpOutcomeBytes, &outcome); err != nil {
+							return nil, err
+						}
+						return respond(httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+					default:
+						return nil, errors.New("unexpected worker request")
+					}
+				})}
+				runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					modelCalls++
+					return aicli.Result{}, errors.New("expired assignment started model")
+				}}
+				err := RunHTTP(ctx, client, "http://worker.test", job.Identity.ExecutorID, runner)
+				wantDeadline := test.cause == context.DeadlineExceeded
+				if watchCalls != 0 || modelCalls != 0 || !errors.Is(err, test.cause) ||
+					bytes.Contains([]byte(err.Error()), []byte(key)) || bytes.Contains(outcomeWire, []byte(key)) ||
+					errors.Is(err, errExecutorInactivity) || errors.Is(err, errExecutorRuntimeCap) ||
+					errors.Is(err, monitor.ErrTerminalJob) != wantDeadline ||
+					outcome.Failure == nil || outcome.Failure.Canceled == wantDeadline ||
+					outcome.Failure.Deadline != wantDeadline || outcome.Failure.Terminal != wantDeadline ||
+					outcome.Failure.Inactivity || outcome.Failure.RuntimeCap || outcome.Failure.OutcomeUnknown ||
+					outcome.Failure.RequestTransport {
+					t.Fatalf("earlier caller cause lost: error=%v outcome=%+v watch=%d model=%d", err, outcome, watchCalls, modelCalls)
+				}
+			})
+		})
+	}
 }
 
 func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {
@@ -227,7 +374,7 @@ func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {
 		}
 		select {
 		case outcome := <-outcomes:
-			if outcome.Failure == nil || !outcome.Failure.Terminal || outcome.Failure.Deadline ||
+			if outcome.Failure == nil || !outcome.Failure.Terminal || !outcome.Failure.Inactivity || outcome.Failure.Deadline ||
 				outcome.Failure.RequestTransport || outcome.Failure.OutcomeUnknown ||
 				len(outcome.Result.Calls) != 0 || outcome.Result.Answer != "" {
 				t.Fatalf("watch admission reported wrong outcome: %+v", outcome)
@@ -324,12 +471,14 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		renew()
 		time.Sleep(3 * time.Second)
 		err := <-f.done
-		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errExecutorRuntimeCap) ||
+			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
 			t.Fatalf("hard runtime did not cap chatty model: %v", err)
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
-		if !errors.As(got.err, &reported) || !reported.failure.Deadline || len(got.result.Calls) != 1 {
+		if !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
+			reported.failure.Inactivity || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
 		}
 	})

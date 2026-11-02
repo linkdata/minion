@@ -1,10 +1,14 @@
 package monitor
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -12,6 +16,11 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
+
+type testExecutorInactivity struct{}
+
+func (testExecutorInactivity) Error() string            { return "worker reported inactivity" }
+func (testExecutorInactivity) ExecutorInactivity() bool { return true }
 
 func TestRevalidatePublicationChecksAssignmentAndLiveAuthority(t *testing.T) {
 	for _, assigned := range []bool{false, true} {
@@ -167,6 +176,8 @@ func (*deadlineProbeAction) WaitCapacity(context.Context) error { return nil }
 func TestSelectedDeadlineIsDurableBeforeWorkerCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m, store, job, gh, _ := assignmentValidationFixture(t)
+		var logs bytes.Buffer
+		m.Logger = log.New(&logs, "", 0)
 		now := time.Now().UTC()
 		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = now, now.Add(time.Minute)
 		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: now.Add(time.Minute)}
@@ -194,6 +205,9 @@ func TestSelectedDeadlineIsDurableBeforeWorkerCleanup(t *testing.T) {
 		if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "expired" {
 			t.Fatalf("expiry was not saved while worker cleanup was blocked: %+v", store.Data)
 		}
+		if !strings.Contains(logs.String(), "saved accepted stop decision job="+job.ID+" outcome=expired") {
+			t.Fatalf("saved expiry was not logged before worker cleanup: %s", logs.String())
+		}
 		close(handler.release)
 		released = true
 		if outcome := <-handler.observed; outcome != "expired" {
@@ -209,6 +223,8 @@ func TestSelectedDeadlineIsDurableBeforeWorkerCleanup(t *testing.T) {
 func TestSelectedCancellationIsDurableBeforeWorkerCleanup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		m, store, job, gh, _ := assignmentValidationFixture(t)
+		var logs bytes.Buffer
+		m.Logger = log.New(&logs, "", 0)
 		gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(job.Source.UpdatedAt), nil }
 		handler := &deadlineProbeAction{store: store, entered: make(chan struct{}, 1), stopped: make(chan struct{}, 1),
 			release: make(chan struct{}), observed: make(chan string, 1)}
@@ -229,6 +245,9 @@ func TestSelectedCancellationIsDurableBeforeWorkerCleanup(t *testing.T) {
 		<-handler.stopped
 		if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "canceled" {
 			t.Fatalf("cancellation was not saved while worker cleanup was blocked: %+v", store.Data)
+		}
+		if !strings.Contains(logs.String(), "saved accepted stop decision job="+job.ID+" outcome=canceled") {
+			t.Fatalf("saved cancellation was not logged before worker cleanup: %s", logs.String())
 		}
 		close(handler.release)
 		released = true
@@ -311,12 +330,15 @@ func TestSelectedTerminalResultBeforeDeadlineSurvivesSlowInvitationCheck(t *test
 		outcome string
 	}{
 		{"failed", ErrTerminalJob, "failed"},
+		{"inactivity", testExecutorInactivity{}, "inactivity"},
 		{"unknown", ErrExecutionOutcomeUnknown, "lost"},
 		{"canceled", context.Canceled, "canceled"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m, store, job, gh, _ := assignmentValidationFixture(t)
+				var logs bytes.Buffer
+				m.Logger = log.New(&logs, "", 0)
 				now := time.Now().UTC()
 				job.AcceptedAt, job.Deadline = now, now.Add(time.Second)
 				store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
@@ -354,7 +376,8 @@ func TestSelectedTerminalResultBeforeDeadlineSurvivesSlowInvitationCheck(t *test
 				err := m.runSelectedWithControls(t.Context(), store, job, "", nil, run,
 					func(err error) error { return m.completeSelected(t.Context(), store, job, now, err) })
 				if err != nil || observed != test.outcome || store.Data.TerminalDecisions[job.ID].Outcome != test.outcome ||
-					store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
+					store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 ||
+					!strings.Contains(logs.String(), "outcome="+test.outcome) {
 					t.Fatalf("early %s became expiry after invitation check: err=%v observed=%q state=%+v comments=%v", test.name, err, observed, store.Data, gh.comments)
 				}
 			})
@@ -362,13 +385,18 @@ func TestSelectedTerminalResultBeforeDeadlineSurvivesSlowInvitationCheck(t *test
 	}
 }
 
-func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
-	for _, earlyParentDeadline := range []bool{false, true} {
-		name := "user cancellation"
-		if earlyParentDeadline {
-			name = "earlier parent deadline"
-		}
-		t.Run(name, func(t *testing.T) {
+func TestSelectedResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		earlyParentDeadline bool
+		result              error
+	}{
+		{name: "user cancellation, nil result"},
+		{name: "user cancellation, canceled result", result: context.Canceled},
+		{name: "earlier parent deadline, nil result", earlyParentDeadline: true},
+		{name: "earlier parent deadline, canceled result", earlyParentDeadline: true, result: context.Canceled},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				m, store, job, gh, _ := assignmentValidationFixture(t)
 				now := time.Now().UTC()
@@ -381,7 +409,7 @@ func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
 				}
 				parent := t.Context()
 				var stop context.CancelFunc
-				if earlyParentDeadline {
+				if test.earlyParentDeadline {
 					parent, stop = context.WithDeadline(parent, now.Add(500*time.Millisecond))
 				} else {
 					parent, stop = context.WithCancel(parent)
@@ -412,12 +440,12 @@ func TestSelectedNilResultAfterEarlyParentStopStaysCanceled(t *testing.T) {
 					}); err != nil {
 						return err
 					}
-					if earlyParentDeadline {
+					if test.earlyParentDeadline {
 						time.Sleep(600 * time.Millisecond)
 					} else {
 						stop()
 					}
-					return nil // Cleanup returned success after the stop was already requested.
+					return test.result // Cleanup returned after the stop was already requested.
 				}
 				err := m.runSelectedWithControls(parent, store, job, "", nil, run,
 					func(err error) error { return m.completeSelected(parent, store, job, now, err) })
@@ -467,6 +495,7 @@ func TestSelectedTerminalErrorBeforeLateParentStopKeepsItsOutcome(t *testing.T) 
 		outcome string
 	}{
 		{"failed", ErrTerminalJob, "failed"},
+		{"inactivity", testExecutorInactivity{}, "inactivity"},
 		{"lost", ErrExecutionOutcomeUnknown, "lost"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -646,9 +675,18 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 	if err != nil || outcome != "succeeded" {
 		t.Fatalf("pre-deadline completion lost to later deadline signal: outcome=%q err=%v", outcome, err)
 	}
+	earlyCompletedAt := job.Deadline.Add(-time.Second)
+	outcome, err = selectedCompletedOutcome(store, job, nil, context.DeadlineExceeded, earlyCompletedAt, earlyCompletedAt.Add(time.Nanosecond))
+	if err != nil || outcome != "succeeded" {
+		t.Fatalf("pre-parent-deadline completion lost to later deadline signal: outcome=%q err=%v", outcome, err)
+	}
 	outcome, err = selectedCompletedOutcome(store, job, nil, context.DeadlineExceeded, completedAt, completedAt.Add(-time.Second))
 	if err != nil || outcome != "canceled" {
 		t.Fatalf("earlier parent deadline lost to completion: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, nil, nil, completedAt, completedAt.Add(-time.Second))
+	if err != nil || outcome != "canceled" {
+		t.Fatalf("earlier parent deadline before context callback lost to completion: outcome=%q err=%v", outcome, err)
 	}
 	outcome, err = selectedCompletedOutcome(store, job, context.Canceled, context.DeadlineExceeded, job.Deadline.Add(time.Second), time.Time{})
 	if err != nil || outcome != "expired" {
@@ -659,33 +697,242 @@ func TestSelectedCompletedOutcomeUsesRunTimeBeforeLaterDeadlineSignal(t *testing
 	if err != nil || outcome != "canceled" {
 		t.Fatalf("earlier parent deadline with worker error became failure: outcome=%q err=%v", outcome, err)
 	}
-	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, nil, parentDeadline, parentDeadline)
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, nil, earlyCompletedAt, earlyCompletedAt.Add(500*time.Millisecond))
 	if err != nil || outcome != "failed" {
 		t.Fatalf("inner deadline with live action context became cancellation: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, nil, parentDeadline, parentDeadline)
+	if err != nil || outcome != "canceled" {
+		t.Fatalf("elapsed parent deadline before callback became inner failure: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, context.DeadlineExceeded, earlyCompletedAt, time.Time{})
+	if err != nil || outcome != "failed" {
+		t.Fatalf("inner deadline became a later hard-cap signal: outcome=%q err=%v", outcome, err)
+	}
+	outcome, err = selectedCompletedOutcome(store, job, context.DeadlineExceeded, context.DeadlineExceeded, earlyCompletedAt, earlyCompletedAt.Add(time.Nanosecond))
+	if err != nil || outcome != "failed" {
+		t.Fatalf("inner deadline became a later parent-deadline signal: outcome=%q err=%v", outcome, err)
+	}
+}
+
+func TestSelectedCompletedOutcomeRetainsUndeliveredCancellationRefund(t *testing.T) {
+	_, store, job, _, _ := assignmentValidationFixture(t)
+	completedAt := job.Deadline.Add(-time.Second)
+	parentDeadline := completedAt.Add(-time.Second)
+	outcome, err := selectedCompletedOutcome(store, job, context.Canceled, context.Canceled, completedAt, parentDeadline)
+	if err != nil || outcome != "" {
+		t.Fatalf("undelivered cancellation lost its refund after an earlier parent deadline: outcome=%q err=%v", outcome, err)
+	}
+}
+
+func TestSelectedInactivityOutcomeKeepsParentStopAndHardCap(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		result, cause       error
+		parentDeadlineDelta time.Duration
+		late                bool
+		want                string
+	}{
+		{name: "worker inactivity", result: testExecutorInactivity{}, want: "inactivity"},
+		{name: "worker runtime cap before parent", result: ErrCheckpointedWorkerRuntimeCap, want: "expired"},
+		{name: "worker runtime cap after parent cancel", result: ErrCheckpointedWorkerRuntimeCap, cause: context.Canceled, want: "canceled"},
+		{name: "worker runtime cap after earlier parent deadline", result: ErrCheckpointedWorkerRuntimeCap, parentDeadlineDelta: -time.Second, want: "canceled"},
+		{name: "worker runtime cap with unknown receipt", result: errors.Join(ErrExecutionOutcomeUnknown, ErrCheckpointedWorkerRuntimeCap), want: "lost"},
+		{name: "parent deadline after checkpointed result", result: ErrCheckpointedParentDeadline, late: true, want: "expired"},
+		{name: "earlier caller deadline after checkpointed result", result: ErrCheckpointedParentDeadline, parentDeadlineDelta: -time.Second, late: true, want: "canceled"},
+		{name: "parent deadline with unknown receipt", result: errors.Join(ErrExecutionOutcomeUnknown, ErrCheckpointedParentDeadline), late: true, want: "lost"},
+		{name: "generic inner deadline", result: context.DeadlineExceeded, want: "failed"},
+		{name: "parent cancellation", result: testExecutorInactivity{}, cause: context.Canceled, want: "canceled"},
+		{name: "earlier parent deadline", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: -time.Second, want: "canceled"},
+		{name: "earlier parent deadline before context callback", result: testExecutorInactivity{}, parentDeadlineDelta: -time.Second, want: "canceled"},
+		{name: "hard deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, want: "inactivity"},
+		{name: "parent deadline sampled after inactivity", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, parentDeadlineDelta: time.Second, want: "inactivity"},
+		{name: "hard deadline at completion", result: testExecutorInactivity{}, cause: context.DeadlineExceeded, late: true, want: "expired"},
+		{name: "earlier parent deadline before callback after hard cap", result: testExecutorInactivity{}, parentDeadlineDelta: -time.Second, late: true, want: "canceled"},
+		{name: "earlier parent deadline after terminal worker failure", result: ErrTerminalJob, parentDeadlineDelta: -time.Second, late: true, want: "canceled"},
+		{name: "original hard cap", result: testExecutorInactivity{}, late: true, want: "expired"},
+		{name: "unknown execution", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), want: "lost"},
+		{name: "late missing call receipt", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), late: true, want: "lost"},
+		{name: "late missing call receipt after parent deadline", result: errors.Join(ErrExecutionOutcomeUnknown, testExecutorInactivity{}), parentDeadlineDelta: -time.Second, late: true, want: "lost"},
+		{name: "parent checkpoint failure", result: errors.Join(ErrTerminalJob, testExecutorInactivity{}), want: "failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, store, job, _, _ := assignmentValidationFixture(t)
+			completedAt := time.Now().UTC()
+			job.Deadline = completedAt.Add(time.Minute)
+			store.Data.Accepted.Deadline = job.Deadline
+			store.Data.Accepted.Assigned = true
+			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: job.AcceptedAt, Deadline: job.Deadline}
+			if test.late {
+				completedAt = job.Deadline
+			}
+			var parentDeadline time.Time
+			if test.parentDeadlineDelta != 0 {
+				parentDeadline = completedAt.Add(test.parentDeadlineDelta)
+			}
+			outcome, err := selectedCompletedOutcome(store, job, test.result, test.cause, completedAt, parentDeadline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := decideAccepted(store, job, outcome, completedAt)
+			if err != nil || decision.Outcome != test.want {
+				t.Fatalf("persisted outcome = %+v, %v; want %s", decision, err, test.want)
+			}
+		})
 	}
 }
 
 func TestAssignedRecoveryRecordsLostWorkerOutcome(t *testing.T) {
-	m, store, job, gh, path := assignmentValidationFixture(t)
+	for _, test := range []struct {
+		overdue, nonregularSidecar, resultReady bool
+	}{
+		{},
+		{nonregularSidecar: true},
+		{resultReady: true},
+		{overdue: true},
+		{overdue: true, nonregularSidecar: true},
+		{overdue: true, resultReady: true},
+	} {
+		t.Run(fmt.Sprintf("overdue=%t/nonregular=%t/ready=%t", test.overdue, test.nonregularSidecar, test.resultReady), func(t *testing.T) {
+			m, store, job, gh, path := assignmentValidationFixture(t)
+			accepted := store.Data.Accepted
+			accepted.Assigned = true
+			accepted.ResultReady = test.resultReady
+			if test.overdue {
+				accepted.AcceptedAt = time.Now().UTC().Add(-8 * time.Minute)
+				accepted.Deadline = accepted.AcceptedAt.Add(7 * time.Minute)
+				failure := store.Data.JobFailures[job.ID]
+				failure.AcceptedAt, failure.Deadline = accepted.AcceptedAt, accepted.Deadline
+				store.Data.JobFailures[job.ID] = failure
+				m.Now = time.Now
+			}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if test.nonregularSidecar {
+				if err := os.Mkdir(path+".result", 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store = openStateAt(t, path, time.Time{})
+			m.Handler = selectedHandler(func(Job) error {
+				t.Fatal("lost worker was redispatched")
+				return nil
+			})
+			if _, err := m.RunOnce(t.Context(), store); err != nil ||
+				store.Data.TerminalDecisions[job.ID].Outcome != "lost" ||
+				store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
+				t.Fatalf("lost worker was not finalized: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, time.Time{})
+			if reopened.Data.TerminalDecisions[job.ID].Outcome != "lost" {
+				t.Fatalf("lost worker decision was not durable: %+v", reopened.Data)
+			}
+		})
+	}
+}
+
+func TestDiscardAcceptedReportsSavedInactivity(t *testing.T) {
+	for _, blockedClear := range []bool{false, true} {
+		t.Run(fmt.Sprint(blockedClear), func(t *testing.T) {
+			m, store, job, _, path := assignmentValidationFixture(t)
+			store.Data.Accepted.Assigned = true
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			m.Logger = log.New(&logs, "", 0)
+			if err := store.WithLock(func() error {
+				_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "inactivity", time.Now().UTC())
+				return err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if blockedClear {
+				if err := os.Mkdir(path+".result", 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path+".result/held", []byte("held"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := store.WithLock(func() error { return m.discardAccepted(store) })
+			if (err != nil) != blockedClear || store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() ||
+				!strings.Contains(logs.String(), "job="+job.ID+" outcome=inactivity") {
+				t.Fatalf("discard lost inactivity report: err=%v state=%+v log=%q", err, store.Data, logs.String())
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, time.Now().UTC())
+			if got := reopened.Data.TerminalDecisions[job.ID].Outcome; got != "inactivity" {
+				t.Fatalf("discard replaced saved inactivity with %q", got)
+			}
+		})
+	}
+}
+
+func TestTerminalFailureReportsInactivityBeforeSidecarClear(t *testing.T) {
+	m, store, job, _, path := assignmentValidationFixture(t)
 	store.Data.Accepted.Assigned = true
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	m.Handler = selectedHandler(func(Job) error {
-		t.Fatal("lost worker was redispatched")
-		return nil
-	})
-	if _, err := m.RunOnce(t.Context(), store); err != nil ||
-		store.Data.TerminalDecisions[job.ID].Outcome != "lost" ||
-		store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || len(gh.comments) != 1 {
-		t.Fatalf("lost worker was not finalized: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
-	}
-	if err := store.Close(); err != nil {
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(job.ID, job.AttemptID, "inactivity", time.Now().UTC())
+		return err
+	}); err != nil {
 		t.Fatal(err)
 	}
-	reopened := openStateAt(t, path, time.Time{})
-	if reopened.Data.TerminalDecisions[job.ID].Outcome != "lost" {
-		t.Fatalf("lost worker decision was not durable: %+v", reopened.Data)
+	if err := os.Mkdir(path+".result", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+".result/held", []byte("held"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m.Logger = log.New(&logs, "", 0)
+	err := m.finishFailedJob(t.Context(), store, job, time.Now().UTC())
+	if !errors.Is(err, ErrAcceptanceState) || store.Data.Accepted != nil ||
+		store.Data.TerminalDecisions[job.ID].Outcome != "inactivity" ||
+		!strings.Contains(logs.String(), "outcome=inactivity") {
+		t.Fatalf("sidecar clear lost terminal report: err=%v state=%+v log=%q", err, store.Data, logs.String())
+	}
+}
+
+func TestTerminalDecisionReportsInactivityBeforeFailureReplyCheckpoint(t *testing.T) {
+	m, store, job, gh, path := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	failure := store.Data.JobFailures[job.ID]
+	failure.Attempts = maxJobAttempts
+	store.Data.JobFailures[job.ID] = failure
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	decision, err := decideAccepted(store, job, "inactivity", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	m.Logger = log.New(&logs, "", 0)
+	m.Handler = &terminalUsageRecoveryHandler{onTerminal: func(Job, string, time.Time) {
+		if err := os.Rename(path, path+".saved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	err = m.resolveSelectedDecision(t.Context(), store, job, time.Now().UTC(), failure, decision)
+	if !errors.Is(err, ErrAcceptanceState) || gh.commentCalls != 0 ||
+		!strings.Contains(logs.String(), "job="+job.ID+" outcome=inactivity") {
+		t.Fatalf("failed reply checkpoint hid saved terminal outcome: err=%v calls=%d log=%q", err, gh.commentCalls, logs.String())
 	}
 }
 

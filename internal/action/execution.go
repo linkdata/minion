@@ -363,20 +363,48 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		return c.fail(fmt.Errorf("%w: selected assignment was not delivered", monitor.ErrAcceptanceState))
 	}
 	if !claimedSuccess {
+		// A bound failed Outcome can retain worker limit claims with incomplete usage.
+		matching := c.matchesFailedResult(result)
+		expectedCalls := len(c.calls)
+		if c.returned != nil {
+			expectedCalls++
+		}
+		var workerReport *workerFailureError
+		errors.As(runErr, &workerReport)
+		checkpointedSelectedResult := c.AssignmentRequired() && c.assigned && c.failure == nil && c.pending == nil && matching
+		knownInactivity := checkpointedSelectedResult && workerReport != nil && workerReport.failure.Inactivity
+		knownRuntimeCap := checkpointedSelectedResult && workerReport != nil && workerReport.failure.RuntimeCap &&
+			!errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
+		parentDeadlineElapsed := false
+		if c.assignmentContext != nil {
+			if deadline, ok := c.assignmentContext.Deadline(); ok {
+				parentDeadlineElapsed = !time.Now().Before(deadline)
+			}
+		}
+		knownParentDeadline := checkpointedSelectedResult && workerReport != nil && workerReport.failure.Deadline &&
+			!workerReport.failure.RuntimeCap && !workerReport.failure.Inactivity && parentDeadlineElapsed &&
+			!errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
+		knownCancellation := checkpointedSelectedResult && c.assignmentContext != nil && errors.Is(c.assignmentContext.Err(), context.Canceled) &&
+			errors.Is(runErr, context.Canceled) && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown)
 		// An admitted model call may have incurred a charge even without a receipt.
 		// The parent owns this checkpoint; worker failure flags do not set retry policy.
-		if !errors.Is(runErr, monitor.ErrTerminalJob) &&
-			(c.pending != nil || c.returned != nil || len(c.calls) != 0) {
+		if len(result.Calls) > expectedCalls || c.pending != nil && c.returned == nil ||
+			!errors.Is(runErr, monitor.ErrTerminalJob) && !knownInactivity && !knownRuntimeCap && !knownParentDeadline && !knownCancellation && len(c.calls) != 0 {
 			runErr = errors.Join(runErr, monitor.ErrExecutionOutcomeUnknown)
 		}
 		// A failed AfterCall may return exactly its captured receipt after the acknowledged prefix.
-		calls := c.calls
-		if c.returned != nil {
-			calls = append(slices.Clone(calls), *c.returned)
-		}
-		if !result.matchesJob(c.job) || (c.pending != nil && c.returned == nil) || !slices.Equal(result.Calls, calls) ||
-			!slices.Equal(result.Refutations, c.review.Refutations) || result.CriticStopReason != c.review.CriticStopReason {
+		if !matching {
 			return errors.Join(runErr, checkpointContractError())
+		}
+		if c.AssignmentRequired() && c.assigned && c.failure != nil && workerReport != nil &&
+			workerReport.failure.Inactivity && !errors.Is(runErr, monitor.ErrTerminalJob) {
+			return errors.Join(runErr, monitor.ErrTerminalJob)
+		}
+		if knownRuntimeCap {
+			return errors.Join(runErr, monitor.ErrCheckpointedWorkerRuntimeCap)
+		}
+		if knownParentDeadline {
+			return errors.Join(runErr, monitor.ErrCheckpointedParentDeadline)
 		}
 		return runErr
 	}
@@ -387,6 +415,24 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
 			return checkpointContractError()
 		}
+	}
+	return nil
+}
+
+func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
+	calls := c.calls
+	if c.returned != nil {
+		calls = append(slices.Clone(calls), *c.returned)
+	}
+	return result.matchesJob(c.job) && (c.pending == nil || c.returned != nil) &&
+		slices.Equal(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
+		result.CriticStopReason == c.review.CriticStopReason
+}
+
+// validateFailedResult checks parent-owned evidence before a failed Outcome is ACKed.
+func (c *executionCheckpoints) validateFailedResult(result Result) error {
+	if !c.matchesFailedResult(result) || result.validate(c.job, false) != nil {
+		return checkpointContractError()
 	}
 	return nil
 }

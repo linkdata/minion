@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -174,6 +175,170 @@ func completeHTTPResult(t *testing.T, f *httpServerTest) httpOutcome {
 	return outcome
 }
 
+func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
+	for _, receiptAcknowledged := range []bool{false, true} {
+		t.Run(fmt.Sprint(receiptAcknowledged), func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixture(t, nil)
+			var outcome httpOutcome
+			if receiptAcknowledged {
+				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+				paid := f.call(2)
+				paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7} // The stopped model may have incomplete usage.
+				f.ack(t, "/after", paid, http.StatusOK, 2)
+				outcome = f.outcome(3, nil)
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			} else {
+				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+				outcome = f.outcome(2, nil)
+			}
+			outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+			status := http.StatusOK
+			if !receiptAcknowledged {
+				status = http.StatusInternalServerError
+			}
+			f.ack(t, "/outcome", outcome, status, outcome.Sequence)
+			got := f.result(t)
+			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+			var claim interface{ ExecutorInactivity() bool }
+			if !errors.As(final, &claim) || !claim.ExecutorInactivity() ||
+				errors.Is(final, monitor.ErrExecutionOutcomeUnknown) == receiptAcknowledged ||
+				errors.Is(final, monitor.ErrTerminalJob) == receiptAcknowledged {
+				t.Fatalf("acknowledged call=%t changed inactivity classification: %v", receiptAcknowledged, final)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+			}
+		})
+	}
+}
+
+func TestSelectedInactivityCannotOverrideFailedParentCheckpoint(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	checkpointErr := errors.New("usage checkpoint save failed")
+	f.tx.sink.(*executionCheckpoints).owner.usageCheckpoint = &usageCheckpoint{
+		save: func() error { return checkpointErr },
+	}
+	ack := f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
+	if ack.Failure == nil || ack.Failure.Terminal || !errors.Is(f.tx.sink.(*executionCheckpoints).failure, checkpointErr) {
+		t.Fatalf("ordinary parent save failure was not retained: ack=%+v", ack)
+	}
+	outcome := f.outcome(2, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, checkpointErr) || !errors.Is(final, monitor.ErrTerminalJob) ||
+		errors.Is(final, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("worker inactivity overrode failed parent checkpoint: %v", final)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("failed checkpoint saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
+func TestSelectedInactivityWithRejectedCallReceiptStaysLost(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
+	bad := f.call(2)
+	bad.Checkpoint.Call.Round++
+	ack := f.ack(t, "/after", bad, http.StatusInternalServerError, 2)
+	if ack.Failure == nil || !ack.Failure.Terminal {
+		t.Fatalf("invalid call receipt was not rejected: %+v", ack)
+	}
+	outcome := f.outcome(3, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(final, monitor.ErrTerminalJob) {
+		t.Fatalf("missing acknowledged receipt became a known failure: %v", final)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
+func TestSelectedInactivityWithUncheckpointedClaimedCallStaysLost(t *testing.T) {
+	f, store, _ := selectedHTTPResultFixture(t, nil)
+	outcome := f.outcome(1, nil)
+	outcome.Result.Calls = []CallUsage{f.call(1).Checkpoint.Call}
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+	f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 1)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, monitor.ErrExecutionOutcomeUnknown) || !errors.Is(final, monitor.ErrTerminalJob) {
+		t.Fatalf("uncheckpointed claimed call became a known failure: %v", final)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || present {
+		t.Fatalf("failed outcome saved a publishable result: present=%t err=%v", present, err)
+	}
+}
+
+func TestSelectedRuntimeCapRequiresMatchingCallReceipts(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		before       bool
+		after        bool
+		claimCall    bool
+		checkpointed bool
+		unknown      bool
+		ackStatus    int
+	}{
+		{name: "no model call", checkpointed: true, ackStatus: http.StatusOK},
+		{name: "acknowledged incomplete usage", before: true, after: true, claimCall: true, checkpointed: true, ackStatus: http.StatusOK},
+		{name: "missing required receipt", before: true, unknown: true, ackStatus: http.StatusInternalServerError},
+		{name: "fabricated call", claimCall: true, unknown: true, ackStatus: http.StatusInternalServerError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixture(t, nil)
+			sequence := uint64(1)
+			if test.before {
+				f.ack(t, "/before", f.call(1), http.StatusOK, sequence)
+				sequence++
+			}
+			paid := f.call(2)
+			paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7}
+			if test.after {
+				f.ack(t, "/after", paid, http.StatusOK, sequence)
+				sequence++
+			}
+			outcome := f.outcome(sequence, nil)
+			if test.claimCall {
+				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
+			}
+			outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap))
+			f.ack(t, "/outcome", outcome, test.ackStatus, sequence)
+			got := f.result(t)
+			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+			if errors.Is(final, monitor.ErrCheckpointedWorkerRuntimeCap) != test.checkpointed ||
+				errors.Is(final, monitor.ErrExecutionOutcomeUnknown) != test.unknown {
+				t.Fatalf("checkpointed cap=%t unknown=%t: %v", test.checkpointed, test.unknown, final)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || present {
+				t.Fatalf("failed runtime cap saved a publishable result: present=%t err=%v", present, err)
+			}
+		})
+	}
+}
+
+func TestSelectedRuntimeCapCannotOverrideFailedParentCheckpoint(t *testing.T) {
+	f, _, _ := selectedHTTPResultFixture(t, nil)
+	checkpointErr := errors.New("usage checkpoint save failed")
+	f.tx.sink.(*executionCheckpoints).owner.usageCheckpoint = &usageCheckpoint{
+		save: func() error { return checkpointErr },
+	}
+	f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
+	outcome := f.outcome(2, nil)
+	outcome.Failure = newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap))
+	f.ack(t, "/outcome", outcome, http.StatusOK, 2)
+	got := f.result(t)
+	final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+	if !errors.Is(final, checkpointErr) || errors.Is(final, monitor.ErrCheckpointedWorkerRuntimeCap) ||
+		errors.Is(final, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("worker cap overrode failed parent checkpoint: %v", final)
+	}
+}
+
 func readSavedResult(store *state.Store) (AcceptedResultRecord, error) {
 	var data []byte
 	err := store.WithLock(func() error {
@@ -266,20 +431,33 @@ func TestSelectedCheckpointRefusalWithoutMarkerRemainsJobFailure(t *testing.T) {
 }
 
 func TestSelectedCanceledOutcomeKeepsDiagnosticsWithoutSavingResult(t *testing.T) {
-	f, store, _ := selectedHTTPResultFixture(t, nil)
-	outcome := completeHTTPResult(t, f)
-	outcome.Result.Diagnostics = []Diagnostic{{Code: "canceled", Message: "worker finished after cancellation"}}
-	f.tx.stopBudget()
-	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
-	if ack.Failure == nil {
-		t.Fatal("canceled result received a success ACK")
-	}
-	got := f.result(t)
-	if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
-		t.Fatalf("canceled result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
-	}
-	if saved, err := store.HasAcceptedResult(); err != nil || saved {
-		t.Fatalf("canceled result was saved: saved=%t error=%v", saved, err)
+	for _, parentCanceled := range []bool{false, true} {
+		t.Run(fmt.Sprint(parentCanceled), func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixture(t, nil)
+			outcome := completeHTTPResult(t, f)
+			outcome.Result.Diagnostics = []Diagnostic{{Code: "canceled", Message: "worker finished after cancellation"}}
+			if parentCanceled {
+				ctx, cancel := context.WithCancel(t.Context())
+				f.tx.sink.(*executionCheckpoints).assignmentContext = ctx
+				cancel()
+			}
+			f.tx.stopBudget()
+			ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 3)
+			if ack.Failure == nil {
+				t.Fatal("canceled result received a success ACK")
+			}
+			got := f.result(t)
+			if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, context.Canceled) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
+				t.Fatalf("canceled result lost diagnostics or became publishable: result=%+v error=%v", got.result, got.err)
+			}
+			final := f.tx.sink.(*executionCheckpoints).finish(got.result, got.err)
+			if errors.Is(final, monitor.ErrExecutionOutcomeUnknown) != !parentCanceled {
+				t.Fatalf("parent-canceled receipt classification: parentCanceled=%t error=%v", parentCanceled, final)
+			}
+			if saved, err := store.HasAcceptedResult(); err != nil || saved {
+				t.Fatalf("canceled result was saved: saved=%t error=%v", saved, err)
+			}
+		})
 	}
 }
 

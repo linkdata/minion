@@ -919,17 +919,30 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			tx.recordSync.Lock()
 			defer tx.recordSync.Unlock()
 			var terminalResult error
+			assignment, selected := tx.sink.(assignmentCheckpoint)
+			selected = selected && assignment.AssignmentRequired()
+			if selected {
+				// Earlier callbacks have applied, but their ACK writes may still be pending.
+				tx.requiredACKs.Wait()
+			}
+			if failedOutcome && selected {
+				validator, ok := tx.sink.(interface{ validateFailedResult(Result) error })
+				if !ok {
+					terminalResult = fmt.Errorf("%w: selected HTTP failed-outcome validator is missing", monitor.ErrAcceptanceState)
+				} else {
+					terminalResult = validator.validateFailedResult(outcome.Result)
+				}
+			}
 			// A successful outcome is acknowledged only after its optional parent
 			// receiver has validated and saved the complete selected attempt.
 			if !failedOutcome {
 				receiver, hasReceiver := tx.sink.(interface{ ReceiveCompletedResult(Result) error })
-				if selected, ok := tx.sink.(assignmentCheckpoint); ok && selected.AssignmentRequired() {
+				if selected {
 					if !hasReceiver {
 						terminalResult = fmt.Errorf("%w: selected HTTP outcome receiver is missing", monitor.ErrAcceptanceState)
 					}
 					// Earlier callbacks release mutation ownership before their ACK writes.
 					// Their delivery must be known before a complete result is saved.
-					tx.requiredACKs.Wait()
 					tx.mu.Lock()
 					checkpointErr, controlErr := tx.checkpointErr, tx.requiredControlErr
 					tx.mu.Unlock()
@@ -954,6 +967,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			}
 			tx.mu.Lock()
 			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), terminalResult)
+			if failedOutcome && selected && tx.checkpointErr != nil {
+				tx.quarantine = true
+			}
 			if terminalResult == nil {
 				tx.runErr = errors.Join(tx.runErr, tx.checkpointErr)
 			} else {
