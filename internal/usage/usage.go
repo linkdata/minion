@@ -74,9 +74,10 @@ type Coverage struct {
 	CumulativeUnattributed bool   `json:"cumulative_unattributed,omitempty"`
 }
 
-// Call is one direct provider invocation. The enclosing Record's job and attempt
-// IDs together with Ordinal identify it across checkpoint replays. A nil
-// FinishedAt means the call was admitted but no usage receipt was saved.
+// Call is one admitted direct provider call; the provider process may not start.
+// StartedAt is the BeforeCall checkpoint time. The enclosing Record's job and
+// attempt IDs with Ordinal identify the call across checkpoint replays. A nil
+// FinishedAt means no usage receipt was saved.
 type Call struct {
 	Ordinal       int        `json:"ordinal"`
 	StartedAt     time.Time  `json:"started_at"`

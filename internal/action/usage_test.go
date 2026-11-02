@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -21,6 +22,49 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/usage"
 )
+
+func TestUsageZeroReportErrorKeepsAcknowledgedCallIncomplete(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		for _, failed := range []bool{true, false} {
+			name := provider + "/success"
+			if failed {
+				name = provider + "/failed start"
+			}
+			t.Run(name, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.Main.Provider = provider
+				f := newExecutionAdapterFixture(t, job)
+				store := f.startUsage()
+				f.owner.Runner = Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					if failed {
+						// Both native CLIs return complete zero usage when cmd.Start fails.
+						return aicli.Result{UsageComplete: true}, exec.ErrNotFound
+					}
+					return aicli.Result{Answer: proposalJSON("Done.", ""), UsageComplete: true}, nil
+				}}
+				result, err := f.owner.Runner.Execute(t.Context(), f.job, f.sink)
+				if errors.Is(err, exec.ErrNotFound) != failed || !failed && err != nil || len(result.Calls) != 1 ||
+					result.Calls[0].Tokens != (usage.Tokens{}) || result.Calls[0].Complete == failed {
+					t.Fatalf("zero-report call changed: result=%+v error=%v", result, err)
+				}
+				wantCoverage := usage.Coverage{}
+				if failed {
+					wantCoverage = usage.Coverage{Scope: "unknown", PartialReport: true}
+				}
+				record, found, loadErr := store.Load(f.owner.attemptID)
+				if loadErr != nil || !found || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil ||
+					record.Calls[0].UsageCoverage != wantCoverage || record.Calls[0].Complete == failed ||
+					record.UsageComplete == failed || record.Tokens != (usage.Tokens{}) ||
+					record.CodexCalls+record.ClaudeCalls != 1 || result.Calls[0].UsageCoverage != wantCoverage {
+					t.Fatalf("acknowledged call was lost or treated as billable: record=%+v result=%+v found=%t error=%v", record, result, found, loadErr)
+				}
+				if failed && !errors.Is(f.sink.finish(result, err), monitor.ErrExecutionOutcomeUnknown) {
+					t.Fatal("failed acknowledged call became automatically retryable")
+				}
+			})
+		}
+	}
+}
 
 func TestRecoveredUsageCompletesOnlyMatchingExistingAttempt(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}

@@ -114,7 +114,8 @@ func TestRunnerFailedStartKeepsOrdinalWithoutRetry(t *testing.T) {
 		before[0].Ordinal != 1 || after[0].Ordinal != 1 ||
 		before[0].Call != callMetadata(after[0].Call) ||
 		len(result.Calls) != 1 || result.Calls[0] != after[0].Call ||
-		result.Calls[0].Complete || result.Calls[0].Tokens != (usage.Tokens{}) || result.Answer != "" {
+		result.Calls[0].Complete || result.Calls[0].Tokens != (usage.Tokens{}) ||
+		result.Calls[0].UsageCoverage != (usage.Coverage{Scope: "unknown", PartialReport: true}) || result.Answer != "" {
 		t.Fatalf("failed start lost or retried ordinal: result=%+v before=%+v after=%+v calls=%d error=%v", result, before, after, nativeCalls, err)
 	}
 }

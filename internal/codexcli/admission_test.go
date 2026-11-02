@@ -59,7 +59,7 @@ func TestSessionStartFailureDoesNotPoisonFreshRetry(t *testing.T) {
 	})
 	dir := t.TempDir()
 	result, err := session.Run(t.Context(), dir, "first", false, "", config.CodexConfig{})
-	if !errors.Is(err, os.ErrNotExist) || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || progress != 0 {
+	if !errors.Is(err, os.ErrNotExist) || result.Answer != "" || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.UsageCoverage != (usage.Coverage{}) || progress != 0 {
 		t.Fatalf("unstarted exec: %+v error=%v progress=%d", result, err, progress)
 	}
 	session.OnProgress = nil

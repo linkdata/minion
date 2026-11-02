@@ -12,6 +12,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/usage"
 )
 
 func TestSessionPreparedInputMatchesClaudeInvocation(t *testing.T) {
@@ -109,8 +110,9 @@ printf '%s\n' '`+successfulResult+`'
 	var inputs []aicli.PreparedInput
 	session.OnInput = func(input aicli.PreparedInput) { inputs = append(inputs, input) }
 	workspace := t.TempDir()
-	if _, err := session.Run(t.Context(), workspace, "first", false, "", config.ClaudeConfig{}); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("failed Start error = %v", err)
+	result, err := session.Run(t.Context(), workspace, "first", false, "", config.ClaudeConfig{})
+	if !errors.Is(err, os.ErrNotExist) || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.UsageCoverage != (usage.Coverage{}) {
+		t.Fatalf("failed Start result=%+v error=%v", result, err)
 	}
 	if len(inputs) != 1 || inputs[0].Mode != "fresh" || inputs[0].NativeID == "" || session.started || progress != 0 {
 		t.Fatalf("failed Start advanced conversation or lost prepared input: inputs=%+v started=%t progress=%d", inputs, session.started, progress)
