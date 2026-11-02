@@ -67,7 +67,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	}
 	jw.Logger = slog.Default()
 	server := &http.Server{
-		Handler:                      jw.SecureHeadersMiddleware(adminGuard(jw, nil)),
+		Handler:                      newAdminHandler(jw, cfg),
 		ReadHeaderTimeout:            5 * time.Second,
 		ReadTimeout:                  30 * time.Second,
 		IdleTimeout:                  time.Minute,
@@ -93,8 +93,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	return a, nil
 }
 
-// adminGuard is the single entry gate for all dashboard routes. The authorizer
-// is nil until admin sessions are implemented.
+// adminGuard is the single entry gate for all dashboard routes.
 func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// JaWS's year-long HSTS policy includes subdomains and could affect other services.

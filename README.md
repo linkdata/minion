@@ -114,7 +114,35 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-To prepare the admin dashboard, add `"admin": {"listen": "127.0.0.1:8377"}` to the orchestrator config. The `admin` block is optional; an empty `listen` uses that loopback address. The admin server runs only with `-loop`, and every route currently returns HTTP 403 until administrator sessions are added. Anything other than a literal loopback IP address in `listen` requires both `tls_cert_file` and `tls_key_file`; relative file paths resolve against the config directory. The certificate must be trusted by the browser and cover the address used. `-check` verifies configured admin TLS files without binding the listener; `-loop` verifies them before binding. One-pass polling neither loads unused admin TLS files nor starts the listener. An admin listener failure stops `-loop` with exit status 1. The admin listener is separate from the worker HTTPS endpoint and does not use its token.
+To enable the admin dashboard, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive. For example:
+
+```json
+"admin": {
+  "listen": "127.0.0.1:8377",
+  "administrators": [{"username": "operator", "password_hash": "PASTE_GENERATED_ARGON2ID_PHC_HASH"}]
+}
+```
+
+Generate the Argon2id PHC hash without putting the password in shell history or process arguments. This example uses a temporary Python environment and prompts for the password without echo:
+
+```sh
+admin_hash_env=$(mktemp -d)
+python3 -m venv "$admin_hash_env"
+"$admin_hash_env/bin/python" -m pip install argon2-cffi
+"$admin_hash_env/bin/python" - <<'PY'
+import getpass
+from argon2 import PasswordHasher
+
+password = getpass.getpass("Admin password: ")
+print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
+                     hash_len=32, salt_len=16).hash(password))
+PY
+rm -r "$admin_hash_env"
+```
+
+Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; the signed-in page's form sends `POST /admin/logout` to revoke the session. JaWS keeps sessions in memory, so they end on restart or after one minute without an attached JaWS page. Failed logins are limited per configured username and in one shared bucket for unknown usernames. At most two password hashes run concurrently.
+
+An empty `listen` uses `127.0.0.1:8377`. The admin server runs only with `-loop`. Anything other than a literal loopback IP address in `listen` requires both `tls_cert_file` and `tls_key_file`; relative file paths resolve against the config directory. The certificate must be trusted by the browser and cover the address used. `-check` verifies configured admin TLS files without binding the listener; `-loop` verifies them before binding. One-pass polling neither loads unused admin TLS files nor starts the listener. An admin listener failure stops `-loop` with exit status 1. The admin listener is separate from the worker HTTPS endpoint and does not use its token.
 
 To use one remote executor, add `remote_executor` to the orchestrator config with `executor_id`, `listen` (host:port), `tls_cert_file`, `tls_key_file`, and `token`. The certificate must be trusted by the worker host and cover the name in its HTTPS URL. Use the same 32-random-byte unpadded base64url token in a separate worker config:
 

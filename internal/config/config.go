@@ -110,9 +110,10 @@ type RemoteExecutorConfig struct {
 
 // AdminConfig configures the optional admin dashboard listener.
 type AdminConfig struct {
-	Listen      string `json:"listen,omitempty"`
-	TLSCertFile string `json:"tls_cert_file,omitempty"`
-	TLSKeyFile  string `json:"tls_key_file,omitempty"`
+	Listen         string         `json:"listen,omitempty"`
+	TLSCertFile    string         `json:"tls_cert_file,omitempty"`
+	TLSKeyFile     string         `json:"tls_key_file,omitempty"`
+	Administrators []AdminAccount `json:"administrators,omitempty"`
 }
 
 // CodexConfig contains authentication, model settings, and job skill paths.
@@ -320,6 +321,16 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
 	}
 	if admin := c.Admin; admin != nil {
+		seen := make(map[string]bool, len(admin.Administrators))
+		for _, account := range admin.Administrators {
+			if !workspace.ValidIdentitySegment(account.Username) || seen[strings.ToLower(account.Username)] {
+				return errors.New("admin.administrators username is invalid or duplicated")
+			}
+			seen[strings.ToLower(account.Username)] = true
+			if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
+				return errors.New("admin.administrators password_hash is invalid")
+			}
+		}
 		if admin.Listen == "" {
 			admin.Listen = DefaultAdminListen
 		}
