@@ -56,7 +56,7 @@ func TestRunHTTPQueuedProviderEventDoesNotHoldOutcomeOrClaimCoverage(t *testing.
 			return aicli.Result{}, ctx.Err()
 		}
 		request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "second"})
-		return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+		return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 	}}
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- RunHTTP(t.Context(), &client, f.server.URL, job.Identity.ExecutorID, runner) }()

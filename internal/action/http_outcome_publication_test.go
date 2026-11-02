@@ -107,11 +107,13 @@ func TestExecuteRejectsHostileHTTPOutcomeBeforePublication(t *testing.T) {
 					result = privateReviewResult(job)
 					for i := range result.Calls {
 						result.Calls[i].Tokens = usage.Tokens{Input: int64(i + 1), Output: 1}
+						result.Calls[i].UsageCoverage.Scope = "invocation"
 						result.Calls[i].Complete = true
 					}
 				} else {
 					call := f.call(1).Checkpoint.Call
 					call.Tokens, call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+					call.UsageCoverage.Scope = "invocation"
 					result.Calls = []CallUsage{call}
 				}
 				if scenario.change == "no evidence" {

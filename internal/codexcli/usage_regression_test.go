@@ -308,8 +308,8 @@ func TestUsageDiscoveryExactWalkLimitAndNextEntry(t *testing.T) {
 }
 
 func TestUsageErrorJoinDeduplicatesSharedSentinels(t *testing.T) {
-	got := joinUsageErrors(errUnverifiedChildren, errUsageAgentLimit, errors.Join(errUnverifiedChildren, errUsageAgentLimit))
-	if strings.Count(got.Error(), errUnverifiedChildren.Error()) != 1 || strings.Count(got.Error(), errUsageAgentLimit.Error()) != 1 || !errors.Is(got, errUnverifiedChildren) || !errors.Is(got, errUsageAgentLimit) || !errors.Is(got, aicli.ErrOutputLimit) {
+	got := joinUsageErrors(errAmbiguousRoot, errUnverifiedChildren, errUsageAgentLimit, errors.Join(errAmbiguousRoot, errUnverifiedChildren, errUsageAgentLimit))
+	if strings.Count(got.Error(), errAmbiguousRoot.Error()) != 1 || strings.Count(got.Error(), errUnverifiedChildren.Error()) != 1 || strings.Count(got.Error(), errUsageAgentLimit.Error()) != 1 || !errors.Is(got, errAmbiguousRoot) || !errors.Is(got, errUnverifiedChildren) || !errors.Is(got, errUsageAgentLimit) || !errors.Is(got, aicli.ErrOutputLimit) {
 		t.Fatalf("joined completion causes lost or duplicated: %v", got)
 	}
 }

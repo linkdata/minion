@@ -147,7 +147,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 						assertRequesterNotesPrompt(t, prompt, job.Source.Body, "Inspect authorization boundaries.")
 						assertModelRepository(t, dir, expected)
 						if tt.failCodex {
-							return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}}, errors.New("Codex unavailable")
+							return aicli.Result{Tokens: usage.Tokens{Input: 10, CachedInput: 8, Output: 2}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, errors.New("Codex unavailable")
 						}
 						auditJob := Job{Identity: Identity{Repository: "o/r"}, Source: workspace.Snapshot{Head: expected}}
 						if tt.wrongSourceRef {
@@ -162,7 +162,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 							}
 						}
 
-						return aicli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageComplete: true}, nil
+						return aicli.Result{Answer: "Untrusted final answer", Tokens: usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 					},
 				},
 			}

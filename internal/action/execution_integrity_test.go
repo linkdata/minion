@@ -55,7 +55,7 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 				Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 					calls++
 					if calls == 1 && request.role == roleMain && request.round == 1 {
-						return aicli.Result{Answer: proposalJSON("Candidate comment.", ""), Tokens: mainTokens, UsageComplete: true}, nil
+						return aicli.Result{Answer: proposalJSON("Candidate comment.", ""), Tokens: mainTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 					}
 					if calls != 2 || request.role != roleCritic || request.round != 1 || request.reviewPhase != reviewFull {
 						t.Fatalf("unexpected call after supplied metadata mutation: %+v", request)
@@ -72,7 +72,7 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 					if !approved {
 						verdict = criticFeedbackJSON(true, "PRIVATE_BLOCKING_FINDING")
 					}
-					return aicli.Result{Answer: verdict, Tokens: criticTokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: verdict, Tokens: criticTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}},
 			}
 			request := usageJob()
@@ -91,8 +91,8 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 				t.Fatalf("integrity failure lost acknowledged paid counters: %+v", record)
 			}
 			wantCalls := []CallUsage{
-				{Provider: "codex", Role: roleMain, Round: 1, Tokens: mainTokens, Complete: true},
-				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: criticTokens, Complete: true, Approved: approved, NoBlockers: approved, HasBlockers: !approved, ReviewComplete: true},
+				{Provider: "codex", Role: roleMain, Round: 1, Tokens: mainTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
+				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: criticTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: approved, NoBlockers: approved, HasBlockers: !approved, ReviewComplete: true},
 			}
 			saved := readPrivateReview(t, work)
 			if saved.Identity.JobID != request.ID || saved.Identity.AttemptID != record.ID || saved.SourceRef != sourceHead || !slices.Equal(saved.Calls, wantCalls) || len(saved.Refutations) != 0 || saved.CriticStopReason != "" {

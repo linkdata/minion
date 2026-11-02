@@ -490,7 +490,7 @@ func TestRunHTTPStopsInactivityDuringOutcomeUpload(t *testing.T) {
 		job.RuntimeBudget = time.Minute
 		job.InactivityTimeout = 10 * time.Second
 		f := newHTTPInactivityFixture(t, job, true, func(context.Context, modelRun) (aicli.Result, error) {
-			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		})
 		select {
 		case <-f.outcomeEntered:

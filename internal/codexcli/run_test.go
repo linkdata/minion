@@ -1161,13 +1161,26 @@ func TestJSONLOutputLineLimitCancelsCLI(t *testing.T) {
 	}
 }
 
+func TestJSONLOutputNewTurnClearsPriorUsage(t *testing.T) {
+	var output jsonlOutput
+	_, _ = output.Write([]byte(`{"type":"turn.completed","usage":{"input_tokens":12,"cached_input_tokens":2,"output_tokens":3}}` + "\n"))
+	if output.tokens == nil || !output.usageSeen {
+		t.Fatalf("first turn usage missing: tokens=%+v seen=%t", output.tokens, output.usageSeen)
+	}
+	_, _ = output.Write([]byte(`{"type":"turn.started"}` + "\n"))
+	if output.tokens != nil || output.usageSeen {
+		t.Fatalf("new turn retained previous cumulative usage: tokens=%+v seen=%t", output.tokens, output.usageSeen)
+	}
+}
+
 func TestRunRetainsFallbackUsageOnFailure(t *testing.T) {
 	installFakeCodex(t, `#!/bin/sh
 printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":12}}'
 exit 7
 `)
 	result, err := Run(t.Context(), t.TempDir(), "Review", false, "", config.CodexConfig{})
-	if err == nil || !strings.Contains(err.Error(), "exit status 7") || strings.Contains(err.Error(), "did not identify a resumable thread") || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) {
+	if err == nil || !strings.Contains(err.Error(), "exit status 7") || strings.Contains(err.Error(), "did not identify a resumable thread") || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 100, CachedInput: 70, Output: 12}) ||
+		result.UsageCoverage != (usage.Coverage{Scope: "root_only", PartialReport: true}) {
 		t.Fatalf("lost partial usage: result=%+v, error=%v", result, err)
 	}
 }

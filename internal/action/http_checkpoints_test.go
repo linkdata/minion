@@ -99,7 +99,7 @@ func TestHTTPCheckpointsKeepActualStoreRefusalsAndDurablePrefix(t *testing.T) {
 						answer = criticFeedbackJSON(true, "Private blocker")
 					}
 				}
-				return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageComplete: true}, nil
+				return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 			}}
 			workerErr := RunHTTP(ctx, server.Client(), server.URL, f.job.Identity.ExecutorID, &runner)
 			var got returned
@@ -314,6 +314,7 @@ func TestHTTPFailedOutcomeWithoutCriticCannotInventReview(t *testing.T) {
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
 			paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 3}, true
+			paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 			f.ack(t, "/after", paid, http.StatusOK, 2)
 			records, err := usage.ReadAll(store.Dir)
 			if err != nil || len(records) != 1 || records[0].ExecutorID != owner.job.Identity.ExecutorID || records[0].SourceRef != owner.job.Source.Head || records[0].UsageSource != "executor_reported" {

@@ -336,6 +336,13 @@ func TestUsageSessionSnapshotOnlyDeltaAndCumulativeStdout(t *testing.T) {
 			if got.Input != 20 || complete != (fallback == 120) || err != nil {
 				t.Fatalf("snapshot delta = %+v, %v, %v", got, complete, err)
 			}
+			want := usage.Coverage{Scope: "invocation"}
+			if fallback != 120 {
+				want = usage.Coverage{Scope: "known_subset", PartialReport: true, CumulativeUnattributed: true}
+			}
+			if session.coverage != want {
+				t.Fatalf("snapshot delta coverage=%+v, want %+v", session.coverage, want)
+			}
 		})
 	}
 }
@@ -362,7 +369,27 @@ func TestUsageSessionNoCurrentSnapshotChecksCumulativeStdout(t *testing.T) {
 			if got != (usage.Tokens{Input: test.current}) || complete != test.complete || err != nil {
 				t.Fatalf("resumed delta = %+v, complete=%t, err=%v", got, complete, err)
 			}
+			want := usage.Coverage{Scope: "invocation"}
+			if !test.complete {
+				want = usage.Coverage{Scope: "known_subset", PartialReport: true, CumulativeUnattributed: true}
+			}
+			if session.coverage != want {
+				t.Fatalf("resumed delta coverage=%+v, want %+v", session.coverage, want)
+			}
 		})
+	}
+}
+
+func TestUsageSessionCompleteTurnIgnoresUnattributedCumulativeStdout(t *testing.T) {
+	ctx, home := t.Context(), t.TempDir()
+	root := writeUsageRollout(t, home, "root", "", completedUsageTurn("root", "old", "r1", 100)...)
+	var session usageSession
+	session.begin(ctx, home, "root", time.Now())
+	appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
+	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), &usage.Tokens{Input: 999}, nil, nil)
+	if got != (usage.Tokens{Input: 20}) || !complete || err != nil ||
+		session.coverage != (usage.Coverage{Scope: "invocation", CumulativeUnattributed: true}) {
+		t.Fatalf("verified turn used unattributed cumulative stdout: tokens=%+v complete=%t coverage=%+v err=%v", got, complete, session.coverage, err)
 	}
 }
 

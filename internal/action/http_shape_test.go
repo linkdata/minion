@@ -32,6 +32,7 @@ func TestHTTPShapeTextByteBounds(t *testing.T) {
 		{"review phase", config.MaxModelSettingBytes, func(s string) error { return httpCallShape(CallUsage{ReviewPhase: s}) }},
 		{"model", config.MaxModelSettingBytes, func(s string) error { return httpCallShape(CallUsage{Model: s}) }},
 		{"effort", config.MaxModelSettingBytes, func(s string) error { return httpCallShape(CallUsage{Effort: s}) }},
+		{"usage scope", config.MaxModelSettingBytes, func(s string) error { return httpCallShape(CallUsage{UsageCoverage: usage.Coverage{Scope: s}}) }},
 		{"decision", 32, func(s string) error { return httpReviewShape(ReviewCheckpoint{CriticStopReason: s}) }},
 		{"refutation", maxOutputBytes, func(s string) error { return httpReviewShape(ReviewCheckpoint{Refutations: []Refutation{{Text: s}}}) }},
 		{"answer", maxOutputBytes, func(s string) error { return httpResultShape(Result{Answer: s}) }},

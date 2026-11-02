@@ -40,6 +40,7 @@ func TestHTTPFailureFallbackPreservesCoreWithoutAcknowledgingRawClaims(t *testin
 			result := privateReviewResult(f.job)
 			for i := range result.Calls {
 				result.Calls[i].Tokens = usage.Tokens{Input: int64(i+1) * 10, CachedInput: int64(i % 2), Output: int64(i + 1)}
+				result.Calls[i].UsageCoverage.Scope = "invocation"
 				result.Calls[i].Complete = true
 			}
 			if !acknowledged {

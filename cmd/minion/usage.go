@@ -17,7 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const usageTokenNote = "Returned-call token counts and completion flags are executor-reported claims, not verified billing. Cached input tokens are included in input tokens; total tokens = input + output. Incomplete usage may omit unknown token counts."
+const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. Billed credits are unknown. Incomplete usage may omit unknown token counts."
 
 type usageAttempt struct {
 	usage.Record
@@ -163,7 +163,7 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 	var buffer bytes.Buffer
 	w := tabwriter.NewWriter(&buffer, 0, 4, 2, ' ', 0)
 	if details {
-		fmt.Fprintln(w, "STARTED (UTC)\tREPO\tUSER\tACTION\tSTATUS\tMAIN\tCRITIC\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tUSAGE\tATTEMPT") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+		fmt.Fprintln(w, "STARTED (UTC)\tREPO\tUSER\tACTION\tSTATUS\tMAIN\tCRITIC\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHE CREATE\tCACHE READ\tOUTPUT\tTOTAL\tUSAGE\tUSAGE GAPS\tATTEMPT") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		for _, attempt := range output.Attempts {
 			critic := attempt.CriticProvider
 			if critic == "" {
@@ -176,19 +176,19 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 					coverage = "partial"
 				}
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\n", attempt.StartedAt.UTC().Format(time.RFC3339), attempt.Repo, attempt.User, attempt.Action, attempt.Status, attempt.Provider, critic, attempt.CodexCalls, attempt.ClaudeCalls, attempt.Tokens.Input, attempt.Tokens.CachedInput, attempt.Tokens.Output, attempt.TotalTokens, coverage, attempt.ID) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\n", attempt.StartedAt.UTC().Format(time.RFC3339), attempt.Repo, attempt.User, attempt.Action, attempt.Status, attempt.Provider, critic, attempt.CodexCalls, attempt.ClaudeCalls, attempt.Tokens.Input, attempt.Tokens.CacheCreationInput, attempt.Tokens.CachedInput, attempt.Tokens.Output, attempt.TotalTokens, coverage, usageGaps(attempt.UsageCoverage), attempt.ID) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
 	} else {
 		for _, group := range output.GroupBy {
 			fmt.Fprintf(w, "%s\t", strings.ToUpper(group)) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
-		fmt.Fprintln(w, "ATTEMPTS\tSUCCEEDED\tFAILED\tRUNNING\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHED\tOUTPUT\tTOTAL\tINCOMPLETE") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+		fmt.Fprintln(w, "ATTEMPTS\tSUCCEEDED\tFAILED\tRUNNING\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHE CREATE\tCACHE READ\tOUTPUT\tTOTAL\tINCOMPLETE") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		for _, summary := range output.Groups {
 			values := map[string]string{"repo": summary.Repo, "user": summary.User, "action": summary.Action, "day": summary.Day, "month": summary.Month}
 			for _, group := range output.GroupBy {
 				fmt.Fprintf(w, "%s\t", values[group]) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 			}
-			fmt.Fprintf(w, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", summary.Attempts, summary.Succeeded, summary.Failed, summary.Running, summary.CodexCalls, summary.ClaudeCalls, summary.Tokens.Input, summary.Tokens.CachedInput, summary.Tokens.Output, summary.TotalTokens, summary.IncompleteUsage) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
+			fmt.Fprintf(w, "%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n", summary.Attempts, summary.Succeeded, summary.Failed, summary.Running, summary.CodexCalls, summary.ClaudeCalls, summary.Tokens.Input, summary.Tokens.CacheCreationInput, summary.Tokens.CachedInput, summary.Tokens.Output, summary.TotalTokens, summary.IncompleteUsage) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		}
 	}
 	if err := w.Flush(); err != nil {
@@ -196,11 +196,34 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 	}
 	t := output.Totals
 	fmt.Fprintf(&buffer, "\nTotals: %d attempts; %d succeeded, %d failed, %d running; %d Codex calls, %d Claude calls.\n", t.Attempts, t.Succeeded, t.Failed, t.Running, t.CodexCalls, t.ClaudeCalls)
-	fmt.Fprintf(&buffer, "Tokens: %d input, %d cached input, %d output, %d total; %d attempts with incomplete usage.\n", t.Tokens.Input, t.Tokens.CachedInput, t.Tokens.Output, t.TotalTokens, t.IncompleteUsage)
+	fmt.Fprintf(&buffer, "Tokens: %d input, %d cache creation, %d cache read, %d output, %d total; %d attempts with incomplete usage.\n", t.Tokens.Input, t.Tokens.CacheCreationInput, t.Tokens.CachedInput, t.Tokens.Output, t.TotalTokens, t.IncompleteUsage)
 	fmt.Fprintln(&buffer, usageTokenNote)
 	if t.Running != 0 {
 		fmt.Fprintln(&buffer, "Running attempts may be stale after an interruption.")
 	}
 	_, err := buffer.WriteTo(stdout)
 	return err
+}
+
+func usageGaps(c usage.Coverage) string {
+	var gaps []string
+	if c.MissingFinalReport {
+		gaps = append(gaps, "missing_final_report")
+	}
+	if c.MalformedFinalReport {
+		gaps = append(gaps, "malformed_final_report")
+	}
+	if c.UnverifiedHelpers {
+		gaps = append(gaps, "unverified_helpers")
+	}
+	if c.PartialReport {
+		gaps = append(gaps, "partial_report")
+	}
+	if c.CumulativeUnattributed {
+		gaps = append(gaps, "cumulative_unattributed")
+	}
+	if len(gaps) == 0 {
+		return "-"
+	}
+	return strings.Join(gaps, ",")
 }

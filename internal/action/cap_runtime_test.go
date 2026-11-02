@@ -76,8 +76,22 @@ func TestCappedDecisionRequiresOriginalFinalCompleteEvidence(t *testing.T) {
 			job.CriticMaxRounds, job.CriticNonblockingRounds = 2, 1
 			result := cappedResultFixture(job)
 			for i := range result.Calls {
-				result.Calls[i].Tokens = usage.Tokens{Input: int64(11 + i), CachedInput: int64(i), Output: int64(3 + i)}
+				result.Calls[i].Tokens = usage.Tokens{Input: int64(11 + i), CacheCreationInput: int64(i + 1), CachedInput: int64(i), Output: int64(3 + i)}
 				result.Calls[i].Complete = i%2 == 0
+				result.Calls[i].UsageCoverage.Scope = "known_subset"
+				if result.Calls[i].Complete {
+					result.Calls[i].UsageCoverage.Scope = "invocation"
+				} else {
+					result.Calls[i].UsageCoverage.PartialReport = true
+				}
+				switch i {
+				case 1:
+					result.Calls[i].UsageCoverage.MissingFinalReport = true
+					result.Calls[i].UsageCoverage.UnverifiedHelpers = true
+				case 3:
+					result.Calls[i].UsageCoverage.MalformedFinalReport = true
+					result.Calls[i].UsageCoverage.CumulativeUnattributed = true
+				}
 			}
 			if err := result.Validate(job); err != nil {
 				t.Fatalf("invalid baseline: %v", err)
@@ -105,7 +119,10 @@ func TestCappedDecisionRequiresOriginalFinalCompleteEvidence(t *testing.T) {
 					t.Fatalf("capped journal lost call usage: %s", journal.String())
 				}
 				for i, call := range result.Calls {
-					want := fmt.Sprintf(" input_tokens=%d cached_input_tokens=%d output_tokens=%d complete=%t", call.Tokens.Input, call.Tokens.CachedInput, call.Tokens.Output, call.Complete)
+					want := fmt.Sprintf(" input_tokens=%d cache_creation_input_tokens=%d cached_input_tokens=%d output_tokens=%d usage_scope=%q missing_final_report=%t malformed_final_report=%t unverified_helpers=%t partial_report=%t cumulative_unattributed=%t complete=%t",
+						call.Tokens.Input, call.Tokens.CacheCreationInput, call.Tokens.CachedInput, call.Tokens.Output, call.UsageCoverage.Scope,
+						call.UsageCoverage.MissingFinalReport, call.UsageCoverage.MalformedFinalReport, call.UsageCoverage.UnverifiedHelpers,
+						call.UsageCoverage.PartialReport, call.UsageCoverage.CumulativeUnattributed, call.Complete)
 					if !strings.HasSuffix(lines[i], want) {
 						t.Fatalf("capped journal changed per-call usage: got=%s want suffix=%s", lines[i], want)
 					}
@@ -155,14 +172,14 @@ func TestFinalCriticFailureCannotPublishAtCap(t *testing.T) {
 						case "incomplete":
 							answer = incompleteCritiqueJSON
 						case "provider":
-							return aicli.Result{Answer: approvedCritiqueJSON, Tokens: tokens, UsageComplete: true}, providerErr
+							return aicli.Result{Answer: approvedCritiqueJSON, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, providerErr
 						case "blank sanitized feedback":
 							answer = criticFeedbackJSON(true, "\x00")
 						case "empty redaction":
 							answer = criticFeedbackJSON(true, "private # and redacted")
 						}
 					}
-					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}}
 				if failure == "empty redaction" {
 					runner.Codex.APIKey, runner.Claude.APIKey = "#", "redacted"

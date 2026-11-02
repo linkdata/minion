@@ -323,7 +323,7 @@ func TestExecuteLimitCausesAndInvalidIncompleteResultsAreTerminal(t *testing.T) 
 				if limitCause != nil {
 					return aicli.Result{}, fmt.Errorf("wrapped native limit: %w", limitCause)
 				}
-				return aicli.Result{Tokens: usage.Tokens{Input: -1}}, modelErr
+				return aicli.Result{Tokens: usage.Tokens{Input: -1}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, modelErr
 			}}}
 			request := usageJob()
 			request.Repository.Actions = []string{"audit"}

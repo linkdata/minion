@@ -13,6 +13,7 @@ import (
 type usageCheckpoint struct {
 	record           usage.Record
 	previousComplete bool
+	previousPartial  bool
 	save             func() error
 	logf             func(string, ...any)
 }
@@ -23,11 +24,14 @@ func (c *usageCheckpoint) beforeCall(call CallUsage) error {
 		calls = &c.record.ClaudeCalls
 	}
 	c.previousComplete = c.record.UsageComplete
+	c.previousPartial = c.record.UsageCoverage.PartialReport
 	*calls++
 	c.record.UsageComplete = false
+	c.record.UsageCoverage.PartialReport = true
 	if err := c.save(); err != nil {
 		*calls--
 		c.record.UsageComplete = c.previousComplete
+		c.record.UsageCoverage.PartialReport = c.previousPartial
 		return err
 	}
 	return nil
@@ -36,6 +40,11 @@ func (c *usageCheckpoint) beforeCall(call CallUsage) error {
 func (c *usageCheckpoint) afterCall(call CallUsage) error {
 	tokens, valid := c.record.Tokens.AddChecked(call.Tokens)
 	c.record.Tokens = tokens
+	c.record.UsageCoverage.PartialReport = c.previousPartial
+	c.record.UsageCoverage = c.record.UsageCoverage.AddGaps(call.UsageCoverage)
+	if !call.Complete || !valid {
+		c.record.UsageCoverage.PartialReport = true
+	}
 	c.record.UsageComplete = c.previousComplete && call.Complete && valid
 	c.record.UsageSource = executorClaimOrigin
 	if !valid {
@@ -66,7 +75,7 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,
 		User: job.Source.Author.Login, Action: cmp.Or(job.Command.Name, string(job.Command.Action)), Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
-		StartedAt: startedAt, Status: "running", UsageComplete: true,
+		StartedAt: startedAt, Status: "running", UsageCoverage: usage.Coverage{Scope: "attempt"}, UsageComplete: true,
 	}}
 	record := &checkpoint.record
 	main := e.roleSettings(record.Provider, nil)

@@ -127,6 +127,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				f.ack(t, "/before", before, http.StatusOK, 1)
 				call := before.Checkpoint.Call
 				call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
+				call.UsageCoverage.Scope = "invocation"
 				f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}}, http.StatusOK, 2)
 				outcome := f.outcome(3, nil)
 				outcome.Result = Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe result", Calls: []CallUsage{call}}
@@ -225,6 +226,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 		f.ack(t, "/before", before, http.StatusOK, 1)
 		call := before.Checkpoint.Call
 		call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 2}, true
+		call.UsageCoverage.Scope = "invocation"
 		f.ack(t, "/after", httpCall{Sequence: 2, Checkpoint: CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}}, http.StatusOK, 2)
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Safe response.", Calls: []CallUsage{call},
 			Changes: []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("fixture-&#x73;ecret\n")}}}
@@ -290,6 +292,7 @@ func TestHostileHTTPFixNULStrippedRefutationCannotPublish(t *testing.T) {
 		result.Changes = []workspace.Change{{Path: "foo", Mode: workspace.Regular, Data: []byte(strings.ReplaceAll(private, "\x00", ""))}}
 		for i := range result.Calls {
 			result.Calls[i].Tokens = usage.Tokens{Input: int64(i + 1), Output: 1}
+			result.Calls[i].UsageCoverage.Scope = "invocation"
 			result.Calls[i].Complete = true
 		}
 		sequence := uint64(1)

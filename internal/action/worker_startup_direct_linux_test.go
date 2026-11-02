@@ -269,12 +269,12 @@ func TestDirectHTTPSChildRetainsMainAndCriticReceiptsHelper(t *testing.T) {
 		}
 		switch request.role {
 		case roleMain:
-			return aicli.Result{Answer: proposalJSON("Worker answer", ""), Tokens: usage.Tokens{Input: 7, Output: 2}, UsageComplete: true}, nil
+			return aicli.Result{Answer: proposalJSON("Worker answer", ""), Tokens: usage.Tokens{Input: 7, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		case roleCritic:
 			if request.reviewPhase != reviewFull {
 				t.Fatalf("unexpected review phase: %s", request.reviewPhase)
 			}
-			return aicli.Result{Answer: approvedCritiqueJSON, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+			return aicli.Result{Answer: approvedCritiqueJSON, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		default:
 			t.Fatalf("unexpected model role: %s", request.role)
 			return aicli.Result{}, nil

@@ -41,7 +41,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 			t.Error(err)
 		}
 	})
-	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	known := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
 	for call := 1; call <= 3; call++ {
 		if call == 2 {
 			settings.ReadOnlyDirs = []string{newGrant}
@@ -56,7 +56,7 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+successfulRe
 			settings.ReadOnlyDirs = nil
 		}
 		result, err := session.Run(t.Context(), workspace, "task", false, "", settings)
-		if err != nil || !result.UsageComplete || result.Tokens != known {
+		if err != nil || !result.UsageComplete || result.Tokens != known || result.UsageCoverage != (usage.Coverage{Scope: "invocation"}) {
 			t.Fatalf("call%d: %+v, %v", call, result, err)
 		}
 	}
@@ -206,7 +206,7 @@ esac
 	dir := t.TempDir()
 	first, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{})
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) || exit.ExitCode() != 7 || first.Answer != "" || first.UsageComplete || first.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+	if !errors.As(err, &exit) || exit.ExitCode() != 7 || first.Answer != "" || first.UsageComplete || first.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) || first.UsageCoverage != (usage.Coverage{Scope: "known_subset", PartialReport: true}) {
 		t.Fatalf("failed turn: %+v,%v", first, err)
 	}
 	id := session.id
@@ -349,7 +349,7 @@ func TestSessionRejectsSwitchToExplicitDefaultConfig(t *testing.T) {
 }
 
 func TestResumedUsageKeepsOnlyNewWholeTreeCounters(t *testing.T) {
-	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	known := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
 	const aggregateOnly = `{"type":"result","subtype":"success","result":"final answer","modelUsage":{"claude-main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 	doubled := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(successfulResult, `"inputTokens":3`, `"inputTokens":6`), `"cacheCreationInputTokens":5`, `"cacheCreationInputTokens":10`), `"cacheReadInputTokens":7`, `"cacheReadInputTokens":14`), `"outputTokens":11`, `"outputTokens":22`)
 	withHelper := strings.TrimSuffix(successfulResult, "}}") + `,"helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}}`
@@ -361,12 +361,12 @@ func TestResumedUsageKeepsOnlyNewWholeTreeCounters(t *testing.T) {
 		{"new counters", doubled, known, known, true, false},
 		{"prior totals repeated without current root usage", aggregateOnly, known, usage.Tokens{}, true, false},
 		{"stale cumulative with current root usage", successfulResult, known, known, false, false},
-		{"helper total", withHelper, known, usage.Tokens{Input: 97, CachedInput: 37, Output: 41}, true, false},
+		{"helper total", withHelper, known, usage.Tokens{Input: 97, CacheCreationInput: 31, CachedInput: 37, Output: 41}, true, false},
 		{"repeated result snapshots", numberResultEvents(doubled + "\n" + doubled), known, known, true, false},
 		{"root fallback is current turn", `{"type":"result","subtype":"success","result":"answer","usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}`, known, known, false, false},
 		{"missing usage", `{"type":"result","subtype":"success","result":"answer"}`, known, usage.Tokens{}, false, false},
-		{"decreasing aggregate without current root usage", aggregateOnly, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, usage.Tokens{}, false, false},
-		{"decreasing aggregate retains current assistant", assistantUsageEvent("current", 3, 5, 7, 11) + "\n" + successfulResult, usage.Tokens{Input: 30, CachedInput: 14, Output: 22}, known, false, false},
+		{"decreasing aggregate without current root usage", aggregateOnly, usage.Tokens{Input: 30, CacheCreationInput: 10, CachedInput: 14, Output: 22}, usage.Tokens{}, false, false},
+		{"decreasing aggregate retains current assistant", assistantUsageEvent("current", 3, 5, 7, 11) + "\n" + successfulResult, usage.Tokens{Input: 30, CacheCreationInput: 10, CachedInput: 14, Output: 22}, known, false, false},
 		{"failed new counters", strings.Replace(doubled, `"is_error":false`, `"is_error":true`, 1), known, known, false, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -454,8 +454,8 @@ func TestSessionIncompleteUsageDoesNotBecomeNextCallUsage(t *testing.T) {
 		{"stream error after snapshot", successfulResult + "\n{", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":93,"cacheCreationInputTokens":0,"cacheReadInputTokens":7,"outputTokens":100}}}`
-			const later = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":97,"cacheCreationInputTokens":0,"cacheReadInputTokens":7,"outputTokens":106}}}`
+			const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":88,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":100}}}`
+			const later = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":92,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":106}}}`
 			fakeExecutable(t, "claude", `n=0
 [ ! -f "$0.count" ] || n=$(cat "$0.count")
 n=$((n+1)); printf '%s' "$n" > "$0.count"
@@ -588,7 +588,7 @@ printf '%s\n' '`+successfulResult+`'
 
 func TestSessionContradictedCumulativeCannotBecomeBaseline(t *testing.T) {
 	native := func(input, cached, output int64) string {
-		return fmt.Sprintf(`{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":%d,"outputTokens":%d}}}`, input-cached, cached, output)
+		return fmt.Sprintf(`{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":5,"cacheReadInputTokens":%d,"outputTokens":%d}}}`, input-cached-5, cached, output)
 	}
 	for _, test := range []struct {
 		name          string
@@ -616,7 +616,7 @@ esac
 				}
 			})
 			source := t.TempDir()
-			for call, want := range []usage.Tokens{{Input: 15, CachedInput: 7, Output: 11}, {Input: 4, Output: 6}, {Input: 2, Output: 3}, {Input: 2, Output: 3}} {
+			for call, want := range []usage.Tokens{{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}, {Input: 4, Output: 6}, {Input: 2, Output: 3}, {Input: 2, Output: 3}} {
 				result, err := session.Run(t.Context(), source, "task", false, "", config.ClaudeConfig{})
 				complete := call == 0 || call == 3
 				if err != nil || result.Tokens != want || result.UsageComplete != complete {
@@ -631,7 +631,7 @@ func TestLateCoveredBlockKeepsExactCumulativeBaseline(t *testing.T) {
 	output := jsonlOutput{}
 	writeChunks(t, &output, assistantUsageEvent("covered", 3, 5, 7, 2)+"\n"+successfulResult+"\n"+assistantUsageEvent("covered", 3, 5, 7, 11)+"\n")
 	output.finish()
-	if output.err != nil || !output.result.UsageComplete || !output.hasCumulative || output.cumulative != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+	if output.err != nil || !output.result.UsageComplete || !output.hasCumulative || output.cumulative != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 		t.Fatalf("covered duplicate invalidated exact baseline: %+v,%v", output, output.err)
 	}
 }
@@ -720,7 +720,7 @@ fi
 	}
 	session.NewConversation()
 	fresh, err := session.Run(t.Context(), source, "independent", false, "", config.ClaudeConfig{})
-	if err != nil || !fresh.UsageComplete || fresh.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+	if err != nil || !fresh.UsageComplete || fresh.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 		t.Fatalf("old usage gap survived independent conversation: %+v, %v", fresh, err)
 	}
 }

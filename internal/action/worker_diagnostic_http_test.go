@@ -723,6 +723,7 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 		result.Answer = `Public reply: "` + copied + `"`
 		for i := range result.Calls {
 			result.Calls[i].Tokens, result.Calls[i].Complete = usage.Tokens{Input: int64(i + 1), Output: 1}, true
+			result.Calls[i].UsageCoverage.Scope = "invocation"
 		}
 		if err := result.Validate(job); err != nil {
 			t.Fatalf("invalid refutation echo fixture: %v", err)

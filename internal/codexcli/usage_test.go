@@ -593,6 +593,17 @@ func TestCollectUsageWithoutRootRetainsStdoutFallback(t *testing.T) {
 	}
 }
 
+func TestCollectUsageLabelsStdoutWhenRootRolloutHasNoCounters(t *testing.T) {
+	home := t.TempDir()
+	writeUsageRollout(t, home, "root", "", usageEvent("task_started", "turn"), usageEvent("task_complete", "turn"))
+	fallback := usage.Tokens{Input: 10, CachedInput: 2, Output: 1}
+	var session usageSession
+	got, complete, err := session.collectUsage(t.Context(), home, "root", time.Now(), &fallback, nil, nil)
+	if got != fallback || complete || err != nil || session.coverage != (usage.Coverage{Scope: "root_only", PartialReport: true}) {
+		t.Fatalf("stdout fallback coverage: tokens=%+v complete=%t coverage=%+v err=%v", got, complete, session.coverage, err)
+	}
+}
+
 func TestCollectUsageRetainsValidCountersOnOverflow(t *testing.T) {
 	for _, source := range []string{"response", "helper", "stdout maximum", "snapshot maximum"} {
 		t.Run(source, func(t *testing.T) {

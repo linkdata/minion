@@ -473,7 +473,7 @@ func TestExecutionCallRejectsOrdinalAfterAcceptedPrefix(t *testing.T) {
 	}{{"stale before", 1, false}, {"skipped before", 3, false}, {"stale after", 1, true}, {"skipped after", 3, true}} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
-			main := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
+			main := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}
 			critic := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull}
 			f.saveReview(nil, nil, "")
 			f.ack(main)
@@ -525,7 +525,7 @@ func TestExecutionCallPairingAndMissingAcknowledgements(t *testing.T) {
 	for _, scenario := range []string{"missing callbacks", "missing Before", "duplicate Before", "missing After", "duplicate After", "changed After metadata", "changed After ordinal", "changed Result", "complete"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, testJob(command.Comment))
-			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
+			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}
 			result := f.result([]CallUsage{call}, nil, "")
 			var runErr error
 			if scenario != "missing callbacks" && scenario != "missing Before" {
@@ -574,7 +574,7 @@ func TestExecutionFailureAfterAdmittedCallCannotRetry(t *testing.T) {
 			f := newExecutionAdapterFixture(t, testJob(command.Comment))
 			var calls []CallUsage
 			if admitted {
-				call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: false}
+				call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, UsageCoverage: usage.Coverage{Scope: "known_subset"}, Complete: false}
 				f.ack(call)
 				calls = []CallUsage{call}
 			}
@@ -684,8 +684,8 @@ func TestExecutionDecisionSaveFailureKeepsAcknowledgedPrefix(t *testing.T) {
 			}
 			f := newExecutionAdapterFixture(t, job)
 			calls := []CallUsage{
-				{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 3}, Complete: true},
-				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 5}, Complete: true, Approved: test.approved, NoBlockers: test.approved, HasBlockers: !test.approved, ReviewComplete: true},
+				{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 3}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
+				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 5}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: test.approved, NoBlockers: test.approved, HasBlockers: !test.approved, ReviewComplete: true},
 			}
 			f.saveReview(nil, nil, "")
 			f.ack(calls[0])
@@ -778,7 +778,7 @@ func TestExecutionFailedBeforePreservesOrdinaryErrorButRefusesPaidContinuation(t
 				t.Fatal(err)
 			}
 			store.Dir = blocked
-			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, Complete: true}
+			call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}
 			beforeErr := f.sink.BeforeCall(f.call(callMetadata(call)))
 			if beforeErr == nil || errors.Is(beforeErr, monitor.ErrTerminalJob) {
 				t.Fatalf("pre-save failure changed classification: %v", beforeErr)
@@ -813,8 +813,8 @@ func TestExecutionFailedAfterAllowsOnlyItsExactCapturedReceipt(t *testing.T) {
 			store := f.startUsage()
 			original := store.Dir
 			calls := []CallUsage{
-				{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 3}, Complete: true},
-				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 7, Output: 2}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
+				{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 3}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
+				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
 			}
 			f.saveReview(nil, nil, "")
 			f.ack(calls[0])

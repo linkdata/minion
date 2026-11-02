@@ -41,7 +41,7 @@ func TestExecuteUsesSelectedAttemptIdentity(t *testing.T) {
 			var journal bytes.Buffer
 			orchestrator := Orchestrator{GitHub: client, Store: openState(t, time.Now()), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(), Logger: log.New(&journal, "", 0), Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, Runner: Runner{runModel: func(context.Context, modelRun) (aicli.Result, error) {
 				calls++
-				return aicli.Result{Answer: "No findings.", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+				return aicli.Result{Answer: "No findings.", Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 			}}}
 			if withUsage {
 				orchestrator.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}

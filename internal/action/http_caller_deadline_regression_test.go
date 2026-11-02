@@ -89,6 +89,7 @@ func TestSelectedCallerDeadlineWithAcknowledgedCallStaysKnown(t *testing.T) {
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
 	paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7}
+	paid.Checkpoint.Call.UsageCoverage.Scope = "known_subset"
 	f.ack(t, "/after", paid, http.StatusOK, 2)
 	parent, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	t.Cleanup(cancel)

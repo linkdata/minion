@@ -595,7 +595,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				failure.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 				configured.eventSink(failure)
 			}
-			entry.Tokens, entry.Complete = call.Tokens, call.UsageComplete
+			entry.Tokens, entry.UsageCoverage, entry.Complete = call.Tokens, call.UsageCoverage, call.UsageComplete
 			if err == nil && request.role == roleCritic {
 				approved, hasBlockers, reviewComplete, feedback, parseErr := parseCritique(call.Answer, secrets...)
 				entry.Approved = parseErr == nil && approved

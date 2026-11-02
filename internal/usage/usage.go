@@ -18,17 +18,20 @@ import (
 )
 
 type Tokens struct {
-	Input       int64 `json:"input_tokens"`
-	CachedInput int64 `json:"cached_input_tokens"`
-	Output      int64 `json:"output_tokens"`
+	Input              int64 `json:"input_tokens"`
+	CacheCreationInput int64 `json:"cache_creation_input_tokens,omitempty"`
+	CachedInput        int64 `json:"cached_input_tokens"`
+	Output             int64 `json:"output_tokens"`
 }
 
-// Valid checks nonnegative counters, cached-input inclusion and total overflow.
+// Valid checks nonnegative counters, cache subsets and total overflow.
 func (t Tokens) Valid() bool {
-	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input && t.Output >= 0 && t.Output <= math.MaxInt64-t.Input
+	return t.Input >= 0 && t.CachedInput >= 0 && t.CachedInput <= t.Input &&
+		t.CacheCreationInput >= 0 && t.CacheCreationInput <= t.Input-t.CachedInput &&
+		t.Output >= 0 && t.Output <= math.MaxInt64-t.Input
 }
 
-// Cached input is a subset of input tokens.
+// Cached and cache-creation input are disjoint subsets of input tokens.
 func (t Tokens) Total() int64 { return t.Input + t.Output }
 
 // AddChecked sums normalized counters, retaining the receiver on overflow.
@@ -37,6 +40,7 @@ func (t Tokens) AddChecked(other Tokens) (Tokens, bool) {
 		return t, false
 	}
 	t.Input += other.Input
+	t.CacheCreationInput += other.CacheCreationInput
 	t.CachedInput += other.CachedInput
 	t.Output += other.Output
 	return t, true
@@ -44,12 +48,62 @@ func (t Tokens) AddChecked(other Tokens) (Tokens, bool) {
 
 // Sub returns raw component differences; callers validate the resulting delta.
 func (t Tokens) Sub(other Tokens) Tokens {
-	return Tokens{Input: t.Input - other.Input, CachedInput: t.CachedInput - other.CachedInput, Output: t.Output - other.Output}
+	return Tokens{Input: t.Input - other.Input, CacheCreationInput: t.CacheCreationInput - other.CacheCreationInput,
+		CachedInput: t.CachedInput - other.CachedInput, Output: t.Output - other.Output}
 }
 
-// Max returns component maxima; callers validate that the combined total fits.
+// Max returns component maxima as a conservative floor. Its result may violate
+// the disjoint cache-subset invariant even when both operands are valid; callers
+// must validate it before using it as a token count.
 func (t Tokens) Max(other Tokens) Tokens {
-	return Tokens{Input: max(t.Input, other.Input), CachedInput: max(t.CachedInput, other.CachedInput), Output: max(t.Output, other.Output)}
+	return Tokens{Input: max(t.Input, other.Input), CacheCreationInput: max(t.CacheCreationInput, other.CacheCreationInput),
+		CachedInput: max(t.CachedInput, other.CachedInput), Output: max(t.Output, other.Output)}
+}
+
+// Coverage describes the scope and gaps of an executor-reported token claim.
+// PartialReport means the observed counters may be a subset of the invocation;
+// an unusable present final report is MalformedFinalReport, not MissingFinalReport.
+// An empty value is permitted for older attempt records and zero-token calls.
+// Billed credits are not inferred from these counters.
+type Coverage struct {
+	Scope                  string `json:"scope,omitempty"`
+	MissingFinalReport     bool   `json:"missing_final_report,omitempty"`
+	MalformedFinalReport   bool   `json:"malformed_final_report,omitempty"`
+	UnverifiedHelpers      bool   `json:"unverified_helpers,omitempty"`
+	PartialReport          bool   `json:"partial_report,omitempty"`
+	CumulativeUnattributed bool   `json:"cumulative_unattributed,omitempty"`
+}
+
+func (c Coverage) Valid() bool {
+	switch c.Scope {
+	case "", "invocation", "root_only", "known_subset", "unknown", "attempt":
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidForCall and ValidForAttempt check claim consistency. A missing or bad
+// final CLI report can coexist with complete rollout accounting, and a resumed
+// cumulative report can be ignored when a current-turn delta is proven.
+func (c Coverage) ValidForCall(complete bool) bool {
+	return c.Valid() && c.Scope != "attempt" && !(c.MissingFinalReport && c.MalformedFinalReport) &&
+		(!complete || (c.Scope == "" || c.Scope == "invocation") && !c.UnverifiedHelpers && !c.PartialReport)
+}
+
+func (c Coverage) ValidForAttempt(complete bool) bool {
+	return c.Valid() && (c.Scope == "" || c.Scope == "attempt") &&
+		(!complete || !c.UnverifiedHelpers && !c.PartialReport)
+}
+
+// AddGaps retains reasons reported by each call in an attempt.
+func (c Coverage) AddGaps(other Coverage) Coverage {
+	c.MissingFinalReport = c.MissingFinalReport || other.MissingFinalReport
+	c.MalformedFinalReport = c.MalformedFinalReport || other.MalformedFinalReport
+	c.UnverifiedHelpers = c.UnverifiedHelpers || other.UnverifiedHelpers
+	c.PartialReport = c.PartialReport || other.PartialReport
+	c.CumulativeUnattributed = c.CumulativeUnattributed || other.CumulativeUnattributed
+	return c
 }
 
 // Record contains the usage reported by all model calls in one action attempt.
@@ -79,6 +133,7 @@ type Record struct {
 	CodexCalls     int        `json:"codex_calls"`
 	ClaudeCalls    int        `json:"claude_calls,omitempty"`
 	Tokens         Tokens     `json:"tokens"`
+	UsageCoverage  Coverage   `json:"usage_coverage,omitzero"`
 	UsageComplete  bool       `json:"usage_complete"`
 }
 
@@ -115,7 +170,7 @@ func (r Record) validate() error {
 	default:
 		return fmt.Errorf("usage record %s has invalid status %q", r.ID, r.Status)
 	}
-	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() {
+	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() || !r.UsageCoverage.ValidForAttempt(r.UsageComplete) {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
 	counted := r.CodexCalls > 0 || r.ClaudeCalls > 0

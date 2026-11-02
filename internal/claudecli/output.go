@@ -44,7 +44,8 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 	if *u.Created > math.MaxInt64-*u.Input || *u.Cached > math.MaxInt64-*u.Input-*u.Created {
 		return
 	}
-	tokens = usage.Tokens{Input: *u.Input + *u.Created + *u.Cached, CachedInput: *u.Cached, Output: *u.Output}
+	tokens = usage.Tokens{Input: *u.Input + *u.Created + *u.Cached, CacheCreationInput: *u.Created,
+		CachedInput: *u.Cached, Output: *u.Output}
 	valid = tokens.Valid()
 	return
 }
@@ -193,6 +194,12 @@ type jsonlOutput struct {
 	results                int64
 	indexed                bool
 	result                 aicli.Result
+	finalModelUsage        bool
+	finalTopUsage          bool
+	finalTopTokens         usage.Tokens
+	finalReportPresent     bool
+	finalMalformedUsage    bool
+	cumulativeUnattributed bool
 	aggregateGeneration    int64
 	aggregateTokens        usage.Tokens
 	assistantUsage         map[string]messageUsage
@@ -305,6 +312,26 @@ func (o *jsonlOutput) finish() {
 			o.fail(errors.New("missing successful Claude result"))
 		}
 	}
+	coverage := usage.Coverage{
+		MissingFinalReport:     !o.finalReportPresent,
+		MalformedFinalReport:   o.finalMalformedUsage,
+		UnverifiedHelpers:      o.pending != 0 || o.taskFailure != nil,
+		CumulativeUnattributed: o.cumulativeUnattributed,
+	}
+	switch {
+	case o.result.UsageComplete:
+		coverage.Scope = "invocation"
+	case o.finalTopUsage && (!o.finalModelUsage || o.cumulativeUnattributed && o.aggregateGeneration == 0) && o.result.Tokens == o.finalTopTokens:
+		coverage.Scope = "root_only"
+	case o.result.Tokens != (usage.Tokens{}):
+		coverage.Scope = "known_subset"
+	default:
+		coverage.Scope = "unknown"
+	}
+	if !o.result.UsageComplete && (coverage.Scope == "known_subset" || coverage.Scope == "root_only") {
+		coverage.PartialReport = true
+	}
+	o.result.UsageCoverage = coverage
 }
 
 func (o *jsonlOutput) acceptsSession(id string) bool {
@@ -494,16 +521,21 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		return
 	}
 	tokens, complete := e.tokens()
+	var top eventUsage
+	if json.Unmarshal(e.Usage, &top) == nil {
+		o.finalTopTokens, o.finalTopUsage = top.tokens()
+	} else {
+		o.finalTopTokens, o.finalTopUsage = usage.Tokens{}, false
+	}
+	o.finalModelUsage = complete
+	o.finalReportPresent = reportPresent(e.ModelUsage) || reportPresent(e.Usage)
+	o.finalMalformedUsage = !complete && (reportPresent(e.ModelUsage) || !o.finalTopUsage && reportPresent(e.Usage))
 	o.hasCumulative = false
 	if complete {
 		o.ensureAssistantTotal()
 		cumulative := tokens
 		tokens = tokens.Sub(o.baseline)
-		var rawRoot eventUsage
-		root, rootValid := usage.Tokens{}, json.Unmarshal(e.Usage, &rawRoot) == nil
-		if rootValid {
-			root, rootValid = rawRoot.tokens()
-		}
+		root, rootValid := o.finalTopTokens, o.finalTopUsage
 		// An exact snapshot must cover the prior cumulative floor plus all
 		// attributable current counters before it can become the next baseline.
 		lower, valid := o.assistantLowerBound()
@@ -515,6 +547,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		if o.baselineUnknown || !tokens.Valid() {
 			// An uncertain prior baseline cannot identify this invocation's delta.
+			o.cumulativeUnattributed = true
 			tokens, complete = usage.Tokens{}, false
 		}
 		if rootValid && !covers(tokens, root) {
@@ -631,6 +664,11 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.result.Answer = e.Result
 	}
 	o.completed = true
+}
+
+func reportPresent(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) != 0 && !bytes.Equal(raw, []byte("null"))
 }
 
 func (o *jsonlOutput) captureMessage(e event) {

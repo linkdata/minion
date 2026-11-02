@@ -388,7 +388,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 		Refutations: []Refutation{{Round: 2, Text: "Private refutation."}},
 		Diagnostics: []Diagnostic{{Code: "incomplete_usage", Message: "Provider omitted usage."}},
 		Calls: []CallUsage{
-			{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 11, CachedInput: 2, Output: 3}},
+			{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 11, CachedInput: 2, Output: 3}, UsageCoverage: usage.Coverage{Scope: "known_subset"}},
 			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 2, Complete: true},
 			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
@@ -590,7 +590,7 @@ func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T)
 	}
 }
 
-func TestProtocolRejectsEarlierCriticContracts(t *testing.T) {
+func TestProtocolRejectsEarlierContracts(t *testing.T) {
 	job := testJob(command.Comment)
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
@@ -600,7 +600,7 @@ func TestProtocolRejectsEarlierCriticContracts(t *testing.T) {
 	if err := status.Validate(job); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int{3, 4} {
+	for _, version := range []int{3, 4, ProtocolVersion - 1} {
 		oldJob := job
 		oldJob.Version = version
 		result.Version, status.Version = version, version
@@ -667,14 +667,41 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"usage", "invalid model call usage", func(r *Result) {
 			r.Calls = []CallUsage{{Provider: "codex", Role: "main", Round: 1, Tokens: usage.Tokens{Input: -1}}}
 		}},
+		{"unscoped nonzero usage", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Tokens = usage.Tokens{Input: 1}
+		}},
+		{"invalid usage scope", "invalid model call usage", func(r *Result) {
+			r.Calls[0].UsageCoverage.Scope = "foreign"
+		}},
+		{"attempt scope in call", "invalid model call usage", func(r *Result) {
+			r.Calls[0].UsageCoverage.Scope = "attempt"
+		}},
+		{"complete root-only claim", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Complete = true
+			r.Calls[0].UsageCoverage.Scope = "root_only"
+		}},
+		{"complete partial claim", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Complete = true
+			r.Calls[0].UsageCoverage = usage.Coverage{Scope: "invocation", PartialReport: true}
+		}},
+		{"complete unverified helpers", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Complete = true
+			r.Calls[0].UsageCoverage = usage.Coverage{Scope: "invocation", UnverifiedHelpers: true}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result := valid
+			result.Calls = append([]CallUsage(nil), valid.Calls...)
 			test.change(&result)
 			if err := result.Validate(job); err == nil || err.Error() != test.want {
 				t.Fatalf("result mismatch=%v want%q", err, test.want)
 			}
 		})
+	}
+	scoped := valid
+	scoped.Calls = []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1, Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}}}
+	if err := scoped.Validate(job); err != nil {
+		t.Fatalf("scoped nonzero usage rejected: %v", err)
 	}
 }
 

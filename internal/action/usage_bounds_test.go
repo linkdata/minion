@@ -50,7 +50,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 							answer = `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Check the remaining detail."}`
 						}
 					}
-					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}},
 			})
 			finish, err := orchestrator.trackUsage(usageJob())
@@ -83,7 +83,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 				t.Fatalf("invalid persisted usage: records=%d err=%v", len(records), err)
 			}
 			got := records[0]
-			if got.Status != "succeeded" || got.FinishedAt == nil || got.Tokens != (usage.Tokens{Input: scenario.want}) || got.UsageComplete != scenario.complete || got.CodexCalls+got.ClaudeCalls != wantCalls {
+			if got.Status != "succeeded" || got.FinishedAt == nil || got.Tokens != (usage.Tokens{Input: scenario.want}) || got.UsageComplete != scenario.complete || got.UsageCoverage.Scope != "attempt" || got.UsageCoverage.PartialReport != !scenario.complete || got.CodexCalls+got.ClaudeCalls != wantCalls {
 				t.Fatalf("usage did not retain/finalize the representable bound: %+v", got)
 			}
 			const warning = "action usage counters invalid or overflowed; retaining previous reported totals for attempt "

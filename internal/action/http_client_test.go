@@ -180,7 +180,7 @@ func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 					t.Errorf("worker renewed the accepted budget: %v %t", deadline, ok)
 					return aicli.Result{}, errors.New("renewed native runtime")
 				}
-				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageComplete: true}, nil
+				return aicli.Result{Answer: "Complete answer", Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 			}}
 			err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner)
 			if test.invalidCounters || test.afterFailure {
@@ -270,7 +270,7 @@ func TestRunHTTPBlockedStatusEndpointDoesNotDelayOutcome(t *testing.T) {
 			case <-time.After(2 * statusSendTimeout):
 				return aicli.Result{}, errors.New("worker did not send initial Status")
 			}
-			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		}}
 		if err := RunHTTP(t.Context(), &client, server.URL, job.Identity.ExecutorID, runner); err != nil {
 			t.Fatal(err)
@@ -336,7 +336,7 @@ func TestRunHTTPReportsModelProgressAndHeartbeatsDuringUpload(t *testing.T) {
 				return aicli.Result{}, ctx.Err()
 			}
 			request.onProgress() // The stub process has exited.
-			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+			return aicli.Result{Answer: "Complete", Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		}}
 		workerDone := make(chan error, 1)
 		go func() { workerDone <- RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, runner) }()
@@ -522,7 +522,7 @@ func TestRunHTTPRedactsAssignedKeyFromCancellationOutcome(t *testing.T) {
 		runner := &Runner{WorkRoot: t.TempDir(), runModel: func(callCtx context.Context, _ modelRun) (aicli.Result, error) {
 			modelEntered <- struct{}{}
 			<-callCtx.Done()
-			return aicli.Result{Tokens: usage.Tokens{Input: 1}}, callCtx.Err()
+			return aicli.Result{Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, callCtx.Err()
 		}}
 		workerDone := make(chan error, 1)
 		go func() { workerDone <- RunHTTP(ctx, server.Client(), server.URL, job.Identity.ExecutorID, runner) }()
@@ -810,7 +810,7 @@ func TestRunHTTPPullWaitDoesNotRenewOrConsumeRuntime(t *testing.T) {
 					if !test.wantWatch || !ok || time.Until(deadline) <= time.Second || time.Until(deadline) > job.RuntimeBudget {
 						return aicli.Result{}, errors.New("idle pull consumed or renewed model runtime")
 					}
-					return aicli.Result{Answer: "Complete answer", Tokens: usage.Tokens{Input: 1}, UsageComplete: true}, nil
+					return aicli.Result{Answer: "Complete answer", Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}})
 				if (err == nil) != test.wantWatch || (native.Load() != 0) != test.wantWatch || (watch.Load() != 0) != test.wantWatch || len(outcomes) != 1 {
 					t.Fatalf("wrong pull budget treatment: error=%v watch=%d native=%d outcomes=%d", err, watch.Load(), native.Load(), len(outcomes))
@@ -1242,10 +1242,10 @@ func TestRunHTTPOutcomeACKPreservesKnownReceiptAfterWatchFailure(t *testing.T) {
 				close(started)
 				if test.early {
 					<-ctx.Done()
-					return aicli.Result{Tokens: tokens}, ctx.Err()
+					return aicli.Result{Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, ctx.Err()
 				}
 				close(modelFinished)
-				return aicli.Result{Answer: "Known candidate", Tokens: tokens, UsageComplete: true}, nil
+				return aicli.Result{Answer: "Known candidate", Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 			}}
 			done := make(chan error, 1)
 			finished := false
@@ -1605,7 +1605,7 @@ func TestRunHTTPDeliversPaidFactsAfterCancellationWatchStopsAction(t *testing.T)
 					cancel()
 				}
 				<-ctx.Done()
-				return aicli.Result{Tokens: tokens}, ctx.Err()
+				return aicli.Result{Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, ctx.Err()
 			}}
 			err := RunHTTP(ctx, &client, server.URL, job.Identity.ExecutorID, runner)
 			unknown := name == "completed" || name == "malformed" || name == "pipe before outcome"
@@ -1672,7 +1672,7 @@ func TestHTTPClientSendsOneBoundFailureForUnrepresentableOutcome(t *testing.T) {
 				checkpoints := &httpClientCheckpoints{transport: &httpExecutionClient{client: server.Client(), base: base}, control: t.Context(), binding: binding}
 				// Craft the invalid primary field at the wire boundary, not as a Runner response.
 				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Answer: strings.Repeat("x", maxOutputBytes+1),
-					Calls:       []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, CachedInput: -2}, Approved: true, HasBlockers: true}},
+					Calls:       []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, CachedInput: -2}, UsageCoverage: usage.Coverage{Scope: "known_subset"}, Approved: true, HasBlockers: true}},
 					Refutations: []Refutation{{Round: 2, Text: "Private raw refutation\x00\nkept exactly."}}, CriticStopReason: "round_cap"}
 				if test.edit != nil {
 					test.edit(&result)
@@ -1800,7 +1800,7 @@ func TestRunHTTPStopGraceBoundsSerialAfterAndOutcome(t *testing.T) {
 					}
 					close(started)
 					<-ctx.Done()
-					return aicli.Result{Tokens: usage.Tokens{Input: 7}}, ctx.Err()
+					return aicli.Result{Tokens: usage.Tokens{Input: 7}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, ctx.Err()
 				}}
 				done := make(chan error, 1)
 				go func() { done <- RunHTTP(ctx, &client, server.URL, job.Identity.ExecutorID, runner) }()
