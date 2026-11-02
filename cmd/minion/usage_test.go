@@ -73,9 +73,13 @@ func TestUsageJSONFiltersAndTotals(t *testing.T) {
 	if strings.Join(output.GroupBy, ",") != "repo,user,action" || len(output.Groups) != 4 {
 		t.Fatalf("unexpected groups: %+v", output)
 	}
-	want := usage.Summary{Attempts: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, TotalTokens: 175}
+	want := usage.Summary{Attempts: 4, UsageRecordedActions: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, UnallocatedTokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, TotalTokens: 175}
 	if output.Totals != want {
 		t.Fatalf("totals = %+v, want %+v", output.Totals, want)
+	}
+	unknown := reportJSON(t, "-dir", dir, "-group-by", "requester_id,service")
+	if len(unknown.Groups) != 1 || unknown.Groups[0].RequesterID != 0 || unknown.Groups[0].Service != "unknown" || unknown.Groups[0].UnallocatedTokens != want.Tokens {
+		t.Fatalf("legacy usage lost unknown attribution: %+v", unknown)
 	}
 	output = reportJSON(t, "-dir", dir, "-repo", "EXAMPLE-OWNER/EXAMPLE-REPO", "-user", "ALICE", "-from", "2026-10-09T02:00:00+02:00", "-to", "2026-10-10", "-group-by", "day,user")
 	if len(output.Groups) != 1 || output.Groups[0].Day != "2026-10-09" || output.Groups[0].User != "alice" || output.Totals.Attempts != 1 || output.Totals.TotalTokens != 55 || output.Totals.Tokens.CacheCreationInput != 5 || output.Totals.IncompleteUsage != 1 {
@@ -83,6 +87,64 @@ func TestUsageJSONFiltersAndTotals(t *testing.T) {
 	}
 	if output.Filters.From != "2026-10-09T00:00:00Z" || output.Filters.To != "2026-10-10T00:00:00Z" {
 		t.Fatalf("wrong UTC boundaries: %+v", output.Filters)
+	}
+}
+
+func TestUsageServiceAndRequesterFiltersKeepOriginalDetail(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	record := usage.Record{
+		ID: "0123456789abcdef0123456789abcdef", JobID: "job-one", Repo: "linkdata/minion", RepositoryID: 11,
+		User: "old-login", RequesterID: 22, Action: "review", Number: 1, Provider: "codex", Model: "main-model",
+		CriticProvider: "claude", CriticModel: "critic-model", StartedAt: start, Status: "running",
+		ExecutorID: "local", SourceRef: strings.Repeat("a", 40), UsageCoverage: usage.Coverage{Scope: "attempt"}, UsageComplete: true,
+	}
+	for i, call := range []usage.Call{
+		{Ordinal: 1, StartedAt: start.Add(time.Second), Provider: "codex", Model: "main-model", Role: "main", Round: 1},
+		{Ordinal: 2, StartedAt: start.Add(2 * time.Second), Provider: "claude", Model: "critic-model", Role: "critic", Round: 1, ReviewPhase: "full"},
+	} {
+		if _, err := record.BeginCall(call); err != nil {
+			t.Fatal(err)
+		}
+		finish := call.StartedAt.Add(time.Second)
+		call.FinishedAt = &finish
+		call.Tokens = usage.Tokens{Input: int64(10 * (i + 1)), Output: int64(i + 2)}
+		call.UsageCoverage = usage.Coverage{Scope: "invocation"}
+		call.Complete = true
+		if _, err := record.FinishCall(call); err != nil {
+			t.Fatal(err)
+		}
+	}
+	end := start.Add(time.Minute)
+	record.Status, record.FinishedAt = "succeeded", &end
+	if err := (usage.Store{Dir: dir}).Save(record); err != nil {
+		t.Fatal(err)
+	}
+	output := reportJSON(t, "-dir", dir, "-requester-id", "22", "-service", "codex", "-group-by", "service,requester_id")
+	if output.Totals.Attempts != 1 || output.Totals.UsageRecordedActions != 1 || output.Totals.Tokens != (usage.Tokens{Input: 10, Output: 2}) ||
+		len(output.Groups) != 1 || output.Groups[0].Service != "codex" || output.Groups[0].RequesterID != 22 || output.Groups[0].Tokens != output.Totals.Tokens {
+		t.Fatalf("wrong selected service totals: %+v", output)
+	}
+	details := reportJSON(t, "-dir", dir, "-requester-id", "22", "-service", "claude", "-group-by", "none")
+	if len(details.Attempts) != 1 || details.Attempts[0].SelectedUsage == nil ||
+		details.Attempts[0].SelectedUsage.Tokens != (usage.Tokens{Input: 20, Output: 3}) ||
+		details.Attempts[0].Tokens != (usage.Tokens{Input: 30, Output: 5}) || details.Totals.TotalTokens != 23 {
+		t.Fatalf("filtered detail lost full attempt or selected portion: %+v", details)
+	}
+	var table, stderr bytes.Buffer
+	if code := runUsageWithOutput([]string{"-dir", dir, "-service", "claude", "-group-by", "none"}, &table, &stderr); code != 0 {
+		t.Fatalf("filtered table exit %d: %s", code, &stderr)
+	}
+	lines := strings.SplitN(table.String(), "\n", 3)
+	if len(lines) < 2 {
+		t.Fatalf("filtered table lacks a row: %s", &table)
+	}
+	totalAt, usageAt := strings.Index(lines[0], "TOTAL"), strings.Index(lines[0], "USAGE")
+	if totalAt < 0 || usageAt <= totalAt || strings.TrimSpace(lines[1][totalAt:usageAt]) != "23" || !strings.Contains(lines[1], "22") {
+		t.Fatalf("filtered table shows whole-attempt tokens: %s", &table)
+	}
+	if got := reportJSON(t, "-dir", dir, "-requester-id", "23"); got.Totals.Attempts != 0 {
+		t.Fatalf("wrong requester selected: %+v", got)
 	}
 }
 
@@ -191,6 +253,7 @@ func TestUsageRejectsInvalidArguments(t *testing.T) {
 		{"-from", "2026-10-10", "-to", "2026-10-09"},
 		{"-group-by", "repo,repo"}, {"-group-by", "week"},
 		{"-group-by", "none,repo"}, {"-group-by", ""},
+		{"-service", "other"}, {"-requester-id", "-1"}, {"-requester-id", "0"}, {"-requester-id", "bad"},
 		{"-dir", ""}, {"-dir", "records", "-config", "config.json"},
 		{"-loop"}, {"-check"}, {"extra"},
 	} {
