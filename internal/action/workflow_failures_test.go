@@ -104,6 +104,41 @@ func TestPerformRetainsWorkerRecoveryAfterWorkRootBecomesReadOnly(t *testing.T) 
 	}
 }
 
+func TestPerformDoesNotRetainAcknowledgedFailedResultTwice(t *testing.T) {
+	gitFixtureRemote(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !serveIssueFixture(t, w, r) {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	var journal bytes.Buffer
+	owner := attemptFixture(&Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), Logger: log.New(&journal, "", 0),
+		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+			result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+				Diagnostics: []Diagnostic{{Code: "result_detail", Message: "private result detail"}}}
+			failure := newHTTPFailure(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
+			if err := checkpoints.(*executionCheckpoints).validateFailedResult(result, failure); err != nil {
+				t.Fatalf("save failed Result before ACK: %v", err)
+			}
+			return result, failure.workerErr()
+		}),
+	})
+	request := usageJob()
+	request.Command = command.Command{Name: "comment", Action: command.Comment}
+	request.Repository.Actions = []string{"comment"}
+	err := owner.perform(testActionContext(t), request)
+	var inactivity interface{ ExecutorInactivity() bool }
+	if !errors.As(err, &inactivity) || !inactivity.ExecutorInactivity() || errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("known inactivity classification changed: %v", err)
+	}
+	if count := strings.Count(journal.String(), "action worker diagnostics"); count != 1 {
+		t.Fatalf("failed Result diagnostics retained %d times, want once: %s", count, journal.String())
+	}
+}
+
 func TestReplyFailureClassificationBeforeAndAfterModel(t *testing.T) {
 	for _, kind := range []string{"model result", "recovery"} {
 		t.Run(kind, func(t *testing.T) {

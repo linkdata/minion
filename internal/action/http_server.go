@@ -965,11 +965,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				tx.requiredACKs.Wait()
 			}
 			if failedOutcome && selected {
-				validator, ok := tx.sink.(interface{ validateFailedResult(Result) error })
+				validator, ok := tx.sink.(interface {
+					validateFailedResult(Result, *httpFailure) error
+				})
 				if !ok {
 					terminalResult = fmt.Errorf("%w: selected HTTP failed-outcome validator is missing", monitor.ErrAcceptanceState)
 				} else {
-					terminalResult = validator.validateFailedResult(outcome.Result)
+					terminalResult = validator.validateFailedResult(outcome.Result, outcome.Failure)
 				}
 			}
 			// A successful outcome is acknowledged only after its optional parent
