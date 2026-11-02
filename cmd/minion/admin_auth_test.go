@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -172,8 +175,12 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer page.Body.Close()
-	if page.StatusCode != http.StatusOK {
-		t.Fatalf("authenticated TLS page: status=%d", page.StatusCode)
+	pageBody, err := io.ReadAll(page.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "Signed in") {
+		t.Fatalf("authenticated TLS page: status=%d body=%q", page.StatusCode, pageBody)
 	}
 	request, err = http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/jaws/.ping", nil)
 	if err != nil {
@@ -185,8 +192,8 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer allowed.Body.Close()
-	if allowed.StatusCode == http.StatusForbidden {
-		t.Fatal("configured JaWS route denied a valid admin session")
+	if allowed.StatusCode != http.StatusNoContent {
+		t.Fatalf("authenticated JaWS ping: status=%d, want 204", allowed.StatusCode)
 	}
 }
 
@@ -219,8 +226,76 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer page.Body.Close()
-	if page.StatusCode != http.StatusOK {
-		t.Fatalf("authenticated loopback page: status=%d", page.StatusCode)
+	pageBody, err := io.ReadAll(page.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "Signed in") {
+		t.Fatalf("authenticated loopback page: status=%d body=%q", page.StatusCode, pageBody)
+	}
+}
+
+func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{
+		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.PostForm("http://"+admin.listener.Addr().String()+"/admin/login",
+		url.Values{"username": {"operator"}, "password": {"correct-password"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
+		t.Fatalf("login: status=%d cookies=%v", response.StatusCode, response.Cookies())
+	}
+	cookie := response.Cookies()[0]
+	for _, tc := range []struct {
+		name, method, path, headers string
+		want                        int
+	}{
+		{name: "public GET", method: http.MethodGet, path: "/admin/login", want: http.StatusOK},
+		{name: "cross-origin login", method: http.MethodPost, path: "/admin/login",
+			headers: "Origin: http://other.example\r\n", want: http.StatusForbidden},
+		{name: "unsupported login body", method: http.MethodPost, path: "/admin/login",
+			headers: "Content-Type: text/plain\r\n", want: http.StatusBadRequest},
+		{name: "cross-origin logout", method: http.MethodPost, path: "/admin/logout",
+			headers: "Origin: http://other.example\r\nCookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
+		{name: "logout", method: http.MethodPost, path: "/admin/logout",
+			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusSeeOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", admin.listener.Addr().String(), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			request := tc.method + " " + tc.path + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n" + tc.headers + "\r\n"
+			if _, err := io.WriteString(conn, request); err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: tc.method})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want || !resp.Close {
+				t.Fatalf("incomplete body: status=%d close=%t, want %d and close", resp.StatusCode, resp.Close, tc.want)
+			}
+			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conn.Read(make([]byte, 1)); err != io.EOF {
+				t.Fatalf("server kept incomplete request open: %v", err)
+			}
+		})
 	}
 }
 
@@ -288,6 +363,10 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 			t.Fatalf("duplicate credential field: status=%d cookies=%v", response.Code, response.Result().Cookies())
 		}
 	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {strings.Repeat("x", 101)}, "password": {"wrong"}}, nil, ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("username beyond config limit: status=%d, want 400", response.Code)
+	}
 	form := url.Values{"username": {"unknown"}, "password": {"wrong"}, "padding": {""}}
 	form.Set("padding", strings.Repeat("x", (8<<10)-len(form.Encode())))
 	if got := len(form.Encode()); got != 8<<10 {
@@ -323,6 +402,21 @@ func TestAdminAttemptReservationIsConcurrentAndExpires(t *testing.T) {
 			t.Fatal("expired login window did not reopen")
 		}
 	})
+}
+
+func TestAdminUnknownNamesShareAttemptLimit(t *testing.T) {
+	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	for i := range 6 {
+		form := url.Values{"username": {fmt.Sprintf("unknown-%d", i)}, "password": {"wrong"}}
+		response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "")
+		want := http.StatusUnauthorized
+		if i == 5 {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want {
+			t.Fatalf("unknown name %d: status=%d, want %d", i, response.Code, want)
+		}
+	}
 }
 
 func TestAdminUnattachedSessionExpires(t *testing.T) {

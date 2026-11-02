@@ -114,7 +114,7 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-To enable the admin dashboard, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive. For example:
+To enable the admin dashboard, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
@@ -140,7 +140,17 @@ PY
 rm -r "$admin_hash_env"
 ```
 
-Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; the signed-in page's form sends `POST /admin/logout` to revoke the session. JaWS keeps sessions in memory, so they end on restart or after one minute without an attached JaWS page. Failed logins are limited per configured username and in one shared bucket for unknown usernames. At most two password hashes run concurrently.
+On native Windows, use PowerShell with Python installed:
+
+```powershell
+$adminHashEnv = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+py -3 -m venv $adminHashEnv
+& "$adminHashEnv\Scripts\python.exe" -m pip install argon2-cffi
+& "$adminHashEnv\Scripts\python.exe" -c "import getpass; from argon2 import PasswordHasher; print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len=32, salt_len=16).hash(getpass.getpass('Admin password: ')))"
+Remove-Item -Recurse -Force $adminHashEnv
+```
+
+Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; the signed-in page's form sends `POST /admin/logout` to revoke the session. JaWS keeps sessions in memory, so they end on restart or after one minute without an attached JaWS page. The built-in signed-in page does not attach a JaWS request, so its session expires after roughly one minute even while the page stays open. Failed logins are limited per configured username and in one shared bucket for unknown usernames. These separate limits can reveal configured usernames after repeated failures; usernames should not be treated as secrets. At most two password hashes run concurrently.
 
 An empty `listen` uses `127.0.0.1:8377`. The admin server runs only with `-loop`. Anything other than a literal loopback IP address in `listen` requires both `tls_cert_file` and `tls_key_file`; relative file paths resolve against the config directory. The certificate must be trusted by the browser and cover the address used. `-check` verifies configured admin TLS files without binding the listener; `-loop` verifies them before binding. One-pass polling neither loads unused admin TLS files nor starts the listener. An admin listener failure stops `-loop` with exit status 1. The admin listener is separate from the worker HTTPS endpoint and does not use its token.
 

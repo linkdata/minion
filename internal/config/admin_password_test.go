@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -71,5 +73,26 @@ func TestAdminAccountsDoNotRelaxPublicTLSRequirement(t *testing.T) {
 	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "outside literal loopback") {
 		t.Fatalf("public admin without TLS: error=%v", err)
+	}
+}
+
+func TestLoadAdminAccount(t *testing.T) {
+	hash := testAdminPasswordHash("correct horse battery staple")
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := fmt.Sprintf(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}],"admin":{"administrators":[{"username":"operator","password_hash":%q}]}}`, hash)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Admin == nil || len(cfg.Admin.Administrators) != 1 {
+		t.Fatal("expected one loaded admin account")
+	}
+	account := cfg.Admin.Administrators[0]
+	if account.Username != "operator" || account.PasswordHash != hash ||
+		!account.VerifyPassword("correct horse battery staple") || account.VerifyPassword("wrong") {
+		t.Fatal("loaded admin account does not verify its configured password")
 	}
 }

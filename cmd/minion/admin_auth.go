@@ -48,7 +48,12 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig) http.Handler {
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
 	mux.Handle("/", jw)
-	return jw.SecureHeadersMiddleware(adminGuard(http.NewCrossOriginProtection().Handler(mux), access.allowed))
+	crossOrigin := http.NewCrossOriginProtection()
+	crossOrigin.SetDenyHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		closeUnreadAdminBody(w, r)
+		http.Error(w, "Forbidden", http.StatusForbidden)
+	}))
+	return jw.SecureHeadersMiddleware(adminGuard(crossOrigin.Handler(mux), access.allowed))
 }
 
 func (a *adminAccess) sessionUsername(sess *jaws.Session) string {
@@ -70,6 +75,7 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 }
 
 func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
+	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if a.sessionUsername(a.jaws.GetSession(r)) != "" {
@@ -102,12 +108,14 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
 	if err := r.ParseForm(); err != nil {
+		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
 	username, password := r.PostForm.Get("username"), r.PostForm.Get("password")
-	if username == "" || password == "" || len(username) > 256 || len(password) > 4096 ||
+	if username == "" || password == "" || len(username) > 100 || len(password) > 4096 ||
 		len(r.PostForm["username"]) != 1 || len(r.PostForm["password"]) != 1 {
+		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
@@ -144,6 +152,7 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
+	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
