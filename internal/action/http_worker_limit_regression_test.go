@@ -41,18 +41,23 @@ func TestWorkerLimitKeepsEarlierCallerDeadlineWhenCallbacksLag(t *testing.T) {
 
 func TestWorkerLimitOutcomeKeepsConsistentDiagnosticAndFallback(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		cause      error
-		runErr     error
-		hardFirst  bool
-		oversized  bool
-		wantCap    bool
-		wantDetail string
+		name         string
+		cause        error
+		runErr       error
+		hardFirst    bool
+		oversized    bool
+		wantCap      bool
+		wantDetail   string
+		wantObserved string
 	}{
 		{name: "inactivity beats hard callback", cause: errExecutorRuntimeCap,
 			runErr: errors.Join(monitor.ErrTerminalJob, errExecutorRuntimeCap), wantDetail: "inactivity"},
+		{name: "inactivity outranks model cancellation", cause: errExecutorInactivity,
+			runErr: errors.Join(monitor.ErrTerminalJob, context.Canceled), wantDetail: "inactivity", wantObserved: context.Canceled.Error()},
 		{name: "hard beats inactivity callback", cause: errExecutorInactivity,
 			runErr: errors.Join(monitor.ErrTerminalJob, errExecutorInactivity), hardFirst: true, wantCap: true, wantDetail: "runtime cap"},
+		{name: "runtime cap outranks model cancellation", cause: errExecutorRuntimeCap,
+			runErr: errors.Join(monitor.ErrTerminalJob, context.Canceled), hardFirst: true, wantCap: true, wantDetail: "runtime cap", wantObserved: context.Canceled.Error()},
 		{name: "selected hard limit is terminal", cause: errExecutorInactivity,
 			runErr: errors.New("ordinary model failure"), hardFirst: true, wantCap: true, wantDetail: "runtime cap"},
 		{name: "degraded outcome keeps corrected inactivity", cause: errExecutorRuntimeCap,
@@ -68,10 +73,13 @@ func TestWorkerLimitOutcomeKeepsConsistentDiagnosticAndFallback(t *testing.T) {
 			if degraded != test.oversized || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) != test.oversized {
 				t.Fatalf("degraded=%t error=%v, want degraded=%t", degraded, err, test.oversized)
 			}
-			if got.Failure == nil || !got.Failure.Terminal || got.Failure.Inactivity == test.wantCap ||
+			if got.Failure == nil || !got.Failure.Terminal || got.Failure.Canceled || got.Failure.Inactivity == test.wantCap ||
 				got.Failure.RuntimeCap != test.wantCap || got.Failure.Deadline != test.wantCap ||
 				!strings.Contains(got.Failure.Message, test.wantDetail) {
 				t.Fatalf("inconsistent selected limit: %+v", got.Failure)
+			}
+			if test.wantObserved != "" && !strings.Contains(got.Failure.ObservedMessage, test.wantObserved) {
+				t.Fatalf("model cancellation missing from observed diagnostic: %+v", got.Failure)
 			}
 			losing := "runtime cap"
 			if test.wantCap {

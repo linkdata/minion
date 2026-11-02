@@ -683,6 +683,7 @@ func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) *httpFailure
 	}
 	failure := newHTTPFailure(errors.Join(runErr, limit.err()))
 	failure.Terminal = true
+	failure.Canceled = false // A selected limit outranks the model's later ctx.Err().
 	failure.Inactivity = limit == workerLimitInactivity
 	failure.RuntimeCap = limit == workerLimitRuntimeCap
 	failure.Deadline = limit != workerLimitInactivity
