@@ -91,10 +91,12 @@ func loadAdminCertificate(cfg config.AdminConfig) (*tls.Certificate, error) {
 func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowed == nil || !allowed(r) {
+			controller := http.NewResponseController(w)
 			if r.ProtoMajor == 1 && r.ContentLength != 0 {
 				w.Header().Set("Connection", "close")
-				_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+				_ = controller.SetReadDeadline(time.Now())
 			}
+			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
