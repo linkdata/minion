@@ -186,7 +186,7 @@ func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 		Message:         strings.Repeat("\x01", httpFailureMessageLimit),
 		ObservedMessage: strings.Repeat("\x01", httpFailureMessageLimit),
 		Terminal:        true, Canceled: true, Deadline: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
-		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true,
+		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true, CaptureLimit: true,
 	}
 	if err := failure.validate(); err != nil {
 		t.Fatal(err)

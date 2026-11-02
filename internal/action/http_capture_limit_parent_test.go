@@ -95,6 +95,58 @@ func TestHTTPStatusTotalCapSavesMarkerAndRejectsSuccess(t *testing.T) {
 	}
 }
 
+func TestHTTPStatusCapAfterSavedFragmentReopensWithStop(t *testing.T) {
+	root := t.TempDir()
+	job := testJob(command.Comment)
+	f := newHTTPServerTestWithRoot(t, t.Context(), job, runnerExecutionCheckpoints{}, root)
+	f.pull(t)
+	store, err := openAttemptRecordStoreWithLimit(root, job.Identity, job.Source.Head, 8192)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.tx.records = store
+	first := httpTestRecord(job, 1, "saved prefix")
+	first.More = true
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.limit = store.stopSpace + store.coverSpace + int64(len(encoded)+1)
+	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
+	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{first}}, http.StatusOK, 1); ack.LogSequence != 1 {
+		t.Fatalf("first fragment highwater = %d", ack.LogSequence)
+	}
+	prefix := httpTestRecords(t, root, job)
+	const rejectedText = "private continuation"
+	status.Sequence, status.LogSequence = 2, 2
+	ack := f.ack(t, "/status", httpObservation{Status: status,
+		Logs: []attemptRecord{httpTestRecord(job, 2, rejectedText)}}, http.StatusInternalServerError, 2)
+	if ack.Failure == nil || !ack.Failure.CaptureLimit {
+		t.Fatalf("continuation refusal was not a confirmed store cap: %+v", ack.Failure)
+	}
+	f.ack(t, "/outcome", f.outcome(1, errors.New("capture stopped")), http.StatusOK, 1)
+	_ = f.result(t)
+	saved := httpTestRecords(t, root, job)
+	lines := bytes.Split(bytes.TrimSpace(saved), []byte{'\n'})
+	var marker attemptRecord
+	if len(lines) != 2 || !bytes.HasPrefix(saved, prefix) || bytes.Contains(saved, []byte(rejectedText)) ||
+		json.Unmarshal(lines[len(lines)-1], &marker) != nil || marker.Kind != attemptRecordStop ||
+		marker.Sequence != 2 || marker.Text != "capture_limit" {
+		t.Fatalf("fragment cap lost its prefix or fixed stop marker: %q marker=%+v", saved, marker)
+	}
+	reopened, err := openAttemptRecordStore(root, job.Identity, job.Source.Head)
+	if err != nil {
+		t.Fatalf("reopen after split fragment cap: %v", err)
+	}
+	defer reopened.Close()
+	if len(reopened.lines) != 2 || !reopened.stop || reopened.coverage ||
+		!bytes.Equal(httpTestRecords(t, root, job), saved) {
+		t.Fatalf("reopened fragment/marker state changed: lines=%d stop=%t coverage=%t",
+			len(reopened.lines), reopened.stop, reopened.coverage)
+	}
+}
+
 func TestHTTPStatusCapWorkerLossKeepsDiagnosticAndUnknown(t *testing.T) {
 	const privateText = "private-rejected-discussion-text"
 	root := t.TempDir()
