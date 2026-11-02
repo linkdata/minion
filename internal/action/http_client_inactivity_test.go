@@ -242,13 +242,17 @@ func TestRunHTTPExpiredAssignmentSkipsWatchAndModel(t *testing.T) {
 	})
 }
 
-func TestRunHTTPExpiredAfterPullKeepsEarlierCallerCause(t *testing.T) {
+func TestRunHTTPEarlyOutcomesKeepCallerCauseAndRedactKey(t *testing.T) {
+	const key = "assigned-key-leak-canary"
 	for _, test := range []struct {
-		name  string
-		cause error
+		name        string
+		cause       error
+		delay       time.Duration
+		cancelAfter time.Duration
 	}{
-		{name: "canceled", cause: context.Canceled},
-		{name: "deadline", cause: context.DeadlineExceeded},
+		{name: "post-pull canceled", cause: context.Canceled, delay: 12 * time.Second, cancelAfter: time.Second},
+		{name: "post-pull deadline", cause: context.DeadlineExceeded, delay: 12 * time.Second, cancelAfter: time.Second},
+		{name: "pre-watch canceled", cause: context.Canceled, delay: time.Second, cancelAfter: time.Second / 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -259,14 +263,15 @@ func TestRunHTTPExpiredAfterPullKeepsEarlierCallerCause(t *testing.T) {
 				pullClosed := make(chan struct{})
 				parent, cancel := context.WithCancelCause(t.Context())
 				defer cancel(nil)
-				// Deadline is queried after assignment validation; hold that seam past both limits.
-				ctx := &delayedHTTPDeadlineContext{Context: parent, ready: pullClosed, delay: 12 * time.Second}
+				// Deadline is queried after assignment validation; hold the seam across cancellation.
+				ctx := &delayedHTTPDeadlineContext{Context: parent, ready: pullClosed, delay: test.delay}
 				go func() {
 					<-pullClosed
-					time.Sleep(time.Second)
-					cancel(test.cause)
+					time.Sleep(test.cancelAfter)
+					cancel(errors.Join(test.cause, errors.New("caller cause contains "+key)))
 				}()
 				var outcome httpOutcome
+				var outcomeWire []byte
 				var watchCalls, modelCalls int
 				respond := func(value any) (*http.Response, error) {
 					data, err := httpEncode(value, httpJobBytes)
@@ -278,7 +283,8 @@ func TestRunHTTPExpiredAfterPullKeepsEarlierCallerCause(t *testing.T) {
 				client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
 					switch r.URL.Path {
 					case "/next":
-						response, err := respond(httpAssignment{Job: job, StopGrace: httpControlTimeout})
+						response, err := respond(httpAssignment{Job: job, StopGrace: httpControlTimeout,
+							Credentials: WorkerCredentials{CodexAPIKey: key}})
 						if err == nil {
 							response.Body = &httpPullCloseSignal{ReadCloser: response.Body, ready: pullClosed}
 						}
@@ -287,7 +293,12 @@ func TestRunHTTPExpiredAfterPullKeepsEarlierCallerCause(t *testing.T) {
 						watchCalls++
 						return nil, errors.New("expired assignment opened cancellation watch")
 					case "/outcome":
-						if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+						var err error
+						outcomeWire, err = io.ReadAll(r.Body)
+						if err != nil {
+							return nil, err
+						}
+						if err := httpDecode(bytes.NewReader(outcomeWire), httpOutcomeBytes, &outcome); err != nil {
 							return nil, err
 						}
 						return respond(httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
@@ -302,11 +313,13 @@ func TestRunHTTPExpiredAfterPullKeepsEarlierCallerCause(t *testing.T) {
 				err := RunHTTP(ctx, client, "http://worker.test", job.Identity.ExecutorID, runner)
 				wantDeadline := test.cause == context.DeadlineExceeded
 				if watchCalls != 0 || modelCalls != 0 || !errors.Is(err, test.cause) ||
+					bytes.Contains([]byte(err.Error()), []byte(key)) || bytes.Contains(outcomeWire, []byte(key)) ||
 					errors.Is(err, errExecutorInactivity) || errors.Is(err, errExecutorRuntimeCap) ||
 					errors.Is(err, monitor.ErrTerminalJob) != wantDeadline ||
 					outcome.Failure == nil || outcome.Failure.Canceled == wantDeadline ||
 					outcome.Failure.Deadline != wantDeadline || outcome.Failure.Terminal != wantDeadline ||
-					outcome.Failure.Inactivity || outcome.Failure.RuntimeCap || outcome.Failure.OutcomeUnknown {
+					outcome.Failure.Inactivity || outcome.Failure.RuntimeCap || outcome.Failure.OutcomeUnknown ||
+					outcome.Failure.RequestTransport {
 					t.Fatalf("earlier caller cause lost: error=%v outcome=%+v watch=%d model=%d", err, outcome, watchCalls, modelCalls)
 				}
 			})

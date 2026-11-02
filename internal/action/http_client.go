@@ -198,6 +198,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
 		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
 	}
@@ -221,6 +222,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
 		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, err, context.Cause(actionCtx))
 		return redactActionError(errors.Join(selectedRunErr, outcomeErr), assignedSecrets...)
