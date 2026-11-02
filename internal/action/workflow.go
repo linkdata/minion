@@ -71,7 +71,9 @@ func (e *Orchestrator) perform(ctx context.Context, request monitor.Job) (result
 		err = checkpoints.finish(result, err)
 		if err != nil {
 			evidence := checkpoints.failureEvidence()
-			err = errors.Join(err, e.requireSavedResultForRetry(prepared.job, e.retainWorkerDiagnostics(prepared.job, result, err)))
+			if !checkpoints.failedDetailsSaved {
+				err = errors.Join(err, e.requireSavedResultForRetry(prepared.job, e.retainWorkerDiagnostics(prepared.job, result, err)))
+			}
 			e.logResult(prepared.job, evidence)
 			if len(evidence.Calls) != 0 {
 				err = errors.Join(err, e.requireSavedResultForRetry(prepared.job, e.retainReviewEvidence(prepared.job, evidence)))

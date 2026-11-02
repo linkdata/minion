@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -19,13 +20,25 @@ type failedResultACKWriter struct {
 	path       *string
 	wantStatus int
 	checked    chan error
+	priorSync  <-chan struct{}
 }
 
 func (w failedResultACKWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w failedResultACKWriter) WriteHeader(status int) {
 	if status == w.wantStatus {
-		data, err := os.ReadFile(*w.path)
+		var err error
+		if w.priorSync != nil {
+			select {
+			case <-w.priorSync:
+			default:
+				err = errors.New("failed Result ACK preceded Status sync")
+			}
+		}
+		var data []byte
+		if err == nil {
+			data, err = os.ReadFile(*w.path)
+		}
 		if err == nil {
 			var saved retainedWorkerDiagnostics
 			err = json.Unmarshal(data, &saved)
@@ -53,22 +66,57 @@ func failedResultWithDiagnostic(f *httpServerTest) httpOutcome {
 func TestSelectedFailedResultDiagnosticsAreDurableBeforeACK(t *testing.T) {
 	var path string
 	checked := make(chan error, 1)
+	statusEntered, release, synced, outcomeEntered := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	f, store, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/outcome" {
-				w = failedResultACKWriter{ResponseWriter: w, path: &path, wantStatus: http.StatusOK, checked: checked}
+				close(outcomeEntered)
+				w = failedResultACKWriter{ResponseWriter: w, path: &path, wantStatus: http.StatusOK, checked: checked, priorSync: synced}
 			}
 			next.ServeHTTP(w, r)
 		})
 	})
 	path = failedResultDiagnosticPath(f)
+	records, err := openAttemptRecordStore(f.tx.recordRoot, f.job.Identity, f.job.Source.Head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.tx.records = records
+	syncFile := records.syncFile
+	records.syncFile = func() error {
+		close(statusEntered)
+		<-release
+		err := syncFile()
+		close(synced)
+		return err
+	}
 	status := Status{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
-	f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{httpTestRecord(f.job, 1, "earlier discussion")}}, http.StatusOK, 1)
+	statusDone := make(chan httpServerTestExchange, 1)
+	go func() {
+		statusDone <- f.request("/status", httpObservation{Status: status, Logs: []attemptRecord{httpTestRecord(f.job, 1, "earlier discussion")}})
+	}()
+	<-statusEntered
+	outcomeDone := make(chan httpServerTestExchange, 1)
+	go func() { outcomeDone <- f.request("/outcome", failedResultWithDiagnostic(f)) }()
+	<-outcomeEntered
+	select {
+	case got := <-outcomeDone:
+		t.Fatalf("failed Result ACK passed an unfinished Status sync: %+v", got)
+	default:
+	}
+	releaseOnce.Do(func() { close(release) })
+	if got := <-statusDone; got.err != nil || got.status != http.StatusOK || got.ack.LogSequence != 1 {
+		t.Fatalf("Status sync acknowledgement: %+v", got)
+	}
 	if saved := httpTestRecords(t, f.tx.recordRoot, f.job); !bytes.Contains(saved, []byte("earlier discussion")) {
 		t.Fatalf("earlier Status was not saved: %q", saved)
 	}
-	f.ack(t, "/outcome", failedResultWithDiagnostic(f), http.StatusOK, 1)
+	if got := <-outcomeDone; got.err != nil || got.status != http.StatusOK || got.ack.Kind != "outcome" || got.ack.Sequence != 1 {
+		t.Fatalf("failed Outcome acknowledgement: %+v", got)
+	}
 	if err := <-checked; err != nil {
 		t.Fatal(err)
 	}

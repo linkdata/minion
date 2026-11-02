@@ -66,6 +66,7 @@ type executionCheckpoints struct {
 	assignmentContext   context.Context
 	assignmentRequest   monitor.Job
 	fixDestination      *FixDestination
+	failedDetailsSaved  bool               // A selected failed Outcome already retained its diagnostics before ACK.
 	writeAcceptedResult func([]byte) error // Test seam for a save that crosses the deadline.
 	saveAcceptedResult  func() error       // Test seam for the result commit crossing the deadline.
 }
@@ -429,9 +430,10 @@ func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
 		result.CriticStopReason == c.review.CriticStopReason
 }
 
-// validateFailedResult saves bounded diagnostics before any failed Result ACK.
+// validateFailedResult saves bounded diagnostics before a selected failed Result ACK.
 func (c *executionCheckpoints) validateFailedResult(result Result, failure *httpFailure) error {
 	retained := c.owner.requireSavedResultForRetry(c.job, c.owner.retainWorkerDiagnostics(c.job, result, failure.workerErr()))
+	c.failedDetailsSaved = retained == nil
 	if !c.matchesFailedResult(result) || result.validate(c.job, false) != nil {
 		return errors.Join(checkpointContractError(), retained)
 	}
