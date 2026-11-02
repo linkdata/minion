@@ -118,7 +118,7 @@ func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handl
 	if len(server) != 0 {
 		newServer = server[0]
 	}
-	httpFixture := newHTTPServerTestWithServer(t, t.Context(), f.job, f.sink, wrap, newServer)
+	httpFixture := newHTTPServerTestWithStopServerRoot(t, t.Context(), f.job, f.sink, wrap, newServer, 0, f.owner.WorkRoot)
 	httpFixture.pull(t)
 	if !monitor.AssignmentMatchesAccepted(f.sink.assignmentRequest, *store.Data.Accepted) {
 		t.Fatalf("selected HTTP fixture request differs from accepted action: request=%+v accepted=%+v", f.sink.assignmentRequest, store.Data.Accepted)

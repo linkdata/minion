@@ -118,9 +118,20 @@ func TestSelectedFailedOutcomeAfterRejectedBeforeQuarantinesWorker(t *testing.T)
 }
 
 func TestSelectedFailedOutcomeRejectsJobInvalidResultBeforeACK(t *testing.T) {
-	f, _, _ := selectedHTTPResultFixture(t, nil)
+	var path string
+	checked := make(chan error, 1)
+	f, _, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" {
+				w = failedResultACKWriter{ResponseWriter: w, path: &path, wantStatus: http.StatusInternalServerError, checked: checked}
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	path = failedResultDiagnosticPath(f)
 	outcome := f.outcome(1, errors.New("worker failed"))
 	outcome.Result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("changed\n")}}
+	outcome.Result.Diagnostics = []Diagnostic{{Code: "result_detail", Message: "private result detail"}}
 	if err := httpResultShape(outcome.Result); err != nil {
 		t.Fatalf("test Result is not wire-shaped: %v", err)
 	}
@@ -130,6 +141,9 @@ func TestSelectedFailedOutcomeRejectsJobInvalidResultBeforeACK(t *testing.T) {
 	ack := f.ack(t, "/outcome", outcome, http.StatusInternalServerError, 1)
 	if ack.Failure == nil {
 		t.Fatal("job-invalid failed Outcome received success ACK")
+	}
+	if err := <-checked; err != nil {
+		t.Fatal(err)
 	}
 	got := f.result(t)
 	if got.err == nil {

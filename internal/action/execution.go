@@ -429,10 +429,14 @@ func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
 		result.CriticStopReason == c.review.CriticStopReason
 }
 
-// validateFailedResult checks parent-owned evidence before a failed Outcome is ACKed.
-func (c *executionCheckpoints) validateFailedResult(result Result) error {
-	if !c.matchesFailedResult(result) || result.validate(c.job, false) != nil {
+// validateFailedResult saves bounded diagnostics before any failed Result ACK.
+func (c *executionCheckpoints) validateFailedResult(result Result, failure *httpFailure) error {
+	if !c.matchesFailedResult(result) {
 		return checkpointContractError()
 	}
-	return nil
+	retained := c.owner.requireSavedResultForRetry(c.job, c.owner.retainWorkerDiagnostics(c.job, result, failure.workerErr()))
+	if result.validate(c.job, false) != nil {
+		return errors.Join(checkpointContractError(), retained)
+	}
+	return retained
 }
