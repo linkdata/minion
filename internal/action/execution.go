@@ -282,6 +282,12 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 			}
 			return nil
 		}); err != nil {
+			// No BeforeCall ACK was sent, so the provider cannot have started this call.
+			if c.owner.usageCheckpoint != nil {
+				if discardErr := c.owner.usageCheckpoint.discardBeforeCall(fact.Ordinal); discardErr != nil {
+					err = errors.Join(err, fmt.Errorf("discard rejected usage call: %w", discardErr))
+				}
+			}
 			return c.fail(err)
 		}
 	}

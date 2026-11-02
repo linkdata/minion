@@ -37,6 +37,16 @@ func (c *usageCheckpoint) beforeCall(ordinal int, call CallUsage) error {
 	return nil
 }
 
+func (c *usageCheckpoint) discardBeforeCall(ordinal int) error {
+	if err := c.record.DiscardPendingCall(ordinal); err != nil {
+		return err
+	}
+	if len(c.record.Calls) == 0 {
+		c.record.ExecutorID, c.record.SourceRef = "", ""
+	}
+	return c.save()
+}
+
 func (c *usageCheckpoint) afterCall(ordinal int, call CallUsage) error {
 	entry := usageCall(ordinal, call)
 	finished := time.Now().UTC()

@@ -301,6 +301,21 @@ func (r *Record) BeginCall(call Call) (bool, error) {
 	return true, nil
 }
 
+// DiscardPendingCall removes an unacknowledged start that did not reach the
+// provider. A returned receipt or an earlier ordinal cannot be discarded.
+func (r *Record) DiscardPendingCall(ordinal int) error {
+	if ordinal == 0 || ordinal != len(r.Calls) || r.Calls[ordinal-1].FinishedAt != nil {
+		return fmt.Errorf("invalid pending usage call ordinal %d", ordinal)
+	}
+	next := *r
+	next.Calls = slices.Clone(r.Calls[:ordinal-1])
+	if err := next.reconcileCalls(); err != nil {
+		return err
+	}
+	*r = next
+	return nil
+}
+
 // FinishCall records one returned usage claim. Identical replayed receipts are
 // ignored, so a save error after atomic replacement cannot add tokens twice.
 func (r *Record) FinishCall(call Call) (bool, error) {
