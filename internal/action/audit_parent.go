@@ -40,9 +40,6 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	if err != nil {
 		return fmt.Errorf("%w: %w", errAuditPublicationUnavailable, err)
 	}
-	if !workspace.ValidIdentitySegment(job.Identity.AttemptID) {
-		return errors.New("audit validation attempt ID is invalid")
-	}
 	validationDir, err := os.MkdirTemp(root, auditValidationTempPattern(job.Identity.AttemptID))
 	if err != nil {
 		return fmt.Errorf("%w: create validation directory: %w", errAuditPublicationUnavailable, err)

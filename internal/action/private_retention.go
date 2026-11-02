@@ -165,7 +165,7 @@ func privateScratchAttemptID(name string) string {
 	for _, prefix := range []string{auditValidationDirPrefix, auditReportsDirPrefix, reviewReportsDirPrefix, reviewHistoryDirPrefix} {
 		if rest, ok := strings.CutPrefix(name, prefix); ok {
 			id, suffix, found := strings.Cut(rest, "+")
-			if found && suffix != "" && workspace.ValidIdentitySegment(id) {
+			if found && suffix != "" {
 				return id
 			}
 		}
