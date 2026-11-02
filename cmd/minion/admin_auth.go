@@ -130,7 +130,8 @@ func (a *adminAccess) reserveAttempt(username string) bool {
 
 func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	// A 4096-byte password can triple when URL-encoded, plus the form field names.
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil {
 		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
