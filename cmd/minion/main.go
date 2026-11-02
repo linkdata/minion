@@ -190,7 +190,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if cfg.Admin != nil {
+		if cfg.Admin != nil && (*check || *loop) {
 			if _, err := loadAdminCertificate(*cfg.Admin); err != nil {
 				logger.Printf("admin TLS preflight: %v", err)
 				return false
@@ -243,21 +243,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("preflight passed as @%s", user.Login)
 		return 0
 	}
-	if cfg.Admin != nil && *loop {
-		admin, err := startAdminServer(*cfg.Admin, stop)
-		if err != nil {
-			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
-			return 1
-		}
-		defer func() {
-			if err := admin.Close(); err != nil {
-				logger.Printf("close admin dashboard: %s", monitor.InertLogText(err.Error()))
-				code = 1
-			}
-		}()
-		logger.Printf("admin dashboard listening on %s", admin.listener.Addr())
-	}
-
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}
 	if terminalRecovery {
 		recovery := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
@@ -275,6 +260,20 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if !preflight() {
 			return 1
 		}
+	}
+	if cfg.Admin != nil && *loop {
+		admin, err := startAdminServer(*cfg.Admin, stop)
+		if err != nil {
+			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
+			return 1
+		}
+		defer func() {
+			if err := admin.Close(); err != nil {
+				logger.Printf("close admin dashboard: %s", monitor.InertLogText(err.Error()))
+				code = 1
+			}
+		}()
+		logger.Printf("admin dashboard listening on %s", admin.listener.Addr())
 	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 	orchestrator.BotID = user.ID

@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -36,12 +37,14 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		_ = listener.Close()
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
+	jw.Logger = slog.Default()
 	jw.MakeAuth = func(*jaws.Request) jaws.Auth { return deniedAdminAuth{} }
 	mux := http.NewServeMux()
 	mux.Handle("GET /jaws/", jw)
 	server := &http.Server{
 		Handler:           jw.SecureHeadersMiddleware(adminGuard(mux, nil)),
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       time.Minute,
 	}
 	if certificate != nil {

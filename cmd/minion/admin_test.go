@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -26,7 +27,9 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	client := &http.Client{Timeout: 5 * time.Second}
+	transport := &http.Transport{}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	for _, tc := range []struct {
 		name, path string
 		upgrade    bool
@@ -73,7 +76,9 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	})
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}, Timeout: 5 * time.Second}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -88,15 +93,34 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	}
 }
 
+func TestAdminServerReportsListenerFailure(t *testing.T) {
+	t.Parallel()
+	failed := make(chan struct{})
+	admin, err := startAdminServer(config.AdminConfig{Listen: "127.0.0.1:0"}, func() { close(failed) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if err := admin.listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener failure did not invoke onFailure")
+	}
+	if err := admin.Close(); err == nil {
+		t.Fatal("Close did not report the listener failure")
+	}
+}
+
 func TestAdminGuardCoversJaWSAndLaterRoutes(t *testing.T) {
 	t.Parallel()
 	jw, err := jaws.New()
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { defer close(done); jw.Serve() }()
-	t.Cleanup(func() { jw.Close(); <-done })
+	t.Cleanup(jw.Close)
 	mux := http.NewServeMux()
 	mux.Handle("GET /jaws/", jw)
 	for _, path := range []string{"/", "/jaws/test-websocket", "/auth/callback", "/download/report", "/export/usage"} {
@@ -159,5 +183,31 @@ func TestCheckRejectsInvalidAdminTLS(t *testing.T) {
 				t.Fatalf("-check code=%d, output=%q; want admin TLS failure", code, output)
 			}
 		})
+	}
+}
+
+func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {
+	cfg := config.Config{
+		Main: "codex", BotLogin: "bot", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		Codex: config.CodexConfig{Model: "test-model", ReasoningEffort: "medium"},
+		Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem"},
+		RemoteExecutor: &config.RemoteExecutorConfig{
+			ExecutorID: "remote", Listen: "127.0.0.1:8443",
+			TLSCertFile: "missing-remote-cert.pem", TLSKeyFile: "missing-remote-key.pem",
+			Token: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+		},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+	}
+	gitChecks := 0
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			gitChecks++
+			return nil
+		})
+	})
+	if code != 1 || gitChecks != 1 || !strings.Contains(output, "remote TLS preflight:") ||
+		strings.Contains(output, "admin TLS preflight:") {
+		t.Fatalf("cron startup was blocked by admin TLS: code=%d git_checks=%d output=%q", code, gitChecks, output)
 	}
 }
