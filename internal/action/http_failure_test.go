@@ -129,13 +129,15 @@ func TestHTTPFailurePreservesRequestTransportPolicyWithoutReconstructingURL(t *t
 
 func TestHTTPFailureRejectsMalformedDiagnostics(t *testing.T) {
 	for _, tc := range []struct {
-		name, message string
+		name, message, observed string
 	}{
-		{"oversized diagnostic", strings.Repeat("x", httpFailureMessageLimit+1)},
-		{"invalid diagnostic UTF8", "bad\xff"},
+		{name: "oversized diagnostic", message: strings.Repeat("x", httpFailureMessageLimit+1)},
+		{name: "invalid diagnostic UTF8", message: "bad\xff"},
+		{name: "oversized observed diagnostic", message: "limit", observed: strings.Repeat("x", httpFailureMessageLimit+1)},
+		{name: "invalid observed diagnostic UTF8", message: "limit", observed: "bad\xff"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			failure := &httpFailure{Message: tc.message}
+			failure := &httpFailure{Message: tc.message, ObservedMessage: tc.observed}
 			if failure.validate() == nil {
 				t.Fatal("malformed failure accepted")
 			}

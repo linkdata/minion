@@ -76,8 +76,9 @@ func TestSelectedWorkerLimitDiagnosticKeepsIndependentError(t *testing.T) {
 				t.Fatalf("degraded=%t error=%v, want degraded=%t", degraded, err, test.degraded)
 			}
 			if got.Failure == nil || !got.Failure.Inactivity || !got.Failure.Terminal ||
-				!strings.Contains(got.Failure.Message, test.detail) ||
-				strings.Contains(got.Failure.Message, "runtime cap") || len(got.Failure.Message) > httpFailureMessageLimit {
+				!strings.Contains(got.Failure.ObservedMessage, test.detail) ||
+				strings.Contains(got.Failure.Message, "runtime cap") || len(got.Failure.Message) > httpFailureMessageLimit ||
+				len(got.Failure.ObservedMessage) > httpFailureMessageLimit {
 				t.Fatalf("selected limit lost independent diagnostic: %+v", got.Failure)
 			}
 		})

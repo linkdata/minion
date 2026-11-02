@@ -1799,36 +1799,29 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		}
 		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
-	if !time.Now().Before(job.Deadline) {
-		if accepted.FixedRefusal == "" && (accepted.Assigned || failure.ModelCallStarted) {
-			if !accepted.ResultReady {
-				return resolveLost()
-			}
-			stored, err := store.HasAcceptedResult()
-			if err != nil {
-				return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
-			}
-			if !stored {
-				return resolveLost()
-			}
-		}
-		return m.terminalAccepted(ctx, store, job, failure)
-	}
+	overdue := !time.Now().Before(job.Deadline)
 	if accepted.FixedRefusal != "" {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
-	if !accepted.ResultReady && (accepted.Assigned || failure.ModelCallStarted) {
+	needsResult := accepted.Assigned || failure.ModelCallStarted
+	if needsResult && !accepted.ResultReady {
 		return resolveLost()
+	}
+	if overdue && !needsResult {
+		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	stored, err := store.HasAcceptedResult()
 	if err != nil {
 		return fmt.Errorf("%w: inspect stored result: %w", ErrAcceptanceState, err)
 	}
+	if needsResult && !stored {
+		return resolveLost()
+	}
+	if overdue {
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
 	if stored && accepted.ResultReady {
 		return m.recoverStoredResult(ctx, store, job)
-	}
-	if accepted.Assigned || failure.ModelCallStarted {
-		return resolveLost()
 	}
 	if accepted.Terminal || !time.Now().Before(job.Deadline) {
 		return m.terminalAccepted(ctx, store, job, failure)

@@ -20,6 +20,7 @@ const httpFailureMessageLimit = 8 << 10
 // worker outcome fields are diagnostic claims at the receiver.
 type httpFailure struct {
 	Message           string `json:"message"`
+	ObservedMessage   string `json:"observed_message,omitempty"`
 	Terminal          bool   `json:"terminal,omitempty"`
 	Canceled          bool   `json:"canceled,omitempty"`
 	Deadline          bool   `json:"deadline,omitempty"`
@@ -64,7 +65,8 @@ func (f *httpFailure) validate() error {
 	if f == nil {
 		return nil
 	}
-	if len(f.Message) > httpFailureMessageLimit || !utf8.ValidString(f.Message) {
+	if len(f.Message) > httpFailureMessageLimit || !utf8.ValidString(f.Message) ||
+		len(f.ObservedMessage) > httpFailureMessageLimit || !utf8.ValidString(f.ObservedMessage) {
 		return errors.New("invalid HTTP failure diagnostic")
 	}
 	return nil
