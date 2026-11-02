@@ -126,6 +126,38 @@ func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T
 	}
 }
 
+func TestExecutionBeforeCallPostReplacementUsageErrorKeepsProvisionalRow(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	stateStore := openState(t, time.Now())
+	f.owner.Store = stateStore
+	stateStore.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1}
+	if err := stateStore.Save(); err != nil {
+		t.Fatal(err)
+	}
+	usageStore := f.startUsage()
+	persist := f.owner.usageCheckpoint.save
+	saveErr := errors.New("usage directory sync failed after replacement")
+	f.owner.usageCheckpoint.save = func() error {
+		if err := persist(); err != nil {
+			return err
+		}
+		return saveErr
+	}
+	call := f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1})
+	err := f.sink.BeforeCall(call)
+	if !errors.Is(err, saveErr) || f.sink.pending != nil || stateStore.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {
+		t.Fatalf("failed usage save acknowledged call: pending=%+v state=%+v error=%v", f.sink.pending, stateStore.Data.JobFailures[f.job.Identity.JobID], err)
+	}
+	record, found, err := usageStore.Load(f.owner.attemptID)
+	if err != nil || !found || len(record.Calls) != 1 || record.Calls[0].FinishedAt != nil || record.CodexCalls != 1 ||
+		record.UsageComplete || !record.UsageCoverage.PartialReport {
+		t.Fatalf("post-replacement error lost provisional row: record=%+v found=%t error=%v", record, found, err)
+	}
+	if err := f.sink.BeforeCall(call); !errors.Is(err, saveErr) || f.sink.pending != nil {
+		t.Fatalf("failed call checkpoint was replayed or acknowledged: pending=%+v error=%v", f.sink.pending, err)
+	}
+}
+
 func TestExecutionBeforeCallRechecksSelectedStateAfterUsageSave(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	store := openState(t, time.Now())

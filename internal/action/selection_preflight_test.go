@@ -11,6 +11,7 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 func requirePreflightMessage(t *testing.T, err error, want string) {
@@ -205,7 +206,7 @@ exit 99
 	}
 }
 
-func TestPreflightSelectionKeepsLocalClaudePinnedButAcceptsRemoteAlias(t *testing.T) {
+func TestPreflightSelectionRequiresPinnedClaudeModelForLocalAndRemote(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake Claude CLI uses a POSIX shell")
 	}
@@ -250,7 +251,7 @@ fi
 	}
 	err = runner.PreflightSelection(t.Context())
 	requirePreflightMessage(t, err, preflightClaudeSettingsUnavailable)
-	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "was not resolved at startup") {
+	if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), "was not resolved before dispatch") {
 		t.Fatalf("unresolved Claude alias cause = %v", cause)
 	}
 	selected.Main.Model = "claude-pinned"
@@ -262,8 +263,17 @@ fi
 		t.Fatalf("resolved Claude model failed preflight: %v", err)
 	}
 	selected.Main.Model = "default"
-	if message, err := checkSelectedRoleCLI(t.Context(), runner, selected.Main, true); err != nil || message != "" {
-		t.Fatalf("remote Claude alias failed CLI validation: message=%q error=%v", message, err)
+	if message, err := checkSelectedRoleCLI(t.Context(), runner, selected.Main); message != preflightClaudeSettingsUnavailable || err == nil {
+		t.Fatalf("remote Claude alias passed CLI validation: message=%q error=%v", message, err)
+	}
+	job := testJob(command.Comment)
+	job.Main = selected.Main
+	job.Main.Skills = []string{testReviewSkillURL}
+	remote := NewRemoteRunner(t.TempDir())
+	remote.runModel = forbidModel(t)
+	result, err := remote.Execute(t.Context(), job, runnerExecutionCheckpoints{})
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), preflightClaudeSettingsUnavailable) || len(result.Calls) != 0 {
+		t.Fatalf("remote alias reached model call: result=%+v error=%v", result, err)
 	}
 }
 

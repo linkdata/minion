@@ -144,7 +144,7 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 		roles = append(roles, *r.selection.Critic)
 	}
 	for _, role := range roles {
-		message, err = checkSelectedRoleCLI(ctx, &configured, role, false)
+		message, err = checkSelectedRoleCLI(ctx, &configured, role)
 		if err != nil {
 			return err
 		}
@@ -152,7 +152,7 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	return nil
 }
 
-func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings, allowClaudeAlias bool) (string, error) {
+func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings) (string, error) {
 	switch role.Provider {
 	case "codex":
 		settings := configured.Codex
@@ -177,8 +177,8 @@ func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSett
 		if err != nil {
 			return preflightClaudeSettingsUnavailable, fmt.Errorf("claude settings: %w", err)
 		}
-		if validated.Effort != role.Effort || !allowClaudeAlias && validated.Model != role.Model {
-			return preflightClaudeSettingsUnavailable, errors.New("selected Claude model or effort was not resolved at startup")
+		if validated.Effort != role.Effort || validated.Model != role.Model {
+			return preflightClaudeSettingsUnavailable, errors.New("selected Claude model or effort was not resolved before dispatch")
 		}
 	default:
 		return preflightSelectionUnavailable, errors.New("unsupported action provider")

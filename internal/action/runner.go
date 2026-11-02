@@ -342,7 +342,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			roles = append(roles, *job.Critic)
 		}
 		for _, role := range roles {
-			message, err := checkSelectedRoleCLI(ctx, &configured, role, true)
+			message, err := checkSelectedRoleCLI(ctx, &configured, role)
 			if err != nil {
 				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
 			}
