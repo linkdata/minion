@@ -26,9 +26,9 @@ func runExecuteMode() int {
 	return 0
 }
 
-func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) int {
+func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) (code int) {
 	if terminalRecoveryPending(store) {
-		code := recoverTerminalService(ctx, watcher, store, loop, logger)
+		code = recoverTerminalService(ctx, watcher, store, loop, logger)
 		if code != 0 || !loop || ctx.Err() != nil {
 			return code
 		}
@@ -40,6 +40,23 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 	if err := watcher.ReconcilePublicationWrites(ctx, store); err != nil {
 		logger.Printf("reconcile issued publication before worker startup: %s", monitor.InertLogText(err.Error()))
 		return 1
+	}
+	if watcher.Config.Admin != nil && loop {
+		adminCtx, cancel := context.WithCancel(ctx)
+		ctx = adminCtx
+		defer cancel()
+		admin, err := startAdminServer(ctx, *watcher.Config.Admin, cancel)
+		if err != nil {
+			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
+			return 1
+		}
+		defer func() {
+			if err := admin.Close(); err != nil {
+				logger.Printf("admin dashboard failed: %s", monitor.InertLogText(err.Error()))
+				code = 1
+			}
+		}()
+		logger.Printf("admin dashboard listening on %s", admin.listener.Addr())
 	}
 	if watcher.Config.RemoteExecutor != nil {
 		endpoint, err := attachSelectedRemoteWorker(owner, watcher)

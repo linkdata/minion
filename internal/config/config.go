@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,6 +29,8 @@ var (
 const (
 	// DefaultMaxGitHubContextBytes is the default GitHub text budget for an AI action.
 	DefaultMaxGitHubContextBytes = 32 << 10
+	// DefaultAdminListen binds the optional admin server to IPv4 loopback.
+	DefaultAdminListen = "127.0.0.1:8377"
 	// DefaultInactivityTimeout is the default gap allowed without executor progress.
 	DefaultInactivityTimeout = 10 * time.Minute
 	// MaxInactivityTimeout is the largest configurable inactivity timeout.
@@ -103,6 +106,13 @@ type RemoteExecutorConfig struct {
 	TLSCertFile string `json:"tls_cert_file"`
 	TLSKeyFile  string `json:"tls_key_file"`
 	Token       string `json:"token"`
+}
+
+// AdminConfig configures the optional admin dashboard listener.
+type AdminConfig struct {
+	Listen      string `json:"listen,omitempty"`
+	TLSCertFile string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile  string `json:"tls_key_file,omitempty"`
 }
 
 // CodexConfig contains authentication, model settings, and job skill paths.
@@ -184,6 +194,7 @@ type Config struct {
 	Codex          CodexConfig           `json:"codex,omitempty"`
 	Claude         ClaudeConfig          `json:"claude,omitempty"`
 	RemoteExecutor *RemoteExecutorConfig `json:"remote_executor,omitempty"`
+	Admin          *AdminConfig          `json:"admin,omitempty"`
 	// Nil Commands selects defaults; an empty map disables all commands.
 	Commands map[string]CommandMapping `json:"commands"`
 	// Nil AlwaysOnSkills selects anti-prompt-injection and caveman; an empty list disables always-on skills.
@@ -227,6 +238,19 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func resolveAdminTLSPath(configDir, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	path = filepath.FromSlash(path)
+	if configDir == "" {
+		return path
+	}
+	// filepath.Join would clean symlink/.. and could select a different file.
+	sep := string(filepath.Separator)
+	return strings.TrimSuffix(configDir, sep) + sep + path
 }
 
 func decode(r io.Reader) (Config, error) {
@@ -294,6 +318,33 @@ func (c *Config) Validate(configDir string) error {
 	c.Claude.Effort = strings.TrimSpace(c.Claude.Effort)
 	if !validModelSetting(c.Claude.Model) || !validModelSetting(c.Claude.Effort) {
 		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
+	}
+	if admin := c.Admin; admin != nil {
+		if admin.Listen == "" {
+			admin.Listen = DefaultAdminListen
+		}
+		host, port, err := net.SplitHostPort(admin.Listen)
+		if err != nil {
+			return fmt.Errorf("admin.listen: %w", err)
+		}
+		if strings.HasPrefix(admin.Listen, "[]") {
+			return errors.New("admin.listen empty bracketed host is invalid; use :port")
+		}
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || number == 0 {
+			return errors.New("admin.listen requires a numeric port from 1 to 65535")
+		}
+		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
+			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
+		}
+		addr, err := netip.ParseAddr(host)
+		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" {
+			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+		}
+		if admin.TLSCertFile != "" {
+			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)
+			admin.TLSKeyFile = resolveAdminTLSPath(configDir, admin.TLSKeyFile)
+		}
 	}
 	if remote := c.RemoteExecutor; remote != nil {
 		if !workspace.ValidIdentitySegment(remote.ExecutorID) {

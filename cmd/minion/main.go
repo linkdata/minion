@@ -47,7 +47,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, or remote-execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
-	check := flag.Bool("check", false, "verify Git, GitHub, repositories, and the selected local AI tools or remote TLS files, then exit")
+	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
@@ -190,8 +190,14 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
+		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && (*check || *loop) {
+			if _, err := loadTLSCertificate("admin", cfg.Admin.TLSCertFile, cfg.Admin.TLSKeyFile); err != nil {
+				logger.Printf("admin TLS preflight: %v", err)
+				return false
+			}
+		}
 		if remote := cfg.RemoteExecutor; remote != nil {
-			if _, err := loadRemoteCertificate(remote.TLSCertFile, remote.TLSKeyFile); err != nil {
+			if _, err := loadTLSCertificate("remote", remote.TLSCertFile, remote.TLSKeyFile); err != nil {
 				logger.Printf("remote TLS preflight: %v", err)
 				return false
 			}

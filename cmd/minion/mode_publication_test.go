@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -90,12 +90,21 @@ func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 func TestOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T) {
 	for _, withAccepted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unassigned_accepted=%t", withAccepted), func(t *testing.T) {
-			testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, withAccepted)
+			testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, withAccepted, true, "")
 		})
 	}
+	t.Run("admin_port_occupied", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, "occupied")
+	})
+	t.Run("cron_ignores_admin_port", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, false, "occupied")
+	})
+	t.Run("admin_listener_closed", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, "active")
+	})
 }
 
-func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted bool) {
+func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted, loop bool, adminSetup string) {
 	now := time.Now().UTC()
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), now)
 	if err != nil {
@@ -139,10 +148,42 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	client := github.New("fixture-token")
 	client.HTTPClient, client.BaseURL = server.Client(), server.URL
 	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: client, BotID: 8}
-	if code := runOrchestrateMode(t.Context(), nil, watcher, store, true, log.New(io.Discard, "", 0), "", 0); code != 1 {
-		t.Fatalf("missing worker should fail after reconciliation: code=%d", code)
+	if adminSetup == "occupied" {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
+	} else if adminSetup == "active" {
+		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0"}
+	}
+	var output strings.Builder
+	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {
+		t.Fatalf("orchestrate startup should fail after reconciliation: code=%d", code)
+	}
+	want := "start selected worker:"
+	if adminSetup == "occupied" && loop {
+		want = "admin dashboard: prepare listener:"
+	}
+	if !strings.Contains(output.String(), want) {
+		t.Fatalf("startup log %q does not contain %q", output.String(), want)
 	}
 	if lookups.Load() != 1 || store.Data.PublicationWrites[jobID].Status != state.PublicationWriteObserved {
 		t.Fatalf("worker startup preceded reconciliation: lookups=%d write=%+v", lookups.Load(), store.Data.PublicationWrites[jobID])
+	}
+	if adminSetup == "active" {
+		_, addressLine, found := strings.Cut(output.String(), "admin dashboard listening on ")
+		if !found {
+			t.Fatalf("admin listener did not start after reconciliation: log=%q", output.String())
+		}
+		address, _, _ := strings.Cut(addressLine, "\n")
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			t.Fatalf("admin listener still holds %s after return: %v", address, err)
+		}
+		if err := listener.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

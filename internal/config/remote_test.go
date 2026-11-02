@@ -40,6 +40,51 @@ func TestLoadRemoteExecutorConfigResolvesPathsWithoutLocalSkills(t *testing.T) {
 	}
 }
 
+func TestLoadRemoteExecutorKeepsLexicalTLSPathResolution(t *testing.T) {
+	t.Parallel()
+	if filepath.Separator == '\\' {
+		t.Skip("symlink traversal semantics differ on Windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.MkdirAll(filepath.Join(target, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, contents := range map[string]string{
+		filepath.Join(dir, "cert.pem"):    "cleaned path",
+		filepath.Join(target, "cert.pem"): "symlink path",
+	} {
+		if err := os.WriteFile(name, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(target, "sub"), filepath.Join(dir, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := remoteTestConfig()
+	cfg.RemoteExecutor.TLSCertFile = "link/../cert.pem"
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "cert.pem")
+	if cfg.RemoteExecutor == nil || cfg.RemoteExecutor.TLSCertFile != want {
+		t.Fatalf("remote certificate path = %+v, want %q", cfg.RemoteExecutor, want)
+	}
+	contents, err := os.ReadFile(cfg.RemoteExecutor.TLSCertFile)
+	if err != nil || string(contents) != "cleaned path" {
+		t.Fatalf("remote certificate = %q, %v; want cleaned path", contents, err)
+	}
+}
+
 func TestRemoteExecutorConfigRejectsInvalidTransportOrMissingSelectedModel(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
