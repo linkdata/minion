@@ -388,7 +388,7 @@ func TestResultJSONRoundTripPreservesValidatedPayload(t *testing.T) {
 		Refutations: []Refutation{{Round: 2, Text: "Private refutation."}},
 		Diagnostics: []Diagnostic{{Code: "incomplete_usage", Message: "Provider omitted usage."}},
 		Calls: []CallUsage{
-			{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 11, CachedInput: 2, Output: 3}},
+			{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 11, CachedInput: 2, Output: 3}, UsageCoverage: usage.Coverage{Scope: "known_subset"}},
 			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true, Complete: true},
 			{Provider: job.Main.Provider, Role: roleMain, Round: 2, Complete: true},
 			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, NoBlockers: true},
@@ -667,6 +667,9 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"usage", "invalid model call usage", func(r *Result) {
 			r.Calls = []CallUsage{{Provider: "codex", Role: "main", Round: 1, Tokens: usage.Tokens{Input: -1}}}
 		}},
+		{"unscoped nonzero usage", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Tokens = usage.Tokens{Input: 1}
+		}},
 		{"invalid usage scope", "invalid model call usage", func(r *Result) {
 			r.Calls[0].UsageCoverage.Scope = "foreign"
 		}},
@@ -694,6 +697,11 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 				t.Fatalf("result mismatch=%v want%q", err, test.want)
 			}
 		})
+	}
+	scoped := valid
+	scoped.Calls = []CallUsage{{Provider: job.Main.Provider, Role: "main", Round: 1, Tokens: usage.Tokens{Input: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}}}
+	if err := scoped.Validate(job); err != nil {
+		t.Fatalf("scoped nonzero usage rejected: %v", err)
 	}
 }
 

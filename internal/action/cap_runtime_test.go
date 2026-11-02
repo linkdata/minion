@@ -78,6 +78,10 @@ func TestCappedDecisionRequiresOriginalFinalCompleteEvidence(t *testing.T) {
 			for i := range result.Calls {
 				result.Calls[i].Tokens = usage.Tokens{Input: int64(11 + i), CachedInput: int64(i), Output: int64(3 + i)}
 				result.Calls[i].Complete = i%2 == 0
+				result.Calls[i].UsageCoverage.Scope = "known_subset"
+				if result.Calls[i].Complete {
+					result.Calls[i].UsageCoverage.Scope = "invocation"
+				}
 			}
 			if err := result.Validate(job); err != nil {
 				t.Fatalf("invalid baseline: %v", err)
@@ -155,14 +159,14 @@ func TestFinalCriticFailureCannotPublishAtCap(t *testing.T) {
 						case "incomplete":
 							answer = incompleteCritiqueJSON
 						case "provider":
-							return aicli.Result{Answer: approvedCritiqueJSON, Tokens: tokens, UsageComplete: true}, providerErr
+							return aicli.Result{Answer: approvedCritiqueJSON, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, providerErr
 						case "blank sanitized feedback":
 							answer = criticFeedbackJSON(true, "\x00")
 						case "empty redaction":
 							answer = criticFeedbackJSON(true, "private # and redacted")
 						}
 					}
-					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}}
 				if failure == "empty redaction" {
 					runner.Codex.APIKey, runner.Claude.APIKey = "#", "redacted"

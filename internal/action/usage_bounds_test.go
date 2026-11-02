@@ -50,7 +50,7 @@ func TestUsageAggregateBounds(t *testing.T) {
 							answer = `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Check the remaining detail."}`
 						}
 					}
-					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}},
 			})
 			finish, err := orchestrator.trackUsage(usageJob())

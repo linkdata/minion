@@ -79,7 +79,7 @@ func TestExecutePublicationBookkeepingBoundaries(t *testing.T) {
 					if !ok || got.Before(started) || got.Sub(started) > budget+500*time.Millisecond {
 						t.Fatal("model lost the configured action deadline")
 					}
-					return aicli.Result{Answer: "No findings.", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+					return aicli.Result{Answer: "No findings.", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}},
 			}
 			if scenario == "final usage save" {

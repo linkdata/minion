@@ -43,6 +43,7 @@ func TestSelectedOutcomeWaitsForRequiredACKBeforeSaving(t *testing.T) {
 		f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 		paid := f.call(2)
 		paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 7, Output: 2}, true
+		paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 		afterDone := make(chan httpServerTestExchange, 1)
 		go func() { afterDone <- f.request("/after", paid) }()
 		select {

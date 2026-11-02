@@ -36,6 +36,10 @@ func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
 				job := withClaudeCritic(testJob(command.Comment))
 				job.CriticMaxRounds, job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = 3, position.threshold, 0
 				tokens := usage.Tokens{Input: 13, CachedInput: 3, Output: 5}
+				scope := "known_subset"
+				if usageComplete {
+					scope = "invocation"
+				}
 				var sequence []string
 				var lastCheckpoint []CallUsage
 				finalCheckpoint := false
@@ -66,13 +70,13 @@ func TestRunnerStopsOnIncompleteCriticReview(t *testing.T) {
 					case request.round == 1:
 						answer = criticFeedbackJSON(false, "Correct the remaining detail.")
 					}
-					return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: usageComplete}, nil
+					return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: scope}, UsageComplete: usageComplete}, nil
 				}}
 				result, err := runner.Run(t.Context(), job)
 				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "critic review incomplete") || !slices.Equal(sequence, position.sequence) || len(result.Calls) != len(position.sequence) || result.Answer != "" || len(result.Changes) != 0 || len(result.Artifacts) != 0 || result.CriticStopReason != "" {
 					t.Fatalf("incomplete review continued or published: sequence=%v result=%+v error=%v", sequence, result, err)
 				}
-				wantLast := CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: position.round, ReviewPhase: position.phase, Tokens: tokens, HasBlockers: true, Complete: usageComplete}
+				wantLast := CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: position.round, ReviewPhase: position.phase, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: scope}, HasBlockers: true, Complete: usageComplete}
 				if last := result.Calls[len(result.Calls)-1]; last != wantLast || !finalCheckpoint || !slices.Equal(lastCheckpoint, result.Calls) {
 					t.Fatalf("incomplete verdict or final checkpoint lost: last=%+v want=%+v checkpoint=%+v", last, wantLast, lastCheckpoint)
 				}
@@ -124,7 +128,7 @@ func TestRunnerCompletedReviewDoesNotRequireUsageCompletion(t *testing.T) {
 		if request.role == roleMain {
 			answer = proposalJSON("Complete answer", "")
 		}
-		return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: false}, nil
+		return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "known_subset"}, UsageComplete: false}, nil
 	}}
 	result, err := runner.Run(t.Context(), job)
 	if err != nil || calls != 2 || len(result.Calls) != 2 || result.Answer != "Complete answer" || result.CriticStopReason != "approved" {
@@ -153,13 +157,13 @@ func TestRunnerProviderErrorDoesNotAttestReviewCompletion(t *testing.T) {
 				if request.role == roleMain {
 					return aicli.Result{Answer: proposalJSON("Candidate", ""), UsageComplete: true}, nil
 				}
-				return aicli.Result{Answer: verdict.answer, Tokens: tokens, UsageComplete: true}, failure
+				return aicli.Result{Answer: verdict.answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, failure
 			}}
 			result, err := runner.Run(t.Context(), job)
 			if !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) || calls != 2 || len(result.Calls) != 2 || result.Answer != "" || len(result.Changes) != 0 || len(result.Artifacts) != 0 || result.CriticStopReason != "" {
 				t.Fatalf("failed provider output continued or became a review decision: result=%+v calls=%d error=%v", result, calls, err)
 			}
-			want := CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: tokens, Complete: true}
+			want := CallUsage{Provider: job.Critic.Provider, Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}
 			if result.Calls[1] != want || result.validate(job, false) != nil {
 				t.Fatalf("provider error acquired verdict flags or lost paid usage: result=%+v want=%+v", result, want)
 			}

@@ -77,7 +77,7 @@ func TestRunnerUsesSuppliedSourceAndContext(t *testing.T) {
 						t.Fatalf("prompt lacks %q: %s", want, request.prompt)
 					}
 				}
-				return aicli.Result{Answer: "No findings", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+				return aicli.Result{Answer: "No findings", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 			}
 			result, err := runner.Run(t.Context(), job)
 			if err != nil || len(result.Refutations) != 0 || calls != 1 || result.Answer != "No findings" || len(result.Calls) != 1 || !result.Calls[0].Complete {
@@ -162,7 +162,7 @@ func TestRunnerReturnsFileChangesAndPartialUsage(t *testing.T) {
 	}
 	failure := errors.New("provider stopped")
 	runner.runModel = func(_ context.Context, _ modelRun) (aicli.Result, error) {
-		return aicli.Result{Tokens: usage.Tokens{Input: 12, Output: 3}}, failure
+		return aicli.Result{Tokens: usage.Tokens{Input: 12, Output: 3}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, failure
 	}
 	result, err = runner.Run(t.Context(), job)
 	if !errors.Is(err, failure) || errors.Is(err, monitor.ErrTerminalJob) || len(result.Calls) != 1 || result.Calls[0].Tokens.Input != 12 || result.Calls[0].Complete || result.Answer != "" {
@@ -415,7 +415,7 @@ func TestRunnerReturnsPartialAuditArtifactsOnFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 				writeSparseFixtureFile(t, request.outputDir, "findings.json", maxAuditArtifactBytes+1)
-				return aicli.Result{Tokens: usage.Tokens{Input: 9}}, failure
+				return aicli.Result{Tokens: usage.Tokens{Input: 9}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, failure
 			}}
 			result, err := runner.Run(t.Context(), job)
 			wantArtifacts := 2

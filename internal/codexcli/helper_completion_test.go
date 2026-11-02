@@ -99,8 +99,8 @@ func TestDuplicateRootRolloutsCannotInflateFreshUsage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, complete, err := (&usageSession{}).collectUsage(t.Context(), home, "root", time.Now(), tc.fallback, nil, nil)
-			if got != tc.want || complete || !errors.Is(err, errUnverifiedChildren) {
-				t.Fatalf("ambiguous root usage = %+v, complete=%t, err=%v; want %+v, incomplete and unverified", got, complete, err, tc.want)
+			if got != tc.want || complete || !errors.Is(err, errAmbiguousRoot) || errors.Is(err, errUnverifiedChildren) {
+				t.Fatalf("ambiguous root usage = %+v, complete=%t, err=%v; want %+v, incomplete root collision", got, complete, err, tc.want)
 			}
 		})
 	}
@@ -121,7 +121,7 @@ func TestResumedDuplicateRootCannotAttestCompletion(t *testing.T) {
 	}
 	appendUsageEvents(t, root, completedUsageTurn("root", "new", "r2", 20)...)
 	got, complete, err := session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
-	if got != (usage.Tokens{}) || complete || !errors.Is(err, errUnverifiedChildren) {
+	if got != (usage.Tokens{}) || complete || !errors.Is(err, errAmbiguousRoot) || errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("resumed ambiguous root accepted: tokens=%+v complete=%t err=%v", got, complete, err)
 	}
 	old := time.Now().Add(-2 * time.Hour)
@@ -131,7 +131,7 @@ func TestResumedDuplicateRootCannotAttestCompletion(t *testing.T) {
 	session.begin(ctx, home, "root", time.Now())
 	appendUsageEvents(t, root, completedUsageTurn("root", "later", "r3", 5)...)
 	got, complete, err = session.collectUsage(ctx, home, "root", time.Now(), nil, nil, nil)
-	if got != (usage.Tokens{}) || complete || !errors.Is(err, errUnverifiedChildren) {
+	if got != (usage.Tokens{}) || complete || !errors.Is(err, errAmbiguousRoot) || errors.Is(err, errUnverifiedChildren) {
 		t.Fatalf("aged duplicate root accepted: tokens=%+v complete=%t err=%v", got, complete, err)
 	}
 }
@@ -154,7 +154,7 @@ EVENTS
 		t.Fatal(err)
 	}
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
-	if !errors.Is(err, errUnverifiedChildren) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{}) {
+	if !errors.Is(err, errAmbiguousRoot) || errors.Is(err, errUnverifiedChildren) || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.UsageCoverage != (usage.Coverage{Scope: "unknown", MissingFinalReport: true, PartialReport: true}) {
 		t.Fatalf("ambiguous root published answer: result=%+v err=%v", result, err)
 	}
 }

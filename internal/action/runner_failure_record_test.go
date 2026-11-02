@@ -248,7 +248,7 @@ func TestRunnerWithholdsCrossRecordDiagnosticSecret(t *testing.T) {
 						for i, piece := range test.pieces {
 							diagnostics[i] = aicli.ProviderDiagnostic{Code: provider.code, Message: piece}
 						}
-						return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageComplete: true, Diagnostics: diagnostics}, nil
+						return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true, Diagnostics: diagnostics}, nil
 					}}
 				if provider.name == "codex" {
 					runner.Claude.APIKey = test.secret
@@ -326,7 +326,7 @@ func TestRunnerWithholdsStreamFinalDiagnosticKeyAcrossProviders(t *testing.T) {
 					runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 						request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: test.pieces[0]})
 						request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "final", Text: test.pieces[1]})
-						return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageComplete: true,
+						return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true,
 							Diagnostics: []aicli.ProviderDiagnostic{{Code: provider.code, Message: test.pieces[2]}, {Code: provider.code, Message: "safe later diagnostic"}}}, nil
 					}}
 				if provider.name == "codex" {
@@ -365,12 +365,12 @@ func TestRunnerWithholdsDiagnosticStreamFeedbackKeyAcrossCalls(t *testing.T) {
 	runner := Runner{WorkRoot: t.TempDir(), Codex: config.CodexConfig{APIKey: secret}, eventSink: queue.add,
 		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 			if request.role == roleMain {
-				return aicli.Result{Answer: proposalJSON("Candidate.", ""), Tokens: mainTokens, UsageComplete: true,
+				return aicli.Result{Answer: proposalJSON("Candidate.", ""), Tokens: mainTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true,
 					Diagnostics: []aicli.ProviderDiagnostic{{Code: "native_error", Message: "fixture-"}}}, nil
 			}
 			request.onEvent(aicli.StreamEvent{NativeID: "critic-native", Kind: "assistant", Text: "sec"})
 			return aicli.Result{Answer: `{"approved":false,"has_blockers":true,"review_complete":false,"feedback":"ret"}`,
-				Tokens: criticTokens, UsageComplete: true}, nil
+				Tokens: criticTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		}}
 	result, err := runner.Run(t.Context(), job)
 	if err == nil || !strings.Contains(err.Error(), "critic review incomplete") || result.Answer != "" ||
@@ -424,7 +424,7 @@ func TestRunnerRetainsRedactedStreamDiscussionAndCoverage(t *testing.T) {
 		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "assistant", Text: "before " + secret + " after"})
 			request.onEvent(aicli.StreamEvent{NativeID: "native", Kind: "final", Text: "ordinary later text"})
-			return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageComplete: true}, nil
+			return aicli.Result{Answer: "Done.", Tokens: wantTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		}}
 	result, err := runner.Run(t.Context(), testJob(command.Comment))
 	if err != nil || result.Answer != "Done." || len(result.Calls) != 1 ||

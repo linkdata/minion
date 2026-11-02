@@ -78,7 +78,7 @@ func TestRunnerWaitDelayKeepsReceiptWithoutAutomaticRetry(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	tokens := usage.Tokens{Input: 13, Output: 4}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
-		return aicli.Result{Tokens: tokens}, exec.ErrWaitDelay
+		return aicli.Result{Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, exec.ErrWaitDelay
 	}}
 	result, err := runner.Execute(t.Context(), f.job, f.sink)
 	finalErr := f.sink.finish(result, err)
@@ -142,7 +142,7 @@ func TestRunnerExecuteCheckpointsInsideObserverAndSeparatesDecision(t *testing.T
 			if request.role == roleMain {
 				answer = proposalJSON("Complete answer", "")
 			}
-			return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, nil
+			return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		},
 	}
 	checkpoints := runnerExecutionCheckpoints{
@@ -278,7 +278,7 @@ func TestRunnerExecuteCallCheckpointFailurePreservesReturnedFacts(t *testing.T) 
 				if request.role == test.role {
 					err = test.nativeErr
 				}
-				return aicli.Result{Answer: answer, Tokens: tokens, UsageComplete: true}, err
+				return aicli.Result{Answer: answer, Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, err
 			}}
 			checkpoints := runnerExecutionCheckpoints{
 				before: func(value CallCheckpoint) error {
@@ -331,7 +331,7 @@ func TestRunnerExecuteStopsAfterPaidReviewCheckpointFailure(t *testing.T) {
 		if nativeCalls != 1 || request.role != roleMain {
 			t.Fatal("critic dispatched after paid review checkpoint failure")
 		}
-		return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: tokens, UsageComplete: true}, nil
+		return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 	}}
 	result, err := runner.Execute(t.Context(), job, runnerExecutionCheckpoints{
 		after: func(value CallCheckpoint) error {
@@ -368,7 +368,7 @@ func TestRunnerExecuteAfterCallRunsAfterNativeCancellation(t *testing.T) {
 	var captured []CallUsage
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 		cancel()
-		return aicli.Result{Tokens: tokens}, context.Canceled
+		return aicli.Result{Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, context.Canceled
 	}}
 	result, err := runner.Execute(ctx, job, runnerExecutionCheckpoints{after: func(value CallCheckpoint) error {
 		if !errors.Is(ctx.Err(), context.Canceled) {

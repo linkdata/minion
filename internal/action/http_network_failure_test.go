@@ -249,6 +249,7 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 					transport.ack(t, "/before", transport.call(1), http.StatusOK, 1)
 					receipt := transport.call(2)
 					receipt.Checkpoint.Call.Tokens = tokens
+					receipt.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 					receipt.Checkpoint.Call.Complete = true
 					transport.ack(t, "/after", receipt, http.StatusOK, 2)
 					sequence = 3

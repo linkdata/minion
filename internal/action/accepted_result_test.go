@@ -168,6 +168,7 @@ func completeHTTPResult(t *testing.T, f *httpServerTest) httpOutcome {
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
 	paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 7, Output: 2}, true
+	paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 	f.ack(t, "/after", paid, http.StatusOK, 2)
 	outcome := f.outcome(3, nil)
 	outcome.Result.Answer = "Completed answer"
@@ -184,6 +185,7 @@ func TestSelectedInactivityAfterModelCallKeepsKnownOutcome(t *testing.T) {
 				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 				paid := f.call(2)
 				paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7} // The stopped model may have incomplete usage.
+				paid.Checkpoint.Call.UsageCoverage.Scope = "known_subset"
 				f.ack(t, "/after", paid, http.StatusOK, 2)
 				outcome = f.outcome(3, nil)
 				outcome.Result.Calls = []CallUsage{paid.Checkpoint.Call}
@@ -298,6 +300,7 @@ func TestSelectedRuntimeCapRequiresMatchingCallReceipts(t *testing.T) {
 			}
 			paid := f.call(2)
 			paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7}
+			paid.Checkpoint.Call.UsageCoverage.Scope = "known_subset"
 			if test.after {
 				f.ack(t, "/after", paid, http.StatusOK, sequence)
 				sequence++

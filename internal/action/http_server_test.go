@@ -1025,7 +1025,7 @@ func TestHTTPExecutorFailedOutcomeAcrossMissingCallbackPreservesOnlyRawFacts(t *
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	// Sequence 2 was the returned paid receipt, lost before reaching this handler.
 	outcome := f.outcome(3, nil)
-	outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 17, Output: 4}, Complete: true}}
+	outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 17, Output: 4}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}}
 	f.ack(t, "/outcome", outcome, http.StatusConflict, 3)
 	outcome.Failure = newHTTPFailure(errors.New("paid receipt transport failed"))
 	f.ack(t, "/outcome", outcome, http.StatusOK, 3)
@@ -1085,6 +1085,7 @@ func TestHTTPExecutorTreatsWorkerFailurePolicyAsUntrusted(t *testing.T) {
 				f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 				receipt := f.call(2)
 				receipt.Checkpoint.Call.Tokens = usage.Tokens{Input: 17, Output: 4}
+				receipt.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				receipt.Checkpoint.Call.Complete = true
 				f.ack(t, "/after", receipt, http.StatusOK, 2)
 				outcome.Sequence = 3
@@ -1587,6 +1588,7 @@ func TestHTTPExecutorFencesAdmissionAndDrainsEnteredFailedSave(t *testing.T) {
 	f.pull(t)
 	call := f.call(1)
 	call.Checkpoint.Call.Tokens = usage.Tokens{Input: 19, CachedInput: 3, Output: 7}
+	call.Checkpoint.Call.UsageCoverage.Scope = "known_subset"
 	acknowledged := make(chan httpServerTestExchange, 1)
 	go func() { acknowledged <- f.request("/after", call) }()
 	select {
@@ -1678,6 +1680,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 				}
 				paid := f.call(2)
 				paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+				paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				if path == "/before" {
 					f.ack(t, "/after", paid, http.StatusOK, 2)
 				} else if reply := f.request(path, paid); reply.err == nil {
@@ -1691,6 +1694,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 				f.ack(t, "/before", f.call(2), http.StatusOK, 2)
 				main := f.call(3)
 				main.Checkpoint.Call.Tokens, main.Checkpoint.Call.Complete = usage.Tokens{Input: 9, Output: 2}, true
+				main.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				f.ack(t, "/after", main, http.StatusOK, 3)
 				f.ack(t, "/review", httpReview{Sequence: 4, Checkpoint: owner.review([]CallUsage{main.Checkpoint.Call}, nil, "")}, http.StatusOK, 4)
 				critic := f.call(5)
@@ -1699,6 +1703,7 @@ func TestHTTPExecutorRequiredReplyFailureCannotBecomeSuccess(t *testing.T) {
 				f.ack(t, "/before", critic, http.StatusOK, 5)
 				critic.Sequence = 6
 				critic.Checkpoint.Call.Tokens, critic.Checkpoint.Call.Complete = usage.Tokens{Input: 4, Output: 1}, true
+				critic.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				critic.Checkpoint.Call.Approved, critic.Checkpoint.Call.NoBlockers, critic.Checkpoint.Call.ReviewComplete = true, true, true
 				f.ack(t, "/after", critic, http.StatusOK, 6)
 				calls := []CallUsage{main.Checkpoint.Call, critic.Checkpoint.Call}
@@ -1785,7 +1790,7 @@ func TestHTTPExecutorReceivedOutcomeSurvivesLostReceiptACK(t *testing.T) {
 			f.pull(t)
 			outcome := f.outcome(1, runErr)
 			outcome.Result.Answer = "Complete received answer"
-			outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, Output: 5}, Complete: true}}
+			outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 13, Output: 5}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}}
 			if ack := f.request("/outcome", outcome); ack.err == nil {
 				t.Fatalf("receipt ACK unexpectedly survived injected write failure: %+v", ack)
 			}
@@ -1821,7 +1826,7 @@ func TestHTTPExecutorLateKnownOutcomeRetainsFactsAndActualContextCause(t *testin
 				<-f.tx.ctx.Done()
 				outcome := f.outcome(1, nil)
 				outcome.Result.Answer = "Received after the accepted action stopped"
-				outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 23, Output: 3}, Complete: true}}
+				outcome.Result.Calls = []CallUsage{{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 23, Output: 3}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}}
 				f.ack(t, "/outcome", outcome, http.StatusOK, 1)
 				got := f.result(t)
 				if !reflect.DeepEqual(got.result, outcome.Result) || !errors.Is(got.err, ctx.Err()) || errors.Is(got.err, monitor.ErrTerminalJob) != deadline || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) {
@@ -1864,6 +1869,7 @@ func TestHTTPExecutorChecksDeadlineBeforeCancellationNotification(t *testing.T) 
 				sequence++
 				paid := f.call(sequence)
 				paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = tokens, true
+				paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				f.ack(t, "/after", paid, http.StatusOK, sequence)
 				calls = []CallUsage{paid.Checkpoint.Call}
 				sequence++
@@ -1936,6 +1942,7 @@ func TestHTTPExecutorRejectedBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
 			paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 11, Output: 3}, true
+			paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 			f.ack(t, "/after", paid, http.StatusOK, 2)
 			f.tx.stopExecution(io.ErrClosedPipe, true)
 			<-f.tx.ctx.Done()
@@ -2005,6 +2012,7 @@ func TestHTTPExecutorConcurrentBoundBeforeSurvivesWatchOutcome(t *testing.T) {
 	f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 	paid := f.call(2)
 	paid.Checkpoint.Call.Tokens, paid.Checkpoint.Call.Complete = usage.Tokens{Input: 11, Output: 3}, true
+	paid.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 	afterReply := make(chan httpServerTestExchange, 1)
 	go func() { afterReply <- f.request("/after", paid) }()
 	select {
@@ -2118,6 +2126,7 @@ func TestHTTPExecutorCloseKeepsWatchAndPaidReceiptGraceAvailable(t *testing.T) {
 				}
 				call := f.call(1)
 				call.Checkpoint.Call.Tokens, call.Checkpoint.Call.Complete = usage.Tokens{Input: 31, Output: 2}, true
+				call.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				f.ack(t, "/after", call, http.StatusOK, 1)
 				if got := <-paid; got != call.Checkpoint.Call {
 					t.Fatalf("Close lost a paid receipt in grace: %+v", got)
@@ -2443,6 +2452,7 @@ func TestHTTPExecutorShortStopBudgetDoesNotRenewForSerialControls(t *testing.T) 
 				time.Sleep(stopBudget - 2*time.Millisecond)
 				receipt := f.call(2)
 				receipt.Checkpoint.Call.Tokens = usage.Tokens{Input: 17}
+				receipt.Checkpoint.Call.UsageCoverage.Scope = "invocation"
 				receipt.Checkpoint.Call.Complete = true
 				f.ack(t, "/after", receipt, http.StatusOK, 2)
 				if got := <-paid; got != receipt.Checkpoint.Call {

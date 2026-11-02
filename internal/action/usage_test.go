@@ -298,6 +298,42 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 	}
 }
 
+func TestUsageCheckpointMarksUnfinishedCallPartial(t *testing.T) {
+	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
+	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex"})
+	if _, err := tracked.trackUsage(usageJob()); err != nil {
+		t.Fatal(err)
+	}
+	tracked.usageCheckpoint.record.ExecutorID = "local"
+	tracked.usageCheckpoint.record.SourceRef = strings.Repeat("a", 40)
+	call := CallUsage{Provider: "codex"}
+	if err := tracked.usageCheckpoint.beforeCall(call); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, found, err := store.Load(tracked.attemptID)
+	if err != nil || !found || checkpoint.CodexCalls != 1 || checkpoint.UsageComplete || !checkpoint.UsageCoverage.PartialReport {
+		t.Fatalf("unfinished call lacks a durable partial marker: %+v found=%t err=%v", checkpoint, found, err)
+	}
+	call.Tokens = usage.Tokens{Input: 1}
+	call.UsageCoverage = usage.Coverage{Scope: "invocation"}
+	call.Complete = true
+	if err := tracked.usageCheckpoint.afterCall(call); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint, found, err = store.Load(tracked.attemptID)
+	if err != nil || !found || checkpoint.CodexCalls != 1 || !checkpoint.UsageComplete || checkpoint.UsageCoverage.PartialReport || checkpoint.Tokens.Input != 1 {
+		t.Fatalf("completed call retained a provisional partial marker: %+v found=%t err=%v", checkpoint, found, err)
+	}
+
+	failedSave := usageCheckpoint{
+		record: usage.Record{UsageComplete: true, UsageCoverage: usage.Coverage{Scope: "attempt"}},
+		save:   func() error { return errors.New("save failed") },
+	}
+	if err := failedSave.beforeCall(call); err == nil || failedSave.record.CodexCalls != 0 || !failedSave.record.UsageComplete || failedSave.record.UsageCoverage.PartialReport {
+		t.Fatalf("failed start save changed in-memory usage state: %+v err=%v", failedSave.record, err)
+	}
+}
+
 func TestUsageDefaultsUnspecifiedModelLabels(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "claude", Adversarial: "codex"})
@@ -325,14 +361,14 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 		WorkRoot:    work,
 		Runner: Runner{WorkRoot: work, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 			if request.provider == "claude" {
-				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageComplete: true}, nil
+				return aicli.Result{Answer: proposalJSON("proposal", "Private evidence"), Tokens: usage.Tokens{Input: 100, Output: 20}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 			}
 			critiques++
 			answer := approvedCritiqueJSON
 			if critiques == 1 {
 				answer = `{"approved":false,"has_blockers":true,"review_complete":true,"feedback":"Check the error path."}`
 			}
-			return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+			return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 10, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		}},
 	}
 	tracked := attemptFixture(e)
@@ -387,7 +423,7 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 			tracked := attemptFixture(&Orchestrator{Usage: store, Main: tt.provider, Runner: Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				calls++
 				if tt.critic && request.role == roleMain {
-					return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: true}, nil
+					return aicli.Result{Answer: proposalJSON("Candidate answer", ""), Tokens: usage.Tokens{Input: 10, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}
 				store.Dir = blocked
 				if tt.critic {
@@ -395,9 +431,13 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 					if tt.approvedCritic {
 						answer = approvedCritiqueJSON
 					}
-					return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageComplete: true}, nil
+					return aicli.Result{Answer: answer, Tokens: usage.Tokens{Input: 11, Output: 3}, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}
-				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageComplete: tt.modelErr == nil}, tt.modelErr
+				scope := "invocation"
+				if tt.modelErr != nil {
+					scope = "known_subset"
+				}
+				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageCoverage: usage.Coverage{Scope: scope}, UsageComplete: tt.modelErr == nil}, tt.modelErr
 			}}})
 			finish, err := tracked.trackUsage(usageJob())
 			if err != nil {

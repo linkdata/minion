@@ -28,7 +28,7 @@ func httpBindingShape(binding httpBinding) error {
 }
 
 func httpCallShape(call CallUsage) error {
-	for _, value := range []string{call.Provider, call.Role, call.ReviewPhase, call.Model, call.Effort} {
+	for _, value := range []string{call.Provider, call.Role, call.ReviewPhase, call.Model, call.Effort, call.UsageCoverage.Scope} {
 		if !boundedText(value, config.MaxModelSettingBytes) {
 			return errHTTPShape
 		}

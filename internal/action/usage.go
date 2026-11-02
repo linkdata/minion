@@ -13,6 +13,7 @@ import (
 type usageCheckpoint struct {
 	record           usage.Record
 	previousComplete bool
+	previousPartial  bool
 	save             func() error
 	logf             func(string, ...any)
 }
@@ -23,11 +24,14 @@ func (c *usageCheckpoint) beforeCall(call CallUsage) error {
 		calls = &c.record.ClaudeCalls
 	}
 	c.previousComplete = c.record.UsageComplete
+	c.previousPartial = c.record.UsageCoverage.PartialReport
 	*calls++
 	c.record.UsageComplete = false
+	c.record.UsageCoverage.PartialReport = true
 	if err := c.save(); err != nil {
 		*calls--
 		c.record.UsageComplete = c.previousComplete
+		c.record.UsageCoverage.PartialReport = c.previousPartial
 		return err
 	}
 	return nil
@@ -36,6 +40,7 @@ func (c *usageCheckpoint) beforeCall(call CallUsage) error {
 func (c *usageCheckpoint) afterCall(call CallUsage) error {
 	tokens, valid := c.record.Tokens.AddChecked(call.Tokens)
 	c.record.Tokens = tokens
+	c.record.UsageCoverage.PartialReport = c.previousPartial
 	c.record.UsageCoverage = c.record.UsageCoverage.AddGaps(call.UsageCoverage)
 	if !call.Complete || !valid {
 		c.record.UsageCoverage.PartialReport = true

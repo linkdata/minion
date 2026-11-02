@@ -201,7 +201,9 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 			}
 			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
-		} else if id != rootID || meta.duplicate {
+		} else if id == rootID && meta.duplicate {
+			childError = joinUsageErrors(childError, errAmbiguousRoot)
+		} else if id != rootID {
 			childError = joinUsageErrors(childError, errUnverifiedChildren)
 		}
 		if id == rootID && fallback != nil {

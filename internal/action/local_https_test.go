@@ -405,7 +405,7 @@ func TestLocalEndpointDrainsPaidCallbackBeforeShutdown(t *testing.T) {
 	if tx == nil {
 		t.Fatal("HTTPS pull did not admit a transaction")
 	}
-	call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7, Output: 2}, Complete: true}
+	call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true}
 	fact := CallCheckpoint{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: callMetadata(call)}
 	localTestAck(t, client, access.BaseURL, "/before", httpCall{Sequence: 1, Checkpoint: fact}, 1)
 	fact.Call = call

@@ -31,6 +31,7 @@ const (
 )
 
 var (
+	errAmbiguousRoot      = errors.New("Codex root rollout identity is ambiguous")
 	errUnverifiedChildren = errors.New("helper agent work did not complete or completion could not be verified")
 	errUsageAgentLimit    = fmt.Errorf("%w: Codex usage agent count exceeded the limit", aicli.ErrOutputLimit)
 )
@@ -38,7 +39,7 @@ var (
 // joinUsageErrors emits each shared completion cause once.
 func joinUsageErrors(errs ...error) error {
 	var causes []error
-	for _, sentinel := range []error{errUnverifiedChildren, errUsageAgentLimit} {
+	for _, sentinel := range []error{errAmbiguousRoot, errUnverifiedChildren, errUsageAgentLimit} {
 		for _, err := range errs {
 			if errors.Is(err, sentinel) {
 				causes = append(causes, sentinel)
@@ -74,7 +75,13 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 			coverage.Scope = "root_only"
 		}
 		coverage.PartialReport = true
-		if ambiguous[rootID] || len(expectedChildren) != 0 {
+		if ambiguous[rootID] {
+			if len(expectedChildren) != 0 {
+				return total, false, joinUsageErrors(errAmbiguousRoot, errUnverifiedChildren)
+			}
+			return total, false, errAmbiguousRoot
+		}
+		if len(expectedChildren) != 0 {
 			return total, false, errUnverifiedChildren
 		}
 		return total, false, nil

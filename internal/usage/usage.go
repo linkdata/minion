@@ -63,7 +63,7 @@ func (t Tokens) Max(other Tokens) Tokens {
 // Coverage describes the scope and gaps of an executor-reported token claim.
 // PartialReport means the observed counters may be a subset of the invocation;
 // an unusable present final report is MalformedFinalReport, not MissingFinalReport.
-// An empty value is permitted for older records and test-provided call results.
+// An empty value is permitted for older attempt records and zero-token calls.
 // Billed credits are not inferred from these counters.
 type Coverage struct {
 	Scope                  string `json:"scope,omitempty"`

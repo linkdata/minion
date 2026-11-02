@@ -44,11 +44,11 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	const answer = "Public completed response."
 	const mainModel, criticModel = "fixture-main", "fixture-critic"
 	expected := []CallUsage{
-		{Provider: "codex", Role: roleMain, Round: 1, Model: mainModel, Effort: "high", Tokens: usage.Tokens{Input: 10, CachedInput: 1, Output: 2}, Complete: true},
-		{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 3, CachedInput: 1, Output: 1}, Complete: true, HasBlockers: true, ReviewComplete: true},
-		{Provider: "codex", Role: roleMain, Round: 2, Model: mainModel, Effort: "high", Tokens: usage.Tokens{Input: 20, CachedInput: 2, Output: 4}, Complete: true},
-		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 5, CachedInput: 1, Output: 1}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
-		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewFull, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 7, CachedInput: 2, Output: 2}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
+		{Provider: "codex", Role: roleMain, Round: 1, Model: mainModel, Effort: "high", Tokens: usage.Tokens{Input: 10, CachedInput: 1, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
+		{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 3, CachedInput: 1, Output: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, HasBlockers: true, ReviewComplete: true},
+		{Provider: "codex", Role: roleMain, Round: 2, Model: mainModel, Effort: "high", Tokens: usage.Tokens{Input: 20, CachedInput: 2, Output: 4}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
+		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewVerification, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 5, CachedInput: 1, Output: 1}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
+		{Provider: "claude", Role: roleCritic, Round: 2, ReviewPhase: reviewFull, Model: criticModel, Effort: "medium", Tokens: usage.Tokens{Input: 7, CachedInput: 2, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
 	}
 	if capped {
 		expected[4].Approved, expected[4].NoBlockers, expected[4].HasBlockers = false, false, true
@@ -196,7 +196,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 				}
 				native.onEvent(aicli.StreamEvent{NativeID: agents[index], Kind: "final", Text: response})
 			}
-			return aicli.Result{Answer: response, Tokens: want.Tokens, UsageComplete: true}, nil
+			return aicli.Result{Answer: response, Tokens: want.Tokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 		}},
 	}
 	selectFixtureRunner(t, &e, &request)

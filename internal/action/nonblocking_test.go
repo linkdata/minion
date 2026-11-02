@@ -44,7 +44,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 				if request.role == roleMain {
 					return aicli.Result{Answer: proposalJSON("Candidate answer", "")}, nil
 				}
-				return aicli.Result{Answer: tt.answer, Tokens: usage.Tokens{Input: 11, Output: 2}}, tt.err
+				return aicli.Result{Answer: tt.answer, Tokens: usage.Tokens{Input: 11, Output: 2}, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, tt.err
 			}}
 			result, err := runner.Run(t.Context(), job)
 			validVerdict := tt.approved || tt.noBlockers || tt.hasBlockers
@@ -65,7 +65,7 @@ func TestCriticEvidencePreservesBlockerVerdicts(t *testing.T) {
 			} else if result.CriticStopReason != "" || result.Answer != "" {
 				t.Fatalf("failed critic published: %+v", result)
 			}
-			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, ReviewComplete: tt.noBlockers || tt.hasBlockers, Tokens: usage.Tokens{Input: 11, Output: 2}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
+			want := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, ReviewComplete: tt.noBlockers || tt.hasBlockers, Tokens: usage.Tokens{Input: 11, Output: 2}, UsageCoverage: usage.Coverage{Scope: "known_subset"}, Approved: tt.approved, NoBlockers: tt.noBlockers, HasBlockers: tt.hasBlockers}
 			if result.Calls[1] != want {
 				t.Fatalf("native verdict lost: got=%+v want=%+v", result.Calls[1], want)
 			}

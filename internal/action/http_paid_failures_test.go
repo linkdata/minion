@@ -112,14 +112,14 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 				index := native.Add(1)
 				if index == 1 && request.role == roleMain {
-					return aicli.Result{Answer: proposalJSON("Candidate", ""), Tokens: mainTokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: proposalJSON("Candidate", ""), Tokens: mainTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}
 				if index == 2 && request.role == roleCritic {
 					answer := approvedCritiqueJSON
 					if stage == "capped decision ACK" {
 						answer = criticFeedbackJSON(true, "PRIVATE_FINAL_BLOCKER")
 					}
-					return aicli.Result{Answer: answer, Tokens: criticTokens, UsageComplete: true}, nil
+					return aicli.Result{Answer: answer, Tokens: criticTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, UsageComplete: true}, nil
 				}
 				return aicli.Result{}, fmt.Errorf("paid work repeated after %s: call %d role=%s", stage, index, request.role)
 			}}
@@ -256,7 +256,7 @@ func TestHTTPPaidOutputLimitPreservesUsageWithoutTrustingWorkerPolicy(t *testing
 	var native atomic.Int32
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
 		native.Add(1)
-		return aicli.Result{Tokens: tokens}, fmt.Errorf("paid native event limit: %w", aicli.ErrOutputLimit)
+		return aicli.Result{Tokens: tokens, UsageCoverage: usage.Coverage{Scope: "known_subset"}}, fmt.Errorf("paid native event limit: %w", aicli.ErrOutputLimit)
 	}}
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- RunHTTP(ctx, workerServer.Client(), workerServer.URL, "local", &runner) }()

@@ -35,6 +35,7 @@ func TestSelectedFailedOutcomeChecksAcknowledgedCallBeforeACK(t *testing.T) {
 			f.ack(t, "/before", f.call(1), http.StatusOK, 1)
 			paid := f.call(2)
 			paid.Checkpoint.Call.Tokens = usage.Tokens{Input: 7}
+			paid.Checkpoint.Call.UsageCoverage.Scope = "known_subset"
 			f.ack(t, "/after", paid, http.StatusOK, 2)
 
 			outcome := f.outcome(3, nil)

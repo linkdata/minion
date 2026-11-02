@@ -300,6 +300,7 @@ func TestOrchestratorRequiresExecutorAcknowledgementsBeforePublication(t *testin
 						}
 					}
 					call.Tokens, call.Complete = usage.Tokens{Input: 3, Output: 1}, true
+					call.UsageCoverage.Scope = "invocation"
 					fact.Call = call
 					if mode == "complete" {
 						if err := checkpoints.AfterCall(fact); err != nil {

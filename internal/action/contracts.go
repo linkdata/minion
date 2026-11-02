@@ -418,7 +418,8 @@ func (r Result) validateCalls(j Job, complete bool) error {
 			(call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers) ||
 			(call.ReviewComplete && !call.NoBlockers && !call.HasBlockers) || (!call.ReviewComplete && (call.Approved || call.NoBlockers))
 		wrongModel := call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort
-		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() || !call.UsageCoverage.ValidForCall(call.Complete) {
+		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() ||
+			(call.Tokens != (usage.Tokens{}) && call.UsageCoverage.Scope == "") || !call.UsageCoverage.ValidForCall(call.Complete) {
 			return errors.New("invalid model call usage")
 		}
 		advanceToFull, stopReason = policy.observe(call)
