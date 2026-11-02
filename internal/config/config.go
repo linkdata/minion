@@ -244,6 +244,7 @@ func resolveTLSPath(configDir, path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
+	path = filepath.FromSlash(path)
 	if configDir == "" {
 		return path
 	}
