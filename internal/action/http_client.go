@@ -23,6 +23,8 @@ var errHTTPWatchStopped = errors.New("HTTP cancellation watch stopped after work
 var errHTTPWorkerCleanup = errors.New("HTTP worker cleanup failed; worker is unavailable")
 var errExecutorRuntimeCap = fmt.Errorf("executor runtime cap: %w", context.DeadlineExceeded)
 
+const captureLimitMessage = "Discussion capture reached its limit; history is incomplete."
+
 type httpExecutionClient struct {
 	client              *http.Client
 	base                *url.URL
@@ -301,6 +303,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		watchDone <- err
 	}()
 	statusFeed := newWorkerStatus(job, started)
+	statusFeed.onCaptureLimit = func() { cancelAction(errors.Join(monitor.ErrTerminalJob, errRemoteCaptureLimit)) }
 	statusCtx, cancelStatus := context.WithCancel(controlCtx)
 	defer cancelStatus()
 	eventCtx, cancelEvents := context.WithCancel(controlCtx)
@@ -362,6 +365,10 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		if errors.Is(cause, context.DeadlineExceeded) {
 			cause = errors.Join(cause, monitor.ErrTerminalJob)
 		}
+		if statusFeed.captureLimited.Load() {
+			result = withCaptureLimitDiagnostic(result)
+			runErr = errors.Join(runErr, monitor.ErrTerminalJob, errRemoteCaptureLimit)
+		}
 		runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
 		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, runErr, stopCause)
 		runErr = selectedRunErr
@@ -394,6 +401,27 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		runErr = errors.Join(runErr, errHTTPWorkerCleanup)
 	}
 	return redactActionError(errors.Join(runErr, outcomeErr, watchErr, callerErr), assignedSecrets...)
+}
+
+func withCaptureLimitDiagnostic(result Result) Result {
+	result.Answer, result.Changes = "", nil
+	diagnostic := Diagnostic{Code: "capture_limit", Message: captureLimitMessage}
+	for i := range result.Diagnostics {
+		if result.Diagnostics[i].Code == diagnostic.Code {
+			result.Diagnostics[i] = diagnostic
+			return result
+		}
+	}
+	if len(result.Diagnostics) == maxDiagnostics {
+		replace := len(result.Diagnostics) - 1
+		for replace > 0 && result.Diagnostics[replace].Code == "cleanup_failed" {
+			replace--
+		}
+		result.Diagnostics[replace] = diagnostic
+	} else {
+		result.Diagnostics = append(result.Diagnostics, diagnostic)
+	}
+	return result
 }
 
 func watchAdmissionDeadline(hard, idle, control time.Time) (time.Time, bool) {
@@ -794,6 +822,9 @@ func (c *httpClientCheckpoints) outcomeWithCauseAndRunError(result Result, runEr
 				fallback.Diagnostics = []Diagnostic{{Code: "cleanup_failed", Message: "Execution workspace cleanup failed; operator attention is required."}}
 				break
 			}
+		}
+		if errors.Is(runErr, errRemoteCaptureLimit) {
+			fallback.Diagnostics = append(fallback.Diagnostics, Diagnostic{Code: "capture_limit", Message: captureLimitMessage})
 		}
 		if matchingBinding {
 			core := ReviewCheckpoint{Version: c.binding.Version, Identity: c.binding.Identity, SourceRef: c.binding.SourceRef, Calls: result.Calls}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -77,8 +78,13 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 		logger.Printf("remote worker Git preflight: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
+	return runRemoteWorkerLoop(ctx, cfg, client, logger)
+}
+
+func runRemoteWorkerLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
 	if err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, action.NewRemoteRunner(cfg.WorkRoot)); err != nil {
-		logger.Printf("remote worker: %s", monitor.InertLogText(err.Error()))
+		// Returned errors can contain private model text.
+		logger.Print("remote worker: execution or protocol failure")
 		return 1
 	}
 	return 0

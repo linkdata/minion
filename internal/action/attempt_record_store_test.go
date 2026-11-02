@@ -282,7 +282,7 @@ func TestAttemptRecordsCapReservesStopAndCoverage(t *testing.T) {
 		entry := attemptRecordFixture(sequence, attemptRecordDiscussion, strings.Repeat("x", 300))
 		ack, err := store.Append(entry)
 		if errors.Is(err, errAttemptRecordsFull) {
-			if ack != 0 || sequence == 1 {
+			if ack != 0 || sequence == 1 || !errors.Is(err, errAttemptRecordStoreFull) {
 				t.Fatalf("full-store result: ack=%d sequence=%d", ack, sequence)
 			}
 			break
@@ -778,7 +778,7 @@ func TestAttemptRecordsLogicalEventCapAcrossReopen(t *testing.T) {
 			last.Call = first.Call
 			ack, err := store.Append(last)
 			if test.wantFull {
-				if ack != 0 || !errors.Is(err, errAttemptRecordsFull) {
+				if ack != 0 || !errors.Is(err, errAttemptRecordsFull) || errors.Is(err, errAttemptRecordStoreFull) {
 					t.Fatalf("over-cap fragment: ack=%d error=%v", ack, err)
 				}
 			} else if ack != 2 || err != nil {
