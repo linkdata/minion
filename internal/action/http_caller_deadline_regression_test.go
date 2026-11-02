@@ -56,18 +56,6 @@ func TestCallerDeadlineWinsDelayedInactivityOutcome(t *testing.T) {
 	}
 }
 
-func TestCallerDeadlineExpiredAfterPositiveBudgetSample(t *testing.T) {
-	start := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
-	hard, idle := start.Add(10*time.Second), start.Add(20*time.Second)
-	if sampled := hard.Sub(start.Add(9 * time.Second)); sampled <= 0 {
-		t.Fatalf("test needs a previously positive RuntimeBudget, got %s", sampled)
-	}
-	// The caller deadline has passed, although its context callback has not run.
-	if got := selectWorkerLimit(nil, start.Add(11*time.Second), hard, idle, false); got != workerLimitCallerDeadline {
-		t.Fatalf("absolute pre-Runner limit = %v, want caller deadline", got)
-	}
-}
-
 func TestAdmissionFailureKeepsTransportBeforeLaterInactivity(t *testing.T) {
 	for _, test := range []struct {
 		name           string

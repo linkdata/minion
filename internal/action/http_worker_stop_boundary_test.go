@@ -13,29 +13,6 @@ import (
 	"github.com/linkdata/minion/internal/command"
 )
 
-func TestPostPullOverdueWorkerLimitUsesFirstDeadline(t *testing.T) {
-	started := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
-	for _, test := range []struct {
-		name   string
-		hard   time.Duration
-		idle   time.Duration
-		ownCap bool
-		want   workerLimit
-	}{
-		{name: "inactivity before runtime cap", hard: 7 * time.Second, idle: 5 * time.Second, ownCap: true, want: workerLimitInactivity},
-		{name: "runtime cap before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
-		{name: "runtime cap wins tie", hard: 5 * time.Second, idle: 5 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
-		{name: "caller deadline before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, want: workerLimitCallerDeadline},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got := selectWorkerLimit(nil, started.Add(8*time.Second), started.Add(test.hard), started.Add(test.idle), test.ownCap)
-			if got != test.want {
-				t.Fatalf("post-pull limit = %v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestStoppedInactivityDoesNotFailOutcomeAfterIdleDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)

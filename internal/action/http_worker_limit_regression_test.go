@@ -16,30 +16,6 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-func TestWorkerLimitKeepsEarlierCallerDeadlineWhenCallbacksLag(t *testing.T) {
-	start := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
-	for _, test := range []struct {
-		name  string
-		cause error
-		hard  time.Duration
-		idle  time.Duration
-		want  workerLimit
-	}{
-		{name: "caller before delayed inactivity callback", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, want: workerLimitCallerDeadline},
-		{name: "caller and inactivity tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, want: workerLimitCallerDeadline},
-		{name: "inactivity before delayed caller callback", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 9 * time.Second, want: workerLimitInactivity},
-		{name: "inactivity before caller with no callback", hard: 10 * time.Second, idle: 9 * time.Second, want: workerLimitInactivity},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got := selectWorkerLimit(test.cause, start.Add(12*time.Second),
-				start.Add(test.hard), start.Add(test.idle), false)
-			if got != test.want {
-				t.Fatalf("worker limit = %v, want %v", got, test.want)
-			}
-		})
-	}
-}
-
 func TestWorkerLimitOutcomeKeepsConsistentDiagnosticAndFallback(t *testing.T) {
 	for _, test := range []struct {
 		name         string

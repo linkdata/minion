@@ -138,7 +138,7 @@ func TestWatchAdmissionDeadlineUsesAbsoluteOrder(t *testing.T) {
 	}
 }
 
-func TestWorkerLimitUsesAbsoluteOrderAfterDelayedCallbacks(t *testing.T) {
+func TestWorkerLimitUsesAbsoluteDeadlineOrder(t *testing.T) {
 	start := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	for _, test := range []struct {
 		name       string
@@ -155,6 +155,15 @@ func TestWorkerLimitUsesAbsoluteOrderAfterDelayedCallbacks(t *testing.T) {
 		{name: "caller owns earlier hard deadline", cause: context.DeadlineExceeded, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
 		{name: "parent cancellation remains first", cause: context.Canceled, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, ownCap: true, want: workerLimitNone},
 		{name: "inner deadline before limits", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 11 * time.Second, at: 9 * time.Second, ownCap: true, want: workerLimitNone},
+		{name: "no callback after inactivity before runtime cap", hard: 7 * time.Second, idle: 5 * time.Second, at: 8 * time.Second, ownCap: true, want: workerLimitInactivity},
+		{name: "no callback after runtime cap before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, at: 8 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "no callback after runtime cap tie", hard: 5 * time.Second, idle: 5 * time.Second, at: 8 * time.Second, ownCap: true, want: workerLimitRuntimeCap},
+		{name: "no callback after caller deadline before inactivity", hard: 5 * time.Second, idle: 7 * time.Second, at: 8 * time.Second, want: workerLimitCallerDeadline},
+		{name: "caller before delayed inactivity callback", cause: errExecutorInactivity, hard: 9 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
+		{name: "caller and inactivity tie", cause: errExecutorInactivity, hard: 10 * time.Second, idle: 10 * time.Second, at: 12 * time.Second, want: workerLimitCallerDeadline},
+		{name: "inactivity before delayed caller callback", cause: context.DeadlineExceeded, hard: 10 * time.Second, idle: 9 * time.Second, at: 12 * time.Second, want: workerLimitInactivity},
+		{name: "inactivity before caller with no callback", hard: 10 * time.Second, idle: 9 * time.Second, at: 12 * time.Second, want: workerLimitInactivity},
+		{name: "only caller deadline elapsed with no callback", hard: 10 * time.Second, idle: 20 * time.Second, at: 11 * time.Second, want: workerLimitCallerDeadline},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got := selectWorkerLimit(test.cause, start.Add(test.at), start.Add(test.hard), start.Add(test.idle), test.ownCap)

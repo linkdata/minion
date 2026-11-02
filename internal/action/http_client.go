@@ -236,18 +236,15 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		headerErr = fmt.Errorf("cancellation watch admission timed out: %w", errExecutorRuntimeCap)
 	}
 	headerWait := max(0, time.Until(headerDeadline))
-	headerDone := make(chan struct{})
+	admission := &watchAdmission{}
 	headerTimer := time.AfterFunc(headerWait, func() {
-		stopWatch(headerErr)
-		close(headerDone)
+		admission.expire(stopWatch, headerErr)
 	})
-	watchResponse, err := transport.open(watchCtx, "cancel", watchBody, checkpoints.binding, 0)
-	admissionCause := context.Cause(actionCtx)
-	admissionObservedAt := time.Now()
-	if !headerTimer.Stop() {
-		<-headerDone
-	}
-	watchAdmissionTimedOut := context.Cause(watchCtx) == headerErr
+	watchResponse, err := transport.openObserved(watchCtx, "cancel", watchBody, checkpoints.binding, 0, func() {
+		admission.observe(actionCtx, watchCtx)
+	})
+	headerTimer.Stop()
+	admissionObservedAt, admissionCause, watchAdmissionTimedOut := admission.finish(headerDeadline, stopWatch, headerErr)
 	if watchAdmissionTimedOut {
 		if watchResponse != nil {
 			_ = watchResponse.Body.Close()
@@ -399,6 +396,44 @@ func watchAdmissionDeadline(hard, idle, control time.Time) (time.Time, bool) {
 	return deadline, false
 }
 
+// watchAdmission settles the first observed watch result against the header timer.
+// The timer cannot cancel a watch whose headers or error were already observed.
+type watchAdmission struct {
+	mu         sync.Mutex
+	observedAt time.Time
+	cause      error
+	watchCause error
+}
+
+func (a *watchAdmission) observe(action, watch context.Context) {
+	a.mu.Lock()
+	a.cause = context.Cause(action)
+	a.watchCause = context.Cause(watch)
+	a.observedAt = time.Now()
+	a.mu.Unlock()
+}
+
+func (a *watchAdmission) expire(cancel context.CancelCauseFunc, err error) {
+	a.mu.Lock()
+	expired := a.observedAt.IsZero()
+	a.mu.Unlock()
+	if expired {
+		cancel(err)
+	}
+}
+
+func (a *watchAdmission) finish(deadline time.Time, cancel context.CancelCauseFunc, err error) (time.Time, error, bool) {
+	a.mu.Lock()
+	observedAt, cause, watchCause := a.observedAt, a.cause, a.watchCause
+	a.mu.Unlock()
+	// A non-admission watch stop already selected by context keeps its cause.
+	timedOut := (watchCause == nil || watchCause == err) && !observedAt.Before(deadline)
+	if timedOut {
+		cancel(err) // The absolute deadline wins even if its callback was delayed.
+	}
+	return observedAt, cause, timedOut
+}
+
 type workerLimit uint8
 
 const (
@@ -473,6 +508,13 @@ func (c *httpExecutionClient) post(ctx context.Context, kind string, data []byte
 // open returns only after success headers. The held cancellation body is read
 // separately, so a registered watch is an admission barrier before Runner starts.
 func (c *httpExecutionClient) open(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64) (*http.Response, error) {
+	return c.openObserved(ctx, kind, data, binding, sequence, nil)
+}
+
+func (c *httpExecutionClient) openObserved(ctx context.Context, kind string, data []byte, binding httpBinding, sequence uint64, observed func()) (*http.Response, error) {
+	if observed != nil {
+		defer observed() // Record completion before the caller can be descheduled.
+	}
 	var pullCancel context.CancelCauseFunc
 	if kind == "next" {
 		ctx, pullCancel = context.WithCancelCause(ctx)

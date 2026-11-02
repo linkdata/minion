@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -14,6 +15,139 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/monitor"
 )
+
+func TestWatchAdmissionObservationSurvivesLaterTimer(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		openError error
+	}{
+		{name: "headers"},
+		{name: "transport error", openError: errors.New("watch transport failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				action, cancelAction := context.WithCancelCause(t.Context())
+				defer cancelAction(nil)
+				watch, stopWatch := context.WithCancelCause(t.Context())
+				defer stopWatch(nil)
+				admission := &watchAdmission{}
+				headerErr := errors.New("watch admission timed out")
+				deadline := time.Now().Add(time.Second)
+				timer := time.AfterFunc(time.Second, func() { admission.expire(stopWatch, headerErr) })
+				client := &httpExecutionClient{
+					client: &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+						if test.openError != nil {
+							return nil, test.openError
+						}
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+							Body: io.NopCloser(strings.NewReader("{}"))}, nil
+					})},
+					base: &url.URL{Scheme: "http", Host: "worker.test"},
+				}
+				response, err := client.openObserved(watch, "cancel", []byte("{}"), httpBinding{}, 0, func() {
+					admission.observe(action, watch)
+					time.Sleep(2 * time.Second) // Hold the caller after open completed, across the header deadline.
+				})
+				timer.Stop()
+				observedAt, cause, timedOut := admission.finish(deadline, stopWatch, headerErr)
+				if response != nil {
+					defer response.Body.Close()
+				}
+				if !observedAt.Before(deadline) || cause != nil || timedOut || context.Cause(watch) != nil ||
+					(response != nil) == (test.openError != nil) || (test.openError != nil && !errors.Is(err, test.openError)) ||
+					(test.openError == nil && err != nil) {
+					t.Fatalf("early watch result replaced: response=%v error=%v observed=%v deadline=%v cause=%v timedOut=%t watch=%v",
+						response != nil, err, observedAt, deadline, cause, timedOut, context.Cause(watch))
+				}
+				if test.openError != nil {
+					idleTimer := time.NewTimer(time.Hour)
+					defer idleTimer.Stop()
+					idle := &inactivityTimer{last: deadline.Add(-time.Second), timeout: time.Second, timer: idleTimer, cancel: cancelAction}
+					selected := admissionFailure(err, cause, idle, observedAt, deadline.Add(time.Minute), true)
+					if !errors.Is(selected, test.openError) || errors.Is(selected, errExecutorInactivity) {
+						t.Fatalf("later inactivity replaced observed transport error: %v", selected)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestWatchAdmissionDeadlineWinsDelayedTimerCallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		action, cancelAction := context.WithCancelCause(t.Context())
+		defer cancelAction(nil)
+		watch, stopWatch := context.WithCancelCause(t.Context())
+		defer stopWatch(nil)
+		admission := &watchAdmission{}
+		headerErr := errors.New("watch admission timed out")
+		deadline := time.Now().Add(time.Second)
+		releaseTimer := make(chan struct{})
+		timerEntered := make(chan struct{})
+		timer := time.AfterFunc(time.Second, func() {
+			close(timerEntered)
+			<-releaseTimer
+			admission.expire(stopWatch, headerErr)
+		})
+		client := &httpExecutionClient{
+			client: &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+				time.Sleep(2 * time.Second) // Ignore cancellation until after the absolute header deadline.
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader("{}"))}, nil
+			})},
+			base: &url.URL{Scheme: "http", Host: "worker.test"},
+		}
+		response, err := client.openObserved(watch, "cancel", []byte("{}"), httpBinding{}, 0, func() {
+			admission.observe(action, watch)
+		})
+		if response != nil {
+			defer response.Body.Close()
+		}
+		<-timerEntered
+		timer.Stop()
+		observedAt, cause, timedOut := admission.finish(deadline, stopWatch, headerErr)
+		close(releaseTimer)
+		synctest.Wait()
+		if err != nil || response == nil || observedAt.Before(deadline) || cause != nil || !timedOut || context.Cause(watch) != headerErr {
+			t.Fatalf("late watch result accepted: response=%v error=%v observed=%v deadline=%v cause=%v timedOut=%t watch=%v",
+				response != nil, err, observedAt, deadline, cause, timedOut, context.Cause(watch))
+		}
+	})
+}
+
+func TestWatchAdmissionKeepsCallerCancellationBeforeLateOpenReturn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		caller, cancelCaller := context.WithCancel(t.Context())
+		defer cancelCaller()
+		action, cancelAction := context.WithCancelCause(caller)
+		defer cancelAction(nil)
+		watch, stopWatch := context.WithCancelCause(caller)
+		defer stopWatch(nil)
+		admission := &watchAdmission{}
+		headerErr := errors.New("watch admission timed out")
+		deadline := time.Now().Add(time.Second)
+		cancelTimer := time.AfterFunc(time.Second/2, cancelCaller)
+		defer cancelTimer.Stop()
+		headerTimer := time.AfterFunc(time.Second, func() { admission.expire(stopWatch, headerErr) })
+		client := &httpExecutionClient{
+			client: &http.Client{Transport: httpClientTestTransport(func(*http.Request) (*http.Response, error) {
+				time.Sleep(2 * time.Second) // Transport returns after both caller stop and header deadline.
+				return nil, context.Canceled
+			})},
+			base: &url.URL{Scheme: "http", Host: "worker.test"},
+		}
+		response, err := client.openObserved(watch, "cancel", []byte("{}"), httpBinding{}, 0, func() {
+			admission.observe(action, watch)
+		})
+		headerTimer.Stop()
+		observedAt, cause, timedOut := admission.finish(deadline, stopWatch, headerErr)
+		if response != nil || !errors.Is(err, context.Canceled) || !errors.Is(cause, context.Canceled) ||
+			!observedAt.After(deadline) || timedOut || context.Cause(watch) != context.Canceled {
+			t.Fatalf("caller stop replaced by late header deadline: response=%v error=%v observed=%v deadline=%v cause=%v timedOut=%t watch=%v",
+				response != nil, err, observedAt, deadline, cause, timedOut, context.Cause(watch))
+		}
+	})
+}
 
 func TestSelectedWatchAdmissionControlTimeoutSurvivesLaterInactivity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
