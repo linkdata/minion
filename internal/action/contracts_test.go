@@ -590,7 +590,7 @@ func TestResultCallUsageRejectsCriticsAndRepeatedMainWithoutCritic(t *testing.T)
 	}
 }
 
-func TestProtocolRejectsEarlierCriticContracts(t *testing.T) {
+func TestProtocolRejectsEarlierContracts(t *testing.T) {
 	job := testJob(command.Comment)
 	result := Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Complete answer", Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}}
 	status := Status{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Sequence: 1, WorkerState: "busy", Phase: "prepare"}
@@ -600,7 +600,7 @@ func TestProtocolRejectsEarlierCriticContracts(t *testing.T) {
 	if err := status.Validate(job); err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []int{3, 4} {
+	for _, version := range []int{3, 4, ProtocolVersion - 1} {
 		oldJob := job
 		oldJob.Version = version
 		result.Version, status.Version = version, version
