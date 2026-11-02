@@ -103,13 +103,7 @@ func testHTTPWorkerLimitOutcome(t *testing.T, earlyRuntimeCap bool) {
 	if _, err := m.RunOnce(ctx, store); err != nil {
 		t.Fatal(err)
 	}
-	if earlyRuntimeCap {
-		select {
-		case <-modelStarted:
-			t.Fatal("worker ran a model after its runtime cap")
-		default:
-		}
-	} else {
+	if !earlyRuntimeCap {
 		select {
 		case <-modelStarted:
 		default:
@@ -127,6 +121,13 @@ func testHTTPWorkerLimitOutcome(t *testing.T, earlyRuntimeCap bool) {
 		}
 	case <-ctx.Done():
 		t.Fatalf("HTTP worker did not finish: %v", ctx.Err())
+	}
+	if earlyRuntimeCap {
+		select {
+		case <-modelStarted:
+			t.Fatal("worker ran a model after its runtime cap")
+		default:
+		}
 	}
 	var reported *workerFailureError
 	select {
