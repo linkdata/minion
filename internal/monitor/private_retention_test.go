@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/state"
@@ -125,4 +126,43 @@ func TestRunOnceServicesDueControlsBeforePrivatePrune(t *testing.T) {
 			}
 		})
 	}
+}
+
+type heldRetentionProbe struct {
+	*heldCapacityHandler
+	prunes int
+	cancel context.CancelFunc
+}
+
+func (p *heldRetentionProbe) PrunePrivateRecords(context.Context, *state.Store, time.Time) error {
+	p.prunes++
+	if p.prunes == 2 {
+		p.cancel()
+	}
+	return nil
+}
+
+func TestCapacityWaitPrunesOnExistingWake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now)
+		store.Data.NextInviteCheckAt = now.Add(time.Second)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		probe := &heldRetentionProbe{
+			heldCapacityHandler: &heldCapacityHandler{entered: make(chan struct{}), release: make(chan struct{})},
+			cancel:              cancel,
+		}
+		m := selectedMonitor(t, now, &fakeGitHub{}, probe)
+		m.Now = time.Now
+		if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
+			t.Fatalf("capacity wait after retention wake = %v", err)
+		}
+		if probe.prunes != 2 {
+			t.Fatalf("capacity wait did not rerun retention on invitation wake: %d", probe.prunes)
+		}
+	})
 }

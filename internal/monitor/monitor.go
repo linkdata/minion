@@ -144,6 +144,19 @@ func (m *Monitor) logf(format string, args ...any) {
 	}
 }
 
+func (m *Monitor) prunePrivateRecords(ctx context.Context, store *state.Store) {
+	if ctx.Err() != nil || store.Data.Accepted != nil {
+		return
+	}
+	if pruner, ok := m.Handler.(interface {
+		PrunePrivateRecords(context.Context, *state.Store, time.Time) error
+	}); ok {
+		if err := pruner.PrunePrivateRecords(ctx, store, m.now().UTC()); err != nil {
+			m.logf("private record retention: %v", err)
+		}
+	}
+}
+
 // InertLogText bounds and escapes untrusted text before it reaches a log line.
 func InertLogText(s string) string {
 	quoted := strconv.QuoteToGraphic(bounded.Text(s))
@@ -260,13 +273,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return wake(store.Data.NextPollAt, false), err
 		}
 		initialTerminalWake = m.serviceTerminalControls(ctx, store)
-		if pruner, ok := m.Handler.(interface {
-			PrunePrivateRecords(context.Context, *state.Store, time.Time) error
-		}); ok && ctx.Err() == nil {
-			if err := pruner.PrunePrivateRecords(ctx, store, now().UTC()); err != nil {
-				m.logf("private record retention: %v", err)
-			}
-		}
+		m.prunePrivateRecords(ctx, store)
 	}
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
@@ -940,6 +947,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 				return err
 			}
 			nextTerminal = m.serviceTerminalControls(ctx, store)
+			m.prunePrivateRecords(ctx, store)
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
