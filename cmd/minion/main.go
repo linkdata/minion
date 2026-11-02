@@ -190,14 +190,14 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if cfg.Admin != nil && (*check || *loop) {
-			if _, err := loadAdminCertificate(*cfg.Admin); err != nil {
+		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && (*check || *loop) {
+			if _, err := loadTLSCertificate("admin", cfg.Admin.TLSCertFile, cfg.Admin.TLSKeyFile); err != nil {
 				logger.Printf("admin TLS preflight: %v", err)
 				return false
 			}
 		}
 		if remote := cfg.RemoteExecutor; remote != nil {
-			if _, err := loadRemoteCertificate(remote.TLSCertFile, remote.TLSKeyFile); err != nil {
+			if _, err := loadTLSCertificate("remote", remote.TLSCertFile, remote.TLSKeyFile); err != nil {
 				logger.Printf("remote TLS preflight: %v", err)
 				return false
 			}

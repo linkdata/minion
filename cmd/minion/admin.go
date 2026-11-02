@@ -32,32 +32,24 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
 	if cfg.TLSCertFile != "" {
-		certFile, err := filepath.Abs(cfg.TLSCertFile)
-		if err != nil {
-			return nil, fmt.Errorf("resolve admin TLS certificate path: %w", err)
-		}
-		keyFile, err := filepath.Abs(cfg.TLSKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("resolve admin TLS key path: %w", err)
-		}
-		certDir := filepath.Dir(certFile)
-		relKey, err := filepath.Rel(certDir, keyFile)
+		certDir := filepath.Dir(cfg.TLSCertFile)
+		relKey, err := filepath.Rel(certDir, cfg.TLSKeyFile)
 		// webserv expands CertDir and cleans paths; Windows volumes may differ.
 		if err != nil || strings.Contains(certDir, "$") ||
 			filepath.Clean(cfg.TLSCertFile) != cfg.TLSCertFile || filepath.Clean(cfg.TLSKeyFile) != cfg.TLSKeyFile {
-			certificate, err := loadAdminCertificate(cfg)
+			certificate, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
 			if err != nil {
 				return nil, err
 			}
 			fallbackTLS = &tls.Config{
 				MinVersion:   tls.VersionTLS13,
-				Certificates: []tls.Certificate{*certificate},
+				Certificates: []tls.Certificate{certificate},
 				// A manually wrapped listener cannot follow net/http's HTTP/2 policy.
 				NextProtos: []string{"http/1.1"},
 			}
 		} else {
 			service.CertDir = certDir
-			service.FullchainPem = filepath.Base(certFile)
+			service.FullchainPem = filepath.Base(cfg.TLSCertFile)
 			service.PrivkeyPem = relKey
 		}
 	}
@@ -74,11 +66,8 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
 	jw.Logger = slog.Default()
-	mux := http.NewServeMux()
-	mux.Handle("/jaws/", jw)
 	server := &http.Server{
-		Handler:                      jw.SecureHeadersMiddleware(adminGuard(mux, nil)),
-		TLSConfig:                    fallbackTLS,
+		Handler:                      jw.SecureHeadersMiddleware(adminGuard(jw, nil)),
 		ReadHeaderTimeout:            5 * time.Second,
 		ReadTimeout:                  30 * time.Second,
 		IdleTimeout:                  time.Minute,
@@ -103,21 +92,12 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	return a, nil
 }
 
-func loadAdminCertificate(cfg config.AdminConfig) (*tls.Certificate, error) {
-	if cfg.TLSCertFile == "" {
-		return nil, nil
-	}
-	certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load admin TLS certificate: %w", err)
-	}
-	return &certificate, nil
-}
-
 // adminGuard is the single entry gate for all dashboard routes. The authorizer
 // is nil until admin sessions are implemented.
 func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// JaWS's year-long host-wide HSTS policy could affect other services on this host.
+		w.Header().Del("Strict-Transport-Security")
 		if allowed == nil || !allowed(r) {
 			controller := http.NewResponseController(w)
 			if r.ProtoMajor == 1 && r.ContentLength != 0 {

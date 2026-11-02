@@ -52,7 +52,7 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		}
 		defer func() {
 			if err := admin.Close(); err != nil {
-				logger.Printf("close admin dashboard: %s", monitor.InertLogText(err.Error()))
+				logger.Printf("admin dashboard failed: %s", monitor.InertLogText(err.Error()))
 				code = 1
 			}
 		}()

@@ -137,6 +137,10 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	reused := false
+	wantProto := 2
+	if strings.Contains(","+os.Getenv("GODEBUG")+",", ",http2server=0,") {
+		wantProto = 1
+	}
 	for i := range 2 {
 		ctx := t.Context()
 		if i == 1 {
@@ -158,12 +162,15 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 		if err := resp.Body.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 2 {
-			t.Fatalf("HTTPS response = %s %d, want HTTP/2 403", resp.Proto, resp.StatusCode)
+		if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != wantProto {
+			t.Fatalf("HTTPS response = %s %d, want HTTP/%d 403", resp.Proto, resp.StatusCode, wantProto)
+		}
+		if resp.Header.Get("Strict-Transport-Security") != "" {
+			t.Fatal("admin response sets host-wide HSTS")
 		}
 	}
 	if !reused {
-		t.Fatal("denied HTTP/2 request did not reuse its connection")
+		t.Fatal("denied HTTPS request did not reuse its connection")
 	}
 }
 
@@ -207,6 +214,59 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 1 {
 		t.Fatalf("fallback HTTPS response = %s %d, want HTTP/1.1 403", resp.Proto, resp.StatusCode)
+	}
+	if resp.Header.Get("Strict-Transport-Security") != "" {
+		t.Fatal("fallback admin response sets host-wide HSTS")
+	}
+}
+
+func TestAdminServerServesNonCleanSymlinkTLSPath(t *testing.T) {
+	t.Parallel()
+	if filepath.Separator == '\\' {
+		t.Skip("symlink traversal semantics differ on Windows")
+	}
+	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(filepath.Join(real, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	cert, err := os.ReadFile(certFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "cert.pem"), cert, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(real, "sub"), filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	sep := string(filepath.Separator)
+	certFile = root + sep + "link" + sep + ".." + sep + "cert.pem"
+	if _, err := loadTLSCertificate("admin", certFile, keyFile); err != nil {
+		t.Fatalf("TLS preflight: %v", err)
+	}
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := admin.Close(); err != nil {
+			t.Errorf("close admin server: %v", err)
+		}
+	})
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	resp, err := client.Get("https://" + admin.listener.Addr().String() + "/jaws/.ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 1 {
+		t.Fatalf("HTTPS response = %s %d, want HTTP/1.1 403", resp.Proto, resp.StatusCode)
 	}
 }
 

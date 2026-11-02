@@ -108,7 +108,7 @@ type RemoteExecutorConfig struct {
 	Token       string `json:"token"`
 }
 
-// AdminConfig serves the optional admin dashboard on the configured address.
+// AdminConfig configures the optional admin dashboard listener.
 type AdminConfig struct {
 	Listen      string `json:"listen,omitempty"`
 	TLSCertFile string `json:"tls_cert_file,omitempty"`

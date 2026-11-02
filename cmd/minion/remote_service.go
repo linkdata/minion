@@ -18,7 +18,7 @@ func attachSelectedRemoteWorker(owner *action.Orchestrator, watcher *monitor.Mon
 		return nil, errors.New("selected remote service requires an owner, monitor and remote executor config")
 	}
 	remote := watcher.Config.RemoteExecutor
-	certificate, err := loadRemoteCertificate(remote.TLSCertFile, remote.TLSKeyFile)
+	certificate, err := loadTLSCertificate("remote", remote.TLSCertFile, remote.TLSKeyFile)
 	if err != nil {
 		return nil, err
 	}
@@ -39,10 +39,10 @@ func attachSelectedRemoteWorker(owner *action.Orchestrator, watcher *monitor.Mon
 	return endpoint, nil
 }
 
-func loadRemoteCertificate(certFile, keyFile string) (tls.Certificate, error) {
+func loadTLSCertificate(kind, certFile, keyFile string) (tls.Certificate, error) {
 	certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("load remote TLS certificate: %w", err)
+		return tls.Certificate{}, fmt.Errorf("load %s TLS certificate: %w", kind, err)
 	}
 	return certificate, nil
 }

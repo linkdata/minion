@@ -162,10 +162,12 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {
 		t.Fatalf("orchestrate startup should fail after reconciliation: code=%d", code)
 	}
-	if adminSetup == "occupied" && loop && !strings.Contains(output.String(), "admin dashboard: listen:") {
-		t.Fatalf("occupied admin port did not stop startup: log=%q", output.String())
-	} else if (adminSetup != "occupied" || !loop) && !strings.Contains(output.String(), "start selected worker:") {
-		t.Fatalf("missing worker did not stop startup: log=%q", output.String())
+	want := "start selected worker:"
+	if adminSetup == "occupied" && loop {
+		want = "admin dashboard: listen:"
+	}
+	if !strings.Contains(output.String(), want) {
+		t.Fatalf("startup log %q does not contain %q", output.String(), want)
 	}
 	if lookups.Load() != 1 || store.Data.PublicationWrites[jobID].Status != state.PublicationWriteObserved {
 		t.Fatalf("worker startup preceded reconciliation: lookups=%d write=%+v", lookups.Load(), store.Data.PublicationWrites[jobID])
