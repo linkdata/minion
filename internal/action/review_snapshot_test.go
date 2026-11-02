@@ -203,6 +203,9 @@ func TestReviewSnapshotFreezesRawAuditArtifactsAndAbsence(t *testing.T) {
 	if snapshot.source != source || snapshot.ownedSource {
 		t.Fatal("copied an already read-only audit source")
 	}
+	if !strings.HasPrefix(filepath.Base(snapshot.outputDir), reviewReportsDirPrefix+job.Identity.AttemptID+"+") {
+		t.Fatalf("frozen reports lack attempt identity: %q", snapshot.outputDir)
+	}
 	data, err := workspace.ReadRegular(filepath.Join(snapshot.outputDir, "run-metadata.json"), maxAuditArtifactBytes)
 	if err != nil || string(data) != rawMetadata || len(snapshot.artifacts) != 3 {
 		t.Fatalf("frozen raw reports=%q,%+v,%v", data, snapshot.artifacts, err)

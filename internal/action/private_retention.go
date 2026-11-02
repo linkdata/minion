@@ -16,6 +16,12 @@ import (
 
 const privateRecordRetention = 30 * 24 * time.Hour
 
+const (
+	auditReportsDirPrefix  = ".minion-reports-"
+	reviewReportsDirPrefix = ".minion-review-reports-"
+	reviewHistoryDirPrefix = ".minion-review-history-"
+)
+
 // PrunePrivateRecords removes only records bound to a finished attempt past retention.
 func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Store, now time.Time) error {
 	eligible := make(map[string]bool)
@@ -60,7 +66,7 @@ func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Sto
 	count, err := prunePrivateDirectories(ctx, root, "audits", eligible, auditAttemptID)
 	removed += count
 	pruneErr = errors.Join(pruneErr, err)
-	count, err = prunePrivateDirectories(ctx, root, ".", eligible, auditValidationAttemptID)
+	count, err = prunePrivateDirectories(ctx, root, ".", eligible, privateScratchAttemptID)
 	removed += count
 	pruneErr = errors.Join(pruneErr, err)
 	if removed != 0 {
@@ -155,16 +161,16 @@ func prunePrivateDirectories(ctx context.Context, root, name string, eligible ma
 	return removed, removeErr
 }
 
-func auditValidationAttemptID(name string) string {
-	rest, ok := strings.CutPrefix(name, auditValidationDirPrefix)
-	if !ok {
-		return ""
+func privateScratchAttemptID(name string) string {
+	for _, prefix := range []string{auditValidationDirPrefix, auditReportsDirPrefix, reviewReportsDirPrefix, reviewHistoryDirPrefix} {
+		if rest, ok := strings.CutPrefix(name, prefix); ok {
+			id, suffix, found := strings.Cut(rest, "+")
+			if found && suffix != "" && workspace.ValidIdentitySegment(id) {
+				return id
+			}
+		}
 	}
-	id, suffix, found := strings.Cut(rest, "+")
-	if !found || suffix == "" || !workspace.ValidIdentitySegment(id) {
-		return ""
-	}
-	return id
+	return ""
 }
 
 func auditAttemptID(name string) string {

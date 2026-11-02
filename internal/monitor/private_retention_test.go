@@ -15,10 +15,14 @@ import (
 type retentionProbe struct {
 	capacityHandler
 	calledAt []time.Time
+	onPrune  func()
 	err      error
 }
 
 func (p *retentionProbe) PrunePrivateRecords(_ context.Context, _ *state.Store, at time.Time) error {
+	if p.onPrune != nil {
+		p.onPrune()
+	}
 	p.calledAt = append(p.calledAt, at)
 	return p.err
 }
@@ -32,7 +36,9 @@ func TestRunOncePrunesPrivateRecordsWithoutWorkerCapacity(t *testing.T) {
 		Config: testConfig(t), GitHub: &fakeGitHub{}, Handler: probe,
 		Now: func() time.Time { return now }, Logger: log.New(&logs, "", 0), SelectedExecutorID: "local",
 	}
-	if _, err := m.RunOnce(t.Context(), openState(t, now.Add(-time.Minute))); !errors.Is(err, workerUnavailable) {
+	store := openState(t, now.Add(-time.Minute))
+	store.Data.NextInviteCheckAt = now.Add(time.Minute)
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, workerUnavailable) {
 		t.Fatalf("worker capacity error = %v", err)
 	}
 	if len(probe.calledAt) != 1 || !probe.calledAt[0].Equal(now) {
@@ -43,30 +49,79 @@ func TestRunOncePrunesPrivateRecordsWithoutWorkerCapacity(t *testing.T) {
 	}
 }
 
-func TestRunOnceDefersPrivatePruneDuringRecovery(t *testing.T) {
-	for _, name := range []string{"accepted action", "pending publication"} {
+func TestRunOnceDefersPrivatePruneWhileAccepted(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	accepted := selectedAcceptance(t, now)
+	accepted.RetryAt = now.Add(time.Minute)
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	probe := &retentionProbe{}
+	m := selectedMonitor(t, now, &fakeGitHub{}, probe)
+	_, _ = m.RunOnce(t.Context(), store)
+	if len(probe.calledAt) != 0 {
+		t.Fatalf("private cleanup ran before accepted recovery: %v", probe.calledAt)
+	}
+}
+
+func TestRunOnceReconcilesPendingWriteBeforePrivatePrune(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	store.Data.NextInviteCheckAt = now.Add(time.Minute)
+	store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8,
+		Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:issued-job -->",
+		Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{}
+	probe := &retentionProbe{onPrune: func() {
+		if len(gh.verifiedCalls) == 0 {
+			t.Error("private cleanup ran before publication reconciliation")
+		}
+	}}
+	m := selectedMonitor(t, now, gh, probe)
+	_, _ = m.RunOnce(t.Context(), store)
+	if len(probe.calledAt) != 1 || store.Data.PublicationWrites["issued-job"].Status != state.PublicationWritePending {
+		t.Fatalf("pending write starved unrelated retention: calls=%v write=%+v", probe.calledAt, store.Data.PublicationWrites["issued-job"])
+	}
+}
+
+func TestRunOnceServicesDueControlsBeforePrivatePrune(t *testing.T) {
+	for _, name := range []string{"invitation", "terminal reply"} {
 		t.Run(name, func(t *testing.T) {
 			now := time.Now().UTC()
 			store := openState(t, now)
-			if name == "accepted action" {
-				accepted := selectedAcceptance(t, now)
-				accepted.RetryAt = now.Add(time.Minute)
-				store.Data.Accepted = &accepted
+			store.Data.NextInviteCheckAt = now.Add(time.Minute)
+			if name == "invitation" {
+				store.Data.NextInviteCheckAt = now
 			} else {
-				store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
-					AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8,
-					Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:issued-job -->",
-					Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				queueTerminalControl(store, now, 8, state.JobFailure{Attempts: maxJobAttempts}, time.Time{})
+			}
+			gh := &fakeGitHub{}
+			if name == "terminal reply" {
+				gh.repositoryErr = errors.New("terminal lookup unavailable")
+			}
+			invitationChecked := false
+			probe := &retentionProbe{onPrune: func() {
+				if name == "invitation" && !invitationChecked || name == "terminal reply" && gh.repoChecks == 0 {
+					t.Errorf("private cleanup ran before due %s", name)
 				}
-			}
-			if err := store.Save(); err != nil {
-				t.Fatal(err)
-			}
-			probe := &retentionProbe{}
-			m := selectedMonitor(t, now, &fakeGitHub{}, probe)
+			}}
+			m := selectedMonitor(t, now, gh, probe)
+			m.afterInvitationCheck = func() { invitationChecked = true }
 			_, _ = m.RunOnce(t.Context(), store)
-			if len(probe.calledAt) != 0 {
-				t.Fatalf("private cleanup ran during %s recovery", name)
+			wantCalls := 1
+			if name == "terminal reply" {
+				_, _ = m.RunOnce(t.Context(), store)
+				wantCalls = 2 // A repeatedly due failed reply cannot starve retention.
+			}
+			if len(probe.calledAt) != wantCalls {
+				t.Fatalf("due %s starved private cleanup: %v", name, probe.calledAt)
 			}
 		})
 	}

@@ -56,7 +56,7 @@ func freezeReviewSnapshot(ctx context.Context, workRoot string, job Job, source,
 			if s.artifacts, _, err = readAuditArtifactsWithProgress(outputDir, false, progress, secrets...); err != nil {
 				return err
 			}
-			if s.outputDir, err = resetReviewDirectory(s.outputDir, workRoot, ".minion-review-reports-"); err != nil {
+			if s.outputDir, err = resetReviewDirectory(s.outputDir, workRoot, reviewReportsDirPrefix+job.Identity.AttemptID+"+"); err != nil {
 				return err
 			}
 			if err := workspace.MaterializeWithProgress(ctx, s.outputDir, s.artifacts, progress); err != nil {

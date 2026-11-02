@@ -186,25 +186,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 		}
 	}
-	// Recovery and publication take priority over cleanup, which can scan large directories.
-	privateRecordsIdle := store.Data.Accepted == nil
-	if privateRecordsIdle {
-		for _, write := range store.Data.PublicationWrites {
-			if write.Status == state.PublicationWritePending {
-				privateRecordsIdle = false
-				break
-			}
-		}
-	}
-	if privateRecordsIdle {
-		if pruner, ok := m.Handler.(interface {
-			PrunePrivateRecords(context.Context, *state.Store, time.Time) error
-		}); ok {
-			if err := pruner.PrunePrivateRecords(ctx, store, m.now().UTC()); err != nil {
-				m.logf("private record retention: %v", err)
-			}
-		}
-	}
 	activeJobID := ""
 	activeWriteChecked := false
 	activeSavedReply := false
@@ -271,6 +252,21 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			return withPublicationWriteWake(next, store, at)
 		}
 		return withPublicationWriteWake(earlierWake(earlierWake(next, store.Data.NextInviteCheckAt), terminal), store, at)
+	}
+	var initialTerminalWake time.Time
+	if store.Data.Accepted == nil {
+		at := now().UTC()
+		if err := m.checkDueInvitations(ctx, store, at); err != nil {
+			return wake(store.Data.NextPollAt, false), err
+		}
+		initialTerminalWake = m.serviceTerminalControls(ctx, store)
+		if pruner, ok := m.Handler.(interface {
+			PrunePrivateRecords(context.Context, *state.Store, time.Time) error
+		}); ok && ctx.Err() == nil {
+			if err := pruner.PrunePrivateRecords(ctx, store, now().UTC()); err != nil {
+				m.logf("private record retention: %v", err)
+			}
+		}
 	}
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
@@ -379,9 +375,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
 			return wake(store.Data.NextPollAt, false), err
 		}
-		return wake(store.Data.NextPollAt, true), nil
+		return earlierWake(wake(store.Data.NextPollAt, false), initialTerminalWake), nil
 	}
-	if err := m.waitCapacityWithInvitations(ctx, store); err != nil {
+	if err := m.waitCapacityWithInvitations(ctx, store, &initialTerminalWake); err != nil {
 		return wake(store.Data.NextPollAt, false), err
 	}
 	started := now().UTC()
@@ -768,7 +764,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				}
 				failures = append(failures, err)
 			}
-			if err := m.waitCapacityWithInvitations(ctx, store); err != nil {
+			if err := m.waitCapacityWithInvitations(ctx, store, nil); err != nil {
 				for _, later := range scans[scanIndex+1:] {
 					rememberNotification(store, later.key, later.notification, later.since)
 				}
@@ -880,14 +876,19 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 }
 
 // Keep the one capacity wait live while the monitor services invitation deadlines.
-func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.Store) error {
+func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.Store, precheckedTerminal *time.Time) error {
 	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
 		return err
 	}
 	if _, ok := m.Handler.(interface{ WaitCapacity(context.Context) error }); !ok {
 		return fmt.Errorf("%w: selected worker has no readiness check", ErrAcceptanceState)
 	}
-	nextTerminal := m.serviceTerminalControls(ctx, store)
+	nextTerminal := time.Time{}
+	if precheckedTerminal != nil {
+		nextTerminal = *precheckedTerminal
+	} else {
+		nextTerminal = m.serviceTerminalControls(ctx, store)
+	}
 	waitCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- m.waitCapacity(waitCtx) }()
@@ -1862,7 +1863,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		}
 		return nil
 	}
-	if err := m.waitCapacityWithInvitations(resumeCtx, store); err != nil {
+	if err := m.waitCapacityWithInvitations(resumeCtx, store, nil); err != nil {
 		return failed("resume accepted action capacity", err)
 	}
 	if err := checkContext("resume accepted action capacity"); err != nil {

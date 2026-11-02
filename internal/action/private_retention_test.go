@@ -85,6 +85,9 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 		stageDir := filepath.Join(root, "audits", ".complete-"+artifactID)
 		incompleteDir := filepath.Join(root, "audits", "incomplete-"+artifactID+"+abc")
 		validationDir := filepath.Join(root, auditValidationTempPattern(artifactID)+"abc")
+		reportsDir := filepath.Join(root, auditReportsDirPrefix+artifactID+"+abc")
+		reviewReportsDir := filepath.Join(root, reviewReportsDirPrefix+artifactID+"+abc")
+		historyDir := filepath.Join(root, reviewHistoryDirPrefix+artifactID+"+abc")
 		paths[id] = []string{
 			filepath.Join(root, "attempt-records", artifactID+".jsonl"),
 			filepath.Join(root, "reviews", artifactID+".json"),
@@ -96,6 +99,10 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 			filepath.Join(stageDir, "REPORT.md"),
 			filepath.Join(incompleteDir, "INCOMPLETE.txt"),
 			filepath.Join(validationDir, "REPORT.md"),
+			filepath.Join(reportsDir, "REPORT.md"),
+			filepath.Join(reportsDir, "findings.json"),
+			filepath.Join(reviewReportsDir, "REPORT.md"),
+			filepath.Join(historyDir, "refutations.json"),
 		}
 		for _, path := range paths[id] {
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -105,7 +112,7 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		paths[id] = append(paths[id], completeDir, stageDir, incompleteDir, validationDir)
+		paths[id] = append(paths[id], completeDir, stageDir, incompleteDir, validationDir, reportsDir, reviewReportsDir, historyDir)
 	}
 	legacy := filepath.Join(root, "audits", "incomplete-owner-repo-7-abc", "INCOMPLETE.txt")
 	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
@@ -118,6 +125,10 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 		filepath.Join(root, "reviews", ".record+unrelated.json+12345"),
 		filepath.Join(root, "reviews", ".record-"+cutoffID+"-12345"),
 		filepath.Join(root, auditValidationDirPrefix+"legacy", "REPORT.md"),
+		filepath.Join(root, auditReportsDirPrefix+"legacy", "REPORT.md"),
+		filepath.Join(root, reviewReportsDirPrefix+"legacy", "REPORT.md"),
+		filepath.Join(root, reviewHistoryDirPrefix+"legacy", "refutations.json"),
+		filepath.Join(root, auditReportsDirPrefix+"unrelated+abc", "REPORT.md"),
 	}
 	for _, path := range unrelated {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
