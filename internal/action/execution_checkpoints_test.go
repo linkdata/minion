@@ -75,6 +75,19 @@ func (f *executionAdapterFixture) startUsage() *usage.Store {
 	return f.owner.Usage
 }
 
+func TestResultCallsCannotCreateUsageWithoutCallCheckpoint(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := f.startUsage()
+	call := CallUsage{Provider: f.job.Main.Provider, Role: roleMain, Round: 1, Model: f.job.Main.Model, Effort: f.job.Main.Effort}
+	if err := f.sink.finish(f.result([]CallUsage{call}, nil, ""), nil); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("result-only call was accepted: %v", err)
+	}
+	record, found, err := store.Load(f.owner.attemptID)
+	if err != nil || !found || len(record.Calls) != 0 || record.CodexCalls != 0 || record.ClaudeCalls != 0 {
+		t.Fatalf("result-only usage was persisted: %+v found=%t error=%v", record, found, err)
+	}
+}
+
 func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -87,9 +100,14 @@ func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
+	usageStore := f.startUsage()
 	call := f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1})
 	if err := f.sink.BeforeCall(call); err != nil || f.sink.pending == nil || !store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {
 		t.Fatalf("model start was not saved before ACK: pending=%+v failure=%+v error=%v", f.sink.pending, store.Data.JobFailures[f.job.Identity.JobID], err)
+	}
+	if record, found, err := usageStore.Load(f.owner.attemptID); err != nil || !found || len(record.Calls) != 1 ||
+		record.Calls[0].FinishedAt != nil || record.CodexCalls != 1 || record.UsageComplete {
+		t.Fatalf("acknowledged pending call was not retained: record=%+v found=%t error=%v", record, found, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -105,6 +123,38 @@ func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T
 	})
 	if failure := reopened.Data.JobFailures[f.job.Identity.JobID]; failure.Attempts != 1 || !failure.ModelCallStarted {
 		t.Fatalf("reopen lost admitted model call: %+v", failure)
+	}
+}
+
+func TestExecutionBeforeCallPostReplacementUsageErrorKeepsProvisionalRow(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	stateStore := openState(t, time.Now())
+	f.owner.Store = stateStore
+	stateStore.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1}
+	if err := stateStore.Save(); err != nil {
+		t.Fatal(err)
+	}
+	usageStore := f.startUsage()
+	persist := f.owner.usageCheckpoint.save
+	saveErr := errors.New("usage directory sync failed after replacement")
+	f.owner.usageCheckpoint.save = func() error {
+		if err := persist(); err != nil {
+			return err
+		}
+		return saveErr
+	}
+	call := f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1})
+	err := f.sink.BeforeCall(call)
+	if !errors.Is(err, saveErr) || f.sink.pending != nil || stateStore.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {
+		t.Fatalf("failed usage save acknowledged call: pending=%+v state=%+v error=%v", f.sink.pending, stateStore.Data.JobFailures[f.job.Identity.JobID], err)
+	}
+	record, found, err := usageStore.Load(f.owner.attemptID)
+	if err != nil || !found || len(record.Calls) != 1 || record.Calls[0].FinishedAt != nil || record.CodexCalls != 1 ||
+		record.UsageComplete || !record.UsageCoverage.PartialReport {
+		t.Fatalf("post-replacement error lost provisional row: record=%+v found=%t error=%v", record, found, err)
+	}
+	if err := f.sink.BeforeCall(call); !errors.Is(err, saveErr) || f.sink.pending != nil {
+		t.Fatalf("failed call checkpoint was replayed or acknowledged: pending=%+v error=%v", f.sink.pending, err)
 	}
 }
 
@@ -125,17 +175,31 @@ func TestExecutionBeforeCallRechecksSelectedStateAfterUsageSave(t *testing.T) {
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatal(err)
 	}
-	f.owner.usageCheckpoint = &usageCheckpoint{save: func() error {
+	usageStore := f.startUsage()
+	persist := f.owner.usageCheckpoint.save
+	savedPending := false
+	f.owner.usageCheckpoint.save = func() error {
+		if err := persist(); err != nil {
+			return err
+		}
+		if savedPending {
+			return nil
+		}
+		savedPending = true
 		return store.WithLock(func() error {
 			_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "canceled", time.Now())
 			return err
 		})
-	}}
+	}
 	err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
 	if !errors.Is(err, monitor.ErrTerminalJob) || f.sink.pending != nil ||
 		store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted ||
 		store.Data.TerminalDecisions[accepted.JobID].Outcome != "canceled" {
 		t.Fatalf("model call started after terminal decision during usage save: err=%v pending=%+v state=%+v", err, f.sink.pending, store.Data)
+	}
+	if record, found, loadErr := usageStore.Load(f.owner.attemptID); loadErr != nil || !found || !savedPending ||
+		len(record.Calls) != 0 || record.CodexCalls != 0 || !record.UsageComplete || record.UsageCoverage.PartialReport || record.ExecutorID != "" {
+		t.Fatalf("rejected call left pending usage: record=%+v found=%t error=%v", record, found, loadErr)
 	}
 }
 
@@ -161,11 +225,27 @@ func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T)
 		if err := f.sink.BeforeAssignment(f.job); err != nil {
 			t.Fatal(err)
 		}
-		f.owner.usageCheckpoint = &usageCheckpoint{save: func() error { time.Sleep(2 * time.Second); return nil }}
+		usageStore := f.startUsage()
+		persist := f.owner.usageCheckpoint.save
+		savedPending := false
+		f.owner.usageCheckpoint.save = func() error {
+			if err := persist(); err != nil {
+				return err
+			}
+			if !savedPending {
+				savedPending = true
+				time.Sleep(2 * time.Second)
+			}
+			return nil
+		}
 		err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
 		if !errors.Is(err, context.DeadlineExceeded) || f.sink.pending != nil ||
 			store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {
 			t.Fatalf("model call started after deadline during usage save: err=%v pending=%+v state=%+v", err, f.sink.pending, store.Data)
+		}
+		if record, found, loadErr := usageStore.Load(f.owner.attemptID); loadErr != nil || !found || !savedPending ||
+			len(record.Calls) != 0 || record.CodexCalls != 0 || !record.UsageComplete || record.UsageCoverage.PartialReport || record.ExecutorID != "" {
+			t.Fatalf("expired call left pending usage: record=%+v found=%t error=%v", record, found, loadErr)
 		}
 	})
 }
@@ -414,7 +494,7 @@ func TestExecutionBeforeCallStateSaveFailureRemainsPreCall(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	store := openState(t, time.Now())
 	f.owner.Store = store
-	f.startUsage()
+	usageStore := f.startUsage()
 	store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -426,6 +506,10 @@ func TestExecutionBeforeCallStateSaveFailureRemainsPreCall(t *testing.T) {
 	}
 	if final := f.sink.finish(f.result(nil, nil, ""), err); !errors.Is(final, err) || errors.Is(final, monitor.ErrExecutionOutcomeUnknown) {
 		t.Fatalf("failed marker save changed pre-call retry policy: %v", final)
+	}
+	if record, found, loadErr := usageStore.Load(f.owner.attemptID); loadErr != nil || !found ||
+		len(record.Calls) != 0 || record.CodexCalls != 0 || !record.UsageComplete || record.UsageCoverage.PartialReport || record.ExecutorID != "" {
+		t.Fatalf("failed state save left pending usage: record=%+v found=%t error=%v", record, found, loadErr)
 	}
 }
 

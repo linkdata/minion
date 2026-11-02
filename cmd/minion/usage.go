@@ -17,7 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. Billed credits are unknown. Incomplete usage may omit unknown token counts."
+const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts."
 
 type usageAttempt struct {
 	usage.Record

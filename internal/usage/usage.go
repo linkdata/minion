@@ -74,6 +74,25 @@ type Coverage struct {
 	CumulativeUnattributed bool   `json:"cumulative_unattributed,omitempty"`
 }
 
+// Call describes a direct-call checkpoint; a saved row may precede acknowledgment.
+// StartedAt is the BeforeCall checkpoint time. The enclosing Record's job and
+// attempt IDs with Ordinal identify the call across checkpoint replays. A nil
+// FinishedAt means no usage receipt was saved.
+type Call struct {
+	Ordinal       int        `json:"ordinal"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	Provider      string     `json:"provider"`
+	Model         string     `json:"model"`
+	Effort        string     `json:"reasoning_effort,omitempty"`
+	Role          string     `json:"role"`
+	Round         int        `json:"round"`
+	ReviewPhase   string     `json:"review_phase,omitempty"`
+	Tokens        Tokens     `json:"tokens"`
+	UsageCoverage Coverage   `json:"usage_coverage,omitzero"`
+	Complete      bool       `json:"usage_complete"`
+}
+
 func (c Coverage) Valid() bool {
 	switch c.Scope {
 	case "", "invocation", "root_only", "known_subset", "unknown", "attempt":
@@ -114,7 +133,9 @@ type Record struct {
 	ID             string     `json:"id"`
 	JobID          string     `json:"job_id"`
 	Repo           string     `json:"repo"`
+	RepositoryID   int64      `json:"repository_id,omitempty"`
 	User           string     `json:"user"`
+	RequesterID    int64      `json:"requester_id,omitempty"`
 	Action         string     `json:"action"`
 	Number         int        `json:"number"`
 	SourceURL      string     `json:"source_url,omitempty"`
@@ -135,6 +156,7 @@ type Record struct {
 	Tokens         Tokens     `json:"tokens"`
 	UsageCoverage  Coverage   `json:"usage_coverage,omitzero"`
 	UsageComplete  bool       `json:"usage_complete"`
+	Calls          []Call     `json:"calls,omitempty"`
 }
 
 var validID = regexp.MustCompile(`^[0-9a-f]{32}$`)
@@ -151,6 +173,9 @@ func (r Record) validate() error {
 	}
 	if r.CriticProvider != "" && r.CriticProvider != "codex" && r.CriticProvider != "claude" {
 		return fmt.Errorf("usage record %s has invalid critic provider %q", r.ID, r.CriticProvider)
+	}
+	if r.RepositoryID < 0 || r.RequesterID < 0 {
+		return fmt.Errorf("usage record %s has invalid numeric identity", r.ID)
 	}
 	if (r.ExecutorID == "") != (r.SourceRef == "") ||
 		(r.ExecutorID != "" && !workspace.ValidIdentitySegment(r.ExecutorID)) ||
@@ -173,6 +198,19 @@ func (r Record) validate() error {
 	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() || !r.UsageCoverage.ValidForAttempt(r.UsageComplete) {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
+	if len(r.Calls) != 0 {
+		if r.RepositoryID <= 0 || r.RequesterID <= 0 {
+			return fmt.Errorf("usage record %s has invalid call identity", r.ID)
+		}
+		codex, claude, tokens, coverage, complete, source, err := r.callTotals()
+		if err != nil {
+			return fmt.Errorf("usage record %s has invalid calls: %w", r.ID, err)
+		}
+		if r.CodexCalls != codex || r.ClaudeCalls != claude || r.Tokens != tokens ||
+			r.UsageCoverage != coverage || r.UsageComplete != complete || r.UsageSource != source {
+			return fmt.Errorf("usage record %s has inconsistent call totals", r.ID)
+		}
+	}
 	counted := r.CodexCalls > 0 || r.ClaudeCalls > 0
 	hasTokens := r.Tokens != (Tokens{})
 	// A pending call has a counter before its returned usage claim exists.
@@ -181,6 +219,141 @@ func (r Record) validate() error {
 		(counted && (hasTokens || r.UsageComplete || r.Status == "succeeded") && r.UsageSource != "executor_reported") {
 		return fmt.Errorf("usage record %s has unattributed usage", r.ID)
 	}
+	return nil
+}
+
+func (r Record) callTotals() (codex, claude int, tokens Tokens, coverage Coverage, complete bool, source string, err error) {
+	coverage, complete = Coverage{Scope: "attempt"}, true
+	for i, call := range r.Calls {
+		if call.Ordinal != i+1 || call.StartedAt.IsZero() || call.Model == "" || call.Round < 1 ||
+			(call.Role != "main" && call.Role != "critic") ||
+			(call.Role == "main" && call.ReviewPhase != "") ||
+			(call.Role == "critic" && call.ReviewPhase != "full" && call.ReviewPhase != "verification") ||
+			(call.Role == "main" && call.Provider != r.Provider) ||
+			(call.Role == "critic" && call.Provider != r.CriticProvider) ||
+			!call.Tokens.Valid() || !call.UsageCoverage.ValidForCall(call.Complete) ||
+			(call.Tokens != (Tokens{}) && call.UsageCoverage.Scope == "") {
+			err = fmt.Errorf("invalid call ordinal %d", i+1)
+			return
+		}
+		switch call.Provider {
+		case "codex":
+			codex++
+		case "claude":
+			claude++
+		default:
+			err = fmt.Errorf("invalid call provider %q", call.Provider)
+			return
+		}
+		if call.FinishedAt == nil {
+			if call.Complete || call.Tokens != (Tokens{}) || call.UsageCoverage != (Coverage{}) || i != len(r.Calls)-1 {
+				err = fmt.Errorf("invalid pending call ordinal %d", call.Ordinal)
+				return
+			}
+			complete, coverage.PartialReport = false, true
+			continue
+		}
+		if call.FinishedAt.Before(call.StartedAt) {
+			err = fmt.Errorf("invalid call finish time at ordinal %d", call.Ordinal)
+			return
+		}
+		source = "executor_reported"
+		coverage = coverage.AddGaps(call.UsageCoverage)
+		var valid bool
+		if tokens, valid = tokens.AddChecked(call.Tokens); !valid {
+			complete, coverage.PartialReport = false, true
+		}
+		if !call.Complete {
+			complete, coverage.PartialReport = false, true
+		}
+	}
+	return
+}
+
+func sameCallMetadata(a, b Call) bool {
+	return a.Ordinal == b.Ordinal && a.Provider == b.Provider && a.Model == b.Model &&
+		a.Effort == b.Effort && a.Role == b.Role && a.Round == b.Round && a.ReviewPhase == b.ReviewPhase
+}
+
+// BeginCall saves an ordinal's pending metadata once. Replays with identical
+// metadata do not change its original start time or reported usage.
+func (r *Record) BeginCall(call Call) (bool, error) {
+	if call.StartedAt.IsZero() || call.FinishedAt != nil || call.Tokens != (Tokens{}) ||
+		call.UsageCoverage != (Coverage{}) || call.Complete || r.RepositoryID <= 0 || r.RequesterID <= 0 ||
+		(len(r.Calls) == 0 && (r.CodexCalls != 0 || r.ClaudeCalls != 0)) {
+		return false, fmt.Errorf("invalid usage call start ordinal %d", call.Ordinal)
+	}
+	if call.Ordinal > 0 && call.Ordinal <= len(r.Calls) {
+		if sameCallMetadata(r.Calls[call.Ordinal-1], call) {
+			return false, nil
+		}
+		return false, fmt.Errorf("conflicting usage call ordinal %d", call.Ordinal)
+	}
+	if call.Ordinal != len(r.Calls)+1 ||
+		(len(r.Calls) != 0 && r.Calls[len(r.Calls)-1].FinishedAt == nil) {
+		return false, fmt.Errorf("invalid usage call start ordinal %d", call.Ordinal)
+	}
+	next := *r
+	next.Calls = append(slices.Clone(r.Calls), call)
+	if err := next.reconcileCalls(); err != nil {
+		return false, err
+	}
+	*r = next
+	return true, nil
+}
+
+// DiscardPendingCall removes an unacknowledged start that did not reach the
+// provider. A returned receipt or an earlier ordinal cannot be discarded.
+func (r *Record) DiscardPendingCall(ordinal int) error {
+	if ordinal == 0 || ordinal != len(r.Calls) || r.Calls[ordinal-1].FinishedAt != nil {
+		return fmt.Errorf("invalid pending usage call ordinal %d", ordinal)
+	}
+	next := *r
+	next.Calls = slices.Clone(r.Calls[:ordinal-1])
+	if err := next.reconcileCalls(); err != nil {
+		return err
+	}
+	*r = next
+	return nil
+}
+
+// FinishCall records one returned usage claim. Identical replayed receipts are
+// ignored, so a save error after atomic replacement cannot add tokens twice.
+func (r *Record) FinishCall(call Call) (bool, error) {
+	if call.Ordinal <= 0 || call.Ordinal > len(r.Calls) || call.FinishedAt == nil {
+		return false, fmt.Errorf("invalid usage call receipt ordinal %d", call.Ordinal)
+	}
+	prior := r.Calls[call.Ordinal-1]
+	if !sameCallMetadata(prior, call) {
+		return false, fmt.Errorf("conflicting usage call ordinal %d", call.Ordinal)
+	}
+	if prior.FinishedAt != nil {
+		if prior.Tokens == call.Tokens && prior.UsageCoverage == call.UsageCoverage && prior.Complete == call.Complete {
+			return false, nil
+		}
+		return false, fmt.Errorf("conflicting usage call receipt ordinal %d", call.Ordinal)
+	}
+	if call.FinishedAt.Before(prior.StartedAt) {
+		call.FinishedAt = &prior.StartedAt
+	}
+	next := *r
+	next.Calls = slices.Clone(r.Calls)
+	entry := &next.Calls[call.Ordinal-1]
+	entry.FinishedAt, entry.Tokens, entry.UsageCoverage, entry.Complete = call.FinishedAt, call.Tokens, call.UsageCoverage, call.Complete
+	if err := next.reconcileCalls(); err != nil {
+		return false, err
+	}
+	*r = next
+	return true, nil
+}
+
+func (r *Record) reconcileCalls() error {
+	codex, claude, tokens, coverage, complete, source, err := r.callTotals()
+	if err != nil {
+		return err
+	}
+	r.CodexCalls, r.ClaudeCalls, r.Tokens = codex, claude, tokens
+	r.UsageCoverage, r.UsageComplete, r.UsageSource = coverage, complete, source
 	return nil
 }
 

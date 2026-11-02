@@ -324,6 +324,9 @@ func (c *Config) Validate(configDir string) error {
 			(c.Main == "claude" || c.Adversarial == "claude") && (c.Claude.Model == "" || c.Claude.Effort == "") {
 			return errors.New("remote_executor requires explicit model and effort for each selected provider")
 		}
+		if (c.Main == "claude" || c.Adversarial == "claude") && c.Claude.Model == "default" {
+			return errors.New("remote_executor requires a concrete Claude model, not the default alias")
+		}
 	}
 	if c.AlwaysOnSkills == nil {
 		c.AlwaysOnSkills = []string{defaultAntiInjectionSkill, defaultCavemanSkill}

@@ -56,6 +56,7 @@ func TestRemoteExecutorConfigRejectsInvalidTransportOrMissingSelectedModel(t *te
 		{"codex effort", "explicit model and effort", func(c *Config) { c.Codex.ReasoningEffort = "" }},
 		{"critic model", "explicit model and effort", func(c *Config) { c.Adversarial = "claude" }},
 		{"critic effort", "explicit model and effort", func(c *Config) { c.Adversarial = "claude"; c.Claude.Model = "test-model" }},
+		{"claude default alias", "concrete Claude model", func(c *Config) { c.Adversarial = "claude"; c.Claude.Model, c.Claude.Effort = "default", "medium" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

@@ -35,6 +35,139 @@ func TestCoverageFinalReportGaps(t *testing.T) {
 	}
 }
 
+func TestCallReceiverPersistsPendingAndDeduplicatesReceipts(t *testing.T) {
+	store := Store{Dir: t.TempDir()}
+	record := testRecord()
+	record.RepositoryID, record.RequesterID = 12, 34
+	record.Status, record.FinishedAt = "running", nil
+	record.CodexCalls, record.Tokens, record.UsageSource = 0, Tokens{}, ""
+	record.UsageCoverage, record.UsageComplete = Coverage{Scope: "attempt"}, true
+	start := record.StartedAt.Add(time.Second)
+	call := Call{Ordinal: 1, StartedAt: start, Provider: "codex", Model: "model-a", Effort: "high", Role: "main", Round: 1}
+	if added, err := record.BeginCall(call); err != nil || !added {
+		t.Fatalf("begin call: added=%t error=%v", added, err)
+	}
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	pending, found, err := store.Load(record.ID)
+	if err != nil || !found || len(pending.Calls) != 1 || pending.Calls[0].FinishedAt != nil ||
+		pending.CodexCalls != 1 || pending.UsageComplete || !pending.UsageCoverage.PartialReport || pending.UsageSource != "" ||
+		pending.RepositoryID != 12 || pending.RequesterID != 34 {
+		t.Fatalf("pending checkpoint: %+v found=%t error=%v", pending, found, err)
+	}
+	replay := call
+	replay.StartedAt = start.Add(time.Minute)
+	if added, err := pending.BeginCall(replay); err != nil || added || !pending.Calls[0].StartedAt.Equal(start) {
+		t.Fatalf("replayed start changed call: added=%t record=%+v error=%v", added, pending, err)
+	}
+	conflict := replay
+	conflict.Model = "other-model"
+	if _, err := pending.BeginCall(conflict); err == nil {
+		t.Fatal("conflicting call identity was accepted")
+	}
+	finished := start.Add(2 * time.Minute)
+	receipt := call
+	receipt.FinishedAt = &finished
+	receipt.Tokens = Tokens{Input: 100, CacheCreationInput: 10, CachedInput: 60, Output: 20}
+	receipt.UsageCoverage = Coverage{Scope: "invocation"}
+	receipt.Complete = true
+	if added, err := pending.FinishCall(receipt); err != nil || !added {
+		t.Fatalf("finish call: added=%t error=%v", added, err)
+	}
+	if err := store.Save(pending); err != nil {
+		t.Fatal(err)
+	}
+	returned, found, err := store.Load(record.ID)
+	if err != nil || !found || returned.Tokens != receipt.Tokens || !returned.UsageComplete || returned.UsageSource != "executor_reported" {
+		t.Fatalf("returned checkpoint: %+v found=%t error=%v", returned, found, err)
+	}
+	receipt.FinishedAt = &replay.StartedAt
+	if added, err := returned.FinishCall(receipt); err != nil || added || returned.Tokens != receipt.Tokens {
+		t.Fatalf("replayed receipt changed totals: added=%t record=%+v error=%v", added, returned, err)
+	}
+	conflict = receipt
+	conflict.Tokens.Input++
+	if _, err := returned.FinishCall(conflict); err == nil || returned.Tokens != receipt.Tokens {
+		t.Fatalf("conflicting receipt changed totals: record=%+v error=%v", returned, err)
+	}
+	if added, err := returned.BeginCall(call); err != nil || added {
+		t.Fatalf("replayed start after receipt: added=%t error=%v", added, err)
+	}
+	if err := store.Save(returned); err != nil {
+		t.Fatal(err)
+	}
+	if summary, err := Summarize([]Record{returned}, Filter{}, nil); err != nil || len(summary) != 1 || summary[0].CodexCalls != 1 || summary[0].Tokens != receipt.Tokens {
+		t.Fatalf("duplicate usage entered summary: %+v error=%v", summary, err)
+	}
+}
+
+func TestCallReceiverRetainsOverflowedReceiptAndIncompleteCoverage(t *testing.T) {
+	record := testRecord()
+	record.RepositoryID, record.RequesterID = 12, 34
+	record.CriticProvider = "claude"
+	record.Status, record.FinishedAt = "running", nil
+	record.CodexCalls, record.Tokens, record.UsageSource = 0, Tokens{}, ""
+	record.UsageCoverage, record.UsageComplete = Coverage{Scope: "attempt"}, true
+	for ordinal, provider := range []string{"codex", "claude"} {
+		start := record.StartedAt.Add(time.Duration(ordinal+1) * time.Second)
+		call := Call{Ordinal: ordinal + 1, StartedAt: start, Provider: provider, Model: "default", Role: "main", Round: ordinal + 1}
+		if ordinal == 1 {
+			call.Role, call.ReviewPhase = "critic", "full"
+		}
+		if _, err := record.BeginCall(call); err != nil {
+			t.Fatal(err)
+		}
+		finish := start.Add(time.Second)
+		call.FinishedAt = &finish
+		call.Tokens = Tokens{Input: math.MaxInt64/2 + 1}
+		call.UsageCoverage = Coverage{Scope: "invocation"}
+		call.Complete = true
+		if _, err := record.FinishCall(call); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if record.CodexCalls != 1 || record.ClaudeCalls != 1 || record.Tokens.Input != math.MaxInt64/2+1 ||
+		record.UsageComplete || !record.UsageCoverage.PartialReport || len(record.Calls) != 2 || record.Calls[1].Tokens.Input != math.MaxInt64/2+1 {
+		t.Fatalf("overflow lost per-call evidence or changed aggregate: %+v", record)
+	}
+	if err := (Store{Dir: t.TempDir()}).Save(record); err != nil {
+		t.Fatalf("overflowed receipt should remain readable: %v", err)
+	}
+	broken := record
+	broken.CodexCalls++
+	if err := (Store{Dir: t.TempDir()}).Save(broken); err == nil {
+		t.Fatal("inconsistent aggregate was saved")
+	}
+}
+
+func TestCallReceiverDistinguishesPendingFromZeroTokenReturn(t *testing.T) {
+	record := testRecord()
+	record.RepositoryID, record.RequesterID = 12, 34
+	record.Status, record.FinishedAt = "running", nil
+	record.CodexCalls, record.Tokens, record.UsageSource = 0, Tokens{}, ""
+	record.UsageCoverage, record.UsageComplete = Coverage{Scope: "attempt"}, true
+	call := Call{Ordinal: 1, StartedAt: record.StartedAt.Add(time.Second), Provider: "codex", Model: "default", Role: "main", Round: 1}
+	if _, err := record.BeginCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if record.UsageComplete || record.UsageSource != "" || !record.UsageCoverage.PartialReport {
+		t.Fatalf("pending call claimed a returned receipt: %+v", record)
+	}
+	finished := call.StartedAt.Add(time.Second)
+	call.FinishedAt, call.Complete = &finished, true
+	if _, err := record.FinishCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if !record.UsageComplete || record.UsageSource != "executor_reported" || record.UsageCoverage.PartialReport ||
+		record.Calls[0].FinishedAt == nil || record.Tokens != (Tokens{}) {
+		t.Fatalf("zero-token receipt remained pending: %+v", record)
+	}
+	if err := (Store{Dir: t.TempDir()}).Save(record); err != nil {
+		t.Fatalf("zero-token receipt could not be saved: %v", err)
+	}
+}
+
 func TestStoreAtomicUpdates(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "usage")
 	store := Store{Dir: dir}

@@ -11,7 +11,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
+func TestRunnerMissingProviderIsNotTerminalAndRecordsIncompleteUsage(t *testing.T) {
 	for _, provider := range []string{"codex", "claude"} {
 		t.Run(provider, func(t *testing.T) {
 			t.Setenv("PATH", gitOnlyPath(t))
@@ -21,7 +21,8 @@ func TestRunnerMissingProviderIsNotTerminalAndRecordsZeroUsage(t *testing.T) {
 			if !errors.Is(err, exec.ErrNotFound) || errors.Is(err, monitor.ErrTerminalJob) || result.Answer != "" || len(result.Calls) != 1 {
 				t.Fatalf("missing %s classification/accounting: result=%+v error=%v", provider, result, err)
 			}
-			if got := result.Calls[0]; got.Provider != provider || got.Role != roleMain || got.Round != 1 || got.Tokens != (usage.Tokens{}) || !got.Complete {
+			if got := result.Calls[0]; got.Provider != provider || got.Role != roleMain || got.Round != 1 || got.Tokens != (usage.Tokens{}) || got.Complete ||
+				got.UsageCoverage != (usage.Coverage{Scope: "unknown", PartialReport: true}) {
 				t.Fatalf("missing %s call=%+v", provider, got)
 			}
 		})

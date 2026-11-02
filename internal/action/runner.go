@@ -28,6 +28,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -341,7 +342,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			roles = append(roles, *job.Critic)
 		}
 		for _, role := range roles {
-			message, err := checkSelectedRoleCLI(ctx, &configured, role, true)
+			message, err := checkSelectedRoleCLI(ctx, &configured, role)
 			if err != nil {
 				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
 			}
@@ -596,6 +597,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				configured.eventSink(failure)
 			}
 			entry.Tokens, entry.UsageCoverage, entry.Complete = call.Tokens, call.UsageCoverage, call.UsageComplete
+			if err != nil && call.Tokens == (usage.Tokens{}) && call.UsageCoverage == (usage.Coverage{}) {
+				entry.UsageCoverage, entry.Complete = usage.Coverage{Scope: "unknown", PartialReport: true}, false
+			}
 			if err == nil && request.role == roleCritic {
 				approved, hasBlockers, reviewComplete, feedback, parseErr := parseCritique(call.Answer, secrets...)
 				entry.Approved = parseErr == nil && approved
