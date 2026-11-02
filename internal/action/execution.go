@@ -431,11 +431,8 @@ func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
 
 // validateFailedResult saves bounded diagnostics before any failed Result ACK.
 func (c *executionCheckpoints) validateFailedResult(result Result, failure *httpFailure) error {
-	if !c.matchesFailedResult(result) {
-		return checkpointContractError()
-	}
 	retained := c.owner.requireSavedResultForRetry(c.job, c.owner.retainWorkerDiagnostics(c.job, result, failure.workerErr()))
-	if result.validate(c.job, false) != nil {
+	if !c.matchesFailedResult(result) || result.validate(c.job, false) != nil {
 		return errors.Join(checkpointContractError(), retained)
 	}
 	return retained
