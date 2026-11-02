@@ -16,6 +16,12 @@ import (
 var errAuditPublicationUnavailable = errors.New("audit publishing validator is unavailable")
 var removeAuditValidationDir = os.RemoveAll
 
+const auditValidationDirPrefix = ".minion-audit-validation-"
+
+func auditValidationTempPattern(attemptID string) string {
+	return auditValidationDirPrefix + attemptID + "+"
+}
+
 // validateAuditForPublication checks received data with the publishing host's installed skill.
 func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job, files []workspace.File) error {
 	byPath, err := validateAuditArtifactInput(files, job.Identity.Repository, sourceIdentity(job), job.Source.Head)
@@ -34,7 +40,10 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	if err != nil {
 		return fmt.Errorf("%w: %w", errAuditPublicationUnavailable, err)
 	}
-	validationDir, err := os.MkdirTemp(root, ".minion-audit-validation-")
+	if !workspace.ValidIdentitySegment(job.Identity.AttemptID) {
+		return errors.New("audit validation attempt ID is invalid")
+	}
+	validationDir, err := os.MkdirTemp(root, auditValidationTempPattern(job.Identity.AttemptID))
 	if err != nil {
 		return fmt.Errorf("%w: create validation directory: %w", errAuditPublicationUnavailable, err)
 	}

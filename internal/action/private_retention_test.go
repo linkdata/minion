@@ -22,6 +22,10 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
 	cutoff := now.Add(-privateRecordRetention)
 	cutoffID := strings.Repeat("a", 32)
+	attemptIDs := map[string]string{
+		"cutoff": cutoffID, "lost": "lost.json-attempt", "fresh": "fresh-attempt",
+		"accepted": "accepted-attempt", "pending": "pending-attempt", "active": "active-attempt",
+	}
 	base := t.TempDir()
 	root := filepath.Join(base, "work")
 	if err := os.Mkdir(root, 0700); err != nil {
@@ -34,13 +38,13 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 	}
 	store.Data.TerminalDecisions = map[string]state.TerminalDecision{
 		"cutoff":   {AttemptID: cutoffID, Outcome: "succeeded", DecidedAt: cutoff},
-		"lost":     {AttemptID: "lost", Outcome: "lost", DecidedAt: cutoff.Add(-time.Nanosecond)},
-		"fresh":    {AttemptID: "fresh", Outcome: "failed", DecidedAt: cutoff.Add(time.Nanosecond)},
-		"accepted": {AttemptID: "accepted", Outcome: "succeeded", DecidedAt: cutoff},
-		"pending":  {AttemptID: "pending", Outcome: "failed", DecidedAt: cutoff},
+		"lost":     {AttemptID: attemptIDs["lost"], Outcome: "lost", DecidedAt: cutoff.Add(-time.Nanosecond)},
+		"fresh":    {AttemptID: attemptIDs["fresh"], Outcome: "failed", DecidedAt: cutoff.Add(time.Nanosecond)},
+		"accepted": {AttemptID: attemptIDs["accepted"], Outcome: "succeeded", DecidedAt: cutoff},
+		"pending":  {AttemptID: attemptIDs["pending"], Outcome: "failed", DecidedAt: cutoff},
 	}
 	store.Data.Accepted = &state.AcceptedAction{
-		JobID: "accepted", AttemptID: "accepted", ExecutorID: "local",
+		JobID: "accepted", AttemptID: attemptIDs["accepted"], ExecutorID: "local",
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7, SourceKey: "source", SourceNodeID: "node",
 		Requester: "writer", RequesterID: 3, CommandName: "review", Action: "review",
@@ -51,7 +55,7 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 	}
 	store.Data.PublicationWrites = map[string]state.PublicationWrite{
 		"pending": {
-			AttemptID: "pending", Kind: "comment", BotLogin: "minion", BotID: 8,
+			AttemptID: attemptIDs["pending"], Kind: "comment", BotLogin: "minion", BotID: 8,
 			Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:pending -->",
 			Since: cutoff, StartedAt: cutoff, Deadline: cutoff.Add(time.Minute), Status: state.PublicationWritePending,
 		},
@@ -76,17 +80,22 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 
 	paths := make(map[string][]string)
 	for _, id := range []string{"cutoff", "lost", "fresh", "accepted", "pending", "active"} {
-		artifactID := id
-		if id == "cutoff" {
-			artifactID = cutoffID
-		}
+		artifactID := attemptIDs[id]
+		completeDir := filepath.Join(root, "audits", "complete-"+artifactID)
+		stageDir := filepath.Join(root, "audits", ".complete-"+artifactID)
+		incompleteDir := filepath.Join(root, "audits", "incomplete-"+artifactID+"+abc")
+		validationDir := filepath.Join(root, auditValidationTempPattern(artifactID)+"abc")
 		paths[id] = []string{
 			filepath.Join(root, "attempt-records", artifactID+".jsonl"),
 			filepath.Join(root, "reviews", artifactID+".json"),
+			filepath.Join(root, "reviews", ".record+"+artifactID+".json+12345"),
 			filepath.Join(root, "worker-diagnostics", artifactID+".json"),
-			filepath.Join(root, "audits", "complete-"+artifactID, "REPORT.md"),
-			filepath.Join(root, "audits", ".complete-"+artifactID, "REPORT.md"),
-			filepath.Join(root, "audits", "incomplete-"+artifactID+"+abc", "INCOMPLETE.txt"),
+			filepath.Join(root, "worker-diagnostics", ".record+"+artifactID+".json+12345"),
+			filepath.Join(completeDir, "REPORT.md"),
+			filepath.Join(completeDir, "FINDINGS.json"),
+			filepath.Join(stageDir, "REPORT.md"),
+			filepath.Join(incompleteDir, "INCOMPLETE.txt"),
+			filepath.Join(validationDir, "REPORT.md"),
 		}
 		for _, path := range paths[id] {
 			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -96,6 +105,7 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		paths[id] = append(paths[id], completeDir, stageDir, incompleteDir, validationDir)
 	}
 	legacy := filepath.Join(root, "audits", "incomplete-owner-repo-7-abc", "INCOMPLETE.txt")
 	if err := os.MkdirAll(filepath.Dir(legacy), 0700); err != nil {
@@ -103,6 +113,19 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 	}
 	if err := os.WriteFile(legacy, []byte("legacy"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	unrelated := []string{
+		filepath.Join(root, "reviews", ".record+unrelated.json+12345"),
+		filepath.Join(root, "reviews", ".record-"+cutoffID+"-12345"),
+		filepath.Join(root, auditValidationDirPrefix+"legacy", "REPORT.md"),
+	}
+	for _, path := range unrelated {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("unrelated or legacy"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	usageStore := usage.Store{Dir: filepath.Join(base, "usage")}
 	usageRecord := usage.Record{
@@ -135,6 +158,7 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 	if _, err := os.Stat(legacy); err != nil {
 		t.Fatalf("legacy audit was removed: %v", err)
 	}
+	checkPrivateRetentionPaths(t, unrelated, true)
 	if got, found, err := usageStore.Load(cutoffID); err != nil || !found || !reflect.DeepEqual(got, usageRecord) {
 		t.Fatalf("billing record changed: found=%t record=%+v error=%v", found, got, err)
 	}
@@ -169,6 +193,44 @@ func checkPrivateRetentionPaths(t *testing.T, paths []string, wantPresent bool) 
 		if wantPresent && err != nil || !wantPresent && !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("record %s: present=%t error=%v", path, wantPresent, err)
 		}
+	}
+}
+
+func TestPrunePublishingAuditValidationScratchAfterCleanupFailure(t *testing.T) {
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	job := testJob(command.SecurityAudit)
+	root := t.TempDir()
+	orchestrator := &Orchestrator{WorkRoot: root}
+	original := removeAuditValidationDir
+	t.Cleanup(func() { removeAuditValidationDir = original })
+	var scratch string
+	removeAuditValidationDir = func(path string) error {
+		scratch = path
+		return errors.New("simulated scratch cleanup failure")
+	}
+	if err := orchestrator.validateAuditForPublication(t.Context(), job, completeAuditResult(job).Artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(filepath.Base(scratch), auditValidationTempPattern(job.Identity.AttemptID)) {
+		t.Fatalf("publishing scratch has no attempt identity: %q", scratch)
+	}
+	if _, err := os.Stat(scratch); err != nil {
+		t.Fatalf("simulated cleanup failure left no scratch: %v", err)
+	}
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	store := openState(t, now.Add(-privateRecordRetention))
+	store.Data.TerminalDecisions[job.Identity.JobID] = state.TerminalDecision{
+		AttemptID: job.Identity.AttemptID, Outcome: "succeeded", DecidedAt: now.Add(-privateRecordRetention),
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.PrunePrivateRecords(t.Context(), store, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(scratch); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired publishing scratch survived: %v", err)
 	}
 }
 

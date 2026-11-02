@@ -57,7 +57,10 @@ func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Sto
 		removed += count
 		pruneErr = errors.Join(pruneErr, err)
 	}
-	count, err := prunePrivateAudits(ctx, root, eligible)
+	count, err := prunePrivateDirectories(ctx, root, "audits", eligible, auditAttemptID)
+	removed += count
+	pruneErr = errors.Join(pruneErr, err)
+	count, err = prunePrivateDirectories(ctx, root, ".", eligible, auditValidationAttemptID)
 	removed += count
 	pruneErr = errors.Join(pruneErr, err)
 	if removed != 0 {
@@ -92,8 +95,8 @@ func prunePrivateFiles(ctx context.Context, root, name, suffix string, eligible 
 		if err := ctx.Err(); err != nil {
 			return removed, errors.Join(removeErr, err)
 		}
-		id, match := strings.CutSuffix(entry.Name(), suffix)
-		if !match || !eligible[id] || !entry.Type().IsRegular() {
+		id := privateFileAttemptID(entry.Name(), suffix)
+		if !eligible[id] || !entry.Type().IsRegular() {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
@@ -110,10 +113,26 @@ func prunePrivateFiles(ctx context.Context, root, name, suffix string, eligible 
 	return removed, removeErr
 }
 
-func prunePrivateAudits(ctx context.Context, root string, eligible map[string]bool) (int, error) {
-	dir, entries, err := privateRetentionEntries(root, "audits")
+func privateFileAttemptID(name, suffix string) string {
+	if suffix == ".json" {
+		if rest, ok := strings.CutPrefix(name, ".record+"); ok {
+			basename, random, found := strings.Cut(rest, "+")
+			id, match := strings.CutSuffix(basename, suffix)
+			if found && random != "" && match {
+				return id
+			}
+		}
+	}
+	if id, ok := strings.CutSuffix(name, suffix); ok {
+		return id
+	}
+	return ""
+}
+
+func prunePrivateDirectories(ctx context.Context, root, name string, eligible map[string]bool, attemptID func(string) string) (int, error) {
+	dir, entries, err := privateRetentionEntries(root, name)
 	if err != nil {
-		return 0, fmt.Errorf("read audit retention entries: %w", err)
+		return 0, fmt.Errorf("read %s retention entries: %w", name, err)
 	}
 	var removed int
 	var removeErr error
@@ -121,7 +140,7 @@ func prunePrivateAudits(ctx context.Context, root string, eligible map[string]bo
 		if err := ctx.Err(); err != nil {
 			return removed, errors.Join(removeErr, err)
 		}
-		if !entry.IsDir() || !eligible[auditAttemptID(entry.Name())] {
+		if !entry.IsDir() || !eligible[attemptID(entry.Name())] {
 			continue
 		}
 		if err := cleanup.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
@@ -134,6 +153,18 @@ func prunePrivateAudits(ctx context.Context, root string, eligible map[string]bo
 		removeErr = errors.Join(removeErr, workspace.SyncDirectories(dir))
 	}
 	return removed, removeErr
+}
+
+func auditValidationAttemptID(name string) string {
+	rest, ok := strings.CutPrefix(name, auditValidationDirPrefix)
+	if !ok {
+		return ""
+	}
+	id, suffix, found := strings.Cut(rest, "+")
+	if !found || suffix == "" || !workspace.ValidIdentitySegment(id) {
+		return ""
+	}
+	return id
 }
 
 func auditAttemptID(name string) string {

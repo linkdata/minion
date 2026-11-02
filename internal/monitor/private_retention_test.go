@@ -42,3 +42,32 @@ func TestRunOncePrunesPrivateRecordsWithoutWorkerCapacity(t *testing.T) {
 		t.Fatalf("retention failure was not logged: %s", logs.String())
 	}
 }
+
+func TestRunOnceDefersPrivatePruneDuringRecovery(t *testing.T) {
+	for _, name := range []string{"accepted action", "pending publication"} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now().UTC()
+			store := openState(t, now)
+			if name == "accepted action" {
+				accepted := selectedAcceptance(t, now)
+				accepted.RetryAt = now.Add(time.Minute)
+				store.Data.Accepted = &accepted
+			} else {
+				store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+					AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8,
+					Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:issued-job -->",
+					Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+				}
+			}
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			probe := &retentionProbe{}
+			m := selectedMonitor(t, now, &fakeGitHub{}, probe)
+			_, _ = m.RunOnce(t.Context(), store)
+			if len(probe.calledAt) != 0 {
+				t.Fatalf("private cleanup ran during %s recovery", name)
+			}
+		})
+	}
+}

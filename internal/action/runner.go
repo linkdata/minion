@@ -709,7 +709,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
 		}
-		validationDir, err := os.MkdirTemp(workRoot, ".minion-audit-validation-")
+		validationDir, err := os.MkdirTemp(workRoot, auditValidationTempPattern(job.Identity.AttemptID))
 		if err != nil {
 			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
 		}
