@@ -164,7 +164,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	}
 	want := "start selected worker:"
 	if adminSetup == "occupied" && loop {
-		want = "admin dashboard: listen:"
+		want = "admin dashboard: prepare listener:"
 	}
 	if !strings.Contains(output.String(), want) {
 		t.Fatalf("startup log %q does not contain %q", output.String(), want)

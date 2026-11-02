@@ -55,7 +55,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	}
 	listener, err := service.Listen()
 	if err != nil {
-		return nil, fmt.Errorf("listen: %w", err)
+		return nil, fmt.Errorf("prepare listener: %w", err)
 	}
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
@@ -81,6 +81,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 		jw.Serve()
 	}()
 	go func() {
+		// The parent also handles signals; ServeWith treats a signal-only stop as clean.
 		if err := service.ServeWith(serveCtx, server, listener); err != nil && serveCtx.Err() == nil {
 			a.serveErr = err
 			if onFailure != nil {
@@ -96,7 +97,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 // is nil until admin sessions are implemented.
 func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// JaWS's year-long host-wide HSTS policy could affect other services on this host.
+		// JaWS's year-long HSTS policy includes subdomains and could affect other services.
 		w.Header().Del("Strict-Transport-Security")
 		if allowed == nil || !allowed(r) {
 			controller := http.NewResponseController(w)
@@ -115,6 +116,7 @@ func (a *adminServer) Close() error {
 	a.jaws.Close()
 	a.cancel()
 	<-a.serveDone
+	// Force-close connections left after webserv's graceful shutdown deadline.
 	err := a.server.Close()
 	<-a.jawsDone
 	return errors.Join(err, a.serveErr)

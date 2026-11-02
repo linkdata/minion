@@ -21,6 +21,15 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
+func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
+	t.Helper()
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, ForceAttemptHTTP2: true}
+	t.Cleanup(transport.CloseIdleConnections)
+	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
+}
+
 func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	t.Parallel()
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil)
@@ -131,14 +140,19 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	roots := x509.NewCertPool()
-	roots.AddCert(leaf)
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, ForceAttemptHTTP2: true}
-	t.Cleanup(transport.CloseIdleConnections)
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	client := adminTLSClient(t, leaf)
 	reused := false
 	wantProto := 2
-	if strings.Contains(","+os.Getenv("GODEBUG")+",", ",http2server=0,") {
+	serverH2Off, clientH2Off := false, false
+	for _, setting := range strings.Split(os.Getenv("GODEBUG"), ",") {
+		if value, ok := strings.CutPrefix(setting, "http2server="); ok {
+			serverH2Off = value == "0"
+		}
+		if value, ok := strings.CutPrefix(setting, "http2client="); ok {
+			clientH2Off = value == "0"
+		}
+	}
+	if serverH2Off || clientH2Off {
 		wantProto = 1
 	}
 	for i := range 2 {
@@ -198,11 +212,7 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	roots := x509.NewCertPool()
-	roots.AddCert(leaf)
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, ForceAttemptHTTP2: true}
-	t.Cleanup(transport.CloseIdleConnections)
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	client := adminTLSClient(t, leaf)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -227,22 +237,21 @@ func TestAdminServerServesNonCleanSymlinkTLSPath(t *testing.T) {
 	}
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	root := t.TempDir()
-	real := filepath.Join(root, "real")
-	if err := os.MkdirAll(filepath.Join(real, "sub"), 0700); err != nil {
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(filepath.Join(target, "sub"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	cert, err := os.ReadFile(certFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(real, "cert.pem"), cert, 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "cert.pem"), cert, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(real, "sub"), filepath.Join(root, "link")); err != nil {
+	if err := os.Symlink(filepath.Join(target, "sub"), filepath.Join(root, "link")); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	sep := string(filepath.Separator)
-	certFile = root + sep + "link" + sep + ".." + sep + "cert.pem"
+	certFile = root + "/link/../cert.pem"
 	if _, err := loadTLSCertificate("admin", certFile, keyFile); err != nil {
 		t.Fatalf("TLS preflight: %v", err)
 	}
@@ -255,11 +264,7 @@ func TestAdminServerServesNonCleanSymlinkTLSPath(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	roots := x509.NewCertPool()
-	roots.AddCert(leaf)
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}
-	t.Cleanup(transport.CloseIdleConnections)
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	client := adminTLSClient(t, leaf)
 	resp, err := client.Get("https://" + admin.listener.Addr().String() + "/jaws/.ping")
 	if err != nil {
 		t.Fatal(err)
@@ -292,6 +297,7 @@ func TestAdminServerReportsListenerFailure(t *testing.T) {
 }
 
 func TestAdminServerStopsWithParentContext(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	failed := make(chan struct{}, 1)
 	admin, err := startAdminServer(ctx, config.AdminConfig{Listen: "127.0.0.1:0"}, func() { failed <- struct{}{} })
@@ -331,8 +337,8 @@ func TestAdminGuardCoversJaWSAndLaterRoutes(t *testing.T) {
 		}
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	}
-	denied := adminGuard(mux, nil)
-	allowed := adminGuard(mux, func(*http.Request) bool { return true })
+	denied := jw.SecureHeadersMiddleware(adminGuard(mux, nil))
+	allowed := jw.SecureHeadersMiddleware(adminGuard(mux, func(*http.Request) bool { return true }))
 	for _, tc := range []struct {
 		path    string
 		upgrade bool
@@ -345,6 +351,7 @@ func TestAdminGuardCoversJaWSAndLaterRoutes(t *testing.T) {
 		{path: "/export/usage"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil).WithContext(t.Context())
+		req.TLS = &tls.ConnectionState{}
 		if tc.upgrade {
 			req.Header.Set("Connection", "Upgrade")
 			req.Header.Set("Upgrade", "websocket")
@@ -354,10 +361,16 @@ func TestAdminGuardCoversJaWSAndLaterRoutes(t *testing.T) {
 		if allowedResponse.Code != http.StatusNoContent {
 			t.Errorf("%s: allowed status = %d, want 204", tc.path, allowedResponse.Code)
 		}
+		if allowedResponse.Header().Get("Strict-Transport-Security") != "" {
+			t.Errorf("%s: allowed response sets host-wide HSTS", tc.path)
+		}
 		deniedResponse := httptest.NewRecorder()
 		denied.ServeHTTP(deniedResponse, req)
 		if deniedResponse.Code != http.StatusForbidden {
 			t.Errorf("%s: denied status = %d, want 403", tc.path, deniedResponse.Code)
+		}
+		if deniedResponse.Header().Get("Strict-Transport-Security") != "" {
+			t.Errorf("%s: denied response sets host-wide HSTS", tc.path)
 		}
 	}
 	req := httptest.NewRequest(http.MethodPost, "/jaws/invalid-key", nil).WithContext(t.Context())

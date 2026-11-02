@@ -49,6 +49,40 @@ func TestLoadAdminConfig(t *testing.T) {
 	}
 }
 
+func TestLoadAdminConfigPreservesRelativeSymlinkTLSPath(t *testing.T) {
+	if filepath.Separator == '\\' {
+		t.Skip("symlink traversal semantics differ on Windows")
+	}
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.MkdirAll(filepath.Join(target, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "cert.pem"), []byte("target certificate"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(target, "sub"), filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path := filepath.Join(root, "config.json")
+	data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}],"admin":{"listen":"localhost:8377","tls_cert_file":"link/../cert.pem","tls_key_file":"key.pem"}}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := root + "/link/../cert.pem"
+	if cfg.Admin == nil || cfg.Admin.TLSCertFile != want {
+		t.Fatalf("TLS certificate path = %+v, want %q", cfg.Admin, want)
+	}
+	contents, err := os.ReadFile(cfg.Admin.TLSCertFile)
+	if err != nil || string(contents) != "target certificate" {
+		t.Fatalf("resolved TLS certificate = %q, %v", contents, err)
+	}
+}
+
 func TestAdminConfigValidation(t *testing.T) {
 	for _, test := range []struct {
 		name, listen, cert, key, wantError string
@@ -59,6 +93,7 @@ func TestAdminConfigValidation(t *testing.T) {
 		{name: "loopback with TLS", listen: "127.0.0.1:8377", cert: "cert.pem", key: "key.pem"},
 		{name: "public IP with TLS", listen: "192.0.2.1:8377", cert: "cert.pem", key: "key.pem"},
 		{name: "hostname with TLS", listen: "localhost:8377", cert: "cert.pem", key: "key.pem"},
+		{name: "empty bracketed host", listen: "[]:8377", cert: "cert.pem", key: "key.pem", wantError: "empty bracketed host"},
 		{name: "public IP without TLS", listen: "192.0.2.1:8377", wantError: "outside literal loopback"},
 		{name: "wildcard without TLS", listen: ":8377", wantError: "outside literal loopback"},
 		{name: "IPv4 wildcard without TLS", listen: "0.0.0.0:8377", wantError: "outside literal loopback"},
