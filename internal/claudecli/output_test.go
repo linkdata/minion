@@ -468,6 +468,9 @@ func TestOutputWholeTreeUsage(t *testing.T) {
 			if o.err != nil || o.result.Answer != "answer" || o.result.Tokens != tc.want || o.result.UsageComplete != tc.complete {
 				t.Fatalf("output = %+v, %v; want tokens %+v, complete %v", o.result, o.err, tc.want, tc.complete)
 			}
+			if tc.name == "aggregate ignores malformed root" && o.result.UsageCoverage != (usage.Coverage{Scope: "invocation"}) {
+				t.Fatalf("valid model usage inherited malformed root gap: %+v", o.result.UsageCoverage)
+			}
 		})
 	}
 }

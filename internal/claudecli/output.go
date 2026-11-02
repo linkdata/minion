@@ -529,7 +529,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	}
 	o.finalModelUsage = complete
 	o.finalReportPresent = reportPresent(e.ModelUsage) || reportPresent(e.Usage)
-	o.finalMalformedUsage = (!complete && reportPresent(e.ModelUsage)) || (!o.finalTopUsage && reportPresent(e.Usage))
+	o.finalMalformedUsage = !complete && (reportPresent(e.ModelUsage) || !o.finalTopUsage && reportPresent(e.Usage))
 	o.hasCumulative = false
 	if complete {
 		o.ensureAssistantTotal()
