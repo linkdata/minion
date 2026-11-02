@@ -40,12 +40,13 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 	jw.Logger = slog.Default()
 	jw.MakeAuth = func(*jaws.Request) jaws.Auth { return deniedAdminAuth{} }
 	mux := http.NewServeMux()
-	mux.Handle("GET /jaws/", jw)
+	mux.Handle("/jaws/", jw)
 	server := &http.Server{
-		Handler:           jw.SecureHeadersMiddleware(adminGuard(mux, nil)),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		IdleTimeout:       time.Minute,
+		Handler:                      jw.SecureHeadersMiddleware(adminGuard(mux, nil)),
+		ReadHeaderTimeout:            5 * time.Second,
+		ReadTimeout:                  30 * time.Second,
+		IdleTimeout:                  time.Minute,
+		DisableGeneralOptionsHandler: true,
 	}
 	if certificate != nil {
 		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{*certificate}}

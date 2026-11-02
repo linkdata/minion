@@ -43,7 +43,7 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 	return runWithGitCheckAt(checkGit, time.Now)
 }
 
-func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) (code int) {
+func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, or remote-execute")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
@@ -260,20 +260,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if !preflight() {
 			return 1
 		}
-	}
-	if cfg.Admin != nil && *loop {
-		admin, err := startAdminServer(*cfg.Admin, stop)
-		if err != nil {
-			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
-			return 1
-		}
-		defer func() {
-			if err := admin.Close(); err != nil {
-				logger.Printf("close admin dashboard: %s", monitor.InertLogText(err.Error()))
-				code = 1
-			}
-		}()
-		logger.Printf("admin dashboard listening on %s", admin.listener.Addr())
 	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
 	orchestrator.BotID = user.ID

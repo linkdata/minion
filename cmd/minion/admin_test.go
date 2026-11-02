@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -60,6 +63,27 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 			}
 		})
 	}
+	t.Run("general OPTIONS", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", admin.listener.Addr().String(), 5*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(conn, "OPTIONS * HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodOptions})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("OPTIONS * status = %d, want 403", resp.StatusCode)
+		}
+	})
 }
 
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
@@ -122,7 +146,7 @@ func TestAdminGuardCoversJaWSAndLaterRoutes(t *testing.T) {
 	}
 	t.Cleanup(jw.Close)
 	mux := http.NewServeMux()
-	mux.Handle("GET /jaws/", jw)
+	mux.Handle("/jaws/", jw)
 	for _, path := range []string{"/", "/jaws/test-websocket", "/auth/callback", "/download/report", "/export/usage"} {
 		pattern := "GET " + path
 		if path == "/" {
@@ -158,6 +182,17 @@ func TestAdminGuardCoversJaWSAndLaterRoutes(t *testing.T) {
 		if deniedResponse.Code != http.StatusForbidden {
 			t.Errorf("%s: denied status = %d, want 403", tc.path, deniedResponse.Code)
 		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/jaws/invalid-key", nil).WithContext(t.Context())
+	allowedResponse := httptest.NewRecorder()
+	allowed.ServeHTTP(allowedResponse, req)
+	if allowedResponse.Code != http.StatusNotFound {
+		t.Errorf("POST /jaws/invalid-key: allowed status = %d, want 404", allowedResponse.Code)
+	}
+	deniedResponse := httptest.NewRecorder()
+	denied.ServeHTTP(deniedResponse, req)
+	if deniedResponse.Code != http.StatusForbidden {
+		t.Errorf("POST /jaws/invalid-key: denied status = %d, want 403", deniedResponse.Code)
 	}
 }
 

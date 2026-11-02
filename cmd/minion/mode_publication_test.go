@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -90,12 +90,15 @@ func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 func TestOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T) {
 	for _, withAccepted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unassigned_accepted=%t", withAccepted), func(t *testing.T) {
-			testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, withAccepted)
+			testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, withAccepted, false)
 		})
 	}
+	t.Run("admin_port_occupied", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true)
+	})
 }
 
-func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted bool) {
+func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted, busyAdmin bool) {
 	now := time.Now().UTC()
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), now)
 	if err != nil {
@@ -139,8 +142,22 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	client := github.New("fixture-token")
 	client.HTTPClient, client.BaseURL = server.Client(), server.URL
 	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: client, BotID: 8}
-	if code := runOrchestrateMode(t.Context(), nil, watcher, store, true, log.New(io.Discard, "", 0), "", 0); code != 1 {
-		t.Fatalf("missing worker should fail after reconciliation: code=%d", code)
+	if busyAdmin {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
+	}
+	var output strings.Builder
+	if code := runOrchestrateMode(t.Context(), nil, watcher, store, true, log.New(&output, "", 0), "", 0); code != 1 {
+		t.Fatalf("orchestrate startup should fail after reconciliation: code=%d", code)
+	}
+	if busyAdmin && !strings.Contains(output.String(), "admin dashboard: listen for admin dashboard:") {
+		t.Fatalf("occupied admin port did not stop startup: log=%q", output.String())
+	} else if !busyAdmin && !strings.Contains(output.String(), "start selected worker:") {
+		t.Fatalf("missing worker did not stop startup: log=%q", output.String())
 	}
 	if lookups.Load() != 1 || store.Data.PublicationWrites[jobID].Status != state.PublicationWriteObserved {
 		t.Fatalf("worker startup preceded reconciliation: lookups=%d write=%+v", lookups.Load(), store.Data.PublicationWrites[jobID])
