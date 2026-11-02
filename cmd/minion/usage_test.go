@@ -74,7 +74,7 @@ func TestUsageJSONFiltersAndTotals(t *testing.T) {
 		t.Fatalf("unexpected groups: %+v", output)
 	}
 	want := usage.Summary{Attempts: 4, UsageRecordedActions: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, UnallocatedTokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, TotalTokens: 175}
-	if output.Totals != want {
+	if output.ActionCoverage != "unknown" || output.Totals != want {
 		t.Fatalf("totals = %+v, want %+v", output.Totals, want)
 	}
 	unknown := reportJSON(t, "-dir", dir, "-group-by", "requester_id,service")
@@ -166,7 +166,7 @@ func TestUsageDetailsAndTables(t *testing.T) {
 		if code := runUsageWithOutput([]string{"-dir", dir, "-group-by", grouping}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d: %s", code, &stderr)
 		}
-		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "included in input", "may omit unknown token counts", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
+		for _, text := range []string{"example-owner/example-repo", "175 total", "2 attempts with incomplete usage", "Accepted-action coverage: unknown", "included in input", "may omit unknown token counts", "CODEX CALLS", "CLAUDE CALLS", "4 Codex calls, 3 Claude calls"} {
 			if !strings.Contains(stdout.String(), text) {
 				t.Errorf("%q output lacks %q: %s", grouping, text, &stdout)
 			}
@@ -206,7 +206,7 @@ func TestUsageConfigAndEmptyDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := reportJSON(t, "-config", path)
-	if output.Totals.Attempts != 0 || output.Groups == nil || output.Attempts == nil {
+	if output.Totals.Attempts != 0 || output.ActionCoverage != "unknown" || output.Groups == nil || output.Attempts == nil {
 		t.Fatalf("wrong empty report: %+v", output)
 	}
 	saveReportFixture(t, filepath.Join(dir, "custom", "usage"))

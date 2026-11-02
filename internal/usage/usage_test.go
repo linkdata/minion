@@ -734,7 +734,7 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if full.Totals.Attempts != 2 || full.Totals.UsageRecordedActions != 1 || full.Totals.TotalTokens != 265 ||
+	if full.ActionCoverage != "unknown" || full.Totals.Attempts != 2 || full.Totals.UsageRecordedActions != 1 || full.Totals.TotalTokens != 265 ||
 		full.Totals.UnallocatedTokens != legacy.Tokens || len(full.Groups) != 3 {
 		t.Fatalf("grand totals or service groups: %+v", full)
 	}
@@ -763,6 +763,10 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 	unfiltered, err := store.Query(Filter{}, nil, true)
 	if err != nil || len(unfiltered.Attempts) != 2 || unfiltered.Attempts[0].Usage.Tokens != mixed.Tokens {
 		t.Fatalf("unfiltered attempt projection: %+v, error=%v", unfiltered, err)
+	}
+	withGroups, err := store.Query(Filter{}, []string{"service"}, true)
+	if err != nil || len(withGroups.Groups) != 3 || len(withGroups.Attempts) != 2 || withGroups.Totals != full.Totals {
+		t.Fatalf("combined groups and details: %+v, error=%v", withGroups, err)
 	}
 	unknown, err := store.Query(Filter{Service: "unknown"}, nil, true)
 	if err != nil || unknown.Totals.Attempts != 1 || unknown.Totals.UnallocatedTokens != legacy.Tokens ||

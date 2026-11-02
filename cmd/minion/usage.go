@@ -27,8 +27,9 @@ type usageAttempt struct {
 }
 
 type usageOutput struct {
-	GroupBy []string `json:"group_by"`
-	Filters struct {
+	GroupBy        []string `json:"group_by"`
+	ActionCoverage string   `json:"action_coverage"`
+	Filters        struct {
 		Repo        string `json:"repo,omitempty"`
 		User        string `json:"user,omitempty"`
 		Service     string `json:"service,omitempty"`
@@ -115,7 +116,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(1, err)
 	}
-	output := usageOutput{GroupBy: []string{}, Groups: []usage.Summary{}, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
+	output := usageOutput{GroupBy: []string{}, ActionCoverage: query.ActionCoverage, Groups: []usage.Summary{}, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
 	output.Filters.Repo, output.Filters.User = filter.Repo, filter.User
 	output.Filters.Service, output.Filters.RequesterID = filter.Service, filter.RequesterID
 	if !since.IsZero() {
@@ -216,6 +217,7 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 	t := output.Totals
 	fmt.Fprintf(&buffer, "\nTotals: %d usage-recorded actions, %d attempts; %d succeeded, %d failed, %d running; %d Codex calls, %d Claude calls.\n", t.UsageRecordedActions, t.Attempts, t.Succeeded, t.Failed, t.Running, t.CodexCalls, t.ClaudeCalls)
 	fmt.Fprintf(&buffer, "Tokens: %d input, %d cache creation, %d cache read, %d output, %d total, %d unallocated; %d attempts with incomplete usage.\n", t.Tokens.Input, t.Tokens.CacheCreationInput, t.Tokens.CachedInput, t.Tokens.Output, t.TotalTokens, t.UnallocatedTokens.Total(), t.IncompleteUsage)
+	fmt.Fprintf(&buffer, "Accepted-action coverage: %s; actions without usage files are not counted.\n", output.ActionCoverage)
 	fmt.Fprintln(&buffer, usageTokenNote)
 	if t.Running != 0 {
 		fmt.Fprintln(&buffer, "Running attempts may be stale after an interruption.")

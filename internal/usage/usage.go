@@ -520,9 +520,10 @@ type AttemptDetail struct {
 }
 
 type QueryResult struct {
-	Totals   Summary         `json:"totals"`
-	Groups   []Summary       `json:"groups"`
-	Attempts []AttemptDetail `json:"attempts"`
+	ActionCoverage string          `json:"action_coverage"`
+	Totals         Summary         `json:"totals"`
+	Groups         []Summary       `json:"groups"`
+	Attempts       []AttemptDetail `json:"attempts"`
 }
 
 // Query reads records once and produces totals, groups, and optional details.
@@ -534,13 +535,19 @@ func (s Store) Query(filter Filter, groupBy []string, details bool) (QueryResult
 	if err != nil {
 		return QueryResult{}, err
 	}
-	result := QueryResult{Groups: []Summary{}, Attempts: []AttemptDetail{}}
+	result := QueryResult{ActionCoverage: "unknown", Groups: []Summary{}, Attempts: []AttemptDetail{}}
 	totals, err := Summarize(records, filter, nil)
 	if err != nil {
 		return QueryResult{}, err
 	}
 	if len(totals) != 0 {
 		result.Totals = totals[0]
+	}
+	if !details || len(groupBy) != 0 {
+		result.Groups, err = Summarize(records, filter, groupBy)
+		if err != nil {
+			return QueryResult{}, err
+		}
 	}
 	if details {
 		for _, record := range records {
@@ -553,11 +560,6 @@ func (s Store) Query(filter Filter, groupBy []string, details bool) (QueryResult
 			}
 			usage[0].Service = filter.Service
 			result.Attempts = append(result.Attempts, AttemptDetail{Record: record, Usage: usage[0]})
-		}
-	} else {
-		result.Groups, err = Summarize(records, filter, groupBy)
-		if err != nil {
-			return QueryResult{}, err
 		}
 	}
 	return result, nil
