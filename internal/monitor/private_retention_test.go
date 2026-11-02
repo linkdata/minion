@@ -50,7 +50,7 @@ func TestRunOncePrunesPrivateRecordsWithoutWorkerCapacity(t *testing.T) {
 	}
 }
 
-func TestRunOnceDefersPrivatePruneWhileAccepted(t *testing.T) {
+func TestRunOncePrunesOtherAttemptsAfterAcceptedRecovery(t *testing.T) {
 	now := time.Now().UTC()
 	store := openState(t, now)
 	accepted := selectedAcceptance(t, now)
@@ -59,11 +59,37 @@ func TestRunOnceDefersPrivatePruneWhileAccepted(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	probe := &retentionProbe{}
+	probe := &retentionProbe{onPrune: func() {
+		if store.Data.Accepted == nil {
+			t.Error("accepted attempt was cleared before retention could protect it")
+		}
+	}}
 	m := selectedMonitor(t, now, &fakeGitHub{}, probe)
 	_, _ = m.RunOnce(t.Context(), store)
-	if len(probe.calledAt) != 0 {
-		t.Fatalf("private cleanup ran before accepted recovery: %v", probe.calledAt)
+	if len(probe.calledAt) != 1 {
+		t.Fatalf("accepted recovery starved unrelated retention: %v", probe.calledAt)
+	}
+}
+
+func TestRunOncePrunesAfterPublicationReconcileError(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8,
+		Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:issued-job -->",
+		Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	probe := &retentionProbe{}
+	m := selectedMonitor(t, now, &fakeGitHub{}, probe)
+	m.GitHub = nil
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrAcceptanceState) {
+		t.Fatalf("publication reconciliation error = %v", err)
+	}
+	if len(probe.calledAt) != 1 {
+		t.Fatalf("publication error starved unrelated retention: %v", probe.calledAt)
 	}
 }
 

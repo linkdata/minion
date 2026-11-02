@@ -145,7 +145,7 @@ func (m *Monitor) logf(format string, args ...any) {
 }
 
 func (m *Monitor) prunePrivateRecords(ctx context.Context, store *state.Store) {
-	if ctx.Err() != nil || store.Data.Accepted != nil {
+	if ctx.Err() != nil {
 		return
 	}
 	if pruner, ok := m.Handler.(interface {
@@ -188,6 +188,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return m.terminalControlWake(store), err
 	}
+	pruned := false
+	defer func() {
+		if !pruned {
+			m.prunePrivateRecords(ctx, store)
+		}
+	}()
 	if store.Data.Accepted == nil {
 		// A completed attempt may leave its sidecar after a crash or failed unlink.
 		// Remove it before a new reservation can pair with this stale sidecar.
@@ -274,6 +280,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		initialTerminalWake = m.serviceTerminalControls(ctx, store)
 		m.prunePrivateRecords(ctx, store)
+		pruned = true
 	}
 	if store.Data.Accepted != nil {
 		accepted := store.Data.Accepted
