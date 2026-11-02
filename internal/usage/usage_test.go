@@ -185,10 +185,12 @@ func TestStoreAtomicUpdates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".record-interrupted"), []byte("partial"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan error, 1)
+	writerDone := make(chan struct{})
 	firstSaved := make(chan error, 1)
-	readerProgress := make(chan struct{})
+	readerProgress := make(chan struct{}, 2)
+	var writerErr error
 	go func() {
+		defer close(writerDone)
 		for i := 1; i <= 30; i++ {
 			record.CodexCalls = i
 			record.Tokens = Tokens{Input: int64(i), CachedInput: int64(i / 2), Output: int64(i * 2)}
@@ -197,54 +199,66 @@ func TestStoreAtomicUpdates(t *testing.T) {
 			if i == 1 {
 				firstSaved <- err
 				if err == nil {
-					<-readerProgress // Keep the writer active until a query has read a saved version.
+					<-readerProgress
+					<-readerProgress // Both readers query before the writer can finish.
 				}
 			}
 			if err != nil {
-				done <- err
+				writerErr = err
 				return
 			}
 		}
-		done <- nil
 	}()
 	if err := <-firstSaved; err != nil {
 		t.Fatal(err)
 	}
-	progressed := false
-	defer func() {
-		if !progressed {
-			close(readerProgress)
-		}
-	}()
-	for {
+	checkRead := func() {
 		records, err := ReadAll(dir)
 		if err != nil {
-			t.Fatal(err)
+			t.Error(err)
+			return
 		}
 		if len(records) != 1 || records[0].Tokens.Input != int64(records[0].CodexCalls) || records[0].Tokens.Output != 2*records[0].Tokens.Input {
-			t.Fatalf("partial or duplicate record: %+v", records)
+			t.Errorf("partial or duplicate record: %+v", records)
 		}
 		query, err := store.Query(Filter{}, nil, true)
 		if err != nil || len(query.Attempts) != 1 || query.Totals.Tokens != query.Attempts[0].Record.Tokens ||
 			query.Attempts[0].Usage.Tokens != query.Attempts[0].Record.Tokens {
-			t.Fatalf("query totals and details disagree: %+v, error=%v", query, err)
+			t.Errorf("query totals and details disagree: %+v, error=%v", query, err)
 		}
-		if !progressed {
-			close(readerProgress)
-			progressed = true
-		}
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal(err)
+	}
+	readersReady := make(chan struct{}, 2)
+	startReaders := make(chan struct{})
+	readersDone := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			defer func() { readersDone <- struct{}{} }()
+			readersReady <- struct{}{}
+			<-startReaders
+			checkRead()
+			readerProgress <- struct{}{}
+			for range 30 {
+				select {
+				case <-writerDone:
+					return
+				default:
+					checkRead()
+				}
 			}
-			records, err := ReadAll(dir)
-			if err != nil || len(records) != 1 || records[0].CodexCalls != 30 {
-				t.Fatalf("final record=%+v err=%v", records, err)
-			}
-			return
-		default:
-		}
+		}()
+	}
+	<-readersReady
+	<-readersReady
+	close(startReaders)
+	<-writerDone
+	<-readersDone
+	<-readersDone
+	if writerErr != nil {
+		t.Fatal(writerErr)
+	}
+	records, err := ReadAll(dir)
+	if err != nil || len(records) != 1 || records[0].CodexCalls != 30 {
+		t.Fatalf("final record=%+v err=%v", records, err)
 	}
 }
 
