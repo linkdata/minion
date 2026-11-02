@@ -46,6 +46,7 @@ func startAdminServer(cfg config.AdminConfig, onFailure func()) (*adminServer, e
 		ReadHeaderTimeout:            5 * time.Second,
 		ReadTimeout:                  30 * time.Second,
 		IdleTimeout:                  time.Minute,
+		MaxHeaderBytes:               128 << 10,
 		DisableGeneralOptionsHandler: true,
 	}
 	if certificate != nil {
@@ -90,8 +91,10 @@ func loadAdminCertificate(cfg config.AdminConfig) (*tls.Certificate, error) {
 func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if allowed == nil || !allowed(r) {
-			w.Header().Set("Connection", "close")
-			_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+			if r.ProtoMajor == 1 && r.ContentLength != 0 {
+				w.Header().Set("Connection", "close")
+				_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+			}
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,7 +33,8 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	})
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for _, tc := range []struct {
 		name, path string
 		upgrade    bool
@@ -121,20 +123,37 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	})
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
-	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}, ForceAttemptHTTP2: true}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
-	if err != nil {
-		t.Fatal(err)
+	reused := false
+	for i := range 2 {
+		ctx := t.Context()
+		if i == 1 {
+			ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+				GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
+			})
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+			t.Fatal(err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 2 {
+			t.Fatalf("HTTPS response = %s %d, want HTTP/2 403", resp.Proto, resp.StatusCode)
+		}
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("HTTPS status = %d, want 403", resp.StatusCode)
+	if !reused {
+		t.Fatal("denied HTTP/2 request did not reuse its connection")
 	}
 }
 

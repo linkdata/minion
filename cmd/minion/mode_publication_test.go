@@ -90,15 +90,18 @@ func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 func TestOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T) {
 	for _, withAccepted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("unassigned_accepted=%t", withAccepted), func(t *testing.T) {
-			testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, withAccepted, false)
+			testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, withAccepted, false, true)
 		})
 	}
 	t.Run("admin_port_occupied", func(t *testing.T) {
-		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true)
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, true)
+	})
+	t.Run("cron_ignores_admin_port", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, false)
 	})
 }
 
-func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted, busyAdmin bool) {
+func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted, busyAdmin, loop bool) {
 	now := time.Now().UTC()
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), now)
 	if err != nil {
@@ -151,12 +154,12 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
 	}
 	var output strings.Builder
-	if code := runOrchestrateMode(t.Context(), nil, watcher, store, true, log.New(&output, "", 0), "", 0); code != 1 {
+	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {
 		t.Fatalf("orchestrate startup should fail after reconciliation: code=%d", code)
 	}
-	if busyAdmin && !strings.Contains(output.String(), "admin dashboard: listen for admin dashboard:") {
+	if busyAdmin && loop && !strings.Contains(output.String(), "admin dashboard: listen for admin dashboard:") {
 		t.Fatalf("occupied admin port did not stop startup: log=%q", output.String())
-	} else if !busyAdmin && !strings.Contains(output.String(), "start selected worker:") {
+	} else if (!busyAdmin || !loop) && !strings.Contains(output.String(), "start selected worker:") {
 		t.Fatalf("missing worker did not stop startup: log=%q", output.String())
 	}
 	if lookups.Load() != 1 || store.Data.PublicationWrites[jobID].Status != state.PublicationWriteObserved {
