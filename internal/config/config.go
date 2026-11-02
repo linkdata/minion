@@ -248,6 +248,7 @@ func resolveAdminTLSPath(configDir, path string) string {
 	if configDir == "" {
 		return path
 	}
+	// filepath.Join would clean symlink/.. and could select a different file.
 	sep := string(filepath.Separator)
 	return strings.TrimSuffix(configDir, sep) + sep + path
 }

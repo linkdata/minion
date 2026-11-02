@@ -412,13 +412,17 @@ func TestCheckRejectsInvalidAdminTLS(t *testing.T) {
 }
 
 func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
 	cfg := config.Config{
 		Main: "codex", BotLogin: "bot", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 		Codex: config.CodexConfig{Model: "test-model", ReasoningEffort: "medium"},
 		Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem"},
 		RemoteExecutor: &config.RemoteExecutorConfig{
 			ExecutorID: "remote", Listen: "127.0.0.1:8443",
-			TLSCertFile: "missing-remote-cert.pem", TLSKeyFile: "missing-remote-key.pem",
+			TLSCertFile: certFile, TLSKeyFile: keyFile,
 			Token: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
 		},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
@@ -431,8 +435,8 @@ func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {
 			return nil
 		})
 	})
-	if code != 1 || gitChecks != 1 || !strings.Contains(output, "remote TLS preflight:") ||
-		strings.Contains(output, "admin TLS preflight:") {
+	if code != 1 || gitChecks != 1 || !strings.Contains(output, "GitHub authentication:") ||
+		strings.Contains(output, "admin TLS preflight:") || strings.Contains(output, "remote TLS preflight:") {
 		t.Fatalf("cron startup was blocked by admin TLS: code=%d git_checks=%d output=%q", code, gitChecks, output)
 	}
 }
