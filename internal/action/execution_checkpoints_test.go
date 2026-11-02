@@ -75,6 +75,19 @@ func (f *executionAdapterFixture) startUsage() *usage.Store {
 	return f.owner.Usage
 }
 
+func TestResultCallsCannotCreateUsageWithoutCallCheckpoint(t *testing.T) {
+	f := newExecutionAdapterFixture(t, testJob(command.Comment))
+	store := f.startUsage()
+	call := CallUsage{Provider: f.job.Main.Provider, Role: roleMain, Round: 1, Model: f.job.Main.Model, Effort: f.job.Main.Effort}
+	if err := f.sink.finish(f.result([]CallUsage{call}, nil, ""), nil); !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("result-only call was accepted: %v", err)
+	}
+	record, found, err := store.Load(f.owner.attemptID)
+	if err != nil || !found || len(record.Calls) != 0 || record.CodexCalls != 0 || record.ClaudeCalls != 0 {
+		t.Fatalf("result-only usage was persisted: %+v found=%t error=%v", record, found, err)
+	}
+}
+
 func TestExecutionBeforeCallPersistsModelStartBeforeAcknowledgement(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -125,7 +138,7 @@ func TestExecutionBeforeCallRechecksSelectedStateAfterUsageSave(t *testing.T) {
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatal(err)
 	}
-	f.owner.usageCheckpoint = &usageCheckpoint{save: func() error {
+	f.owner.usageCheckpoint = &usageCheckpoint{record: usage.Record{RepositoryID: 1, RequesterID: 1, Provider: "codex"}, save: func() error {
 		return store.WithLock(func() error {
 			_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "canceled", time.Now())
 			return err
@@ -161,7 +174,7 @@ func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T)
 		if err := f.sink.BeforeAssignment(f.job); err != nil {
 			t.Fatal(err)
 		}
-		f.owner.usageCheckpoint = &usageCheckpoint{save: func() error { time.Sleep(2 * time.Second); return nil }}
+		f.owner.usageCheckpoint = &usageCheckpoint{record: usage.Record{RepositoryID: 1, RequesterID: 1, Provider: "codex"}, save: func() error { time.Sleep(2 * time.Second); return nil }}
 		err := f.sink.BeforeCall(f.call(CallUsage{Provider: "codex", Role: roleMain, Round: 1}))
 		if !errors.Is(err, context.DeadlineExceeded) || f.sink.pending != nil ||
 			store.Data.JobFailures[f.job.Identity.JobID].ModelCallStarted {

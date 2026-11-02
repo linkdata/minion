@@ -218,7 +218,8 @@ func TestSelectedInactivityCannotOverrideFailedParentCheckpoint(t *testing.T) {
 	f, store, _ := selectedHTTPResultFixture(t, nil)
 	checkpointErr := errors.New("usage checkpoint save failed")
 	f.tx.sink.(*executionCheckpoints).owner.usageCheckpoint = &usageCheckpoint{
-		save: func() error { return checkpointErr },
+		record: usage.Record{RepositoryID: 1, RequesterID: 1, Provider: "codex"},
+		save:   func() error { return checkpointErr },
 	}
 	ack := f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
 	if ack.Failure == nil || ack.Failure.Terminal || !errors.Is(f.tx.sink.(*executionCheckpoints).failure, checkpointErr) {
@@ -328,7 +329,8 @@ func TestSelectedRuntimeCapCannotOverrideFailedParentCheckpoint(t *testing.T) {
 	f, _, _ := selectedHTTPResultFixture(t, nil)
 	checkpointErr := errors.New("usage checkpoint save failed")
 	f.tx.sink.(*executionCheckpoints).owner.usageCheckpoint = &usageCheckpoint{
-		save: func() error { return checkpointErr },
+		record: usage.Record{RepositoryID: 1, RequesterID: 1, Provider: "codex"},
+		save:   func() error { return checkpointErr },
 	}
 	f.ack(t, "/before", f.call(1), http.StatusInternalServerError, 1)
 	outcome := f.outcome(2, nil)

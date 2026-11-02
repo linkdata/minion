@@ -252,7 +252,7 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	if c.owner.usageCheckpoint != nil {
 		c.owner.usageCheckpoint.record.ExecutorID = c.job.Identity.ExecutorID
 		c.owner.usageCheckpoint.record.SourceRef = c.job.Source.Head
-		if err := c.owner.usageCheckpoint.beforeCall(fact.Call); err != nil {
+		if err := c.owner.usageCheckpoint.beforeCall(fact.Ordinal, fact.Call); err != nil {
 			return c.fail(err)
 		}
 	}
@@ -313,7 +313,7 @@ func (c *executionCheckpoints) AfterCall(fact CallCheckpoint) error {
 	call := fact.Call
 	c.returned = &call
 	if c.owner.usageCheckpoint != nil {
-		if err := c.owner.usageCheckpoint.afterCall(fact.Call); err != nil {
+		if err := c.owner.usageCheckpoint.afterCall(fact.Ordinal, fact.Call); err != nil {
 			return c.fail(err)
 		}
 	}

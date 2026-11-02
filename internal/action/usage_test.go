@@ -258,16 +258,24 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 				t.Fatal(err)
 			}
 			tracked.usageCheckpoint.record.ExecutorID, tracked.usageCheckpoint.record.SourceRef = "local", strings.Repeat("a", 40)
-			for _, call := range []struct {
+			for i, call := range []struct {
 				role     string
 				settings RoleSettings
 			}{{"main", main}, {"critic", critic}, {"main", main}} {
-				receipt := CallUsage{Role: call.role, Provider: call.settings.Provider, Model: call.settings.Model, Effort: call.settings.Effort}
-				if err := tracked.usageCheckpoint.beforeCall(receipt); err != nil {
+				receipt := CallUsage{Role: call.role, Provider: call.settings.Provider, Model: call.settings.Model, Effort: call.settings.Effort, Round: 1}
+				if call.role == "critic" {
+					receipt.ReviewPhase = reviewFull
+				}
+				if err := tracked.usageCheckpoint.beforeCall(i+1, receipt); err != nil {
 					t.Fatal(err)
 				}
 				checkpoint, err := usage.ReadAll(store.Dir)
-				if err != nil || len(checkpoint) != 1 || checkpoint[0].UsageComplete {
+				if err != nil || len(checkpoint) != 1 || checkpoint[0].UsageComplete ||
+					checkpoint[0].RepositoryID != 1 || checkpoint[0].RequesterID != 7 || len(checkpoint[0].Calls) != i+1 ||
+					checkpoint[0].Calls[i].Ordinal != i+1 || checkpoint[0].Calls[i].FinishedAt != nil ||
+					checkpoint[0].Calls[i].Provider != receipt.Provider || checkpoint[0].Calls[i].Model != receipt.Model ||
+					checkpoint[0].Calls[i].Effort != receipt.Effort || checkpoint[0].Calls[i].Role != receipt.Role ||
+					checkpoint[0].Calls[i].ReviewPhase != receipt.ReviewPhase || checkpoint[0].Calls[i].StartedAt.IsZero() {
 					t.Fatalf("call has no durable incomplete checkpoint: %+v, %v", checkpoint, err)
 				}
 				receipt.Tokens, receipt.Complete = usage.Tokens{Input: 100, CacheCreationInput: 10, CachedInput: 80, Output: 20}, true
@@ -276,8 +284,14 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 					receipt.Tokens, receipt.Complete = usage.Tokens{Input: 10, CacheCreationInput: 1, CachedInput: 8, Output: 2}, false
 					receipt.UsageCoverage = usage.Coverage{Scope: "root_only", PartialReport: true, UnverifiedHelpers: true}
 				}
-				if err := tracked.usageCheckpoint.afterCall(receipt); err != nil {
+				if err := tracked.usageCheckpoint.afterCall(i+1, receipt); err != nil {
 					t.Fatal(err)
+				}
+				checkpoint, err = usage.ReadAll(store.Dir)
+				if err != nil || len(checkpoint) != 1 || checkpoint[0].Calls[i].FinishedAt == nil ||
+					checkpoint[0].Calls[i].Tokens != receipt.Tokens || checkpoint[0].Calls[i].UsageCoverage != receipt.UsageCoverage ||
+					checkpoint[0].Calls[i].Complete != receipt.Complete {
+					t.Fatalf("returned call receipt was not saved: %+v, %v", checkpoint, err)
 				}
 			}
 			if err := finish(runErr); !errors.Is(err, runErr) {
@@ -306,31 +320,74 @@ func TestUsageCheckpointMarksUnfinishedCallPartial(t *testing.T) {
 	}
 	tracked.usageCheckpoint.record.ExecutorID = "local"
 	tracked.usageCheckpoint.record.SourceRef = strings.Repeat("a", 40)
-	call := CallUsage{Provider: "codex"}
-	if err := tracked.usageCheckpoint.beforeCall(call); err != nil {
+	call := CallUsage{Provider: "codex", Role: roleMain, Round: 1}
+	if err := tracked.usageCheckpoint.beforeCall(1, call); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint, found, err := store.Load(tracked.attemptID)
-	if err != nil || !found || checkpoint.CodexCalls != 1 || checkpoint.UsageComplete || !checkpoint.UsageCoverage.PartialReport {
+	if err != nil || !found || checkpoint.CodexCalls != 1 || checkpoint.UsageComplete || !checkpoint.UsageCoverage.PartialReport ||
+		len(checkpoint.Calls) != 1 || checkpoint.Calls[0].FinishedAt != nil || checkpoint.Calls[0].Complete {
 		t.Fatalf("unfinished call lacks a durable partial marker: %+v found=%t err=%v", checkpoint, found, err)
 	}
 	call.Tokens = usage.Tokens{Input: 1}
 	call.UsageCoverage = usage.Coverage{Scope: "invocation"}
 	call.Complete = true
-	if err := tracked.usageCheckpoint.afterCall(call); err != nil {
+	if err := tracked.usageCheckpoint.afterCall(1, call); err != nil {
 		t.Fatal(err)
 	}
 	checkpoint, found, err = store.Load(tracked.attemptID)
-	if err != nil || !found || checkpoint.CodexCalls != 1 || !checkpoint.UsageComplete || checkpoint.UsageCoverage.PartialReport || checkpoint.Tokens.Input != 1 {
+	if err != nil || !found || checkpoint.CodexCalls != 1 || !checkpoint.UsageComplete || checkpoint.UsageCoverage.PartialReport || checkpoint.Tokens.Input != 1 ||
+		len(checkpoint.Calls) != 1 || checkpoint.Calls[0].FinishedAt == nil || checkpoint.Calls[0].Tokens.Input != 1 {
 		t.Fatalf("completed call retained a provisional partial marker: %+v found=%t err=%v", checkpoint, found, err)
 	}
 
+	saveCalled := false
 	failedSave := usageCheckpoint{
-		record: usage.Record{UsageComplete: true, UsageCoverage: usage.Coverage{Scope: "attempt"}},
-		save:   func() error { return errors.New("save failed") },
+		record: usage.Record{RepositoryID: 1, RequesterID: 7, Provider: "codex", UsageComplete: true, UsageCoverage: usage.Coverage{Scope: "attempt"}},
+		save: func() error {
+			saveCalled = true
+			return errors.New("save failed")
+		},
 	}
-	if err := failedSave.beforeCall(call); err == nil || failedSave.record.CodexCalls != 0 || !failedSave.record.UsageComplete || failedSave.record.UsageCoverage.PartialReport {
+	if err := failedSave.beforeCall(1, callMetadata(call)); err == nil || !saveCalled || failedSave.record.CodexCalls != 0 ||
+		!failedSave.record.UsageComplete || failedSave.record.UsageCoverage.PartialReport || len(failedSave.record.Calls) != 0 {
 		t.Fatalf("failed start save changed in-memory usage state: %+v err=%v", failedSave.record, err)
+	}
+}
+
+func TestUsageCheckpointKeepsReturnedReceiptAfterSaveError(t *testing.T) {
+	store := &usage.Store{Dir: t.TempDir()}
+	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex"})
+	if _, err := tracked.trackUsage(usageJob()); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := tracked.usageCheckpoint
+	checkpoint.record.ExecutorID, checkpoint.record.SourceRef = "local", strings.Repeat("a", 40)
+	call := CallUsage{Provider: "codex", Role: roleMain, Round: 1, Model: "model-a"}
+	if err := checkpoint.beforeCall(1, call); err != nil {
+		t.Fatal(err)
+	}
+	call.Tokens, call.UsageCoverage, call.Complete = usage.Tokens{Input: 11, Output: 2}, usage.Coverage{Scope: "invocation"}, true
+	persist := checkpoint.save
+	saveErr := errors.New("post-replacement sync failed")
+	checkpoint.save = func() error {
+		if err := persist(); err != nil {
+			return err
+		}
+		return saveErr
+	}
+	if err := checkpoint.afterCall(1, call); !errors.Is(err, saveErr) || !errors.Is(err, monitor.ErrTerminalJob) {
+		t.Fatalf("returned receipt save error lost: %v", err)
+	}
+	checkpoint.save = func() error { t.Fatal("replay tried to save a duplicate receipt"); return nil }
+	if err := checkpoint.afterCall(1, call); err != nil {
+		t.Fatalf("identical replay was rejected: %v", err)
+	}
+	stored, found, err := store.Load(tracked.attemptID)
+	if err != nil || !found || len(stored.Calls) != 1 || stored.Calls[0].FinishedAt == nil ||
+		stored.CodexCalls != 1 || stored.Tokens != call.Tokens || !stored.UsageComplete ||
+		checkpoint.record.Tokens != stored.Tokens {
+		t.Fatalf("returned receipt was duplicated or lost: stored=%+v memory=%+v found=%t error=%v", stored, checkpoint.record, found, err)
 	}
 }
 
@@ -394,6 +451,18 @@ func TestUsageAccumulatesCriticRevisions(t *testing.T) {
 	if got.CodexCalls != 3 || got.ClaudeCalls != 2 || got.Status != "succeeded" || !got.UsageComplete || got.Tokens != (usage.Tokens{Input: 230, Output: 46}) {
 		t.Fatalf("revision usage not accumulated: %+v", got)
 	}
+	if len(got.Calls) != len(result.Calls) || got.RepositoryID != 1 || got.RequesterID != 7 {
+		t.Fatalf("revision call identities missing: %+v", got)
+	}
+	for i, call := range result.Calls {
+		stored := got.Calls[i]
+		if stored.Ordinal != i+1 || stored.StartedAt.IsZero() || stored.FinishedAt == nil ||
+			stored.Provider != call.Provider || stored.Model != "default" || stored.Effort != call.Effort ||
+			stored.Role != call.Role || stored.Round != call.Round || stored.ReviewPhase != call.ReviewPhase ||
+			stored.Tokens != call.Tokens || stored.UsageCoverage != call.UsageCoverage || stored.Complete != call.Complete {
+			t.Fatalf("call %d differs from checkpointed result: stored=%+v result=%+v", i+1, stored, call)
+		}
+	}
 }
 
 func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
@@ -439,6 +508,12 @@ func TestUsagePersistenceFailureStopsModelsOrPublication(t *testing.T) {
 				}
 				return aicli.Result{Answer: "completed paid work", Tokens: usage.Tokens{Input: 10, Output: 2}, UsageCoverage: usage.Coverage{Scope: scope}, UsageComplete: tt.modelErr == nil}, tt.modelErr
 			}}})
+			if tt.critic {
+				tracked.Adversarial = "claude"
+				if tt.provider == "claude" {
+					tracked.Adversarial = "codex"
+				}
+			}
 			finish, err := tracked.trackUsage(usageJob())
 			if err != nil {
 				t.Fatal(err)

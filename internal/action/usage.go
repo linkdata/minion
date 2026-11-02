@@ -11,42 +11,44 @@ import (
 )
 
 type usageCheckpoint struct {
-	record           usage.Record
-	previousComplete bool
-	previousPartial  bool
-	save             func() error
-	logf             func(string, ...any)
+	record usage.Record
+	save   func() error
+	logf   func(string, ...any)
 }
 
-func (c *usageCheckpoint) beforeCall(call CallUsage) error {
-	calls := &c.record.CodexCalls
-	if call.Provider == "claude" {
-		calls = &c.record.ClaudeCalls
+func usageCall(ordinal int, call CallUsage) usage.Call {
+	return usage.Call{Ordinal: ordinal, Provider: call.Provider, Model: cmp.Or(call.Model, "default"), Effort: call.Effort,
+		Role: call.Role, Round: call.Round, ReviewPhase: call.ReviewPhase, Tokens: call.Tokens,
+		UsageCoverage: call.UsageCoverage, Complete: call.Complete}
+}
+
+func (c *usageCheckpoint) beforeCall(ordinal int, call CallUsage) error {
+	entry := usageCall(ordinal, call)
+	entry.StartedAt = time.Now().UTC()
+	previous := c.record
+	added, err := c.record.BeginCall(entry)
+	if err != nil || !added {
+		return err
 	}
-	c.previousComplete = c.record.UsageComplete
-	c.previousPartial = c.record.UsageCoverage.PartialReport
-	*calls++
-	c.record.UsageComplete = false
-	c.record.UsageCoverage.PartialReport = true
 	if err := c.save(); err != nil {
-		*calls--
-		c.record.UsageComplete = c.previousComplete
-		c.record.UsageCoverage.PartialReport = c.previousPartial
+		c.record = previous
 		return err
 	}
 	return nil
 }
 
-func (c *usageCheckpoint) afterCall(call CallUsage) error {
-	tokens, valid := c.record.Tokens.AddChecked(call.Tokens)
-	c.record.Tokens = tokens
-	c.record.UsageCoverage.PartialReport = c.previousPartial
-	c.record.UsageCoverage = c.record.UsageCoverage.AddGaps(call.UsageCoverage)
-	if !call.Complete || !valid {
-		c.record.UsageCoverage.PartialReport = true
+func (c *usageCheckpoint) afterCall(ordinal int, call CallUsage) error {
+	entry := usageCall(ordinal, call)
+	finished := time.Now().UTC()
+	entry.FinishedAt = &finished
+	_, valid := c.record.Tokens.AddChecked(call.Tokens)
+	added, err := c.record.FinishCall(entry)
+	if err != nil {
+		return fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 	}
-	c.record.UsageComplete = c.previousComplete && call.Complete && valid
-	c.record.UsageSource = executorClaimOrigin
+	if !added {
+		return nil
+	}
 	if !valid {
 		c.logf("action usage counters invalid or overflowed; retaining previous reported totals for attempt %s", c.record.ID)
 	}
@@ -73,7 +75,8 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	}
 	checkpoint := &usageCheckpoint{logf: e.logf, record: usage.Record{
 		ID: e.attemptID, JobID: job.ID, Repo: job.Repository.Name,
-		User: job.Source.Author.Login, Action: cmp.Or(job.Command.Name, string(job.Command.Action)), Number: job.Number,
+		RepositoryID: job.Repository.ID, User: job.Source.Author.Login, RequesterID: job.Source.Author.ID,
+		Action: cmp.Or(job.Command.Name, string(job.Command.Action)), Number: job.Number,
 		SourceURL: sourceURL(job), Provider: e.mainProvider(), CriticProvider: e.Adversarial,
 		StartedAt: startedAt, Status: "running", UsageCoverage: usage.Coverage{Scope: "attempt"}, UsageComplete: true,
 	}}
