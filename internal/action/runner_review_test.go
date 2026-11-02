@@ -134,6 +134,9 @@ func TestRunnerReviewRevisionsFreezeCleanIndependentInputs(t *testing.T) {
 		if request.reviewPhase == "verification" {
 			revisionReview = request.dir
 			checkRefutations(t, request, []Refutation{{Round: 2, Text: "PRIVATE REFUTATION 2"}})
+			if !strings.Contains(request.prompt, reviewHistoryDirPrefix+job.Identity.AttemptID+"+") {
+				t.Fatal("review history path lacks attempt identity")
+			}
 			if revisionReview != firstReview || !strings.Contains(request.prompt, "Implement the missing edge case.") {
 				t.Fatal("verification changed paths or lacks its private evidence")
 			}
@@ -214,6 +217,9 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 						}
 					}
 					source, reports = request.dir, request.outputDir
+					if !strings.HasPrefix(filepath.Base(reports), auditReportsDirPrefix+job.Identity.AttemptID+"+") {
+						t.Fatalf("audit reports lack attempt identity: %q", reports)
+					}
 					for _, file := range auditArtifactsFixture(job, source, "approved report") {
 						if file.Path == "run-metadata.json" {
 							rawMetadata = file.Data
@@ -229,7 +235,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 				criticCalls++
 				var frozenReports string
 				for _, dir := range request.readOnlyDirs {
-					if strings.HasPrefix(filepath.Base(dir), ".minion-review-reports-") {
+					if strings.HasPrefix(filepath.Base(dir), reviewReportsDirPrefix+job.Identity.AttemptID+"+") {
 						frozenReports = dir
 					}
 				}

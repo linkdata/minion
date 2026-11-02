@@ -424,7 +424,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	}
 	outputDir := ""
 	if job.Action == command.SecurityAudit {
-		outputDir, err = os.MkdirTemp(workRoot, ".minion-reports-")
+		outputDir, err = os.MkdirTemp(workRoot, auditReportsDirPrefix+job.Identity.AttemptID+"+")
 		if err != nil {
 			return result, preparationFailure("create report workspace", err)
 		}
@@ -490,7 +490,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if len(request.refutations) != 0 {
 			if historyDir == "" {
 				var err error
-				historyDir, err = os.MkdirTemp(workRoot, ".minion-review-history-")
+				historyDir, err = os.MkdirTemp(workRoot, reviewHistoryDirPrefix+job.Identity.AttemptID+"+")
 				if err != nil {
 					return aicli.Result{}, fmt.Errorf("%w: prepare review history: %w", monitor.ErrTerminalJob, err)
 				}
@@ -709,7 +709,7 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 			}
 		}
-		validationDir, err := os.MkdirTemp(workRoot, ".minion-audit-validation-")
+		validationDir, err := os.MkdirTemp(workRoot, auditValidationTempPattern(job.Identity.AttemptID))
 		if err != nil {
 			return result, fmt.Errorf("%w: create audit validation directory: %w", monitor.ErrTerminalJob, err)
 		}

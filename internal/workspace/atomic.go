@@ -10,7 +10,7 @@ import (
 // WriteAtomic replaces a private record, then syncs its directory and extra ancestors except on Windows.
 // The caller validates paths and serializes updates; sync failure can follow replacement.
 func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error) {
-	file, err := os.CreateTemp(filepath.Dir(path), ".record-*")
+	file, err := os.CreateTemp(filepath.Dir(path), atomicTempPattern(path))
 	if err != nil {
 		return err
 	}
@@ -51,6 +51,15 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 	}
 	temporary = ""
 	return SyncDirectories(append([]string{filepath.Dir(path)}, extraDirs...)...)
+}
+
+func atomicTempPattern(path string) string {
+	name := filepath.Base(path)
+	// A valid long state filename may be too long after adding this prefix and suffix.
+	if len(name) > 120 {
+		return ".record-*"
+	}
+	return ".record+" + name + "+*"
 }
 
 // SyncDirectories persists directory entries on platforms that support it.

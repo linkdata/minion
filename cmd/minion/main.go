@@ -141,6 +141,17 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("close state: %v", err)
 		}
 	}()
+	if !*check {
+		defer func() {
+			if ctx.Err() != nil {
+				return
+			}
+			pruner := &action.Orchestrator{WorkRoot: cfg.WorkRoot, Logger: logger}
+			if err := pruner.PrunePrivateRecords(ctx, store, now().UTC()); err != nil {
+				logger.Printf("private record retention: %s", monitor.InertLogText(err.Error()))
+			}
+		}()
+	}
 	var client *github.Client
 	var user github.User
 	authenticateGitHub := func() bool {

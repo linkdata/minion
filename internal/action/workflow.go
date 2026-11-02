@@ -525,7 +525,7 @@ func (e *Orchestrator) retainAudit(ctx context.Context, p *preparedAction, files
 		e.logf("audit %s #%d at %s; reports: %s", p.job.Identity.Repository, p.job.Identity.Number, p.job.Source.Head, dir)
 		return nil
 	}
-	dir, err := os.MkdirTemp(root, fmt.Sprintf("incomplete-%s-%d-", strings.ReplaceAll(p.job.Identity.Repository, "/", "-"), p.job.Identity.Number))
+	dir, err := os.MkdirTemp(root, "incomplete-"+p.job.Identity.AttemptID+"+")
 	if err != nil {
 		return err
 	}

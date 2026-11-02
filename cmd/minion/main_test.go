@@ -155,6 +155,49 @@ func TestRunRejectsUnsafeWorkRootBeforeExecutionPreflight(t *testing.T) {
 	}
 }
 
+func TestPreflightFailurePrunesExpiredPrivateRecords(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	workRoot := t.TempDir()
+	diagnostic := filepath.Join(workRoot, "worker-diagnostics", "old-attempt.json")
+	if err := os.MkdirAll(filepath.Dir(diagnostic), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(diagnostic, []byte("expired private diagnostic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(statePath, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.TerminalDecisions["old-job"] = state.TerminalDecision{
+		AttemptID: "old-attempt", Outcome: "failed", DecidedAt: now.Add(-31 * 24 * time.Hour),
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		BotLogin: "fixture", StatePath: statePath, WorkRoot: workRoot,
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheckAt(func(context.Context, string) error {
+			return errors.New("fixture Git failure")
+		}, func() time.Time { return now })
+	})
+	if code != 1 || !strings.Contains(output, "Git preflight: fixture Git failure") {
+		t.Fatalf("failed preflight: code=%d log=%q", code, output)
+	}
+	if _, err := os.Stat(diagnostic); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired private diagnostic survived failed preflight: %v", err)
+	}
+}
+
 func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 	for _, mode := range []struct {
 		name          string
