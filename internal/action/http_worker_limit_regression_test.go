@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -109,6 +110,92 @@ func captureWorkerLimitOutcome(t *testing.T, cause, runErr error, hard, idle tim
 		t.Fatal("Outcome acknowledgement was not accepted")
 	}
 	return received, checkpoints.transport.outcomeDegraded, err
+}
+
+type delayedOutcomeControl struct {
+	context.Context
+	delay time.Duration
+	once  sync.Once
+}
+
+func (c *delayedOutcomeControl) Err() error {
+	c.once.Do(func() { time.Sleep(c.delay) })
+	return c.Context.Err()
+}
+
+func TestOutcomeReturnsLimitSelectedAfterUploadPrecheck(t *testing.T) {
+	watchErr := errors.Join(context.DeadlineExceeded, errors.New("watch admission failed"))
+	for _, test := range []struct {
+		name          string
+		hard, idle    time.Duration
+		ownRuntimeCap bool
+		oversized     bool
+		runErr, cause error
+		want          error
+		wantIdle      bool
+		wantCap       bool
+	}{
+		{name: "runtime cap", hard: time.Second, idle: 10 * time.Second, ownRuntimeCap: true, want: errExecutorRuntimeCap, wantCap: true},
+		{name: "runtime cap fallback", hard: time.Second, idle: 10 * time.Second, ownRuntimeCap: true, oversized: true, want: errExecutorRuntimeCap, wantCap: true},
+		{name: "inactivity", hard: 10 * time.Second, idle: time.Second, ownRuntimeCap: true, want: errExecutorInactivity, wantIdle: true},
+		{name: "caller deadline", hard: time.Second, idle: 10 * time.Second, want: context.DeadlineExceeded},
+		{name: "early action deadline", hard: time.Second, idle: 10 * time.Second,
+			runErr: context.DeadlineExceeded, cause: context.DeadlineExceeded, want: context.DeadlineExceeded},
+		{name: "watch admission deadline", hard: time.Second, idle: 10 * time.Second,
+			runErr: watchErr, cause: watchErr, want: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				binding := httpJobBinding(job)
+				result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+				if test.oversized {
+					result.Answer = strings.Repeat("x", maxOutputBytes+1)
+				}
+				started := time.Now()
+				inactivity := &inactivityTimer{last: started, timeout: test.idle}
+				hard := started.Add(test.hard)
+				if got := selectWorkerLimit(test.cause, time.Now(), hard, inactivity.deadline(), test.ownRuntimeCap); got != workerLimitNone {
+					t.Fatalf("upload precheck selected limit early: %v", got)
+				}
+				var received httpOutcome
+				client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					if r.URL.Path != "/outcome" {
+						t.Fatalf("unexpected request: %s", r.URL.Path)
+					}
+					if err := httpDecode(r.Body, httpOutcomeBytes, &received); err != nil {
+						t.Fatal(err)
+					}
+					data, err := httpEncode(httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: received.Sequence}, httpControlBytes)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(data))}, nil
+				})}
+				checkpoints := &httpClientCheckpoints{
+					transport:  &httpExecutionClient{client: client, base: &url.URL{Scheme: "http", Host: "worker.test"}},
+					control:    &delayedOutcomeControl{Context: t.Context(), delay: 2 * time.Second},
+					inactivity: inactivity, hardDeadline: hard, ownRuntimeCap: test.ownRuntimeCap, binding: binding,
+				}
+				outcomeErr, runErr := checkpoints.outcomeWithCauseAndRunError(result, test.runErr, test.cause)
+				if errors.Is(outcomeErr, monitor.ErrExecutionOutcomeUnknown) != test.oversized ||
+					(!test.oversized && outcomeErr != nil) ||
+					(test.runErr != nil && !errors.Is(runErr, test.runErr)) ||
+					!errors.Is(runErr, test.want) || !errors.Is(runErr, monitor.ErrTerminalJob) ||
+					errors.Is(runErr, errExecutorInactivity) != test.wantIdle ||
+					errors.Is(runErr, errExecutorRuntimeCap) != test.wantCap {
+					t.Fatalf("outcome error=%v run error=%v, want %v", outcomeErr, runErr, test.want)
+				}
+				if received.Failure == nil || !received.Failure.Terminal || received.Failure.Inactivity != test.wantIdle ||
+					received.Failure.RuntimeCap != test.wantCap || received.Failure.Deadline == test.wantIdle ||
+					!checkpoints.transport.outcomeAcknowledged ||
+					checkpoints.transport.outcomeDegraded != test.oversized || received.Result.Answer != "" {
+					t.Fatalf("wire failure=%+v acknowledged=%t, run error=%v", received.Failure, checkpoints.transport.outcomeAcknowledged, runErr)
+				}
+			})
+		})
+	}
 }
 
 func TestBeforeCallChecksAbsoluteLimitsAroundACK(t *testing.T) {

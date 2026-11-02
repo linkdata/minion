@@ -216,7 +216,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
-		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
+		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, err, context.Cause(actionCtx))
+		return redactActionError(errors.Join(selectedRunErr, outcomeErr), assignedSecrets...)
 	}
 	jobRunner.executionProgress = inactivity.progress
 	jobRunner.postCallContext = controlCtx
@@ -268,7 +269,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		}
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		return redactActionError(errors.Join(err, checkpoints.outcomeWithCause(result, err, err)), assignedSecrets...)
+		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, err, err)
+		return redactActionError(errors.Join(selectedRunErr, outcomeErr), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
 	go func() {
@@ -353,10 +355,11 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			cause = errors.Join(cause, monitor.ErrTerminalJob)
 		}
 		runErr = redactActionError(errors.Join(runErr, cause), assignedSecrets...)
-		err := checkpoints.outcomeWithCause(result, runErr, stopCause)
+		outcomeErr, selectedRunErr := checkpoints.outcomeWithCauseAndRunError(result, runErr, stopCause)
+		runErr = selectedRunErr
 		cancelStatus() // Keep heartbeats available throughout the final Result upload.
 		cancelEvents() // Optional logs cannot hold the worker after the required outcome.
-		return err
+		return outcomeErr
 	}, func() {
 		if !<-eventsDone {
 			statusFeed.markIncomplete()
@@ -734,31 +737,38 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 	return c.outcomeWithCause(result, runErr, cause)
 }
 
-func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) *httpFailure {
+func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) (*httpFailure, error) {
 	limit := workerLimitNone
 	if c.inactivity != nil {
 		limit = selectWorkerLimit(cause, time.Now(), c.hardDeadline, c.inactivity.deadline(), c.ownRuntimeCap)
 	}
 	if limit == workerLimitNone {
-		return newHTTPFailure(runErr)
+		return newHTTPFailure(runErr), nil
 	}
-	failure := newHTTPFailure(errors.Join(runErr, limit.err()))
+	limitErr := limit.err()
+	failure := newHTTPFailure(errors.Join(runErr, limitErr))
 	failure.Terminal = true
 	failure.Canceled = false // A selected limit outranks the model's later ctx.Err().
 	failure.Inactivity = limit == workerLimitInactivity
 	failure.RuntimeCap = limit == workerLimitRuntimeCap
 	failure.Deadline = limit != workerLimitInactivity
 	failure.ObservedMessage = failure.Message
-	failure.Message = httpFailureDiagnostic(limit.err().Error())
-	return failure
+	failure.Message = httpFailureDiagnostic(limitErr.Error())
+	return failure, limitErr
 }
 
 func (c *httpClientCheckpoints) outcomeWithCause(result Result, runErr, cause error) error {
+	err, _ := c.outcomeWithCauseAndRunError(result, runErr, cause)
+	return err
+}
+
+func (c *httpClientCheckpoints) outcomeWithCauseAndRunError(result Result, runErr, cause error) (error, error) {
 	if err := c.control.Err(); err != nil {
-		return httpClientUnknown("outcome", err)
+		return httpClientUnknown("outcome", err), runErr
 	}
 	sequence := c.sequence + 1
-	outcome := httpOutcome{Sequence: sequence, Result: result, Failure: c.outcomeFailure(runErr, cause)}
+	failure, selectedLimit := c.outcomeFailure(runErr, cause)
+	outcome := httpOutcome{Sequence: sequence, Result: result, Failure: failure}
 	shapeErr := httpResultShape(result)
 	matchingBinding := (httpBinding{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef}) == c.binding
 	if !matchingBinding {
@@ -797,14 +807,17 @@ func (c *httpClientCheckpoints) outcomeWithCause(result Result, runErr, cause er
 		}
 		outcome.Result = fallback
 		omitted = httpClientUnknown("outcome", fmt.Errorf("primary HTTP outcome omitted: %w", err))
-		outcome.Failure = c.outcomeFailure(errors.Join(runErr, omitted), cause)
+		outcome.Failure, selectedLimit = c.outcomeFailure(errors.Join(runErr, omitted), cause)
 		data, err = httpEncode(outcome, httpOutcomeBytes)
 		if err != nil {
-			return httpClientUnknown("outcome", err)
+			return httpClientUnknown("outcome", err), runErr
 		}
 	}
 	if outcome.Failure != nil && outcome.Failure.OutcomeUnknown && !errors.Is(runErr, monitor.ErrExecutionOutcomeUnknown) {
 		omitted = errors.Join(omitted, monitor.ErrExecutionOutcomeUnknown)
 	}
-	return errors.Join(omitted, c.acknowledge(c.control, "outcome", data, sequence))
+	if selectedLimit != nil {
+		runErr = errors.Join(runErr, selectedLimit)
+	}
+	return errors.Join(omitted, c.acknowledge(c.control, "outcome", data, sequence)), runErr
 }

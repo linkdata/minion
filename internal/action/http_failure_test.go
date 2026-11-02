@@ -183,16 +183,24 @@ func TestHTTPFailureBoundsDiagnosticsWithoutChangingOrdinaryFailurePolicy(t *tes
 
 func TestHTTPFailureEscapedMaximumFitsControlBody(t *testing.T) {
 	failure := &httpFailure{
-		Message:  strings.Repeat("\x01", httpFailureMessageLimit),
-		Terminal: true, Canceled: true, Deadline: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
+		Message:         strings.Repeat("\x01", httpFailureMessageLimit),
+		ObservedMessage: strings.Repeat("\x01", httpFailureMessageLimit),
+		Terminal:        true, Canceled: true, Deadline: true, RuntimeCap: true, Unsafe: true, OutcomeUnknown: true,
 		RequestTransport: true, MissingExecutable: true, NoSpace: true, QuotaExceeded: true, OutputLimit: true,
 	}
 	if err := failure.validate(); err != nil {
 		t.Fatal(err)
 	}
-	encoded, err := json.Marshal(failure)
-	if err != nil || len(encoded)+1 > 128<<10 {
-		t.Fatalf("finite failure exceeds shared control cap including newline: bytes=%d error=%v", len(encoded)+1, err)
+	encoded, err := httpEncode(failure, httpControlBytes)
+	if err != nil {
+		t.Fatalf("finite failure exceeds shared control cap: %v", err)
+	}
+	var decoded httpFailure
+	if err := httpDecodeBytes(encoded, httpControlBytes, &decoded); err != nil {
+		t.Fatalf("finite failure failed control round trip: %v", err)
+	}
+	if decoded != *failure {
+		t.Fatal("finite failure changed across control round trip")
 	}
 }
 
