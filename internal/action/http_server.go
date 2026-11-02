@@ -926,11 +926,6 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 				tx.requiredACKs.Wait()
 			}
 			if failedOutcome && selected {
-				tx.mu.Lock()
-				if tx.checkpointErr != nil {
-					tx.quarantine = true
-				}
-				tx.mu.Unlock()
 				validator, ok := tx.sink.(interface{ validateFailedResult(Result) error })
 				if !ok {
 					terminalResult = fmt.Errorf("%w: selected HTTP failed-outcome validator is missing", monitor.ErrAcceptanceState)
@@ -972,6 +967,9 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			}
 			tx.mu.Lock()
 			tx.result, tx.runErr = outcome.Result, errors.Join(outcome.Failure.workerErr(), terminalResult)
+			if failedOutcome && selected && tx.checkpointErr != nil {
+				tx.quarantine = true
+			}
 			if terminalResult == nil {
 				tx.runErr = errors.Join(tx.runErr, tx.checkpointErr)
 			} else {

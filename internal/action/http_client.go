@@ -248,7 +248,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			_ = watchResponse.Body.Close()
 		}
 		err = headerErr
-		if errors.Is(err, errExecutorInactivity) || !time.Now().Before(expires) {
+		if inactivityFirst || headerDeadline.Equal(expires) {
 			err = errors.Join(monitor.ErrTerminalJob, err)
 		} else {
 			err = errors.Join(monitor.ErrRequestTransport, err)
@@ -259,10 +259,14 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		stopWatch(errHTTPWatchStopped)
 		startStop()
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
-		err = admissionFailure(err, actionCtx, inactivity)
+		if watchAdmissionTimedOut {
+			inactivity.stop() // The selected watch deadline wins later timer callbacks.
+		} else {
+			err = admissionFailure(err, actionCtx, inactivity)
+		}
 		err = redactActionError(err, assignedSecrets...)
 		clearCredentials()
-		return redactActionError(errors.Join(err, checkpoints.outcome(result, err)), assignedSecrets...)
+		return redactActionError(errors.Join(err, checkpoints.outcomeWithCause(result, err, err)), assignedSecrets...)
 	}
 	watchDone := make(chan error, 1)
 	go func() {
@@ -662,11 +666,31 @@ func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) *httpFailure
 	failure.Inactivity = limit == workerLimitInactivity
 	failure.RuntimeCap = limit == workerLimitRuntimeCap
 	failure.Deadline = limit == workerLimitRuntimeCap
-	failure.Message = httpFailureDiagnostic(limit.err().Error())
-	if failure.OutcomeUnknown {
-		failure.Message = httpFailureDiagnostic(failure.Message + "; outcome incomplete")
-	}
+	failure.Message = selectedLimitDiagnostic(limit, failure.Message)
 	return failure
+}
+
+// Format only the already redacted, bounded diagnostic; never unwrap a
+// redactedActionError and expose its original error text.
+func selectedLimitDiagnostic(limit workerLimit, prior string) string {
+	selected := errExecutorRuntimeCap.Error()
+	if limit == workerLimitInactivity {
+		selected = errExecutorInactivity.Error()
+	}
+	parts := []string{selected}
+	for _, line := range strings.Split(prior, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == monitor.ErrTerminalJob.Error() || line == context.DeadlineExceeded.Error() {
+			continue
+		}
+		line = strings.ReplaceAll(line, errExecutorInactivity.Error(), "")
+		line = strings.ReplaceAll(line, errExecutorRuntimeCap.Error(), "")
+		line = strings.Trim(line, ":; ")
+		if line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return httpFailureDiagnostic(strings.Join(parts, "; "))
 }
 
 func (c *httpClientCheckpoints) outcomeWithCause(result Result, runErr, cause error) error {
