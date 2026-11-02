@@ -242,6 +242,78 @@ func TestRunHTTPExpiredAssignmentSkipsWatchAndModel(t *testing.T) {
 	})
 }
 
+func TestRunHTTPExpiredAfterPullKeepsEarlierCallerCause(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		cause error
+	}{
+		{name: "canceled", cause: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				job.RuntimeBudget = 10 * time.Second
+				job.InactivityTimeout = 5 * time.Second
+				binding := httpJobBinding(job)
+				pullClosed := make(chan struct{})
+				parent, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				// Deadline is queried after assignment validation; hold that seam past both limits.
+				ctx := &delayedHTTPDeadlineContext{Context: parent, ready: pullClosed, delay: 12 * time.Second}
+				go func() {
+					<-pullClosed
+					time.Sleep(time.Second)
+					cancel(test.cause)
+				}()
+				var outcome httpOutcome
+				var watchCalls, modelCalls int
+				respond := func(value any) (*http.Response, error) {
+					data, err := httpEncode(value, httpJobBytes)
+					if err != nil {
+						return nil, err
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(data))}, nil
+				}
+				client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					switch r.URL.Path {
+					case "/next":
+						response, err := respond(httpAssignment{Job: job, StopGrace: httpControlTimeout})
+						if err == nil {
+							response.Body = &httpPullCloseSignal{ReadCloser: response.Body, ready: pullClosed}
+						}
+						return response, err
+					case "/cancel":
+						watchCalls++
+						return nil, errors.New("expired assignment opened cancellation watch")
+					case "/outcome":
+						if err := httpDecode(r.Body, httpOutcomeBytes, &outcome); err != nil {
+							return nil, err
+						}
+						return respond(httpAcknowledgement{httpBinding: binding, Kind: "outcome", Sequence: outcome.Sequence})
+					default:
+						return nil, errors.New("unexpected worker request")
+					}
+				})}
+				runner := &Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+					modelCalls++
+					return aicli.Result{}, errors.New("expired assignment started model")
+				}}
+				err := RunHTTP(ctx, client, "http://worker.test", job.Identity.ExecutorID, runner)
+				wantDeadline := test.cause == context.DeadlineExceeded
+				if watchCalls != 0 || modelCalls != 0 || !errors.Is(err, test.cause) ||
+					errors.Is(err, errExecutorInactivity) || errors.Is(err, errExecutorRuntimeCap) ||
+					errors.Is(err, monitor.ErrTerminalJob) != wantDeadline ||
+					outcome.Failure == nil || outcome.Failure.Canceled == wantDeadline ||
+					outcome.Failure.Deadline != wantDeadline || outcome.Failure.Terminal != wantDeadline ||
+					outcome.Failure.Inactivity || outcome.Failure.RuntimeCap || outcome.Failure.OutcomeUnknown {
+					t.Fatalf("earlier caller cause lost: error=%v outcome=%+v watch=%d model=%d", err, outcome, watchCalls, modelCalls)
+				}
+			})
+		})
+	}
+}
+
 func TestRunHTTPWatchAdmissionRespectsInactivity(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)

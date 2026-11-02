@@ -187,9 +187,15 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	}
 	checkpoints = &httpClientCheckpoints{transport: transport, control: controlCtx, binding: httpJobBinding(job)}
 	if !time.Now().Before(expires) {
-		err := errors.Join(monitor.ErrTerminalJob, deadlineCause)
-		if limit := selectWorkerLimit(nil, time.Now(), expires, started.Add(job.InactivityTimeout), ownRuntimeCap); limit != workerLimitNone {
+		cause := context.Cause(ctx)
+		err := cause
+		if limit := selectWorkerLimit(cause, time.Now(), expires, started.Add(job.InactivityTimeout), ownRuntimeCap); limit != workerLimitNone {
 			err = limit.err()
+		} else if err == nil {
+			err = errors.Join(monitor.ErrTerminalJob, deadlineCause)
+		}
+		if errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, monitor.ErrTerminalJob) {
+			err = errors.Join(monitor.ErrTerminalJob, err)
 		}
 		result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
 		clearCredentials()
@@ -748,7 +754,6 @@ func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) (*httpFailur
 	}
 	limitErr := limit.err()
 	failure := newHTTPFailure(errors.Join(runErr, limitErr))
-	failure.Terminal = true
 	failure.Canceled = false // A selected limit outranks the model's later ctx.Err().
 	failure.Inactivity = limit == workerLimitInactivity
 	failure.RuntimeCap = limit == workerLimitRuntimeCap
