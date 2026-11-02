@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/monitor"
 )
@@ -68,7 +69,6 @@ func TestSelectedFailedResultDiagnosticsAreDurableBeforeACK(t *testing.T) {
 	checked := make(chan error, 1)
 	statusEntered, release, synced, outcomeEntered := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
-	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	f, store, _ := selectedHTTPResultFixture(t, func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/outcome" {
@@ -78,6 +78,9 @@ func TestSelectedFailedResultDiagnosticsAreDurableBeforeACK(t *testing.T) {
 			next.ServeHTTP(w, r)
 		})
 	})
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
 	path = failedResultDiagnosticPath(f)
 	records, err := openAttemptRecordStore(f.tx.recordRoot, f.job.Identity, f.job.Source.Head)
 	if err != nil {
@@ -98,26 +101,73 @@ func TestSelectedFailedResultDiagnosticsAreDurableBeforeACK(t *testing.T) {
 	go func() {
 		statusDone <- f.request("/status", httpObservation{Status: status, Logs: []attemptRecord{httpTestRecord(f.job, 1, "earlier discussion")}})
 	}()
-	<-statusEntered
+	select {
+	case <-statusEntered:
+	case got := <-statusDone:
+		t.Fatalf("Status ended before its sync: %+v", got)
+	case <-deadline.C:
+		t.Fatal("Status did not enter its sync")
+	}
 	outcomeDone := make(chan httpServerTestExchange, 1)
 	go func() { outcomeDone <- f.request("/outcome", failedResultWithDiagnostic(f)) }()
-	<-outcomeEntered
+	select {
+	case <-outcomeEntered:
+	case got := <-outcomeDone:
+		t.Fatalf("failed Outcome ended before entering its handler: %+v", got)
+	case <-deadline.C:
+		t.Fatal("failed Outcome did not enter its handler")
+	}
+	admission := time.NewTicker(time.Millisecond)
+	defer admission.Stop()
+	for {
+		f.tx.mu.Lock()
+		sequence := f.tx.sequence
+		f.tx.mu.Unlock()
+		if sequence == 1 {
+			break
+		}
+		select {
+		case got := <-outcomeDone:
+			t.Fatalf("failed Outcome ended before mutation admission: %+v", got)
+		case <-admission.C:
+		case <-deadline.C:
+			t.Fatal("failed Outcome did not reach mutation admission")
+		}
+	}
 	select {
 	case got := <-outcomeDone:
 		t.Fatalf("failed Result ACK passed an unfinished Status sync: %+v", got)
 	default:
 	}
 	releaseOnce.Do(func() { close(release) })
-	if got := <-statusDone; got.err != nil || got.status != http.StatusOK || got.ack.LogSequence != 1 {
+	var statusReply httpServerTestExchange
+	select {
+	case statusReply = <-statusDone:
+	case <-deadline.C:
+		t.Fatal("Status ACK did not arrive after sync")
+	}
+	if got := statusReply; got.err != nil || got.status != http.StatusOK || got.ack.LogSequence != 1 {
 		t.Fatalf("Status sync acknowledgement: %+v", got)
 	}
 	if saved := httpTestRecords(t, f.tx.recordRoot, f.job); !bytes.Contains(saved, []byte("earlier discussion")) {
 		t.Fatalf("earlier Status was not saved: %q", saved)
 	}
-	if got := <-outcomeDone; got.err != nil || got.status != http.StatusOK || got.ack.Kind != "outcome" || got.ack.Sequence != 1 {
+	var outcomeReply httpServerTestExchange
+	select {
+	case outcomeReply = <-outcomeDone:
+	case <-deadline.C:
+		t.Fatal("failed Outcome ACK did not arrive after Status sync")
+	}
+	if got := outcomeReply; got.err != nil || got.status != http.StatusOK || got.ack.Kind != "outcome" || got.ack.Sequence != 1 {
 		t.Fatalf("failed Outcome acknowledgement: %+v", got)
 	}
-	if err := <-checked; err != nil {
+	var checkedErr error
+	select {
+	case checkedErr = <-checked:
+	case <-deadline.C:
+		t.Fatal("failed Outcome ACK was not inspected")
+	}
+	if err := checkedErr; err != nil {
 		t.Fatal(err)
 	}
 	if got := f.result(t); got.err == nil {
