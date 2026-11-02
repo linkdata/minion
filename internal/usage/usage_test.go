@@ -186,17 +186,35 @@ func TestStoreAtomicUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
+	firstSaved := make(chan error, 1)
+	readerProgress := make(chan struct{})
 	go func() {
 		for i := 1; i <= 30; i++ {
 			record.CodexCalls = i
 			record.Tokens = Tokens{Input: int64(i), CachedInput: int64(i / 2), Output: int64(i * 2)}
 			record.UsageSource = "executor_reported"
-			if err := store.Save(record); err != nil {
+			err := store.Save(record)
+			if i == 1 {
+				firstSaved <- err
+				if err == nil {
+					<-readerProgress // Keep the writer active until a query has read a saved version.
+				}
+			}
+			if err != nil {
 				done <- err
 				return
 			}
 		}
 		done <- nil
+	}()
+	if err := <-firstSaved; err != nil {
+		t.Fatal(err)
+	}
+	progressed := false
+	defer func() {
+		if !progressed {
+			close(readerProgress)
+		}
 	}()
 	for {
 		records, err := ReadAll(dir)
@@ -210,6 +228,10 @@ func TestStoreAtomicUpdates(t *testing.T) {
 		if err != nil || len(query.Attempts) != 1 || query.Totals.Tokens != query.Attempts[0].Record.Tokens ||
 			query.Attempts[0].Usage.Tokens != query.Attempts[0].Record.Tokens {
 			t.Fatalf("query totals and details disagree: %+v, error=%v", query, err)
+		}
+		if !progressed {
+			close(readerProgress)
+			progressed = true
 		}
 		select {
 		case err := <-done:
@@ -753,6 +775,10 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 			group.UnallocatedTokens != expected.unallocated || group.CodexCalls != expected.codex || group.ClaudeCalls != expected.claude {
 			t.Fatalf("service group %q: %+v", group.Service, group)
 		}
+		delete(want, group.Service)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing service groups: %+v", want)
 	}
 	selected, err := store.Query(Filter{Service: "claude", RequesterID: 7}, nil, true)
 	if err != nil || selected.Totals.Attempts != 1 || selected.Totals.TotalTokens != 35 || selected.Totals.CodexCalls != 0 ||
@@ -785,8 +811,8 @@ func TestQueryRequesterAndUTCBoundaries(t *testing.T) {
 	second := testRecord()
 	second.ID, second.JobID, second.RequesterID = strings.Repeat("c", 32), "second", 2
 	second.StartedAt = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
-	finish = second.StartedAt.Add(time.Minute)
-	second.FinishedAt = &finish
+	secondFinish := second.StartedAt.Add(time.Minute)
+	second.FinishedAt = &secondFinish
 	for _, record := range []Record{first, second} {
 		if err := store.Save(record); err != nil {
 			t.Fatal(err)

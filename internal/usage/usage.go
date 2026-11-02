@@ -544,9 +544,13 @@ func (s Store) Query(filter Filter, groupBy []string, details bool) (QueryResult
 		result.Totals = totals[0]
 	}
 	if !details || len(groupBy) != 0 {
-		result.Groups, err = Summarize(records, filter, groupBy)
-		if err != nil {
-			return QueryResult{}, err
+		if len(groupBy) == 0 {
+			result.Groups = totals
+		} else {
+			result.Groups, err = Summarize(records, filter, groupBy)
+			if err != nil {
+				return QueryResult{}, err
+			}
 		}
 	}
 	if details {
