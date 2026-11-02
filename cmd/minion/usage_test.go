@@ -111,6 +111,10 @@ func TestUsageServiceAndRequesterFiltersKeepOriginalDetail(t *testing.T) {
 		call.Tokens = usage.Tokens{Input: int64(10 * (i + 1)), Output: int64(i + 2)}
 		call.UsageCoverage = usage.Coverage{Scope: "invocation"}
 		call.Complete = true
+		if i == 1 {
+			call.UsageCoverage = usage.Coverage{Scope: "known_subset", MissingFinalReport: true, PartialReport: true}
+			call.Complete = false
+		}
 		if _, err := record.FinishCall(call); err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +144,8 @@ func TestUsageServiceAndRequesterFiltersKeepOriginalDetail(t *testing.T) {
 		t.Fatalf("filtered table lacks a row: %s", &table)
 	}
 	totalAt, usageAt := strings.Index(lines[0], "TOTAL"), strings.Index(lines[0], "USAGE")
-	if totalAt < 0 || usageAt <= totalAt || strings.TrimSpace(lines[1][totalAt:usageAt]) != "23" || !strings.Contains(lines[1], "22") {
+	if totalAt < 0 || usageAt <= totalAt || strings.TrimSpace(lines[1][totalAt:usageAt]) != "23" ||
+		!strings.Contains(lines[1], "22") || !strings.Contains(lines[1], "missing_final_report,partial_report") {
 		t.Fatalf("filtered table shows whole-attempt tokens: %s", &table)
 	}
 	if got := reportJSON(t, "-dir", dir, "-requester-id", "23"); got.Totals.Attempts != 0 {
@@ -196,6 +201,13 @@ func TestUsageDetailsAndTables(t *testing.T) {
 		} else if !strings.Contains(stdout.String(), "MONTH") || !strings.Contains(stdout.String(), "INCOMPLETE") {
 			t.Fatalf("missing summary columns: %s", &stdout)
 		}
+	}
+	var unknown, stderr bytes.Buffer
+	if code := runUsageWithOutput([]string{"-dir", dir, "-service", "unknown", "-group-by", "none"}, &unknown, &stderr); code != 0 {
+		t.Fatalf("legacy filtered table exit %d: %s", code, &stderr)
+	}
+	if !strings.Contains(unknown.String(), "missing_final_report,partial_report") {
+		t.Fatalf("legacy filtered table lost usage gaps: %s", &unknown)
 	}
 }
 

@@ -18,7 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. A service filter selects call usage; detail records retain the whole attempt and show the selected portion separately. Unknown service means usage without call attribution, including legacy records. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts."
+const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. With a service filter, JSON detail records retain the whole attempt and add selected_usage; table call and token columns show only the selected service. Unknown service means usage without call attribution, including legacy records. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts."
 
 type usageAttempt struct {
 	usage.Record
@@ -184,8 +184,17 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 				tokens, total = selected.Tokens, selected.TotalTokens
 				codexCalls, claudeCalls = selected.CodexCalls, selected.ClaudeCalls
 				complete = selected.IncompleteUsage == 0
-				gaps = "-"
-				if !complete {
+				coverage := attempt.UsageCoverage
+				if output.Filters.Service != "unknown" {
+					coverage = usage.Coverage{}
+					for _, call := range attempt.Calls {
+						if call.Provider == output.Filters.Service {
+							coverage = coverage.AddGaps(call.UsageCoverage)
+						}
+					}
+				}
+				gaps = usageGaps(coverage)
+				if !complete && gaps == "-" {
 					gaps = "selected_service_incomplete"
 				}
 			}
