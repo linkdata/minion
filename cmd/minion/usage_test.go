@@ -109,6 +109,22 @@ func TestUsageDetailsAndTables(t *testing.T) {
 				t.Errorf("%q output lacks %q: %s", grouping, text, &stdout)
 			}
 		}
+		lines := strings.SplitN(stdout.String(), "\n", 3)
+		if len(lines) < 2 {
+			t.Fatalf("%q output lacks table rows: %s", grouping, &stdout)
+		}
+		header, first := lines[0], lines[1]
+		inputAt, createAt, readAt, outputAt := strings.Index(header, "INPUT"), strings.Index(header, "CACHE CREATE"), strings.Index(header, "CACHE READ"), strings.Index(header, "OUTPUT")
+		if inputAt < 0 || createAt <= inputAt || readAt <= createAt || outputAt <= readAt || len(first) < outputAt {
+			t.Fatalf("%q cache headings are missing or out of order: %s", grouping, &stdout)
+		}
+		wantCreate, wantRead := "25", "50"
+		if grouping == "none" {
+			wantCreate, wantRead = "20", "40"
+		}
+		if gotCreate, gotRead := strings.TrimSpace(first[createAt:readAt]), strings.TrimSpace(first[readAt:outputAt]); gotCreate != wantCreate || gotRead != wantRead {
+			t.Fatalf("%q cache counts are in the wrong columns: creation=%q read=%q", grouping, gotCreate, gotRead)
+		}
 		if grouping == "none" {
 			for _, text := range []string{"succeeded", "failed", "running", "partial", "unknown", "complete", "stale after an interruption", "MAIN", "CRITIC", "claude", "codex", "missing_final_report"} {
 				if !strings.Contains(stdout.String(), text) {

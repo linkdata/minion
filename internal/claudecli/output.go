@@ -316,7 +316,6 @@ func (o *jsonlOutput) finish() {
 		MissingFinalReport:     !o.finalReportPresent,
 		MalformedFinalReport:   o.finalMalformedUsage,
 		UnverifiedHelpers:      o.pending != 0 || o.taskFailure != nil,
-		PartialReport:          !o.finalModelUsage && o.finalTopUsage,
 		CumulativeUnattributed: o.cumulativeUnattributed,
 	}
 	switch {
@@ -536,11 +535,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.ensureAssistantTotal()
 		cumulative := tokens
 		tokens = tokens.Sub(o.baseline)
-		var rawRoot eventUsage
-		root, rootValid := usage.Tokens{}, json.Unmarshal(e.Usage, &rawRoot) == nil
-		if rootValid {
-			root, rootValid = rawRoot.tokens()
-		}
+		root, rootValid := o.finalTopTokens, o.finalTopUsage
 		// An exact snapshot must cover the prior cumulative floor plus all
 		// attributable current counters before it can become the next baseline.
 		lower, valid := o.assistantLowerBound()

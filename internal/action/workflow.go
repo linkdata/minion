@@ -443,7 +443,14 @@ func (e *Orchestrator) logResult(job Job, result Result) {
 			}
 			capped := reason == "round_cap"
 			policyMet := reason == "approved" || reason == "nonblocking"
-			e.logf("action call job=%s attempt=%s executor=%s call_claim_origin=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t review_complete=%t policy_allows_full=%t no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q capped=%t critic_max_rounds=%d cap_has_blockers=%t model=%q effort=%q input_tokens=%d cached_input_tokens=%d output_tokens=%d complete=%t", id.JobID, id.AttemptID, id.ExecutorID, executorClaimOrigin, call.Provider, call.Role, call.Round, call.ReviewPhase, call.Approved, call.NoBlockers, call.HasBlockers, call.ReviewComplete, advance, policy.noBlockerRounds, policyMet, reason, capped, job.CriticMaxRounds, capped && cap != nil && cap.HasBlockers, call.Model, call.Effort, call.Tokens.Input, call.Tokens.CachedInput, call.Tokens.Output, call.Complete)
+			e.logf("action call job=%s attempt=%s executor=%s call_claim_origin=%s provider=%s role=%s round=%d review_phase=%s approved=%t no_blockers=%t has_blockers=%t review_complete=%t policy_allows_full=%t no_blocker_verdict_streak=%d policy_met=%t stop_reason=%q capped=%t critic_max_rounds=%d cap_has_blockers=%t model=%q effort=%q "+
+				"input_tokens=%d cache_creation_input_tokens=%d cached_input_tokens=%d output_tokens=%d usage_scope=%q missing_final_report=%t malformed_final_report=%t unverified_helpers=%t partial_report=%t cumulative_unattributed=%t complete=%t",
+				id.JobID, id.AttemptID, id.ExecutorID, executorClaimOrigin, call.Provider, call.Role, call.Round, call.ReviewPhase,
+				call.Approved, call.NoBlockers, call.HasBlockers, call.ReviewComplete, advance, policy.noBlockerRounds, policyMet, reason,
+				capped, job.CriticMaxRounds, capped && cap != nil && cap.HasBlockers, call.Model, call.Effort,
+				call.Tokens.Input, call.Tokens.CacheCreationInput, call.Tokens.CachedInput, call.Tokens.Output, call.UsageCoverage.Scope,
+				call.UsageCoverage.MissingFinalReport, call.UsageCoverage.MalformedFinalReport, call.UsageCoverage.UnverifiedHelpers,
+				call.UsageCoverage.PartialReport, call.UsageCoverage.CumulativeUnattributed, call.Complete)
 		}
 	}
 }
