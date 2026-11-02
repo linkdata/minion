@@ -96,7 +96,7 @@ func TestWriteAtomicTemporaryNameIdentifiesDestination(t *testing.T) {
 	if name := filepath.Base(file.Name()); !strings.HasPrefix(name, ".record+attempt.json+") {
 		t.Fatalf("interrupted atomic write has no destination identity: %q", name)
 	}
-	if pattern := atomicTempPattern(filepath.Join(t.TempDir(), strings.Repeat("a", 201))); pattern != ".record-*" {
+	if pattern := atomicTempPattern(filepath.Join(t.TempDir(), strings.Repeat("a", 135))); pattern != ".record-*" {
 		t.Fatalf("long destination overflowed temporary filename: %q", pattern)
 	}
 }

@@ -55,8 +55,8 @@ func WriteAtomic(path string, data []byte, extraDirs ...string) (resultErr error
 
 func atomicTempPattern(path string) string {
 	name := filepath.Base(path)
-	// Leave room for the prefix and random suffix under common filename limits.
-	if len(name) > 200 {
+	// A valid long state filename may be too long after adding this prefix and suffix.
+	if len(name) > 120 {
 		return ".record-*"
 	}
 	return ".record+" + name + "+*"

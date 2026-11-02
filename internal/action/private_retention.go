@@ -99,7 +99,8 @@ func prunePrivateFiles(ctx context.Context, root, name, suffix string, eligible 
 	var removeErr error
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return removed, errors.Join(removeErr, err)
+			removeErr = errors.Join(removeErr, err)
+			break
 		}
 		id := privateFileAttemptID(entry.Name(), suffix)
 		if !eligible[id] || !entry.Type().IsRegular() {
@@ -144,7 +145,8 @@ func prunePrivateDirectories(ctx context.Context, root, name string, eligible ma
 	var removeErr error
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return removed, errors.Join(removeErr, err)
+			removeErr = errors.Join(removeErr, err)
+			break
 		}
 		if !entry.IsDir() || !eligible[attemptID(entry.Name())] {
 			continue
