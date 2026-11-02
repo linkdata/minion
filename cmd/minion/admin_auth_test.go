@@ -78,27 +78,37 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	handler, jw, logs := testAdminHandler(t, []config.AdminAccount{account})
 	if response := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `name="password"`) || response.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("login page: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+		t.Fatalf("login page: status=%d noStore=%t hasPasswordField=%t", response.Code,
+			response.Header().Get("Cache-Control") == "no-store", strings.Contains(response.Body.String(), `name="password"`))
+	}
+	if response := adminResponse(handler, http.MethodHead, "/admin/login", nil, nil, ""); response.Code != http.StatusOK {
+		t.Fatalf("public HEAD login: status=%d, want 200", response.Code)
 	}
 	form := url.Values{"username": {"operator"}, "password": {"wrong-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusUnauthorized ||
 		len(response.Result().Cookies()) != 0 || strings.Contains(response.Body.String(), "wrong-password") {
-		t.Fatalf("invalid login: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+		t.Fatalf("invalid login: status=%d cookieCount=%d echoedPassword=%t", response.Code,
+			len(response.Result().Cookies()), strings.Contains(response.Body.String(), "wrong-password"))
 	}
 	form.Set("password", "correct-password")
 	response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "")
 	if response.Code != http.StatusSeeOther || response.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("valid login: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
+		t.Fatalf("valid login: status=%d noStore=%t", response.Code, response.Header().Get("Cache-Control") == "no-store")
 	}
 	cookies := response.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != jw.CookieName || !cookies[0].Secure || !cookies[0].HttpOnly ||
+	if len(cookies) != 1 {
+		t.Fatalf("admin session cookie count=%d, want 1", len(cookies))
+	}
+	if cookies[0].Name != jw.CookieName || !cookies[0].Secure || !cookies[0].HttpOnly ||
 		cookies[0].SameSite != http.SameSiteLaxMode || cookies[0].Path != "/" {
-		t.Fatalf("admin session cookie = %+v", cookies)
+		t.Fatalf("admin session cookie attributes: nameMatches=%t secure=%t httpOnly=%t sameSiteLax=%t pathRoot=%t",
+			cookies[0].Name == jw.CookieName, cookies[0].Secure, cookies[0].HttpOnly,
+			cookies[0].SameSite == http.SameSiteLaxMode, cookies[0].Path == "/")
 	}
 	cookie := cookies[0]
 	if response := adminResponse(handler, http.MethodGet, "/admin/login", nil, cookie, ""); response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), "Signed in") {
-		t.Fatalf("authenticated page: status=%d body=%q", response.Code, response.Body.String())
+		t.Fatalf("authenticated page: status=%d signedIn=%t", response.Code, strings.Contains(response.Body.String(), "Signed in"))
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://admin.example/jaws/.ping", nil)
 	request.TLS = &tls.ConnectionState{}
@@ -108,7 +118,7 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 		t.Fatal("JaWS template authorization did not use the admin session")
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
-		t.Fatalf("cross-origin logout: status=%d headers=%v", response.Code, response.Header())
+		t.Fatalf("cross-origin logout: status=%d hasHSTS=%t", response.Code, response.Header().Get("Strict-Transport-Security") != "")
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "http://admin.example"); response.Code != http.StatusForbidden {
 		t.Fatalf("HTTP origin on TLS logout: status=%d, want 403", response.Code)
@@ -118,7 +128,7 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	}
 	response = adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example")
 	if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 || response.Result().Cookies()[0].MaxAge >= 0 {
-		t.Fatalf("logout: status=%d headers=%v", response.Code, response.Header())
+		t.Fatalf("logout: status=%d cookieCount=%d", response.Code, len(response.Result().Cookies()))
 	}
 	if jw.MakeAuth(jaWSRequest).IsAdmin() {
 		t.Fatal("revoked JaWS request retained admin template authorization")
@@ -132,7 +142,7 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 		}
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("revoked logout: status=%d location=%q", response.Code, response.Header().Get("Location"))
+		t.Fatalf("revoked logout: status=%d toLogin=%t", response.Code, response.Header().Get("Location") == "/admin/login")
 	}
 	wsRequest := httptest.NewRequest(http.MethodGet, "https://admin.example/jaws/test-websocket", nil)
 	wsRequest.TLS = &tls.ConnectionState{}
@@ -149,7 +159,7 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "correct-password") || strings.Contains(logs.String(), "wrong-password") ||
 		strings.Contains(logs.String(), account.PasswordHash) {
-		t.Fatalf("credentials appeared in logs: %q", logs.String())
+		t.Fatal("credentials appeared in JaWS logs")
 	}
 }
 
@@ -172,7 +182,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 || !response.Cookies()[0].Secure {
-		t.Fatalf("TLS login: status=%d cookies=%v", response.StatusCode, response.Cookies())
+		t.Fatalf("TLS login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
 	}
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/admin/login", nil)
 	if err != nil {
@@ -189,7 +199,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "Signed in") {
-		t.Fatalf("authenticated TLS page: status=%d body=%q", page.StatusCode, pageBody)
+		t.Fatalf("authenticated TLS page: status=%d signedIn=%t", page.StatusCode, strings.Contains(string(pageBody), "Signed in"))
 	}
 	request, err = http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/jaws/.ping", nil)
 	if err != nil {
@@ -223,7 +233,21 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 || response.Cookies()[0].Secure {
-		t.Fatalf("loopback login: status=%d cookies=%v", response.StatusCode, response.Cookies())
+		t.Fatalf("loopback login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
+	}
+	crossScheme, err := http.NewRequestWithContext(t.Context(), http.MethodPost, baseURL+"/admin/logout", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossScheme.AddCookie(response.Cookies()[0])
+	crossScheme.Header.Set("Origin", "https://"+admin.listener.Addr().String())
+	rejected, err := client.Do(crossScheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rejected.Body.Close()
+	if rejected.StatusCode != http.StatusForbidden {
+		t.Fatalf("HTTPS origin on loopback HTTP logout: status=%d, want 403", rejected.StatusCode)
 	}
 	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/admin/login", nil)
 	if err != nil {
@@ -240,7 +264,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "Signed in") {
-		t.Fatalf("authenticated loopback page: status=%d body=%q", page.StatusCode, pageBody)
+		t.Fatalf("authenticated loopback page: status=%d signedIn=%t", page.StatusCode, strings.Contains(string(pageBody), "Signed in"))
 	}
 }
 
@@ -260,7 +284,7 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	}
 	response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
-		t.Fatalf("login: status=%d cookies=%v", response.StatusCode, response.Cookies())
+		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
 	}
 	cookie := response.Cookies()[0]
 	for _, tc := range []struct {
@@ -314,12 +338,13 @@ func TestAdminWithoutConfiguredAccountsDeniesEveryEntry(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, nil)
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/admin/login"}, {http.MethodPost, "/admin/login"},
+		{http.MethodHead, "/admin/login"},
 		{http.MethodPost, "/admin/logout"}, {http.MethodGet, "/jaws/.ping"},
 		{http.MethodGet, "/jaws/test-websocket"}, {http.MethodPost, "/jaws/invalid-key"},
 	} {
 		if response := adminResponse(handler, tc.method, tc.path, nil, nil, ""); response.Code != http.StatusForbidden ||
 			len(response.Result().Cookies()) != 0 {
-			t.Errorf("unconfigured %s %s: status=%d cookies=%v", tc.method, tc.path, response.Code, response.Result().Cookies())
+			t.Errorf("unconfigured %s %s: status=%d cookieCount=%d", tc.method, tc.path, response.Code, len(response.Result().Cookies()))
 		}
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://admin.example/jaws/.ping", nil)
@@ -333,7 +358,7 @@ func TestAdminLoginBoundsAndCrossOrigin(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{account})
 	form := url.Values{"username": {"operator"}, "password": {"wrong-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
-		t.Fatalf("cross-origin login: status=%d headers=%v", response.Code, response.Header())
+		t.Fatalf("cross-origin login: status=%d hasHSTS=%t", response.Code, response.Header().Get("Strict-Transport-Security") != "")
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "http://admin.example"); response.Code != http.StatusForbidden {
 		t.Fatalf("HTTP origin on TLS login: status=%d, want 403", response.Code)
@@ -374,7 +399,7 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 		{"username": {"operator"}, "password": {"correct-password", "correct-password"}},
 	} {
 		if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusBadRequest || len(response.Result().Cookies()) != 0 {
-			t.Fatalf("duplicate credential field: status=%d cookies=%v", response.Code, response.Result().Cookies())
+			t.Fatalf("duplicate credential field: status=%d cookieCount=%d", response.Code, len(response.Result().Cookies()))
 		}
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login",
@@ -392,7 +417,7 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 			}
 			escapedHandler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccountWithPassword(tc.password)})
 			if response := adminResponse(escapedHandler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
-				t.Fatalf("escaped valid password: status=%d cookies=%v, want login", response.Code, response.Result().Cookies())
+				t.Fatalf("escaped valid password: status=%d cookieCount=%d, want login", response.Code, len(response.Result().Cookies()))
 			}
 		})
 	}
@@ -462,7 +487,7 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
 		response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "")
 		if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
-			t.Fatalf("login before expiry: status=%d cookies=%v", response.Code, response.Result().Cookies())
+			t.Fatalf("login before expiry: status=%d cookieCount=%d", response.Code, len(response.Result().Cookies()))
 		}
 		cookie := response.Result().Cookies()[0]
 		time.Sleep(time.Minute + time.Second)
@@ -470,7 +495,7 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 			t.Fatalf("expired admin session: status=%d, want 403", response.Code)
 		}
 		if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
-			t.Fatalf("expired sign-out: status=%d location=%q, want login redirect", response.Code, response.Header().Get("Location"))
+			t.Fatalf("expired sign-out: status=%d toLogin=%t, want login redirect", response.Code, response.Header().Get("Location") == "/admin/login")
 		}
 	})
 }

@@ -25,7 +25,7 @@ func TestAdminPasswordHash(t *testing.T) {
 	if !account.VerifyPassword("correct horse battery staple") || account.VerifyPassword("wrong") {
 		t.Fatal("Argon2id password verification changed")
 	}
-	for _, value := range []string{
+	for i, value := range []string{
 		"plaintext", strings.Replace(hash, "argon2id", "argon2i", 1),
 		strings.Replace(hash, "m=19456", "m=1", 1),
 		strings.Replace(hash, "m=19456", "m=1000000", 1),
@@ -35,7 +35,7 @@ func TestAdminPasswordHash(t *testing.T) {
 		strings.Replace(hash, salt, "?", 1),
 	} {
 		if _, ok := parseAdminPasswordHash(value); ok || (AdminAccount{PasswordHash: value}).VerifyPassword("correct horse battery staple") {
-			t.Fatalf("accepted malformed or unsafe hash %q", value)
+			t.Fatalf("accepted malformed or unsafe hash case %d", i)
 		}
 	}
 }
@@ -58,10 +58,10 @@ func TestAdminAccountsValidation(t *testing.T) {
 				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 			err := cfg.Validate(t.TempDir())
 			if test.invalid != (err != nil) {
-				t.Fatalf("Validate error = %v, invalid = %t", err, test.invalid)
+				t.Fatalf("Validate gotError=%t, invalid=%t", err != nil, test.invalid)
 			}
 			if err != nil && (strings.Contains(err.Error(), "secret password") || strings.Contains(err.Error(), hash)) {
-				t.Fatalf("password leaked in validation error: %v", err)
+				t.Fatal("password leaked in validation error")
 			}
 		})
 	}
@@ -72,7 +72,7 @@ func TestAdminAccountsDoNotRelaxPublicTLSRequirement(t *testing.T) {
 		Listen: "0.0.0.0:8377", Administrators: []AdminAccount{{Username: "operator", PasswordHash: testAdminPasswordHash("password")}},
 	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "outside literal loopback") {
-		t.Fatalf("public admin without TLS: error=%v", err)
+		t.Fatal("public admin without TLS did not report the expected error")
 	}
 }
 

@@ -67,12 +67,16 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig) http.Handler {
 
 // CrossOriginProtection's legacy Origin fallback compares hosts but not schemes.
 func crossSchemeAdminOrigin(r *http.Request) bool {
-	if r.TLS == nil || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return false
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
 	}
 	if raw := r.Header.Get("Origin"); raw != "" {
 		origin, err := url.Parse(raw)
-		return err != nil || origin.Scheme != "https"
+		return err != nil || origin.Scheme != scheme
 	}
 	return false
 }
@@ -89,7 +93,7 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	if len(a.accounts) == 0 {
 		return false
 	}
-	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
 		return true
 	}
 	if r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
