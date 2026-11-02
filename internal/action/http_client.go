@@ -734,7 +734,8 @@ func (c *httpClientCheckpoints) outcome(result Result, runErr error) error {
 	if c.action != nil {
 		cause = context.Cause(c.action)
 	}
-	return c.outcomeWithCause(result, runErr, cause)
+	err, _ := c.outcomeWithCauseAndRunError(result, runErr, cause)
+	return err
 }
 
 func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) (*httpFailure, error) {
@@ -755,11 +756,6 @@ func (c *httpClientCheckpoints) outcomeFailure(runErr, cause error) (*httpFailur
 	failure.ObservedMessage = failure.Message
 	failure.Message = httpFailureDiagnostic(limitErr.Error())
 	return failure, limitErr
-}
-
-func (c *httpClientCheckpoints) outcomeWithCause(result Result, runErr, cause error) error {
-	err, _ := c.outcomeWithCauseAndRunError(result, runErr, cause)
-	return err
 }
 
 func (c *httpClientCheckpoints) outcomeWithCauseAndRunError(result Result, runErr, cause error) (error, error) {
