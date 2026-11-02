@@ -240,7 +240,7 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func resolveTLSPath(configDir, path string) string {
+func resolveAdminTLSPath(configDir, path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
@@ -341,8 +341,8 @@ func (c *Config) Validate(configDir string) error {
 			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
 		}
 		if admin.TLSCertFile != "" {
-			admin.TLSCertFile = resolveTLSPath(configDir, admin.TLSCertFile)
-			admin.TLSKeyFile = resolveTLSPath(configDir, admin.TLSKeyFile)
+			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)
+			admin.TLSKeyFile = resolveAdminTLSPath(configDir, admin.TLSKeyFile)
 		}
 	}
 	if remote := c.RemoteExecutor; remote != nil {
@@ -360,8 +360,12 @@ func (c *Config) Validate(configDir string) error {
 		if remote.TLSCertFile == "" || remote.TLSKeyFile == "" {
 			return errors.New("remote_executor.tls_cert_file and tls_key_file are required")
 		}
-		remote.TLSCertFile = resolveTLSPath(configDir, remote.TLSCertFile)
-		remote.TLSKeyFile = resolveTLSPath(configDir, remote.TLSKeyFile)
+		if !filepath.IsAbs(remote.TLSCertFile) {
+			remote.TLSCertFile = filepath.Join(configDir, remote.TLSCertFile)
+		}
+		if !filepath.IsAbs(remote.TLSKeyFile) {
+			remote.TLSKeyFile = filepath.Join(configDir, remote.TLSKeyFile)
+		}
 		token, err := base64.RawURLEncoding.DecodeString(remote.Token)
 		if err != nil || len(token) != 32 || base64.RawURLEncoding.EncodeToString(token) != remote.Token {
 			return errors.New("remote_executor.token must be 32 bytes in unpadded base64url")
