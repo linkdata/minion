@@ -212,6 +212,10 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		result.Answer = ""
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
+		if result.UsageCoverage.Scope == "invocation" {
+			result.UsageCoverage.Scope = "known_subset"
+			result.UsageCoverage.PartialReport = true
+		}
 		return result, fmt.Errorf("claude: %w", err)
 	}
 	output.emitEvent("final", result.Answer)

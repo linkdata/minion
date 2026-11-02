@@ -66,12 +66,14 @@ type rolloutEvent struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool, spawned map[string]bool) (usage.Tokens, bool, error) {
+func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Tokens, expectedChildren []string, files map[string]rolloutMeta, ambiguous map[string]bool, complete bool, spawned map[string]bool, coverage *usage.Coverage) (usage.Tokens, bool, error) {
 	var total usage.Tokens
 	if rootID == "" || ctx.Err() != nil || ambiguous[rootID] {
 		if fallback != nil {
 			total = *fallback
+			coverage.Scope = "root_only"
 		}
+		coverage.PartialReport = true
 		if ambiguous[rootID] || len(expectedChildren) != 0 {
 			return total, false, errUnverifiedChildren
 		}
@@ -105,6 +107,7 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 			complete = false
 			if i == 0 && fallback != nil {
 				total = *fallback
+				coverage.Scope = "root_only"
 			}
 			if len(ids) > 1 {
 				childError = joinUsageErrors(childError, errUnverifiedChildren)
@@ -121,10 +124,14 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 			complete = false
 			if id == rootID && fallback != nil {
 				total = *fallback
+				coverage.Scope = "root_only"
 			}
 			continue
 		}
 		tokens, ok, children, workError := readRolloutUsageFrom(ctx, meta, rootID, &budget, rolloutUsageMode{spawned: spawned})
+		if ok || tokens != (usage.Tokens{}) {
+			coverage.Scope = "known_subset"
+		}
 		childError = joinUsageErrors(childError, workError)
 		for _, child := range children {
 			_, selectedChild := selected[child]
@@ -136,6 +143,9 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 		if id == rootID && fallback != nil && tokens != *fallback {
 			ok = false
 			if lower := tokens.Max(*fallback); lower.Valid() {
+				if tokens == (usage.Tokens{}) && lower != (usage.Tokens{}) {
+					coverage.Scope = "root_only"
+				}
 				tokens = lower
 			}
 		}
@@ -143,7 +153,12 @@ func collectUsageFiles(ctx context.Context, rootID string, fallback *usage.Token
 		total, added = total.AddChecked(tokens)
 		complete = complete && ok && added
 	}
-	return total, complete && ctx.Err() == nil, childError
+	complete = complete && ctx.Err() == nil
+	coverage.PartialReport = !complete
+	if complete {
+		coverage.Scope = "invocation"
+	}
+	return total, complete, childError
 }
 
 // usageFiles reads only bounded headers. Known paths bypass discovery timestamps,

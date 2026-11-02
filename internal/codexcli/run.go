@@ -334,6 +334,12 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	}
 	var childError error
 	result.Tokens, result.UsageComplete, childError = s.accounting.collectUsage(postCallCtx, codexHome, cmp.Or(output.threadID, output.expectedID), started, output.tokens, output.children, output.observationOnly, output.spawns)
+	result.UsageCoverage = s.accounting.coverage
+	if output.tokens == nil {
+		result.UsageCoverage.MissingFinalReport = !output.usageSeen
+		result.UsageCoverage.MalformedFinalReport = output.usageSeen
+	}
+	result.UsageCoverage.UnverifiedHelpers = errors.Is(childError, errUnverifiedChildren) || errors.Is(childError, errUsageAgentLimit)
 	rootID := cmp.Or(output.expectedID, output.threadID)
 	newPaths, scanErr := rolloutPaths(postCallCtx, codexHome, started)
 	if scanErr != nil {
@@ -356,12 +362,20 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if !clean || ctx.Err() != nil {
 		// Keep known counters; a failed lifecycle cannot certify full coverage.
 		result.UsageComplete = false
+		result.UsageCoverage.PartialReport = true
+		if result.UsageCoverage.Scope == "invocation" {
+			result.UsageCoverage.Scope = "known_subset"
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return result, fmt.Errorf("codex exec: %w", errors.Join(err, runErr))
 	}
 	if activity != nil && activity.progressLimit {
 		result.UsageComplete = false
+		result.UsageCoverage.PartialReport = true
+		if result.UsageCoverage.Scope == "invocation" {
+			result.UsageCoverage.Scope = "known_subset"
+		}
 		return result, fmt.Errorf("codex exec: %w: rollout progress identity limit reached", aicli.ErrOutputLimit)
 	}
 	if output.stopErr != nil {
@@ -527,6 +541,7 @@ type jsonlOutput struct {
 	expectedID        string
 	conflictingID     string
 	tokens            *usage.Tokens
+	usageSeen         bool
 	children          []string
 	observationOnly   map[string]bool
 	spawns            map[string]bool
@@ -1063,6 +1078,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		}
 	case "turn.started":
 		o.completed, o.finalMessage = false, ""
+		o.tokens, o.usageSeen = nil, false
 		o.progressClosed.Store(false)
 	case "item.completed":
 		if event.Item != nil && event.Item.Type == "agent_message" {
@@ -1073,6 +1089,7 @@ func (o *jsonlOutput) accept(event codexEvent) {
 		o.completed = true
 		o.progressClosed.Store(true)
 		o.tokens = nil
+		o.usageSeen = event.Usage != nil
 		if tokens, valid := event.Usage.tokens(); valid {
 			o.tokens = &tokens
 		}

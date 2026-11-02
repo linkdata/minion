@@ -270,9 +270,11 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 				if err != nil || len(checkpoint) != 1 || checkpoint[0].UsageComplete {
 					t.Fatalf("call has no durable incomplete checkpoint: %+v, %v", checkpoint, err)
 				}
-				receipt.Tokens, receipt.Complete = usage.Tokens{Input: 100, CachedInput: 80, Output: 20}, true
+				receipt.Tokens, receipt.Complete = usage.Tokens{Input: 100, CacheCreationInput: 10, CachedInput: 80, Output: 20}, true
+				receipt.UsageCoverage = usage.Coverage{Scope: "invocation"}
 				if call.role == "critic" {
-					receipt.Tokens, receipt.Complete = usage.Tokens{Input: 10, CachedInput: 8, Output: 2}, false
+					receipt.Tokens, receipt.Complete = usage.Tokens{Input: 10, CacheCreationInput: 1, CachedInput: 8, Output: 2}, false
+					receipt.UsageCoverage = usage.Coverage{Scope: "root_only", PartialReport: true, UnverifiedHelpers: true}
 				}
 				if err := tracked.usageCheckpoint.afterCall(receipt); err != nil {
 					t.Fatal(err)
@@ -286,7 +288,7 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 				t.Fatalf("records=%+v err=%v", records, err)
 			}
 			got := records[0]
-			if got.Provider != main.Provider || got.CriticProvider != critic.Provider || got.Model != main.Model || got.Effort != main.Effort || got.CriticModel != critic.Model || got.CriticEffort != critic.Effort || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CachedInput: 168, Output: 42}) {
+			if got.Provider != main.Provider || got.CriticProvider != critic.Provider || got.Model != main.Model || got.Effort != main.Effort || got.CriticModel != critic.Model || got.CriticEffort != critic.Effort || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CacheCreationInput: 21, CachedInput: 168, Output: 42}) || got.UsageCoverage != (usage.Coverage{Scope: "attempt", PartialReport: true, UnverifiedHelpers: true}) {
 				t.Fatalf("inaccurate mixed usage: %+v", got)
 			}
 			if main.Provider == "codex" && (got.CodexCalls != 2 || got.ClaudeCalls != 1) || main.Provider == "claude" && (got.ClaudeCalls != 2 || got.CodexCalls != 1) {

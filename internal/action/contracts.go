@@ -75,13 +75,14 @@ type Job struct {
 
 // CallUsage contains executor claims checked against saved callbacks, not independent model evidence.
 type CallUsage struct {
-	Provider    string       `json:"provider"`
-	Role        string       `json:"role"`
-	Round       int          `json:"round"`
-	ReviewPhase string       `json:"review_phase,omitempty"`
-	Model       string       `json:"model,omitempty"`
-	Effort      string       `json:"effort,omitempty"`
-	Tokens      usage.Tokens `json:"tokens"`
+	Provider      string         `json:"provider"`
+	Role          string         `json:"role"`
+	Round         int            `json:"round"`
+	ReviewPhase   string         `json:"review_phase,omitempty"`
+	Model         string         `json:"model,omitempty"`
+	Effort        string         `json:"effort,omitempty"`
+	Tokens        usage.Tokens   `json:"tokens"`
+	UsageCoverage usage.Coverage `json:"usage_coverage,omitzero"`
 	// Approved reports a parsed approving critic verdict; false is not proof of rejection.
 	Approved bool `json:"approved,omitempty"`
 	// NoBlockers reports an explicit has_blockers=false in a valid critic verdict.
@@ -417,7 +418,7 @@ func (r Result) validateCalls(j Job, complete bool) error {
 			(call.Approved && !call.NoBlockers) || (call.HasBlockers && call.NoBlockers) ||
 			(call.ReviewComplete && !call.NoBlockers && !call.HasBlockers) || (!call.ReviewComplete && (call.Approved || call.NoBlockers))
 		wrongModel := call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort
-		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() {
+		if !validOrder || call.Round > rounds || invalidVerdict || wrongModel || !call.Tokens.Valid() || !call.UsageCoverage.ValidForCall(call.Complete) {
 			return errors.New("invalid model call usage")
 		}
 		advanceToFull, stopReason = policy.observe(call)

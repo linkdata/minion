@@ -57,7 +57,7 @@ exec sleep 30
 	cancel()
 	select {
 	case got := <-done:
-		if !errors.Is(got.err, context.Canceled) || got.result.Answer != "" || got.result.UsageComplete || got.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+		if !errors.Is(got.err, context.Canceled) || got.result.Answer != "" || got.result.UsageComplete || got.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 2}) {
 			t.Fatalf("canceled Run lost partial usage: result=%+v error=%v", got.result, got.err)
 		}
 	case <-waitCtx.Done():

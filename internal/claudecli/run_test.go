@@ -163,7 +163,7 @@ printf '%s\n' '`+successfulResult+`'
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+			if result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 				t.Fatalf("result = %+v", result)
 			}
 			if readFile(t, binary+".env") != "absent,absent,absent,0\n" {
@@ -328,7 +328,7 @@ func TestRunFailures(t *testing.T) {
 
 func TestRunBackgroundWaitCeiling(t *testing.T) {
 	emit := func(data string) string { return "cat <<'RESULT'\n" + data + "\nRESULT\n" }
-	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	known := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
 	for _, tc := range []struct {
 		name, stderr, script, answer, extraFailure string
 		tokens                                     usage.Tokens
@@ -564,7 +564,7 @@ func TestRunUsageLimitKeepsSafeDiagnosticAndExitCause(t *testing.T) {
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'DIAG' >&2\nPRIVATE_STDERR\nforged journal line\nDIAG\n"+output)
 			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 			var exit *exec.ExitError
-			if err == nil || !errors.As(err, &exit) || !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") || strings.Contains(err.Error(), "PRIVATE") || strings.Contains(err.Error(), "forged journal line") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || malformed && !strings.Contains(err.Error(), "invalid Claude JSONL event") {
+			if err == nil || !errors.As(err, &exit) || !strings.Contains(err.Error(), "resets at 2026-10-17T01:20:00Z") || strings.Contains(err.Error(), "PRIVATE") || strings.Contains(err.Error(), "forged journal line") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) || malformed && !strings.Contains(err.Error(), "invalid Claude JSONL event") {
 				t.Fatalf("result=%+v error=%v", result, err)
 			}
 		})
@@ -623,7 +623,7 @@ func TestRunReportsUnavailableStderrAfterSafeRedaction(t *testing.T) {
 	stderr := strings.Repeat("padding\n", 1100) + "Agent capacity reached; session resets at midnight\n"
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(successfulResult)+"\nprintf '%s' "+aicli.ShellQuote(stderr)+" >&2\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
-	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) ||
 		len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
 		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "stderr_unavailable", Message: "stderr could not be safely displayed"}) {
 		t.Fatalf("unsafe stderr was silently omitted or changed success: result=%+v error=%v", result, err)
@@ -636,7 +636,7 @@ func TestRunFailureRetainsEarlierProvisionalStructuredOutput(t *testing.T) {
 	quota := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1792200000}}`
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(provisional)+" "+aicli.ShellQuote(quota)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 3 ||
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 3 ||
 		result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
 		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "structured_output_observed", Message: structured}) || result.Diagnostics[2].Code != "rate_limit_rejected" {
 		t.Fatalf("provisional output promoted or lost: result=%+v error=%v", result, err)
@@ -648,7 +648,7 @@ func TestRunFailedResultRetainsEarlierNonemptyDetails(t *testing.T) {
 	const failed = `{"type":"result","subtype":"error_during_execution","is_error":true,"result_index":1,"result":"","errors":[],"modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(first)+" "+aicli.ShellQuote(failed)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) ||
 		len(result.Diagnostics) != 3 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "Agent capacity reached; session resets at midnight"}) ||
 		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_errors", Message: `["Session quota resets at midnight"]`}) || result.Diagnostics[2].Code != "result_error" {
 		t.Fatalf("empty final result erased earlier native evidence or changed failure: result=%+v error=%v", result, err)
@@ -671,7 +671,7 @@ func TestRunRetainsEveryIndexedResultObservation(t *testing.T) {
 	last := makeResult(1, "last capacity", "last reset", map[string]string{"phase": "last"})
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(first)+" "+aicli.ShellQuote(last)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`, APIKey: key})
-	if err != nil || result.Answer != `{"phase":"last"}` || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 6 {
+	if err != nil || result.Answer != `{"phase":"last"}` || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 6 {
 		t.Fatalf("indexed result outcome or observation count changed: result=%+v error=%v", result, err)
 	}
 	wantCodes := []string{"result_detail", "result_errors", "structured_output_observed", "result_detail", "result_errors", "structured_output_observed"}
@@ -692,7 +692,7 @@ func TestRunSuccessfulResultRecordsNativeErrorsPrivately(t *testing.T) {
 	completed := strings.TrimSuffix(successfulResult, "}") + `,"errors":["Session quota resets at midnight"]}`
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(completed)+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+	if err != nil || result.Answer != "final answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) ||
 		len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) ||
 		result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_errors", Message: `["Session quota resets at midnight"]`}) {
 		t.Fatalf("successful result errors changed verdict or were omitted: result=%+v error=%v", result, err)
@@ -706,7 +706,7 @@ func TestRunManyIndexedResultsMarkDiagnosticOverflow(t *testing.T) {
 	}
 	fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'EVENTS'\n"+events.String()+"EVENTS\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{OutputSchema: `{"type":"object"}`})
-	if err != nil || result.Answer != `{"phase":29}` || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+	if err != nil || result.Answer != `{"phase":29}` || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) ||
 		len(result.Diagnostics) > 64 || len(result.Diagnostics) < 4 || result.Diagnostics[0].Code != "diagnostics_truncated" {
 		t.Fatalf("indexed result overflow lost gap marker or changed outcome: result=%+v error=%v", result, err)
 	}
@@ -753,7 +753,7 @@ func TestRunFailedResultRetainsNativeCapacityAndResetFields(t *testing.T) {
 			}
 			fakeExecutable(t, "claude", "cat >/dev/null\ncat <<'EVENTS'\n"+tc.before+string(encoded)+"\nEVENTS\n")
 			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
-			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 				t.Fatalf("native failure result=%+v error=%v", result, err)
 			}
 			seen := map[string]string{}
@@ -779,7 +779,7 @@ func TestRunFailedResultOmitsEmptyErrors(t *testing.T) {
 			failed := `{"type":"result","subtype":"error_during_execution","is_error":true,"result":"capacity reached","errors":` + empty + `,"modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}}`
 			fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(failed)+"\n")
 			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) ||
 				len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "result_error" || result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "capacity reached"}) {
 				t.Fatalf("empty native errors produced false detail or changed failure: result=%+v error=%v", result, err)
 			}
@@ -803,7 +803,7 @@ func TestRunPermissionDenialsRetainOnlyBoundedRedactedToolNames(t *testing.T) {
 	}
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(string(encoded))+"\n")
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{APIKey: key})
-	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "permission_denied" {
+	if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) || len(result.Diagnostics) != 2 || result.Diagnostics[0].Code != "permission_denied" {
 		t.Fatalf("permission denial result changed: result=%+v error=%v", result, err)
 	}
 	message := result.Diagnostics[0].Message
@@ -819,7 +819,7 @@ func TestRunNullTerminalReasonReportsLiteralWithoutGap(t *testing.T) {
 			terminal := strings.TrimSuffix(successfulResult, "}") + `,"terminal_reason":` + tc.raw + `}`
 			fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+aicli.ShellQuote(terminal)+"\n")
 			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) ||
+			if err == nil || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) ||
 				len(result.Diagnostics) != 2 || result.Diagnostics[0] != (aicli.ProviderDiagnostic{Code: "terminal_reason", Message: tc.want}) ||
 				result.Diagnostics[1] != (aicli.ProviderDiagnostic{Code: "result_detail", Message: "final answer"}) {
 				t.Fatalf("explicit empty terminal reason made a false gap or changed failure: result=%+v error=%v", result, err)
@@ -940,7 +940,7 @@ func TestRunParseFailureCancelsActiveCLI(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || !strings.Contains(err.Error(), "invalid Claude JSONL event") || ctx.Err() != nil || time.Since(started) > 5*time.Second || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+	if err == nil || !strings.Contains(err.Error(), "invalid Claude JSONL event") || ctx.Err() != nil || time.Since(started) > 5*time.Second || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 2}) {
 		t.Fatalf("parse failure did not stop active CLI: %+v, %v, parent=%v", result, err, ctx.Err())
 	}
 }
@@ -955,7 +955,7 @@ func TestRunFinalUnterminatedFailureKeepsSafeDiagnosticAndUsage(t *testing.T) {
 			fakeExecutable(t, "claude", script)
 			result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
 			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), tc.failure) || strings.Contains(err.Error(), "PRIVATE_STDERR") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 2}) {
+			if !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), tc.failure) || strings.Contains(err.Error(), "PRIVATE_STDERR") || result.Answer != "" || result.UsageComplete || result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 2}) {
 				t.Fatalf("result=%+v error=%v", result, err)
 			}
 		})

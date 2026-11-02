@@ -17,6 +17,7 @@ var ErrOutputLimit = errors.New("AI output limit exceeded")
 type Result struct {
 	Answer        string
 	Tokens        usage.Tokens
+	UsageCoverage usage.Coverage
 	UsageComplete bool
 	Diagnostics   []ProviderDiagnostic
 }

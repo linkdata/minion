@@ -73,6 +73,7 @@ type usageSession struct {
 	before           map[string]*usageBoundary
 	baselineComplete bool
 	provedSpawns     map[string]bool
+	coverage         usage.Coverage
 }
 
 func ownedUsageFiles(files map[string]rolloutMeta, rootID string) map[string]rolloutMeta {
@@ -136,13 +137,14 @@ func (s *usageSession) begin(ctx context.Context, home, rootID string, started t
 func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, started time.Time, fallback *usage.Tokens, expectedChildren []string, observationOnly map[string]bool, currentSpawns ...map[string]bool) (usage.Tokens, bool, error) {
 	defer func() { s.before = nil }()
 	s.provedSpawns = nil
+	s.coverage = usage.Coverage{Scope: "unknown"}
 	if s.before == nil {
 		files, ambiguous, complete := usageFiles(ctx, home, rootID, started, nil)
 		spawned := map[string]bool{}
 		if len(currentSpawns) != 0 {
 			maps.Copy(spawned, currentSpawns[0])
 		}
-		tokens, complete, err := collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete, spawned)
+		tokens, complete, err := collectUsageFiles(ctx, rootID, fallback, expectedChildren, files, ambiguous, complete, spawned, &s.coverage)
 		s.known = ownedUsageFiles(files, rootID)
 		s.provedSpawns = spawned
 		return tokens, complete, err
@@ -194,6 +196,9 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 				mode.latest, mode.seenLatest = &latest, &seenLatest
 			}
 			tokens, ok, children, workError = readRolloutUsageFrom(ctx, meta, rootID, &budget, mode)
+			if ok || tokens != (usage.Tokens{}) {
+				s.coverage.Scope = "known_subset"
+			}
 			childError = joinUsageErrors(childError, workError)
 			queue = append(queue, children...)
 		} else if id != rootID || meta.duplicate {
@@ -204,10 +209,18 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 			// or its helpers. Only verified rollout records contribute usage.
 			trustedBaseline := boundary != nil && boundary.valid && boundary.prefixKnown && boundary.hasSnapshot && !boundary.counterGap && !boundary.unfinished
 			if seenLatest {
-				ok = ok && latest == *fallback
+				if latest != *fallback {
+					s.coverage.CumulativeUnattributed = true
+					ok = false
+				}
 			} else if trustedBaseline {
 				cumulative, added := boundary.snapshot.AddChecked(tokens)
-				ok = ok && added && cumulative == *fallback
+				if !added || cumulative != *fallback {
+					s.coverage.CumulativeUnattributed = true
+					ok = false
+				}
+			} else {
+				s.coverage.CumulativeUnattributed = true
 			}
 		}
 		var added bool
@@ -229,5 +242,10 @@ func (s *usageSession) collectUsage(ctx context.Context, home, rootID string, st
 	// Keep bounded lifetime ownership, including unresolved known identities, for the next invocation.
 	s.known = owned
 	s.provedSpawns = spawned
-	return total, complete && ctx.Err() == nil, childError
+	complete = complete && ctx.Err() == nil
+	s.coverage.PartialReport = !complete
+	if complete {
+		s.coverage.Scope = "invocation"
+	}
+	return total, complete, childError
 }

@@ -198,6 +198,10 @@ func TestSaveRejectsInvalidRecords(t *testing.T) {
 			r.ExecutorID, r.SourceRef = "local", "foreign"
 		},
 		"invalid usage source":                  func(r *Record) { r.UsageSource = "verified_billing" },
+		"invalid usage scope":                   func(r *Record) { r.UsageCoverage.Scope = "foreign" },
+		"call scope in attempt":                 func(r *Record) { r.UsageCoverage.Scope = "invocation" },
+		"complete partial attempt":              func(r *Record) { r.UsageCoverage.PartialReport = true },
+		"complete unverified helper attempt":    func(r *Record) { r.UsageCoverage.UnverifiedHelpers = true },
 		"unattributed claim":                    func(r *Record) { r.ExecutorID, r.SourceRef = "", "" },
 		"missing claim origin":                  func(r *Record) { r.UsageSource = "" },
 		"incomplete token claim without origin": func(r *Record) { r.UsageComplete, r.UsageSource = false, "" },
@@ -434,6 +438,10 @@ func TestTokensValidBoundsAndComponentOperations(t *testing.T) {
 		{"negative output", Tokens{Output: -1}, false},
 		{"negative cache", Tokens{CachedInput: -1}, false},
 		{"cache outside input", Tokens{Input: 1, CachedInput: 2}, false},
+		{"negative cache creation", Tokens{CacheCreationInput: -1}, false},
+		{"cache creation outside input", Tokens{Input: 1, CacheCreationInput: 2}, false},
+		{"disjoint cache categories", Tokens{Input: 10, CachedInput: 6, CacheCreationInput: 4}, true},
+		{"overlapping cache categories", Tokens{Input: 10, CachedInput: 6, CacheCreationInput: 5}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.tokens.Valid(); got != tc.valid {
@@ -452,6 +460,13 @@ func TestTokensValidBoundsAndComponentOperations(t *testing.T) {
 	if got := (Tokens{Input: math.MaxInt64 - 1, Output: 1}).Max(Tokens{Input: 1, Output: math.MaxInt64 - 1}); got.Valid() {
 		t.Fatalf("overflowing maximum accepted: %+v", got)
 	}
+	// A component floor may conflict across disjoint cache categories. It must
+	// remain invalid; raising Input to make it valid would invent tokens.
+	created := Tokens{Input: 10, CacheCreationInput: 10}
+	read := Tokens{Input: 10, CachedInput: 10}
+	if got := created.Max(read); got.Valid() || got.Input != 10 || got.CacheCreationInput != 10 || got.CachedInput != 10 {
+		t.Fatalf("conflicting component maximum accepted: %+v", got)
+	}
 }
 
 func TestTokensCheckedAdditionPreservesKnownUsage(t *testing.T) {
@@ -463,6 +478,7 @@ func TestTokensCheckedAdditionPreservesKnownUsage(t *testing.T) {
 		valid bool
 	}{
 		{"normal", Tokens{Input: 50, CachedInput: 10, Output: 30}, Tokens{Input: 150, CachedInput: 90, Output: 50}, true},
+		{"cache categories", Tokens{Input: 50, CacheCreationInput: 20, CachedInput: 10, Output: 30}, Tokens{Input: 150, CacheCreationInput: 20, CachedInput: 90, Output: 50}, true},
 		{"exact total", Tokens{Input: math.MaxInt64 - 121, Output: 1}, Tokens{Input: math.MaxInt64 - 21, CachedInput: 80, Output: 21}, true},
 		{"total overflow", Tokens{Input: math.MaxInt64 - 120, Output: 1}, base, false},
 		{"component overflow", Tokens{Input: math.MaxInt64}, base, false},

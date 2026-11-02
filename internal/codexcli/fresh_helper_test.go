@@ -53,7 +53,24 @@ func TestRunFreshAndBoundaryHelpers(t *testing.T) {
 			if errors.Is(err, errUnverifiedChildren) != scenario.fails || (err != nil) != scenario.fails || result.UsageComplete == scenario.incomplete || result.Tokens != want || scenario.fails && result.Answer != "" || !scenario.fails && result.Answer != "answer" {
 				t.Fatalf("fresh helper result=%+v err=%v want=%+v fail=%t incomplete=%t", result, err, want, scenario.fails, scenario.incomplete)
 			}
+			wantScope := "invocation"
+			if scenario.incomplete {
+				wantScope = "known_subset"
+			}
+			if coverage := result.UsageCoverage; coverage.Scope != wantScope || !coverage.MissingFinalReport || coverage.MalformedFinalReport || coverage.UnverifiedHelpers != scenario.fails || coverage.PartialReport != scenario.incomplete {
+				t.Fatalf("fresh helper usage coverage=%+v, want scope=%s helper gap=%t partial=%t", coverage, wantScope, scenario.fails, scenario.incomplete)
+			}
 		})
+	}
+}
+
+func TestRunLabelsMalformedFinalUsageDespiteCompleteRollout(t *testing.T) {
+	installFakeCodex(t, "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"root\"}' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":10}}'\n")
+	writeUsageRollout(t, os.Getenv("CODEX_HOME"), "root", "", usageEvent("task_started", "root-turn"), usageRecord("root", "root-turn", "response", 10, 0, 1), usageEvent("task_complete", "root-turn"))
+	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.CodexConfig{})
+	if err != nil || result.Answer != "answer" || !result.UsageComplete || result.Tokens != (usage.Tokens{Input: 10, Output: 1}) ||
+		result.UsageCoverage != (usage.Coverage{Scope: "invocation", MalformedFinalReport: true}) {
+		t.Fatalf("malformed final report discarded verified rollout usage: result=%+v err=%v", result, err)
 	}
 }
 

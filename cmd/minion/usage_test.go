@@ -29,10 +29,11 @@ func saveReportFixture(t *testing.T, dir string) {
 			ExecutorID: "local", SourceRef: strings.Repeat("a", 40), UsageSource: "executor_reported"}
 		switch i {
 		case 0:
-			record.Tokens = usage.Tokens{Input: 100, CachedInput: 40, Output: 20}
+			record.Tokens = usage.Tokens{Input: 100, CacheCreationInput: 20, CachedInput: 40, Output: 20}
 		case 1:
-			record.Tokens = usage.Tokens{Input: 50, CachedInput: 10, Output: 5}
+			record.Tokens = usage.Tokens{Input: 50, CacheCreationInput: 5, CachedInput: 10, Output: 5}
 			record.CodexCalls, record.UsageComplete = 2, false
+			record.UsageCoverage = usage.Coverage{Scope: "attempt", MissingFinalReport: true, PartialReport: true}
 			record.Provider, record.CriticProvider, record.CriticModel = "claude", "codex", "critic-model"
 			record.ClaudeCalls = 3
 		case 2:
@@ -72,12 +73,12 @@ func TestUsageJSONFiltersAndTotals(t *testing.T) {
 	if strings.Join(output.GroupBy, ",") != "repo,user,action" || len(output.Groups) != 4 {
 		t.Fatalf("unexpected groups: %+v", output)
 	}
-	want := usage.Summary{Attempts: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CachedInput: 50, Output: 25}, TotalTokens: 175}
+	want := usage.Summary{Attempts: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, TotalTokens: 175}
 	if output.Totals != want {
 		t.Fatalf("totals = %+v, want %+v", output.Totals, want)
 	}
 	output = reportJSON(t, "-dir", dir, "-repo", "EXAMPLE-OWNER/EXAMPLE-REPO", "-user", "ALICE", "-from", "2026-10-09T02:00:00+02:00", "-to", "2026-10-10", "-group-by", "day,user")
-	if len(output.Groups) != 1 || output.Groups[0].Day != "2026-10-09" || output.Groups[0].User != "alice" || output.Totals.Attempts != 1 || output.Totals.TotalTokens != 55 || output.Totals.IncompleteUsage != 1 {
+	if len(output.Groups) != 1 || output.Groups[0].Day != "2026-10-09" || output.Groups[0].User != "alice" || output.Totals.Attempts != 1 || output.Totals.TotalTokens != 55 || output.Totals.Tokens.CacheCreationInput != 5 || output.Totals.IncompleteUsage != 1 {
 		t.Fatalf("wrong filtered report: %+v", output)
 	}
 	if output.Filters.From != "2026-10-09T00:00:00Z" || output.Filters.To != "2026-10-10T00:00:00Z" {
@@ -95,7 +96,7 @@ func TestUsageDetailsAndTables(t *testing.T) {
 	if attempt := output.Attempts[0]; attempt.ExecutorID != "local" || attempt.SourceRef != strings.Repeat("a", 40) || attempt.UsageSource != "executor_reported" || !strings.Contains(output.TokenNote, "executor-reported claims") {
 		t.Fatalf("details lost claim provenance: %+v", attempt)
 	}
-	if attempt := output.Attempts[1]; attempt.Provider != "claude" || attempt.CriticProvider != "codex" || attempt.CriticModel != "critic-model" || attempt.ClaudeCalls != 3 {
+	if attempt := output.Attempts[1]; attempt.Provider != "claude" || attempt.CriticProvider != "codex" || attempt.CriticModel != "critic-model" || attempt.ClaudeCalls != 3 || !attempt.UsageCoverage.MissingFinalReport {
 		t.Fatalf("details lost model roles: %+v", attempt)
 	}
 	for _, grouping := range []string{"repo,month", "none"} {
@@ -109,7 +110,7 @@ func TestUsageDetailsAndTables(t *testing.T) {
 			}
 		}
 		if grouping == "none" {
-			for _, text := range []string{"succeeded", "failed", "running", "partial", "unknown", "complete", "stale after an interruption", "MAIN", "CRITIC", "claude", "codex"} {
+			for _, text := range []string{"succeeded", "failed", "running", "partial", "unknown", "complete", "stale after an interruption", "MAIN", "CRITIC", "claude", "codex", "missing_final_report"} {
 				if !strings.Contains(stdout.String(), text) {
 					t.Errorf("details lack %q: %s", text, &stdout)
 				}

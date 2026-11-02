@@ -667,9 +667,28 @@ func TestPortableContractsRejectMismatches(t *testing.T) {
 		{"usage", "invalid model call usage", func(r *Result) {
 			r.Calls = []CallUsage{{Provider: "codex", Role: "main", Round: 1, Tokens: usage.Tokens{Input: -1}}}
 		}},
+		{"invalid usage scope", "invalid model call usage", func(r *Result) {
+			r.Calls[0].UsageCoverage.Scope = "foreign"
+		}},
+		{"attempt scope in call", "invalid model call usage", func(r *Result) {
+			r.Calls[0].UsageCoverage.Scope = "attempt"
+		}},
+		{"complete root-only claim", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Complete = true
+			r.Calls[0].UsageCoverage.Scope = "root_only"
+		}},
+		{"complete partial claim", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Complete = true
+			r.Calls[0].UsageCoverage = usage.Coverage{Scope: "invocation", PartialReport: true}
+		}},
+		{"complete unverified helpers", "invalid model call usage", func(r *Result) {
+			r.Calls[0].Complete = true
+			r.Calls[0].UsageCoverage = usage.Coverage{Scope: "invocation", UnverifiedHelpers: true}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			result := valid
+			result.Calls = append([]CallUsage(nil), valid.Calls...)
 			test.change(&result)
 			if err := result.Validate(job); err == nil || err.Error() != test.want {
 				t.Fatalf("result mismatch=%v want%q", err, test.want)

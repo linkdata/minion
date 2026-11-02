@@ -123,7 +123,7 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 	// A quota failure can carry subtype=success and cumulative helper usage.
 	const failed = `{"type":"result","subtype":"success","is_error":true,"result_index":0,"result":"PRIVATE_RESULT\nforged journal line","errors":["PRIVATE_ERROR"],"modelUsage":{"claude-opus-5-5":{"inputTokens":36,"cacheCreationInputTokens":160092,"cacheReadInputTokens":435540,"outputTokens":11489}}}`
 	const limit = "provider usage limit reached; resets at 2026-10-17T01:20:00Z"
-	known := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	known := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
 	for _, test := range []struct {
 		name, data   string
 		want         usage.Tokens
@@ -133,7 +133,7 @@ func TestOutputNativeUsageLimit(t *testing.T) {
 		{"warning permits completion", warning + "\n" + successfulResult, known, false, ""},
 		{"paid overage permits completion", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","isUsingOverage":true,"overageStatus":"allowed"}}` + "\n" + successfulResult, known, false, ""},
 		{"active overage permits completion", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","overageInUse":true}}` + "\n" + successfulResult, known, false, ""},
-		{"native failure keeps helper counters", warning + "\n" + rejected + "\n" + failed, usage.Tokens{Input: 595668, CachedInput: 435540, Output: 11489}, true, limit},
+		{"native failure keeps helper counters", warning + "\n" + rejected + "\n" + failed, usage.Tokens{Input: 595668, CacheCreationInput: 160092, CachedInput: 435540, Output: 11489}, true, limit},
 		{"rejection at EOF", rejected, usage.Tokens{}, false, limit},
 		{"later counters parsed before cancellation", rejected + "\n" + successfulResult, known, true, limit},
 		{"warning cannot clear rejection", rejected + "\n" + warning + "\n" + successfulResult, known, true, limit},
@@ -321,7 +321,7 @@ func TestOutputBackgroundTasks(t *testing.T) {
 				t.Fatal(err)
 			}
 			o.finish()
-			if (o.err != nil || !o.completed) != tc.fails || cancelled != (o.err != nil) || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+			if (o.err != nil || !o.completed) != tc.fails || cancelled != (o.err != nil) || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 				t.Fatalf("output = %+v, error %v, cancelled %v", o.result, o.err, cancelled)
 			}
 		})
@@ -432,17 +432,17 @@ func TestUsageValidation(t *testing.T) {
 func TestOutputWholeTreeUsage(t *testing.T) {
 	const root = `{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}`
 	const models = `{"claude-main":{"inputTokens":13,"cacheCreationInputTokens":17,"cacheReadInputTokens":19,"outputTokens":23},"claude-helper":{"inputTokens":29,"cacheCreationInputTokens":31,"cacheReadInputTokens":37,"outputTokens":41}}`
-	fallback := usage.Tokens{Input: 15, CachedInput: 7, Output: 11}
+	fallback := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
 	for _, tc := range []struct {
 		name, root, models string
 		want               usage.Tokens
 		complete           bool
 	}{
-		{"root and helper models", root, models, usage.Tokens{Input: 146, CachedInput: 56, Output: 64}, true},
-		{"aggregate ignores malformed root", `"bad"`, models, usage.Tokens{Input: 146, CachedInput: 56, Output: 64}, true},
+		{"root and helper models", root, models, usage.Tokens{Input: 146, CacheCreationInput: 48, CachedInput: 56, Output: 64}, true},
+		{"aggregate ignores malformed root", `"bad"`, models, usage.Tokens{Input: 146, CacheCreationInput: 48, CachedInput: 56, Output: 64}, true},
 		{"zero aggregate with current root usage", root, `{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}`, fallback, false},
 		{"zero aggregate with zero root usage", `{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}`, `{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":0}}`, usage.Tokens{}, true},
-		{"partial aggregate keeps root counters", root, `{"main":{"inputTokens":20,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}`, usage.Tokens{Input: 20, CachedInput: 7, Output: 11}, false},
+		{"partial aggregate keeps root counters", root, `{"main":{"inputTokens":20,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}`, usage.Tokens{Input: 20, CacheCreationInput: 5, CachedInput: 7, Output: 11}, false},
 		{"absent aggregate", root, "", fallback, false},
 		{"empty aggregate", root, "{}", fallback, false},
 		{"malformed aggregate", root, `"bad"`, fallback, false},
@@ -472,6 +472,35 @@ func TestOutputWholeTreeUsage(t *testing.T) {
 	}
 }
 
+func TestOutputUsageCoverage(t *testing.T) {
+	const root = `{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}`
+	const models = `{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":11}}`
+	for _, tc := range []struct {
+		name, fields    string
+		baselineUnknown bool
+		want            usage.Coverage
+	}{
+		{"model report", `,"usage":` + root + `,"modelUsage":` + models, false, usage.Coverage{Scope: "invocation"}},
+		{"root report only", `,"usage":` + root, false, usage.Coverage{Scope: "root_only", PartialReport: true}},
+		{"malformed model fallback", `,"usage":` + root + `,"modelUsage":{"main":{"inputTokens":"bad"}}`, false, usage.Coverage{Scope: "root_only", PartialReport: true, MalformedFinalReport: true}},
+		{"missing report", "", false, usage.Coverage{Scope: "unknown", MissingFinalReport: true}},
+		{"malformed root report", `,"usage":{"input_tokens":"bad"}`, false, usage.Coverage{Scope: "unknown", MalformedFinalReport: true}},
+		{"unattributed cumulative model report", `,"usage":` + root + `,"modelUsage":` + models, true, usage.Coverage{Scope: "known_subset", PartialReport: true, CumulativeUnattributed: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{baselineUnknown: tc.baselineUnknown}
+			line := `{"type":"result","subtype":"success","result":"answer"` + tc.fields + "}\n"
+			if _, err := o.Write([]byte(line)); err != nil {
+				t.Fatal(err)
+			}
+			o.finish()
+			if o.err != nil || o.result.UsageCoverage != tc.want {
+				t.Fatalf("coverage=%+v result=%+v err=%v, want %+v", o.result.UsageCoverage, o.result, o.err, tc.want)
+			}
+		})
+	}
+}
+
 func TestOutputPreservesRecordedUsage(t *testing.T) {
 	const pending = `{"type":"system","subtype":"background_tasks_changed","uuid":"pending-list","tasks":[{"task_id":"reviewer"}]}`
 	const clear = `{"type":"system","subtype":"background_tasks_changed","uuid":"cleared-list","tasks":[]}`
@@ -479,7 +508,7 @@ func TestOutputPreservesRecordedUsage(t *testing.T) {
 	const aggregate = `{"type":"result","subtype":"success","result":"answer",` + models + `}`
 	const fallback = `"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}`
 	const partial = `{"type":"result","subtype":"success","result":"provisional",` + fallback + `}`
-	known := usage.Tokens{Input: 146, CachedInput: 56, Output: 64}
+	known := usage.Tokens{Input: 146, CacheCreationInput: 48, CachedInput: 56, Output: 64}
 	for _, tc := range []struct {
 		name, first, intermediate, final string
 		want                             usage.Tokens
@@ -489,9 +518,9 @@ func TestOutputPreservesRecordedUsage(t *testing.T) {
 		{name: "error with smaller root fallback", final: `{"type":"result","subtype":"error_during_execution","is_error":true,` + fallback + `}`, want: known, failed: true},
 		{name: "success without usage", final: `{"type":"result","subtype":"success","result":"final"}`, want: known},
 		{name: "success with invalid aggregate and root fallback", final: `{"type":"result","subtype":"success","result":"final","modelUsage":{"main":{"inputTokens":"invalid"}},` + fallback + `}`, want: known},
-		{name: "incomparable aggregate keeps each known counter", final: `{"type":"result","subtype":"success","result":"final","modelUsage":{"main":{"inputTokens":100,"cacheCreationInputTokens":0,"cacheReadInputTokens":40,"outputTokens":100}}}`, want: usage.Tokens{Input: 146, CachedInput: 56, Output: 100}},
+		{name: "incomparable aggregate keeps each known counter", final: `{"type":"result","subtype":"success","result":"final","modelUsage":{"main":{"inputTokens":100,"cacheCreationInputTokens":0,"cacheReadInputTokens":40,"outputTokens":100}}}`, want: usage.Tokens{Input: 146, CacheCreationInput: 48, CachedInput: 56, Output: 100}},
 		{name: "identical cumulative aggregate not summed", intermediate: aggregate, final: aggregate, want: known, complete: true},
-		{name: "dominating aggregate restores completeness", intermediate: partial, final: `{"type":"result","subtype":"success","result":"final","modelUsage":{"main":{"inputTokens":150,"cacheCreationInputTokens":10,"cacheReadInputTokens":60,"outputTokens":100}}}`, want: usage.Tokens{Input: 220, CachedInput: 60, Output: 100}, complete: true},
+		{name: "dominating aggregate restores completeness", intermediate: partial, final: `{"type":"result","subtype":"success","result":"final","modelUsage":{"main":{"inputTokens":110,"cacheCreationInputTokens":50,"cacheReadInputTokens":60,"outputTokens":100}}}`, want: usage.Tokens{Input: 220, CacheCreationInput: 50, CachedInput: 60, Output: 100}, complete: true},
 		{name: "component merge refuses total overflow", first: `{"type":"result","subtype":"success","result":"provisional","modelUsage":{"main":{"inputTokens":9223372036854775797,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":9}}}`, final: `{"type":"result","subtype":"success","result":"final","modelUsage":{"main":{"inputTokens":1,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":9223372036854775805}}}`, want: usage.Tokens{Input: 9223372036854775797, Output: 9}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

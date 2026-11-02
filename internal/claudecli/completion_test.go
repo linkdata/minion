@@ -54,7 +54,7 @@ func TestNewAssistantParentageCannotPreserveStaleResult(t *testing.T) {
 				o := jsonlOutput{}
 				writeChunks(t, &o, numberResultEvents(data))
 				o.finish()
-				if o.completed != test.want || (o.err == nil) != test.want || !test.want && o.result.Answer != "" || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				if o.completed != test.want || (o.err == nil) != test.want || !test.want && o.result.Answer != "" || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 					t.Fatalf("stale completion or lost usage: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
 				}
 			})
@@ -327,7 +327,7 @@ func TestFirstFullAssistantWithUsageBeyondResultNeedsCoveringUsage(t *testing.T)
 			writeChunks(t, &o, strings.TrimSuffix(next, "}")+`,"result_index":1}`+"\n")
 		}
 		o.finish()
-		if o.err != nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 12}) || o.result.UsageComplete != recovered {
+		if o.err != nil || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 12}) || o.result.UsageComplete != recovered {
 			t.Fatalf("recovered=%t result=%+v error=%v", recovered, o.result, o.err)
 		}
 	}
@@ -604,7 +604,7 @@ func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 				}
 				writeChunks(t, &o, numberResultEvents(data))
 				o.finish()
-				if errors.Is(o.err, aicli.ErrOutputLimit) || (o.err == nil) != tc.want || o.completed != tc.want || (o.result.Answer == "final answer") != tc.want || o.result.UsageComplete != tc.want || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				if errors.Is(o.err, aicli.ErrOutputLimit) || (o.err == nil) != tc.want || o.completed != tc.want || (o.result.Answer == "final answer") != tc.want || o.result.UsageComplete != tc.want || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 					t.Fatalf("stale stream completion: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
 				}
 			})
@@ -668,7 +668,7 @@ func TestOutputStoppedTaskNeedsNewRootResponseAndResult(t *testing.T) {
 			if tc.failure != "" && (o.err == nil || !strings.Contains(o.err.Error(), tc.failure)) {
 				t.Fatalf("lost native failure %q: %v", tc.failure, o.err)
 			}
-			if (o.err != nil) != tc.fails || o.completed == tc.fails || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: tc.output}) {
+			if (o.err != nil) != tc.fails || o.completed == tc.fails || o.result.UsageComplete == tc.fails || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: tc.output}) {
 				t.Fatalf("result=%+v completed=%v error=%v", o.result, o.completed, o.err)
 			}
 		})
@@ -807,7 +807,7 @@ func TestOutputTerminalReasonRequiresCompletion(t *testing.T) {
 				_, _ = o.Write([]byte(numberResultEvents(data)))
 				o.finish()
 				fails := !recover && reason != `"completed"`
-				if (o.err != nil) != fails || o.result.UsageComplete == fails || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+				if (o.err != nil) != fails || o.result.UsageComplete == fails || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 					t.Fatalf("recover=%v result=%+v error=%v", recover, o.result, o.err)
 				}
 			}
@@ -832,7 +832,7 @@ func TestOutputUsageGraceStartsOnlyOnce(t *testing.T) {
 		}
 		_, _ = o.Write([]byte(successfulResult + "\n"))
 		o.finish()
-		if o.err == nil || o.result.Tokens != (usage.Tokens{Input: 15, CachedInput: 7, Output: 11}) {
+		if o.err == nil || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 			t.Fatalf("events=%q late result usage lost: %+v error=%v", events, o.result, o.err)
 		}
 	}
@@ -855,7 +855,7 @@ func TestRunFatalGraceStopsWatchdogAndKeepsObservedUsage(t *testing.T) {
 				defer cancel()
 				start := time.Now()
 				result, err := Run(ctx, t.TempDir(), "task", false, "", config.ClaudeConfig{})
-				want := usage.Tokens{Input: 15, CachedInput: 7, Output: 2}
+				want := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 2}
 				if resultFollows {
 					want.Output = 11
 				}
