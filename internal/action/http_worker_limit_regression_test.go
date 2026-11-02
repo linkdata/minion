@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
@@ -132,4 +133,78 @@ func captureWorkerLimitOutcome(t *testing.T, cause, runErr error, hard, idle tim
 		t.Fatal("Outcome acknowledgement was not accepted")
 	}
 	return received, checkpoints.transport.outcomeDegraded, err
+}
+
+func TestBeforeCallChecksAbsoluteLimitsAroundACK(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		hard, idle  time.Duration
+		ackDelay    time.Duration
+		cancelAt    time.Duration
+		callerLimit bool
+		cause, want error
+		requests    int
+	}{
+		{name: "runtime cap before ACK", hard: -time.Second, idle: time.Minute, want: errExecutorRuntimeCap},
+		{name: "inactivity before ACK", hard: time.Minute, idle: -time.Second, want: errExecutorInactivity},
+		{name: "caller deadline before ACK", hard: -time.Second, idle: time.Minute, callerLimit: true, want: context.DeadlineExceeded},
+		{name: "earlier cancellation before ACK", hard: -time.Second, idle: time.Minute, cause: context.Canceled, want: context.Canceled},
+		{name: "runtime cap during ACK", hard: 5 * time.Second, idle: time.Minute, ackDelay: 6 * time.Second, want: errExecutorRuntimeCap, requests: 1},
+		{name: "inactivity during ACK", hard: time.Minute, idle: 5 * time.Second, ackDelay: 6 * time.Second, want: errExecutorInactivity, requests: 1},
+		{name: "earlier cancellation during ACK", hard: 5 * time.Second, idle: time.Minute, ackDelay: 6 * time.Second, cancelAt: 4 * time.Second, want: context.Canceled, requests: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				job := testJob(command.Comment)
+				binding := httpJobBinding(job)
+				started := time.Now()
+				action, cancelAction := context.WithCancelCause(t.Context())
+				defer cancelAction(nil)
+				if test.cause != nil {
+					cancelAction(test.cause)
+				}
+				requests := 0
+				client := &http.Client{Transport: httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+					requests++
+					if r.URL.Path != "/before" {
+						t.Fatalf("unexpected request: %s", r.URL.Path)
+					}
+					if test.cancelAt > 0 {
+						time.Sleep(test.cancelAt)
+						cancelAction(context.Canceled)
+						time.Sleep(test.ackDelay - test.cancelAt)
+					} else {
+						time.Sleep(test.ackDelay)
+					}
+					data, err := httpEncode(httpAcknowledgement{httpBinding: binding, Kind: "before", Sequence: 1}, httpControlBytes)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(data))}, nil
+				})}
+				checkpoints := &httpClientCheckpoints{
+					transport: &httpExecutionClient{client: client, base: &url.URL{Scheme: "http", Host: "worker.test"}},
+					control:   t.Context(), action: action, inactivity: &inactivityTimer{last: started, timeout: test.idle},
+					hardDeadline: started.Add(test.hard), ownRuntimeCap: !test.callerLimit, binding: binding,
+				}
+				call := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+					Ordinal: 1, Call: CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}}
+				got := checkpoints.BeforeCall(call)
+				if !errors.Is(got, test.want) || requests != test.requests ||
+					errors.Is(got, errExecutorInactivity) != (test.want == errExecutorInactivity) ||
+					errors.Is(got, errExecutorRuntimeCap) != (test.want == errExecutorRuntimeCap) {
+					t.Fatalf("before call error=%v requests=%d, want %v and %d requests", got, requests, test.want, test.requests)
+				}
+				if test.cause == nil && test.cancelAt == 0 && action.Err() != nil {
+					t.Fatalf("test context canceled instead of exercising absolute deadline: %v", action.Err())
+				}
+				if test.requests == 1 {
+					if retry := checkpoints.BeforeCall(call); retry != got || requests != 1 {
+						t.Fatalf("expired acknowledged call was retried: first=%v retry=%v requests=%d", got, retry, requests)
+					}
+				}
+			})
+		})
+	}
 }

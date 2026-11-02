@@ -608,12 +608,28 @@ func (c *httpClientCheckpoints) acknowledge(parent context.Context, kind string,
 	return nil
 }
 
+func (c *httpClientCheckpoints) beforeCallStop() error {
+	cause := context.Cause(c.action)
+	if !c.hardDeadline.IsZero() {
+		var idle time.Time
+		if c.inactivity != nil {
+			idle = c.inactivity.deadline()
+		}
+		if limit := selectWorkerLimit(cause, time.Now(), c.hardDeadline, idle, c.ownRuntimeCap); limit != workerLimitNone {
+			return limit.err()
+		}
+	}
+	return cause
+}
+
 func (c *httpClientCheckpoints) checkpoint(kind string, value CallCheckpoint) error {
 	if c.failure != nil {
 		return c.failure
 	}
-	if kind == "before" && c.action.Err() != nil {
-		return context.Cause(c.action)
+	if kind == "before" {
+		if err := c.beforeCallStop(); err != nil {
+			return err
+		}
 	}
 	if (httpBinding{Version: value.Version, Identity: value.Identity, SourceRef: value.SourceRef}) != c.binding {
 		c.failure = httpClientUnknown(kind, errors.New("checkpoint binding differs from assignment"))
@@ -629,6 +645,9 @@ func (c *httpClientCheckpoints) checkpoint(kind string, value CallCheckpoint) er
 		err = c.acknowledge(c.control, kind, data, sequence)
 	} else {
 		err = httpClientUnknown(kind, err)
+	}
+	if err == nil && kind == "before" {
+		err = c.beforeCallStop()
 	}
 	c.failure = err
 	return err
