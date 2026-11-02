@@ -186,6 +186,13 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 		}
 	}
+	if pruner, ok := m.Handler.(interface {
+		PrunePrivateRecords(context.Context, *state.Store, time.Time) error
+	}); ok {
+		if err := pruner.PrunePrivateRecords(ctx, store, m.now().UTC()); err != nil {
+			m.logf("private record retention: %v", err)
+		}
+	}
 	activeJobID := ""
 	activeWriteChecked := false
 	activeSavedReply := false
