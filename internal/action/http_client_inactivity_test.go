@@ -21,6 +21,7 @@ import (
 type httpInactivityFixture struct {
 	parent         *httpServerTest
 	modelStarted   chan struct{}
+	assignedAt     chan time.Time
 	outcomeEntered chan struct{}
 	releaseOutcome func()
 	done           chan error
@@ -54,10 +55,10 @@ func (b *httpPullCloseSignal) Close() error {
 	return err
 }
 
-func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model func(context.Context, modelRun) (aicli.Result, error)) *httpInactivityFixture {
+func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model func(context.Context, modelRun) (aicli.Result, error), workerBudget ...time.Duration) *httpInactivityFixture {
 	t.Helper()
 	f := &httpInactivityFixture{
-		modelStarted: make(chan struct{}, 1), outcomeEntered: make(chan struct{}, 1),
+		modelStarted: make(chan struct{}, 1), assignedAt: make(chan time.Time, 1), outcomeEntered: make(chan struct{}, 1),
 		done: make(chan error, 1),
 	}
 	releaseOutcome := make(chan struct{})
@@ -65,6 +66,14 @@ func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model fun
 	f.parent = newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
 		func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/next" && len(workerBudget) != 0 {
+					next.(*HTTPExecutor).serveNextEncoded(w, r, func(assignment httpAssignment) ([]byte, error) {
+						f.assignedAt <- time.Now()
+						assignment.Job.RuntimeBudget = workerBudget[0]
+						return httpEncode(assignment, httpJobBytes)
+					})
+					return
+				}
 				if r.URL.Path == "/outcome" {
 					select {
 					case f.outcomeEntered <- struct{}{}:
@@ -98,6 +107,33 @@ func (f *httpInactivityFixture) waitModel(t *testing.T) {
 		t.Fatalf("worker ended before model admission: %v", err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("worker did not admit the model")
+	}
+}
+
+func assertHTTPModelRunning(t *testing.T, stopped <-chan time.Time) {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case at := <-stopped:
+		t.Fatalf("model stopped before hard deadline at %s", at)
+	default:
+	}
+}
+
+func assertHTTPModelRunningNearDeadline(t *testing.T, stopped <-chan time.Time, deadline time.Time) {
+	t.Helper()
+	remaining := time.Until(deadline.Add(-time.Second))
+	if remaining <= 0 {
+		t.Fatalf("model deadline %s is too close for a live check", deadline)
+	}
+	time.Sleep(remaining)
+	assertHTTPModelRunning(t, stopped)
+}
+
+func assertHTTPDeadlineNear(t *testing.T, got, want time.Time) {
+	t.Helper()
+	if got.Before(want.Add(-time.Second)) || got.After(want.Add(time.Second)) {
+		t.Fatalf("model deadline %s differs from assigned hard deadline %s", got, want)
 	}
 }
 
@@ -458,28 +494,108 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		job.RuntimeBudget = 25 * time.Second
 		job.InactivityTimeout = 20 * time.Second
 		progress := make(chan func(), 1)
+		modelDeadline := make(chan time.Time, 1)
+		modelStopped := make(chan time.Time, 1)
 		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			defer func() { modelStopped <- time.Now() }()
+			deadline, _ := ctx.Deadline()
+			modelDeadline <- deadline
 			progress <- request.onProgress
 			<-ctx.Done()
 			return aicli.Result{}, ctx.Err()
 		})
 		f.waitModel(t)
+		deadline := <-modelDeadline
+		parentDeadline, ok := f.parent.tx.budget.Deadline()
+		if !ok {
+			t.Fatal("parent action has no hard deadline")
+		}
+		assertHTTPDeadlineNear(t, deadline, parentDeadline)
 		renew := <-progress
-		time.Sleep(15 * time.Second)
+		time.Sleep(4 * time.Second)
 		renew()
-		time.Sleep(8 * time.Second)
+		assertHTTPModelRunning(t, modelStopped)
+		time.Sleep(4 * time.Second)
 		renew()
-		time.Sleep(3 * time.Second)
-		err := <-f.done
-		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errExecutorRuntimeCap) ||
-			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
+		assertHTTPModelRunning(t, modelStopped)
+		assertHTTPModelRunningNearDeadline(t, modelStopped, deadline)
+		time.Sleep(2 * time.Second)
+		var err error
+		select {
+		case err = <-f.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("worker did not return after the hard deadline")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) ||
+			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) ||
+			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) {
 			t.Fatalf("hard runtime did not cap chatty model: %v", err)
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
-		if !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
-			reported.failure.Inactivity || len(got.result.Calls) != 1 {
+		// Parent stop and worker cap can race near the hard deadline.
+		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline ||
+			reported.failure.RuntimeCap != errors.Is(err, errExecutorRuntimeCap) ||
+			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport ||
+			errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrRequestTransport) ||
+			len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
+		}
+	})
+}
+
+func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		job.RuntimeBudget = 30 * time.Second
+		job.InactivityTimeout = 12 * time.Second
+		progress := make(chan func(), 1)
+		modelDeadline := make(chan time.Time, 1)
+		modelStopped := make(chan time.Time, 1)
+		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			defer func() { modelStopped <- time.Now() }()
+			deadline, _ := ctx.Deadline()
+			modelDeadline <- deadline
+			progress <- request.onProgress
+			<-ctx.Done()
+			return aicli.Result{}, ctx.Err()
+		}, 20*time.Second)
+		f.waitModel(t)
+		deadline := <-modelDeadline
+		assertHTTPDeadlineNear(t, deadline, (<-f.assignedAt).Add(20*time.Second))
+		parentDeadline, ok := f.parent.tx.budget.Deadline()
+		if !ok {
+			t.Fatal("parent action has no hard deadline")
+		}
+		renew := <-progress
+		time.Sleep(6 * time.Second)
+		renew()
+		assertHTTPModelRunning(t, modelStopped)
+		time.Sleep(6 * time.Second)
+		renew()
+		assertHTTPModelRunning(t, modelStopped)
+		assertHTTPModelRunningNearDeadline(t, modelStopped, deadline)
+		time.Sleep(2 * time.Second)
+		var err error
+		select {
+		case err = <-f.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("worker did not return after its runtime cap")
+		}
+		if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) ||
+			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) {
+			t.Fatalf("worker runtime cap did not stop chatty model: %v", err)
+		}
+		if stoppedAt := <-modelStopped; !stoppedAt.Before(parentDeadline) {
+			t.Fatalf("model stopped at %s after parent deadline %s", stoppedAt, parentDeadline)
+		}
+		got := f.parent.result(t)
+		var reported *workerFailureError
+		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
+			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport ||
+			errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrRequestTransport) ||
+			len(got.result.Calls) != 1 {
+			t.Fatalf("parent lost worker runtime cap: error=%v result=%+v", got.err, got.result)
 		}
 	})
 }
