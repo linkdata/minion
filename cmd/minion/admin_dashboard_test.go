@@ -136,10 +136,17 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil {
 		t.Fatal(err)
 	}
-	const workerStatus = "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / verification."
+	const workerStatus = "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / verification. Tracked accepted actions 0."
 	if status.String() != workerStatus+" In progress 0." {
 		t.Fatalf("live status summary: %q", status.String())
 	}
+	page.Dot.View.Snapshot.TrackedAccepted = 1
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		status.String() != strings.Replace(workerStatus, "actions 0.", "actions 1.", 1)+" In progress 0." {
+		t.Fatalf("count-only change did not update live status summary: %q, %v", status.String(), err)
+	}
+	page.Dot.View.Snapshot.TrackedAccepted = 0
 	page.Dot.View.Action = &action.DashboardAction{Repository: "owner/repo", Requester: "writer", Action: "review",
 		Phase: "critic", AcceptedAt: time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC), Deadline: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)}
 	page.Dot.View.Snapshot.InProgress = 1
@@ -181,7 +188,7 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	page.Dot.View.Snapshot.Worker.ReviewPhase = "full"
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / full."+actionSummary {
+		status.String() != "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / full. Tracked accepted actions 0."+actionSummary {
 		t.Fatalf("review phase did not change live status summary: %q, %v", status.String(), err)
 	}
 	page.Dot.View.Snapshot.Worker.State = "stopping"
@@ -190,7 +197,7 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	page.Dot.View.Snapshot.Worker.ReviewPhase = ""
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != "Worker readiness busy. Reported state stopping. Worker phase cleanup."+actionSummary {
+		status.String() != "Worker readiness busy. Reported state stopping. Worker phase cleanup. Tracked accepted actions 0."+actionSummary {
 		t.Fatalf("worker state did not change live status summary: %q, %v", status.String(), err)
 	}
 	var actionAfter bytes.Buffer
