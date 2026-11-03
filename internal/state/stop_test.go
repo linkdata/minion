@@ -101,6 +101,50 @@ func TestRequestStopRequiresLiveRunAndFencesBeforeAssignment(t *testing.T) {
 	}
 }
 
+func TestPreparationUnregisterKeepsWorkerStopRegistered(t *testing.T) {
+	store, _, accepted := stopStoreFixture(t)
+	prepCtx, cancelPrep := context.WithCancel(t.Context())
+	defer cancelPrep()
+	unregisterPrep := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancelPrep)
+	workerCtx, cancelWorker := context.WithCancel(t.Context())
+	defer cancelWorker()
+	unregisterWorker := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancelWorker)
+	defer unregisterWorker()
+	unregisterPrep()
+	if !store.SelectedStopActive(accepted.JobID, accepted.AttemptID) {
+		t.Fatal("preparation cleanup erased the worker stop registration")
+	}
+	if _, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if workerCtx.Err() != context.Canceled || prepCtx.Err() != nil {
+		t.Fatalf("stop canceled the wrong registration: worker=%v preparation=%v", workerCtx.Err(), prepCtx.Err())
+	}
+}
+
+func TestPreparationReleaseOrdersStopRequest(t *testing.T) {
+	t.Run("stop first", func(t *testing.T) {
+		store, _, accepted := stopStoreFixture(t)
+		unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, func() {})
+		if _, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if !unregister() {
+			t.Fatal("release missed the saved stop")
+		}
+	})
+	t.Run("release first", func(t *testing.T) {
+		store, _, accepted := stopStoreFixture(t)
+		unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, func() {})
+		if unregister() {
+			t.Fatal("release found an absent stop")
+		}
+		if _, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC()); !errors.Is(err, ErrStopConflict) {
+			t.Fatalf("stop after release = %v, want conflict", err)
+		}
+	})
+}
+
 func TestRequestStopCannotReplaceCompletedDecision(t *testing.T) {
 	store, _, accepted := stopStoreFixture(t)
 	if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", time.Now().UTC()); err != nil {

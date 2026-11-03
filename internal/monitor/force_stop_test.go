@@ -3,10 +3,12 @@ package monitor
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
 
@@ -28,6 +30,104 @@ func (h *cleanRecoveredStopHandler) PublishRecovered(ctx context.Context, _ Job)
 	close(h.entered)
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+type heldStopReactionGitHub struct {
+	*fakeGitHub
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (g *heldStopReactionGitHub) ReactEyes(ctx context.Context, _ string) error {
+	g.once.Do(func() { close(g.entered) })
+	<-ctx.Done()
+	return nil // The remote reaction can succeed as cancellation arrives.
+}
+
+func TestForceStopDuringAcceptanceReactionNeverDispatches(t *testing.T) {
+	at := time.Now().UTC()
+	store := openStateAt(t, filepath.Join(t.TempDir(), "state.json"), at.Add(-time.Minute))
+	gh := &heldStopReactionGitHub{fakeGitHub: &fakeGitHub{
+		notifications: []github.Notification{testNotification(at)}, items: []github.Item{selectedItem(at)},
+		permission: github.Permission{Permission: "write"},
+	}, entered: make(chan struct{})}
+	handler := &fakeHandler{}
+	m := selectedMonitor(t, at, gh, handler)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { _, err := m.RunOnce(ctx, store); finished <- err }()
+	select {
+	case <-gh.entered:
+	case <-ctx.Done():
+		t.Fatal("accepted reaction did not start")
+	}
+	var selected state.AcceptedAction
+	_ = store.WithLock(func() error { selected = *store.Data.Accepted; return nil })
+	if !store.SelectedStopActive(selected.JobID, selected.AttemptID) {
+		t.Fatal("accepted preparation was not stoppable")
+	}
+	if _, err := store.RequestStop(selected.JobID, "stale-attempt", "operator", time.Now().UTC()); !errors.Is(err, state.ErrStopConflict) {
+		t.Fatalf("stale preparation stop = %v", err)
+	}
+	request, err := store.RequestStop(selected.JobID, selected.AttemptID, "operator", time.Now().UTC())
+	if err != nil || request.Status != "requested" {
+		t.Fatalf("preparation stop = %+v, %v", request, err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("stopped preparation: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("stopped preparation did not finish")
+	}
+	decision := store.Data.TerminalDecisions[selected.JobID]
+	if decision.Outcome != "canceled" || decision.StopRequest.Status != "confirmed" ||
+		store.Data.Accepted != nil || store.Data.Processed[selected.JobID].IsZero() ||
+		len(handler.jobs) != 0 || gh.commentCalls != 0 {
+		t.Fatalf("preparation stop dispatched or failed cleanup: decision=%+v state=%+v jobs=%d comments=%d",
+			decision, store.Data, len(handler.jobs), gh.commentCalls)
+	}
+}
+
+func TestForceStopDuringRecoveryCapacityNeverDispatches(t *testing.T) {
+	m, store, job, gh, _ := assignmentValidationFixture(t)
+	store.Data.NextInviteCheckAt = time.Now().Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	handler := &heldCapacityHandler{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(handler.release)
+	m.Handler = handler
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() { finished <- m.recoverAccepted(ctx, store) }()
+	select {
+	case <-handler.entered:
+	case <-ctx.Done():
+		t.Fatal("recovery capacity wait did not start")
+	}
+	request, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC())
+	if err != nil || request.Status != "requested" {
+		t.Fatalf("recovery stop = %+v, %v", request, err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("stopped recovery: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("stopped recovery did not finish")
+	}
+	decision := store.Data.TerminalDecisions[job.ID]
+	if decision.Outcome != "canceled" || decision.StopRequest.Status != "confirmed" ||
+		store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() ||
+		len(handler.jobs) != 0 || handler.cancels.Load() != 1 || gh.commentCalls != 0 {
+		t.Fatalf("recovery stop dispatched or failed cleanup: decision=%+v state=%+v jobs=%d cancellations=%d comments=%d",
+			decision, store.Data, len(handler.jobs), handler.cancels.Load(), gh.commentCalls)
+	}
 }
 
 func TestForceStopDuringRecoveredPublicationCannotConfirmOldWorker(t *testing.T) {

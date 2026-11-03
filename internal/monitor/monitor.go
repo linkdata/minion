@@ -730,44 +730,60 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stop(err)
 				}
 			}
-			jobFailure.Attempts++
-			store.Data.JobFailures[job.ID] = jobFailure
-			store.Data.Accepted = accepted
-			if firstAcceptance {
-				store.Data.AcceptedTotal++
-			}
-			for _, unaccepted := range scans[scanIndex:] {
-				if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
-					unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
-					pending.UpdatedAt = unaccepted.notification.UpdatedAt
-					pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
-					store.Data.PendingNotifications[unaccepted.key] = pending
+			prepCtx, cancelPrep := context.WithDeadline(ctx, job.Deadline)
+			var unregisterPrep func() bool
+			if err := store.WithLock(func() error {
+				jobFailure.Attempts++
+				store.Data.JobFailures[job.ID] = jobFailure
+				store.Data.Accepted = accepted
+				if firstAcceptance {
+					store.Data.AcceptedTotal++
 				}
-				rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
-			}
-			if err := saveAcceptanceState(store); err != nil {
+				for _, unaccepted := range scans[scanIndex:] {
+					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
+						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
+						pending.UpdatedAt = unaccepted.notification.UpdatedAt
+						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
+						store.Data.PendingNotifications[unaccepted.key] = pending
+					}
+					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
+				}
+				if err := saveAcceptanceState(store); err != nil {
+					return err
+				}
+				unregisterPrep = store.RegisterSelectedStopLocked(job.ID, job.AttemptID, cancelPrep)
+				return nil
+			}); err != nil {
+				cancelPrep()
 				return stop(err)
 			}
-			err = m.GitHub.ReactEyes(ctx, item.NodeID)
-			if ctx.Err() != nil {
-				return stopAt("react to "+itemLocation(item), err)
+			releasePrep := func() bool {
+				stopped := unregisterPrep()
+				cancelPrep()
+				return stopped
 			}
-			if err != nil {
-				if !time.Now().Before(job.Deadline) {
-					if err := m.terminalAccepted(ctx, store, job, jobFailure); err != nil {
+			err = m.GitHub.ReactEyes(prepCtx, item.NodeID)
+			if ctx.Err() != nil || prepCtx.Err() != nil || err != nil || !time.Now().Before(job.Deadline) {
+				if releasePrep() {
+					if err := m.completeSelected(ctx, store, job, started, context.Canceled); err != nil {
 						return stop(err)
 					}
+					clearResolvedTerminalFailures()
 					continue
 				}
-				return stop(fmt.Errorf("react to %s: %w", itemLocation(item), err))
-			}
-			if !time.Now().Before(job.Deadline) {
+				if ctx.Err() != nil {
+					return stopAt("react to "+itemLocation(item), err)
+				}
+				if err != nil && time.Now().Before(job.Deadline) {
+					return stop(fmt.Errorf("react to %s: %w", itemLocation(item), err))
+				}
 				if err := m.terminalAccepted(ctx, store, job, jobFailure); err != nil {
 					return stop(err)
 				}
 				continue
 			}
-			executeErr := m.executeSelectedWithControls(ctx, store, job, started, entry.key, items)
+			executeErr := m.executeSelectedWithControls(prepCtx, store, job, started, entry.key, items)
+			releasePrep()
 			clearResolvedTerminalFailures()
 			if err := executeErr; err != nil {
 				if errors.Is(err, ErrAcceptedDiscarded) && !errors.Is(err, ErrAcceptanceState) {
@@ -1933,9 +1949,16 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
 		return fmt.Errorf("%w: selected executor changed before recovery", ErrAcceptanceState)
 	}
+	acceptedForPreparation := *accepted
 	resumeCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
+	unregisterPrep := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
+	defer unregisterPrep()
 	failed := func(location string, err error) error {
+		if errors.Is(resumeCtx.Err(), context.Canceled) && ctx.Err() == nil {
+			unregisterPrep() // Wait for the stop save before reading its state.
+			return m.completeSelected(ctx, store, job, m.now().UTC(), context.Canceled)
+		}
 		if ctx.Err() == nil && !time.Now().Before(job.Deadline) {
 			return m.terminalAccepted(ctx, store, job, failure)
 		}
@@ -1953,7 +1976,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if err := checkContext("resume accepted action capacity"); err != nil {
 		return err
 	}
-	repo, current, valid, err := m.validateAcceptedSource(resumeCtx, *accepted, true)
+	repo, current, valid, err := m.validateAcceptedSource(resumeCtx, acceptedForPreparation, true)
 	if err != nil {
 		return failed("revalidate accepted source", err)
 	}
@@ -1962,10 +1985,21 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if !valid {
 		m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
-		return store.WithLock(func() error { return m.discardAccepted(store) })
+		var stopped bool
+		err := store.WithLock(func() error {
+			stopped = store.Data.Accepted.StopRequest != (state.StopRequest{})
+			if stopped {
+				return nil
+			}
+			return m.discardAccepted(store)
+		})
+		if stopped {
+			return m.completeSelected(ctx, store, job, m.now().UTC(), context.Canceled)
+		}
+		return err
 	}
 	job.Repository, job.Source = repo, current
-	if err := m.GitHub.ReactEyes(resumeCtx, accepted.SourceNodeID); err != nil {
+	if err := m.GitHub.ReactEyes(resumeCtx, acceptedForPreparation.SourceNodeID); err != nil {
 		return failed("react to accepted source", err)
 	}
 	if err := checkContext("react to accepted source"); err != nil {
@@ -2061,6 +2095,10 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	defer cancel()
 	unregisterSelectedStop := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
 	defer unregisterSelectedStop()
+	if err := actionCtx.Err(); err != nil {
+		unregisterSelectedStop()
+		return finish(err)
+	}
 	controlCtx := actionCtx
 	var cancelControls context.CancelFunc
 	if job.Command.Action == command.Fix {

@@ -39,7 +39,7 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 			return s.savedStop.jobID == jobID && s.savedStop.attemptID == attemptID && s.savedStop.request == stop
 		}
 		remember := func(stop StopRequest) { s.savedStop = savedStopRequest{jobID, attemptID, stop} }
-		if active := s.activeStop; active.cancel == nil || active.jobID != jobID || active.attemptID != attemptID {
+		if active := s.activeStop; active == nil || active.jobID != jobID || active.attemptID != attemptID {
 			// Preparation and terminal cleanup still use the monitor's private
 			// state path. Confirm the saved request before acknowledging a repeat.
 			if accepted := s.Data.Accepted; accepted != nil && accepted.JobID == jobID && accepted.AttemptID == attemptID &&
@@ -133,36 +133,51 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 func (s *Store) SelectedStopActive(jobID, attemptID string) bool {
 	active := false
 	_ = s.WithLock(func() error {
-		active = s.activeStop.cancel != nil && s.activeStop.jobID == jobID && s.activeStop.attemptID == attemptID
+		active = s.activeStop != nil && s.activeStop.jobID == jobID && s.activeStop.attemptID == attemptID
 		return nil
 	})
 	return active
 }
 
 func (s *Store) cancelSelectedLocked(jobID, attemptID string) {
-	if active := s.activeStop; active.cancel != nil && active.jobID == jobID && active.attemptID == attemptID {
+	if active := s.activeStop; active != nil && active.jobID == jobID && active.attemptID == attemptID {
 		active.cancel()
 	}
 }
 
 // RegisterSelectedStop binds one run to the durable request. Registration and
 // RequestStop use the same lock, so request-before-bind cannot miss cancellation.
-func (s *Store) RegisterSelectedStop(jobID, attemptID string, cancel context.CancelFunc) func() {
+func (s *Store) RegisterSelectedStop(jobID, attemptID string, cancel context.CancelFunc) func() bool {
+	var unregister func() bool
 	_ = s.WithLock(func() error {
-		s.activeStop = selectedStopCancel{jobID: jobID, attemptID: attemptID, cancel: cancel}
-		if accepted := s.Data.Accepted; accepted != nil && accepted.JobID == jobID &&
-			accepted.AttemptID == attemptID && accepted.StopRequest != (StopRequest{}) {
-			cancel()
-		}
+		unregister = s.RegisterSelectedStopLocked(jobID, attemptID, cancel)
 		return nil
 	})
-	return func() {
+	return unregister
+}
+
+// RegisterSelectedStopLocked replaces the selected cancel while the caller holds WithLock.
+// Its release reports a matching saved request under that same lock.
+func (s *Store) RegisterSelectedStopLocked(jobID, attemptID string, cancel context.CancelFunc) func() bool {
+	registration := &selectedStopCancel{jobID: jobID, attemptID: attemptID, cancel: cancel}
+	s.activeStop = registration
+	if accepted := s.Data.Accepted; accepted != nil && accepted.JobID == jobID &&
+		accepted.AttemptID == attemptID && accepted.StopRequest != (StopRequest{}) {
+		cancel()
+	}
+	return func() bool {
+		stopped := false
 		_ = s.WithLock(func() error {
-			if active := s.activeStop; active.jobID == jobID && active.attemptID == attemptID {
-				s.activeStop = selectedStopCancel{}
+			if s.activeStop == registration {
+				s.activeStop = nil
+			}
+			if accepted := s.Data.Accepted; accepted != nil && accepted.JobID == jobID &&
+				accepted.AttemptID == attemptID && accepted.StopRequest != (StopRequest{}) {
+				stopped = true
 			}
 			return nil
 		})
+		return stopped
 	}
 }
 
