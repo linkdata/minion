@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -66,6 +65,13 @@ func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model fun
 	f.parent = newHTTPServerTestWithServer(t, t.Context(), job, runnerExecutionCheckpoints{},
 		func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/next" && len(workerBudget) != 0 {
+					next.(*HTTPExecutor).serveNextEncoded(w, r, func(assignment httpAssignment) ([]byte, error) {
+						assignment.Job.RuntimeBudget = workerBudget[0]
+						return httpEncode(assignment, httpJobBytes)
+					})
+					return
+				}
 				if r.URL.Path == "/outcome" {
 					select {
 					case f.outcomeEntered <- struct{}{}:
@@ -83,30 +89,6 @@ func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model fun
 	}
 	client := f.parent.server.Client()
 	client.Timeout = 0
-	if len(workerBudget) != 0 {
-		base := client.Transport
-		client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
-			response, err := base.RoundTrip(r)
-			if err != nil || r.URL.Path != "/next" || response.StatusCode != http.StatusOK {
-				return response, err
-			}
-			var assignment httpAssignment
-			decodeErr := httpDecode(response.Body, httpJobBytes, &assignment)
-			closeErr := response.Body.Close()
-			if err := errors.Join(decodeErr, closeErr); err != nil {
-				return nil, err
-			}
-			assignment.Job.RuntimeBudget = workerBudget[0]
-			data, err := httpEncode(assignment, httpJobBytes)
-			if err != nil {
-				return nil, err
-			}
-			response.Body = io.NopCloser(bytes.NewReader(data))
-			response.ContentLength = int64(len(data))
-			response.Header.Set("Content-Length", strconv.Itoa(len(data)))
-			return response, nil
-		})
-	}
 	runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
 		f.modelStarted <- struct{}{}
 		return model(ctx, request)
@@ -495,7 +477,12 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		time.Sleep(8 * time.Second)
 		renew()
 		time.Sleep(3 * time.Second)
-		err := <-f.done
+		var err error
+		select {
+		case err = <-f.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("hard deadline did not stop the model")
+		}
 		if !errors.Is(err, context.DeadlineExceeded) ||
 			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
 			t.Fatalf("hard runtime did not cap chatty model: %v", err)
@@ -531,7 +518,12 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		renew()
 		synctest.Wait()
 		time.Sleep(3 * time.Second)
-		err := <-f.done
+		var err error
+		select {
+		case err = <-f.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("worker cap did not stop the model before the parent deadline")
+		}
 		if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
 			t.Fatalf("worker runtime cap did not stop chatty model: %v", err)
 		}
