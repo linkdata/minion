@@ -1,6 +1,7 @@
 package gitwork
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -21,11 +24,36 @@ func windowsTreeCommit(f gitFixture, tree string) string {
 	return f.gitInput(f.source, "native path fixture\n", "commit-tree", tree, "-p", f.base)
 }
 
+func windowsRecordGitCommands(t *testing.T) string {
+	t.Helper()
+	realGit, err := aicli.AbsoluteExecutable("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyDir := t.TempDir()
+	testsupport.LinkTestExecutable(t, filepath.Join(proxyDir, "git.exe"))
+	log := filepath.Join(t.TempDir(), "git-commands")
+	t.Setenv("PATH", proxyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MINION_TEST_GIT_PROXY", realGit)
+	t.Setenv("MINION_TEST_GIT_COMMANDS", log)
+	return log
+}
+
+func windowsAssertNoCheckout(t *testing.T, log string) {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil || !bytes.Contains(data, []byte("clone\n")) || !bytes.Contains(data, []byte("ls-tree\n")) || bytes.Contains(data, []byte("checkout\n")) || bytes.Contains(data, []byte("update-ref\n")) {
+		t.Fatalf("source preflight Git calls=%q error=%v", data, err)
+	}
+}
+
 func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 	for _, test := range []struct {
 		name               string
 		paths              []string
 		directoryCollision bool
+		linkCollision      bool
+		reason             string
 	}{
 		{name: "device", paths: []string{"CON"}},
 		{name: "numbered device", paths: []string{"COM1"}},
@@ -36,8 +64,9 @@ func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 		{name: "Git metadata alias", paths: []string{"git~1"}},
 		{name: "drive component", paths: []string{"C:"}},
 		{name: "UNC spelling", paths: []string{`\\server`}},
-		{name: "file case collision", paths: []string{"Readme", "README"}},
-		{name: "directory case collision", paths: []string{"Docs/file", "docs/file"}, directoryCollision: true},
+		{name: "file case collision", paths: []string{"Readme", "README"}, reason: "duplicate source path"},
+		{name: "directory case collision", paths: []string{"Docs/file", "docs/file"}, directoryCollision: true, reason: "source directory spelling collision"},
+		{name: "omitted link case collision", paths: []string{"Link", "link"}, linkCollision: true, reason: "duplicate source path"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newFixture(t)
@@ -48,6 +77,11 @@ func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 				records = []string{
 					fmt.Sprintf("040000 tree %s\tDocs", child),
 					fmt.Sprintf("040000 tree %s\tdocs", child),
+				}
+			} else if test.linkCollision {
+				records = []string{
+					fmt.Sprintf("100644 blob %s\tLink", blob),
+					fmt.Sprintf("120000 blob %s\tlink", blob),
 				}
 			} else {
 				for _, name := range test.paths {
@@ -63,15 +97,21 @@ func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 					t.Fatalf("Git tree lost exact path %q: %q", name, listing)
 				}
 			}
+			log := windowsRecordGitCommands(t)
 			workRoot := t.TempDir()
 			checkout, err := cloneFromURL(t.Context(), workRoot, fixture.remote, "main", true)
 			if checkout != nil {
 				t.Cleanup(func() { _ = checkout.Close() })
 			}
 			var exit *exec.ExitError
-			if checkout != nil || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) {
+			reason := test.reason
+			if reason == "" {
+				reason = "unsafe source path"
+			}
+			if checkout != nil || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), reason) {
 				t.Fatalf("hostile Git tree %q crossed source preflight: checkout=%v error=%v", test.paths, checkout, err)
 			}
+			windowsAssertNoCheckout(t, log)
 			if entries, err := os.ReadDir(workRoot); err != nil || len(entries) != 0 {
 				t.Fatalf("rejected tree materialized checkout: entries=%v error=%v", entries, err)
 			}
@@ -85,6 +125,7 @@ func TestWindowsHostilePullRequestTreeFailsBeforeCheckout(t *testing.T) {
 	tree := windowsRawTree(fixture, fmt.Sprintf("100644 blob %s\tgit~1", blob))
 	head := windowsTreeCommit(fixture, tree)
 	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
+	log := windowsRecordGitCommands(t)
 	workRoot := t.TempDir()
 	checkout, err := clonePullRequestFromURL(t.Context(), workRoot, fixture.remote, 7, "main", head)
 	if checkout != nil {
@@ -94,6 +135,7 @@ func TestWindowsHostilePullRequestTreeFailsBeforeCheckout(t *testing.T) {
 	if checkout != nil || !errors.Is(err, ErrUnsupportedSource) || errors.As(err, &exit) || !strings.Contains(err.Error(), "unsafe source path") {
 		t.Fatalf("hostile PR tree crossed source preflight: checkout=%v error=%v", checkout, err)
 	}
+	windowsAssertNoCheckout(t, log)
 	if entries, err := os.ReadDir(workRoot); err != nil || len(entries) != 0 {
 		t.Fatalf("rejected PR tree materialized checkout: entries=%v error=%v", entries, err)
 	}
@@ -120,15 +162,18 @@ func TestWindowsImportRejectsHostileResultPathsBeforeMutation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			fixture := newFixture(t)
-			changes := make([]workspace.Change, len(test.paths))
-			for i, name := range test.paths {
-				changes[i] = workspace.Change{Path: name, Mode: workspace.Regular, Data: []byte("unreviewed")}
+			changes := []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("changed before rejection\n")}}
+			for _, name := range test.paths {
+				changes = append(changes, workspace.Change{Path: name, Mode: workspace.Regular, Data: []byte("unreviewed")})
 			}
 			if err := fixture.checkout.Import(t.Context(), fixture.base, changes); err == nil || !strings.Contains(err.Error(), test.reason) {
 				t.Fatalf("hostile import %q was not rejected before mutation: %v", test.paths, err)
 			}
 			if data, err := os.ReadFile(filepath.Join(fixture.checkout.path, "README.md")); err != nil || string(data) != "fixture\n" {
 				t.Fatalf("rejected import changed source: %q, %v", data, err)
+			}
+			if entries, err := os.ReadDir(fixture.checkout.path); err != nil || len(entries) != 2 || entries[0].Name() != ".git" || entries[1].Name() != "README.md" {
+				t.Fatalf("rejected import changed checkout entries: %v, %v", entries, err)
 			}
 			if count, err := fixture.checkout.stagedPathCount(t.Context()); err != nil || count != 0 {
 				t.Fatalf("rejected import staged paths=%d, %v", count, err)
@@ -221,7 +266,10 @@ func TestWindowsSupportedGitPathsImportAndPublishWithExactSpelling(t *testing.T)
 			t.Fatalf("published tree lost exact path %q: %q", name, listing)
 		}
 	}
-	if got := fixture.git(fixture.source, "--git-dir="+fixture.remote, "show", branch+":Docs/Guide.TXT"); got != "reviewed guide" {
-		t.Fatalf("published reviewed content=%q", got)
+	for _, change := range changes {
+		var output bytes.Buffer
+		if err := runGitInputTo(t.Context(), fixture.source, nil, &output, "--git-dir="+fixture.remote, "show", "refs/heads/"+branch+":"+change.Path); err != nil || !bytes.Equal(output.Bytes(), change.Data) {
+			t.Fatalf("published content at %q=%q, error=%v; want %q", change.Path, output.Bytes(), err, change.Data)
+		}
 	}
 }

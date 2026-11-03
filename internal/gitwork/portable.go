@@ -123,6 +123,11 @@ func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
 	if err := workspace.ValidateSnapshot(workspace.Snapshot{Head: ref, Files: validation}); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
+	if runtime.GOOS == "windows" {
+		if err := workspace.ValidateFixPaths(validation, nil); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
+		}
+	}
 	return entries, nil
 }
 
