@@ -513,6 +513,7 @@ func TestReadAllSortsChronologically(t *testing.T) {
 
 func TestFilter(t *testing.T) {
 	record := testRecord()
+	record.RepositoryID = 12
 	for name, test := range map[string]struct {
 		filter Filter
 		want   bool
@@ -520,6 +521,8 @@ func TestFilter(t *testing.T) {
 		"no constraints":   {Filter{}, true},
 		"case insensitive": {Filter{Repo: "LINKDATA/MINION", User: "EXAMPLE"}, true},
 		"wrong repository": {Filter{Repo: "elsewhere/minion"}, false},
+		"repository ID":    {Filter{RepositoryID: 12}, true},
+		"wrong repo ID":    {Filter{RepositoryID: 13}, false},
 		"wrong user":       {Filter{User: "another-user"}, false},
 		"since inclusive":  {Filter{Since: record.StartedAt}, true},
 		"before since":     {Filter{Since: record.StartedAt.Add(time.Nanosecond)}, false},
@@ -818,12 +821,12 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 func TestQueryRequesterAndUTCBoundaries(t *testing.T) {
 	store := Store{Dir: t.TempDir()}
 	first := testRecord()
-	first.ID, first.JobID, first.RequesterID = strings.Repeat("b", 32), "first", 10
+	first.ID, first.JobID, first.RepositoryID, first.RequesterID = strings.Repeat("b", 32), "first", 10, 10
 	first.StartedAt = time.Date(2026, 11, 1, 0, 30, 0, 0, time.FixedZone("UTC+2", 2*60*60))
 	finish := first.StartedAt.Add(time.Minute)
 	first.FinishedAt = &finish
 	second := testRecord()
-	second.ID, second.JobID, second.RequesterID = strings.Repeat("c", 32), "second", 2
+	second.ID, second.JobID, second.RepositoryID, second.RequesterID = strings.Repeat("c", 32), "second", 2, 2
 	second.StartedAt = time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	secondFinish := second.StartedAt.Add(time.Minute)
 	second.FinishedAt = &secondFinish
@@ -842,7 +845,11 @@ func TestQueryRequesterAndUTCBoundaries(t *testing.T) {
 	if err != nil || len(result.Groups) != 2 || result.Groups[0].RequesterID != 2 || result.Groups[1].RequesterID != 10 {
 		t.Fatalf("numeric requester order: %+v, error=%v", result, err)
 	}
-	for _, filter := range []Filter{{Service: "other"}, {RequesterID: -1}, {Since: second.StartedAt, Until: second.StartedAt}} {
+	result, err = store.Query(Filter{}, []string{"repository_id"}, false)
+	if err != nil || len(result.Groups) != 2 || result.Groups[0].RepositoryID != 2 || result.Groups[1].RepositoryID != 10 {
+		t.Fatalf("numeric repository order: %+v, error=%v", result, err)
+	}
+	for _, filter := range []Filter{{Service: "other"}, {RepositoryID: -1}, {RequesterID: -1}, {Since: second.StartedAt, Until: second.StartedAt}} {
 		if _, err := store.Query(filter, nil, false); err == nil {
 			t.Fatalf("invalid filter accepted: %+v", filter)
 		}

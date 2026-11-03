@@ -18,7 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. With a service filter, JSON detail records retain the whole attempt and add selected_usage; table tokens show the selected service. Unknown service means tokens lack call attribution, including legacy records; legacy call counters retain their provider labels. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts."
+const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. With a service filter, JSON detail records retain the whole attempt and add selected_usage; table tokens show the selected service. Status counts describe each matching attempt's overall outcome. Unknown service means tokens lack call attribution, including legacy records; legacy call counters retain their provider labels. Repository and requester ID filters exclude older records without the corresponding numeric IDs. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts. Actions without usage files are not counted."
 
 type usageAttempt struct {
 	usage.Record
@@ -30,12 +30,13 @@ type usageOutput struct {
 	GroupBy        []string `json:"group_by"`
 	ActionCoverage string   `json:"action_coverage"`
 	Filters        struct {
-		Repo        string `json:"repo,omitempty"`
-		User        string `json:"user,omitempty"`
-		Service     string `json:"service,omitempty"`
-		RequesterID int64  `json:"requester_id,omitempty"`
-		From        string `json:"from,omitempty"`
-		To          string `json:"to,omitempty"`
+		Repo         string `json:"repo,omitempty"`
+		RepositoryID int64  `json:"repository_id,omitempty"`
+		User         string `json:"user,omitempty"`
+		Service      string `json:"service,omitempty"`
+		RequesterID  int64  `json:"requester_id,omitempty"`
+		From         string `json:"from,omitempty"`
+		To           string `json:"to,omitempty"`
 	} `json:"filters"`
 	Totals    usage.Summary   `json:"totals"`
 	Groups    []usage.Summary `json:"groups"`
@@ -53,12 +54,13 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "config.local.json", "path to JSON configuration")
 	dir := flags.String("dir", "", "read usage records directly, without loading configuration")
 	repo := flags.String("repo", "", "filter by owner/repo (case insensitive)")
+	repositoryID := flags.Int64("repository-id", 0, "filter by numeric repository ID")
 	user := flags.String("user", "", "filter by invoking GitHub login (case insensitive)")
 	service := flags.String("service", "", "filter by call provider: codex, claude, or unknown")
 	requesterID := flags.Int64("requester-id", 0, "filter by numeric requester ID")
 	from := flags.String("from", "", "inclusive attempt start: YYYY-MM-DD (UTC) or RFC3339")
 	to := flags.String("to", "", "exclusive attempt start: YYYY-MM-DD (UTC) or RFC3339")
-	groupBy := flags.String("group-by", "repo,user,action", "comma-separated repo,user,requester_id,service,action,day,month; none lists attempts")
+	groupBy := flags.String("group-by", "repo,user,action", "comma-separated repo,repository_id,user,requester_id,service,action,day,month; none lists attempts")
 	jsonOutput := flags.Bool("json", false, "output JSON instead of a table")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -73,14 +75,18 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() != 0 {
 		return fail(2, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " ")))
 	}
-	var dirSet, configSet, requesterSet bool
+	var dirSet, configSet, repositorySet, requesterSet bool
 	flags.Visit(func(f *flag.Flag) {
 		dirSet = dirSet || f.Name == "dir"
 		configSet = configSet || f.Name == "config"
+		repositorySet = repositorySet || f.Name == "repository-id"
 		requesterSet = requesterSet || f.Name == "requester-id"
 	})
 	if dirSet && (configSet || strings.TrimSpace(*dir) == "") {
 		return fail(2, fmt.Errorf("-dir must be nonempty and cannot be combined with -config"))
+	}
+	if repositorySet && *repositoryID <= 0 {
+		return fail(2, fmt.Errorf("-repository-id must be positive"))
 	}
 	if requesterSet && *requesterID <= 0 {
 		return fail(2, fmt.Errorf("-requester-id must be positive"))
@@ -93,7 +99,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(2, fmt.Errorf("-to: %w", err))
 	}
-	filter := usage.Filter{Repo: strings.TrimSpace(*repo), User: strings.TrimSpace(*user), Service: strings.TrimSpace(*service), RequesterID: *requesterID, Since: since, Until: until}
+	filter := usage.Filter{Repo: strings.TrimSpace(*repo), RepositoryID: *repositoryID, User: strings.TrimSpace(*user), Service: strings.TrimSpace(*service), RequesterID: *requesterID, Since: since, Until: until}
 	groups := strings.Split(*groupBy, ",")
 	for i := range groups {
 		groups[i] = strings.TrimSpace(groups[i])
@@ -116,31 +122,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(1, err)
 	}
-	output := usageOutput{GroupBy: []string{}, ActionCoverage: query.ActionCoverage, Groups: []usage.Summary{}, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
-	output.Filters.Repo, output.Filters.User = filter.Repo, filter.User
-	output.Filters.Service, output.Filters.RequesterID = filter.Service, filter.RequesterID
-	if !since.IsZero() {
-		output.Filters.From = since.Format(time.RFC3339Nano)
-	}
-	if !until.IsZero() {
-		output.Filters.To = until.Format(time.RFC3339Nano)
-	}
-	output.Totals = query.Totals
-	if details {
-		for _, detail := range query.Attempts {
-			record := detail.Record
-			record.UsageComplete = record.UsageComplete && record.Status != "running"
-			attempt := usageAttempt{Record: record, TotalTokens: record.Tokens.Total()}
-			if filter.Service != "" {
-				selected := detail.Usage
-				attempt.SelectedUsage = &selected
-			}
-			output.Attempts = append(output.Attempts, attempt)
-		}
-	} else {
-		output.GroupBy = groups
-		output.Groups = query.Groups
-	}
+	output := usageReport(filter, groups, query)
 	if *jsonOutput {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
@@ -154,16 +136,48 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// usageReport keeps CLI and admin exports on the same accounting contract.
+func usageReport(filter usage.Filter, groups []string, query usage.QueryResult) usageOutput {
+	output := usageOutput{GroupBy: []string{}, ActionCoverage: query.ActionCoverage, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
+	output.Filters.Repo, output.Filters.RepositoryID, output.Filters.User = filter.Repo, filter.RepositoryID, filter.User
+	output.Filters.Service, output.Filters.RequesterID = filter.Service, filter.RequesterID
+	if !filter.Since.IsZero() {
+		output.Filters.From = filter.Since.Format(time.RFC3339Nano)
+	}
+	if !filter.Until.IsZero() {
+		output.Filters.To = filter.Until.Format(time.RFC3339Nano)
+	}
+	output.Totals = query.Totals
+	if len(groups) != 0 {
+		output.GroupBy = groups
+	}
+	output.Groups = query.Groups
+	for _, detail := range query.Attempts {
+		record := detail.Record
+		record.UsageComplete = record.UsageComplete && record.Status != "running"
+		attempt := usageAttempt{Record: record, TotalTokens: record.Tokens.Total()}
+		if filter.Service != "" {
+			selected := detail.Usage
+			attempt.SelectedUsage = &selected
+		}
+		output.Attempts = append(output.Attempts, attempt)
+	}
+	return output
+}
+
 func parseUsageTime(value string) (time.Time, error) {
 	if value == "" {
 		return time.Time{}, nil
 	}
 	for _, layout := range []string{"2006-01-02", time.RFC3339} {
 		if parsed, err := time.Parse(layout, value); err == nil {
+			if parsed.UTC().IsZero() {
+				break
+			}
 			return parsed.UTC(), nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("%q must be YYYY-MM-DD or RFC3339", value)
+	return time.Time{}, fmt.Errorf("%q must be a nonzero YYYY-MM-DD or RFC3339 time", value)
 }
 
 func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
@@ -213,7 +227,7 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 		}
 		fmt.Fprintln(w, "ATTEMPTS\tACTIONS RECORDED\tSUCCEEDED\tFAILED\tRUNNING\tCODEX CALLS\tCLAUDE CALLS\tINPUT\tCACHE CREATE\tCACHE READ\tOUTPUT\tTOTAL\tUNALLOCATED\tINCOMPLETE") //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 		for _, summary := range output.Groups {
-			values := map[string]string{"repo": summary.Repo, "user": summary.User, "requester_id": usageIdentity(summary.RequesterID), "service": summary.Service, "action": summary.Action, "day": summary.Day, "month": summary.Month}
+			values := map[string]string{"repo": summary.Repo, "repository_id": usageIdentity(summary.RepositoryID), "user": summary.User, "requester_id": usageIdentity(summary.RequesterID), "service": summary.Service, "action": summary.Action, "day": summary.Day, "month": summary.Month}
 			for _, group := range output.GroupBy {
 				fmt.Fprintf(w, "%s\t", values[group]) //nolint:errcheck // -- The tabwriter writes to an infallible bytes.Buffer.
 			}
@@ -226,7 +240,7 @@ func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {
 	t := output.Totals
 	fmt.Fprintf(&buffer, "\nTotals: %d usage-recorded actions, %d attempts; %d succeeded, %d failed, %d running; %d Codex calls, %d Claude calls.\n", t.UsageRecordedActions, t.Attempts, t.Succeeded, t.Failed, t.Running, t.CodexCalls, t.ClaudeCalls)
 	fmt.Fprintf(&buffer, "Tokens: %d input, %d cache creation, %d cache read, %d output, %d total, %d unallocated; %d attempts with incomplete usage.\n", t.Tokens.Input, t.Tokens.CacheCreationInput, t.Tokens.CachedInput, t.Tokens.Output, t.TotalTokens, t.UnallocatedTokens.Total(), t.IncompleteUsage)
-	fmt.Fprintf(&buffer, "Accepted-action coverage: %s; actions without usage files are not counted.\n", output.ActionCoverage)
+	fmt.Fprintf(&buffer, "Accepted-action coverage: %s.\n", output.ActionCoverage)
 	fmt.Fprintln(&buffer, usageTokenNote)
 	if t.Running != 0 {
 		fmt.Fprintln(&buffer, "Running attempts may be stale after an interruption.")

@@ -13,6 +13,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem clamp(1rem, 4vw, 3rem); border-bottom: 1px solid #39505b; background: #15242c; }
 .topbar strong { letter-spacing: .2em; color: #e8c88f; }
 .topbar span { color: #abb9b8; }
+.topbar a { color: #e8c88f; }
 .topbar button { background: transparent; color: #edf1ee; border-color: #788b90; }
 .topbar button:hover { background: #2c414b; }
 main { max-width: 100rem; margin: 0 auto; padding: 2rem clamp(1rem, 4vw, 3rem) 4rem; }
@@ -35,6 +36,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 table { border-collapse: collapse; min-width: 60rem; width: 100%; text-align: left; }
 th, td { border-bottom: 1px solid #39505b; padding: .7rem .6rem; vertical-align: top; overflow-wrap: anywhere; }
 th { color: #abb9b8; font-size: .78rem; font-weight: 600; }
+.number { text-align: right; font-variant-numeric: tabular-nums; }
 .hint { margin-bottom: 0; font-size: .82rem; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 50rem) {
