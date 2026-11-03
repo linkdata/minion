@@ -95,17 +95,20 @@ func TestAdminUsageConcurrentCLIAndAdminReads(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("load fixture: found=%t err=%v", found, err)
 	}
-	ready := make(chan struct{}, 3)
-	start := make(chan struct{})
+	firstTotal := reportJSON(t, "-dir", dir).Totals.TotalTokens + 100
+	firstSaved := make(chan error, 2)
 	firstReads := make(chan struct{}, 2)
 	done := make(chan error, 3)
 	go func() {
-		ready <- struct{}{}
-		<-start
 		for i := int64(0); i < 20; i++ {
 			next := record
-			next.Tokens.Input = 100 + i
-			if err := owner.Usage.Save(next); err != nil {
+			next.Tokens.Input = record.Tokens.Input + 100 + i
+			err := owner.Usage.Save(next)
+			if i == 0 {
+				firstSaved <- err
+				firstSaved <- err
+			}
+			if err != nil {
 				done <- err
 				return
 			}
@@ -117,8 +120,10 @@ func TestAdminUsageConcurrentCLIAndAdminReads(t *testing.T) {
 		done <- nil
 	}()
 	go func() {
-		ready <- struct{}{}
-		<-start
+		if err := <-firstSaved; err != nil {
+			done <- err
+			return
+		}
 		for i := 0; i < 20; i++ {
 			path := "/admin/usage.json"
 			if i%2 != 0 {
@@ -134,8 +139,8 @@ func TestAdminUsageConcurrentCLIAndAdminReads(t *testing.T) {
 			}
 			if path == "/admin/usage.json" {
 				var report usageOutput
-				if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil || report.Totals.Attempts != 4 {
-					done <- fmt.Errorf("admin export: attempts=%d: %v", report.Totals.Attempts, err)
+				if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil || report.Totals.Attempts != 4 || i == 0 && report.Totals.TotalTokens != firstTotal {
+					done <- fmt.Errorf("admin export: attempts=%d tokens=%d: %v", report.Totals.Attempts, report.Totals.TotalTokens, err)
 					return
 				}
 			}
@@ -143,8 +148,10 @@ func TestAdminUsageConcurrentCLIAndAdminReads(t *testing.T) {
 		done <- nil
 	}()
 	go func() {
-		ready <- struct{}{}
-		<-start
+		if err := <-firstSaved; err != nil {
+			done <- err
+			return
+		}
 		for i := 0; i < 20; i++ {
 			var output, diagnostic bytes.Buffer
 			status := runUsageWithOutput([]string{"-dir", dir, "-json"}, &output, &diagnostic)
@@ -156,17 +163,13 @@ func TestAdminUsageConcurrentCLIAndAdminReads(t *testing.T) {
 				return
 			}
 			var report usageOutput
-			if err := json.Unmarshal(output.Bytes(), &report); err != nil || report.Totals.Attempts != 4 {
-				done <- fmt.Errorf("CLI report: attempts=%d: %v", report.Totals.Attempts, err)
+			if err := json.Unmarshal(output.Bytes(), &report); err != nil || report.Totals.Attempts != 4 || i == 0 && report.Totals.TotalTokens != firstTotal {
+				done <- fmt.Errorf("CLI report: attempts=%d tokens=%d: %v", report.Totals.Attempts, report.Totals.TotalTokens, err)
 				return
 			}
 		}
 		done <- nil
 	}()
-	for range 3 {
-		<-ready
-	}
-	close(start)
 	var firstErr error
 	for range 3 {
 		if err := <-done; err != nil && firstErr == nil {
