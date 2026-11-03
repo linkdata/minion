@@ -1,6 +1,9 @@
 package action
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -8,6 +11,9 @@ import (
 )
 
 const httpControlTimeout = 30 * time.Second
+
+// Required for a current remote Outcome's read lane; the decoded Result still decides admission.
+const httpOutcomeBindingHeader = "X-Minion-Outcome-Binding"
 
 type httpBinding struct {
 	Version   int      `json:"version"`
@@ -17,6 +23,12 @@ type httpBinding struct {
 
 func httpJobBinding(job Job) httpBinding {
 	return httpBinding{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+}
+
+func httpBindingDigest(binding httpBinding) string {
+	data, _ := json.Marshal(binding) // httpBinding contains only JSON scalar fields.
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 type httpPull struct {

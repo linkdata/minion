@@ -70,6 +70,7 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	if err := executor.SetWorkerCredentials(credentials); err != nil {
 		return nil, nil, err
 	}
+	executor.lateOutcome = func(outcome httpOutcome) error { return e.receiveLateOutcome(remote.ExecutorID, outcome) }
 	endpoint, err := ListenRemoteExecution(executor, remote.Listen, certificate, remote.Token)
 	if err != nil {
 		return nil, nil, err

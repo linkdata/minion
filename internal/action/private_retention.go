@@ -47,6 +47,15 @@ func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Sto
 	}); err != nil || len(eligible) == 0 {
 		return err
 	}
+	if e.pruneSelected != nil {
+		e.pruneSelected()
+	}
+	return store.WithPrivateRecords(func() error {
+		return e.prunePrivateRecords(ctx, eligible)
+	})
+}
+
+func (e *Orchestrator) prunePrivateRecords(ctx context.Context, eligible map[string]bool) error {
 	root, err := workspace.CanonicalPath(e.WorkRoot)
 	if err != nil {
 		return err

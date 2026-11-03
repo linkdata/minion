@@ -18,31 +18,36 @@ import (
 )
 
 var errConfirmedCaptureLimit = errors.New("attempt record capture limit confirmed")
+var errLateOutcomeAfterStop = errors.New("HTTP outcome passed the transaction stop deadline")
 
 type pullGenerationContextKey struct{}
 
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
-	mu             sync.Mutex
-	executorID     string
-	workRoot       string
-	credentials    WorkerCredentials
-	credentialsSet bool
-	active         *httpTransaction
-	pull           bool
-	pullDone       <-chan struct{}
-	pullStale      bool
-	pullGeneration uint64
-	closed         bool
-	unavailable    bool
-	changed        chan struct{}
-	outcomeGrace   time.Duration
-	status         Status
-	statusAt       time.Time
+	mu              sync.Mutex
+	lateOutcomeRead sync.Mutex
+	outcomeReads    chan struct{}
+	executorID      string
+	workRoot        string
+	credentials     WorkerCredentials
+	credentialsSet  bool
+	active          *httpTransaction
+	pull            bool
+	pullDone        <-chan struct{}
+	pullStale       bool
+	pullGeneration  uint64
+	closed          bool
+	unavailable     bool
+	changed         chan struct{}
+	outcomeGrace    time.Duration
+	status          Status
+	statusAt        time.Time
+	lateOutcome     func(httpOutcome) error
 }
 
 type httpTransaction struct {
 	mu           sync.Mutex
+	outcomeRead  sync.Mutex
 	mutation     sync.Mutex
 	observation  sync.Mutex
 	recordSync   sync.Mutex
@@ -102,7 +107,8 @@ func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
 	if !workspace.ValidIdentitySegment(executorID) {
 		return nil, errors.New("invalid HTTP executor identity")
 	}
-	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout}, nil
+	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout,
+		outcomeReads: make(chan struct{}, 2)}, nil
 }
 
 // SetWorkRoot enables durable attempt records before the executor starts.
@@ -649,9 +655,13 @@ func (e *HTTPExecutor) transaction() *httpTransaction {
 	return e.active
 }
 
-func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind string, failedOutcome bool) (bool, error) {
+func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind string, failedOutcome, lateEligible bool) (bool, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
+	if kind == "outcome" && lateEligible && tx.delivered && binding == tx.binding &&
+		!tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil) {
+		return false, errLateOutcomeAfterStop // Late admission must not consume the active sequence.
+	}
 	gap := sequence > tx.sequence+1
 	if tx.fenced || !tx.delivered || binding != tx.binding || sequence == 0 || sequence <= tx.sequence || (gap && !failedOutcome) {
 		return false, errors.New("HTTP checkpoint binding, sequence or admission differs")
@@ -946,19 +956,94 @@ func (tx *httpTransaction) stopRequiredDelivery(err error) {
 	tx.stopExecution(nil, true)
 }
 
+func (tx *httpTransaction) currentOutcomeReadable() bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return !tx.fenced && (tx.stopUntil.IsZero() || time.Now().Before(tx.stopUntil))
+}
+
+func (e *HTTPExecutor) lockOutcomeRead(tx *httpTransaction, current bool) (*sync.Mutex, bool) {
+	readLane := &e.lateOutcomeRead
+	if current {
+		readLane = &tx.outcomeRead
+	}
+	readLane.Lock()
+	if current && !tx.currentOutcomeReadable() {
+		// The transaction may have closed while this request waited for its lane.
+		// Move it behind late uploads before consuming a global body slot.
+		readLane.Unlock()
+		readLane = &e.lateOutcomeRead
+		readLane.Lock()
+		current = false
+	}
+	return readLane, current
+}
+
 func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	kind := strings.TrimPrefix(r.URL.Path, "/")
 	tx := e.transaction()
+	var decodedOutcome *httpOutcome
+	if kind == "outcome" && e.lateOutcome != nil {
+		// The current worker's binding header keeps a slow old upload off its lane.
+		// Both lanes remain bounded; the decoded body still decides admission.
+		matchingHint := tx != nil && r.Header.Get(httpOutcomeBindingHeader) == httpBindingDigest(tx.binding)
+		current := matchingHint && tx.currentOutcomeReadable()
+		readLane, current := e.lockOutcomeRead(tx, current)
+		defer readLane.Unlock()
+		select {
+		case e.outcomeReads <- struct{}{}:
+			defer func() { <-e.outcomeReads }()
+		case <-r.Context().Done():
+			return
+		}
+		var outcome httpOutcome
+		// A closed attempt must not inherit a newer transaction's stop deadline.
+		var err error
+		if current {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+		} else {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome)
+		}
+		binding := httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}
+		if err == nil {
+			err = httpResultShape(outcome.Result)
+		}
+		if err == nil {
+			err = outcome.Failure.validate()
+		}
+		if err != nil {
+			httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, outcome.Sequence, err)
+			return
+		}
+		if tx == nil || binding != tx.binding || matchingHint && !current {
+			e.serveLateOutcome(w, outcome)
+			return
+		}
+		decodedOutcome = &outcome
+	}
 	if tx == nil {
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has no mutation slot"))
 		return
 	}
 	tx.mutation.Lock()
 	tx.mu.Lock()
-	if tx.fenced || !tx.delivered {
+	stopped := decodedOutcome != nil && tx.delivered && !tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil)
+	if tx.fenced || !tx.delivered || stopped {
+		fenced := tx.fenced
 		tx.mu.Unlock()
 		tx.mutation.Unlock()
+		if decodedOutcome != nil && (fenced || stopped) {
+			e.serveLateOutcome(w, *decodedOutcome)
+			return
+		}
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed callback admission"))
+		return
+	}
+	if decodedOutcome != nil && r.Header.Get(httpOutcomeBindingHeader) != httpBindingDigest(tx.binding) {
+		tx.mu.Unlock()
+		tx.mutation.Unlock()
+		httpServerReject(w, kind, http.StatusConflict, tx.binding, decodedOutcome.Sequence,
+			errors.New("current HTTP outcome requires its binding header"))
 		return
 	}
 	tx.handlers.Add(1)
@@ -1014,14 +1099,18 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		apply = func() error { return tx.sink.Review(review.Checkpoint) }
 	case "outcome":
 		var outcome httpOutcome
-		err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+		if decodedOutcome != nil {
+			outcome = *decodedOutcome
+		} else {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+			if err == nil {
+				err = httpResultShape(outcome.Result)
+			}
+			if err == nil {
+				err = outcome.Failure.validate()
+			}
+		}
 		binding, sequence = httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}, outcome.Sequence
-		if err == nil {
-			err = httpResultShape(outcome.Result)
-		}
-		if err == nil {
-			err = outcome.Failure.validate()
-		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
 			// An entered Status save may continue after its request is canceled.
@@ -1132,10 +1221,19 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, sequence, err, tx)
 		return
 	}
-	sequenceGap, err = tx.enter(binding, sequence, kind, failedOutcome)
+	sequenceGap, err = tx.enter(binding, sequence, kind, failedOutcome, decodedOutcome != nil)
 	if err != nil {
 		tx.mutation.Unlock()
 		locked = false
+		if decodedOutcome != nil {
+			tx.mu.Lock()
+			fenced := tx.fenced
+			tx.mu.Unlock()
+			if errors.Is(err, errLateOutcomeAfterStop) || fenced {
+				e.serveLateOutcome(w, *decodedOutcome)
+				return
+			}
+		}
 		httpServerReject(w, kind, http.StatusConflict, binding, sequence, err, tx)
 		return
 	}

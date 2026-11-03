@@ -166,8 +166,12 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 				return fmt.Errorf("%w: %w", monitor.ErrAcceptedRetry, err)
 			}
 		}
+		outcomeBinding := ""
+		if c.owner.remoteSelected {
+			outcomeBinding = httpBindingDigest(httpJobBinding(job))
+		}
 		if c.assigned {
-			if !c.owner.Store.Data.Accepted.Assigned {
+			if !c.owner.Store.Data.Accepted.Assigned || c.owner.Store.Data.Accepted.OutcomeBinding != outcomeBinding {
 				return c.fail(fmt.Errorf("%w: assigned action marker changed before re-pull", monitor.ErrAcceptanceState))
 			}
 			return nil // A disconnected pull may be retried before any bytes are sent.
@@ -176,8 +180,10 @@ func (c *executionCheckpoints) BeforeAssignment(job Job) error {
 			return c.fail(fmt.Errorf("%w: accepted action was already assigned", monitor.ErrAcceptanceState))
 		}
 		c.owner.Store.Data.Accepted.Assigned = true
+		c.owner.Store.Data.Accepted.OutcomeBinding = outcomeBinding
 		if err := c.owner.Store.Save(); err != nil {
 			c.owner.Store.Data.Accepted.Assigned = false
+			c.owner.Store.Data.Accepted.OutcomeBinding = ""
 			return c.fail(fmt.Errorf("%w: save worker assignment: %w", monitor.ErrAcceptanceState, err))
 		}
 		c.assigned = true
@@ -193,9 +199,12 @@ func (c *executionCheckpoints) AssignmentNotDelivered() error {
 		if !c.acceptedAssignment(c.job) || !c.owner.Store.Data.Accepted.Assigned {
 			return c.fail(fmt.Errorf("%w: accepted assignment changed before delivery", monitor.ErrAcceptanceState))
 		}
+		outcomeBinding := c.owner.Store.Data.Accepted.OutcomeBinding
 		c.owner.Store.Data.Accepted.Assigned = false
+		c.owner.Store.Data.Accepted.OutcomeBinding = ""
 		if err := c.owner.Store.Save(); err != nil {
 			c.owner.Store.Data.Accepted.Assigned = true
+			c.owner.Store.Data.Accepted.OutcomeBinding = outcomeBinding
 			return c.fail(fmt.Errorf("%w: release undelivered assignment: %w", monitor.ErrAcceptanceState, err))
 		}
 		c.assigned = false

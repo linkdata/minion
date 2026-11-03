@@ -68,7 +68,8 @@ func (r AcceptedResultRecord) MatchesAccepted(current state.AcceptedAction) bool
 		a.SourceKey == current.SourceKey && a.SourceNodeID == current.SourceNodeID && a.SourceURL == current.SourceURL &&
 		a.SourceUpdatedAt.Equal(current.SourceUpdatedAt) && strings.EqualFold(a.Requester, current.Requester) &&
 		a.RequesterID == current.RequesterID && a.CommandName == current.CommandName && a.Action == current.Action &&
-		a.AcceptedAt.Equal(current.AcceptedAt) && a.Deadline.Equal(current.Deadline)
+		a.AcceptedAt.Equal(current.AcceptedAt) && a.Deadline.Equal(current.Deadline) &&
+		a.OutcomeBinding == current.OutcomeBinding
 }
 
 func (r AcceptedResultRecord) Validate() error {

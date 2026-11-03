@@ -42,6 +42,12 @@ var modelLineBreaks = strings.NewReplacer(
 type Orchestrator struct {
 	attemptID          string
 	usageCheckpoint    *usageCheckpoint
+	lateUsageSave      func(usage.Record) error              // Test seam for an ambiguous late receipt save.
+	lateDiagnosticSave func(string, []byte, ...string) error // Test seam for an ambiguous late diagnostic upgrade.
+	finalUsageWaiting  func()                                // Test seam before final usage takes the private-record lock.
+	finalUsageEntered  func()                                // Test seam after final usage takes the private-record lock.
+	finalUsageSave     func(usage.Record) error              // Test seam for a failed terminal usage save.
+	pruneSelected      func()                                // Test seam after private retention eligibility is selected.
 	assignmentRequired bool
 	remoteSelected     bool
 
