@@ -39,4 +39,13 @@ func TestCheckModelsResolvesSameProviderRolesIndependently(t *testing.T) {
 	if got := newOrchestrator(cfg, nil, nil, nil, nil); got.MainModel != "main-1" || got.CriticModel != "critic-2" {
 		t.Fatalf("resolved role settings lost in wiring: main=%q critic=%q", got.MainModel, got.CriticModel)
 	}
+	partial := config.Config{Main: "codex", Adversarial: "codex",
+		CriticSettings: config.RoleModelConfig{Model: "critic-2"}}
+	if err := checkModels(t.Context(), &partial, log.New(io.Discard, "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if partial.MainSettings != (config.RoleModelConfig{Model: "main-1", Effort: "high"}) ||
+		partial.CriticSettings != (config.RoleModelConfig{Model: "critic-2", Effort: "medium"}) {
+		t.Fatalf("partial critic override inherited main effort: main=%+v critic=%+v", partial.MainSettings, partial.CriticSettings)
+	}
 }

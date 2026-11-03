@@ -467,10 +467,11 @@ func githubToken(ctx context.Context) (string, error) {
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
 	requested := [2]config.RoleModelConfig{cfg.MainSettings, cfg.CriticSettings}
+	base := *cfg
 	for i, provider := range []string{cfg.Main, cfg.Adversarial} {
 		role := action.RoleSettings{Provider: provider}
 		var label, effortName string
-		selected := cfg.RoleModelSettings(i == 1)
+		selected := base.RoleModelSettings(i == 1)
 		switch provider {
 		case "codex":
 			settings := cfg.Codex

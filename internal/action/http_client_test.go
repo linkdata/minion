@@ -1099,6 +1099,34 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 	}
 }
 
+func TestRunHTTPNativeSameProviderPairReportsKnownNoWorkOutcome(t *testing.T) {
+	job := testJob(command.Comment)
+	job.Critic = &RoleSettings{Provider: job.Main.Provider}
+	job.CriticMaxRounds = 1
+	var callbacks atomic.Int32
+	sink := runnerExecutionCheckpoints{
+		before: func(CallCheckpoint) error { callbacks.Add(1); return nil },
+		after:  func(CallCheckpoint) error { callbacks.Add(1); return nil },
+		review: func(ReviewCheckpoint) error { callbacks.Add(1); return nil },
+	}
+	f := newHTTPServerTestInMemory(t, t.Context(), job, sink)
+	err := RunHTTP(t.Context(), f.server.Client(), f.server.URL, job.Identity.ExecutorID, &Runner{})
+	got := f.result(t)
+	var failure *workerFailureError
+	if !errors.Is(err, monitor.ErrTerminalJob) || !errors.As(got.err, &failure) ||
+		errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) ||
+		!strings.Contains(err.Error(), nativeRolePairUnverified) || !failure.failure.Terminal ||
+		!strings.Contains(failure.failure.Message, nativeRolePairUnverified) || callbacks.Load() != 0 ||
+		!got.result.matchesJob(job) || len(got.result.Calls) != 0 || got.result.Answer != "" {
+		t.Fatalf("native same-provider pair did not report known no-work outcome: worker=%v parent=%v result=%+v callbacks=%d", err, got.err, got.result, callbacks.Load())
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := f.executor.Execute(ctx, job, sink); !errors.Is(err, context.Canceled) || errors.Is(err, monitor.ErrExecutionOutcomeUnknown) {
+		t.Fatalf("known no-work outcome quarantined reusable parent capacity: %v", err)
+	}
+}
+
 // testDeadlineContext lets a protocol test expire after slow real Git setup.
 type testDeadlineContext struct {
 	context.Context

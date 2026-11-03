@@ -226,6 +226,7 @@ func TestJobValidate(t *testing.T) {
 		{"model LF", func(j *Job) { j.Main.Model = "a\nb" }, "invalid action model or skills"},
 		{"model space", func(j *Job) { j.Main.Model = "a b" }, "invalid action model or skills"},
 		{"model tab", func(j *Job) { j.Main.Model = "a\tb" }, "invalid action model or skills"},
+		{"model Unicode space", func(j *Job) { j.Main.Model = "a\u00a0b" }, "invalid action model or skills"},
 		{"effort bound", func(j *Job) { j.Main.Effort = strings.Repeat("e", config.MaxModelSettingBytes+1) }, "invalid action model or skills"},
 		{"effort CR", func(j *Job) { j.Main.Effort = "a\rb" }, "invalid action model or skills"},
 		{"effort LF", func(j *Job) { j.Main.Effort = "a\nb" }, "invalid action model or skills"},
@@ -238,6 +239,7 @@ func TestJobValidate(t *testing.T) {
 		{"invalid UTF8 notes", func(j *Job) { j.Notes = "\xff" }, "action text is invalid or exceeds limits"},
 		{"critic model", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a\x00b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
 		{"critic model space", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
+		{"critic model Unicode space", func(j *Job) { j.Critic = &RoleSettings{Provider: "claude", Model: "a\u00a0b"}; j.CriticMaxRounds = 1 }, "invalid action model or skills"},
 		{"critic model bound", func(j *Job) {
 			j.Critic = &RoleSettings{Provider: "claude", Model: strings.Repeat("m", config.MaxModelSettingBytes+1)}
 			j.CriticMaxRounds = 1

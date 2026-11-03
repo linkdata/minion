@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/skills"
@@ -299,7 +300,7 @@ func decode(r io.Reader) (Config, error) {
 }
 
 func validModelSetting(value string) bool {
-	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsAny(value, " \t\r\n\x00")
+	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && strings.IndexFunc(value, unicode.IsSpace) < 0
 }
 
 // Validate checks configuration and resolves paths relative to configDir.

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/command"
@@ -153,7 +154,7 @@ func (r RoleSettings) Validate() error {
 	if r.Provider != "codex" && r.Provider != "claude" {
 		return errors.New("unsupported action provider")
 	}
-	if !boundedText(r.Model, config.MaxModelSettingBytes) || !boundedText(r.Effort, config.MaxModelSettingBytes) || strings.ContainsAny(r.Model+r.Effort, " \t\r\n") || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
+	if !boundedText(r.Model, config.MaxModelSettingBytes) || !boundedText(r.Effort, config.MaxModelSettingBytes) || strings.IndexFunc(r.Model+r.Effort, unicode.IsSpace) >= 0 || len(r.Skills)+len(r.AlwaysOnSkills) > config.MaxSkillsPerRole {
 		return errors.New("invalid action model or skills")
 	}
 	for _, source := range slices.Concat(r.Skills, r.AlwaysOnSkills) {
