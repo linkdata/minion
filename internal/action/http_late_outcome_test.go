@@ -689,7 +689,13 @@ func TestLateRemoteOutcomeWhileNewerTransactionIsActive(t *testing.T) {
 	if sequence != 0 || fenced {
 		t.Fatalf("older receipt changed active transaction: sequence=%d fenced=%t", sequence, fenced)
 	}
-	current.ack(t, "/outcome", current.outcome(1, nil), http.StatusOK, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	active := sendHTTPOutcome(ctx, current.server.Client(), current.server.URL+"/outcome", current.outcome(1, nil),
+		httpBindingDigest(httpJobBinding(newJob)), "")
+	if active.err != nil || active.status != http.StatusOK || active.ack.Failure != nil {
+		t.Fatalf("newer current outcome: %+v", active)
+	}
 	if got := current.result(t); got.err != nil {
 		t.Fatalf("newer transaction failed after older receipt: %v", got.err)
 	}
@@ -808,16 +814,21 @@ func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
 	oldCtx, cancelOld := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancelOld()
 	go func() {
-		oldDone <- sendHTTPOutcome(oldCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
-			httpBindingDigest(httpJobBinding(f.job)), "old")
+		oldDone <- sendHTTPOutcome(oldCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil), "", "old")
 	}()
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("old active upload did not enter its read lane")
 	}
-	// A legacy request can complete that transaction while its first upload is still decoding.
-	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	// The current worker can finish while an older headerless upload is decoding.
+	firstCtx, cancelFirst := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelFirst()
+	first := sendHTTPOutcome(firstCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
+		httpBindingDigest(httpJobBinding(f.job)), "")
+	if first.err != nil || first.status != http.StatusOK || first.ack.Failure != nil {
+		t.Fatalf("first current outcome: %+v", first)
+	}
 	if got := f.result(t); got.err != nil {
 		t.Fatalf("first transaction failed: %v", got.err)
 	}
@@ -880,6 +891,95 @@ func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
 	}
 	if old.err != nil || old.status != http.StatusOK || old.ack.Failure != nil {
 		t.Fatalf("old fenced upload failed late receipt: %+v", old)
+	}
+}
+
+func TestRemoteCurrentOutcomeRequiresHeaderAfterHeaderlessLateUpload(t *testing.T) {
+	old := newLateOutcomeFixture(t, false)
+	entered, release := make(chan struct{}), make(chan struct{})
+	currentEntered := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" {
+				switch r.Header.Get("X-Test-Stall") {
+				case "old":
+					r.Body = &outcomeReadBarrier{ReadCloser: r.Body, entered: entered, release: release}
+				case "current":
+					close(currentEntered)
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	job := testJob(command.Comment)
+	job.Identity.JobID = "new-job"
+	job.Identity.AttemptID = strings.Repeat("b", 32)
+	job.Identity.ExecutorID = "remote"
+	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, wrap)
+	f.executor.lateOutcome = func(outcome httpOutcome) error { return old.owner.receiveLateOutcome("remote", outcome) }
+	f.ack(t, "/next", httpPull{Version: 20, ExecutorID: "remote"}, http.StatusConflict, 0)
+	f.pull(t)
+	oldCtx, cancelOld := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelOld()
+	oldDone := make(chan httpServerTestExchange, 1)
+	go func() {
+		oldDone <- sendHTTPOutcome(oldCtx, f.server.Client(), f.server.URL+"/outcome", old.outcome, "", "old")
+	}()
+	select {
+	case <-entered:
+	case <-oldCtx.Done():
+		t.Fatal("headerless late upload did not enter its read lane")
+	}
+	currentCtx, cancelCurrent := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelCurrent()
+	currentDone := make(chan httpServerTestExchange, 1)
+	go func() {
+		currentDone <- sendHTTPOutcome(currentCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil), "", "current")
+	}()
+	select {
+	case <-currentEntered:
+	case <-currentCtx.Done():
+		t.Fatal("headerless current upload did not reach the receiver")
+	}
+	close(release)
+	select {
+	case got := <-oldDone:
+		if got.err != nil || got.status != http.StatusOK || got.ack.Failure != nil {
+			t.Fatalf("headerless late upload: %+v", got)
+		}
+	case <-oldCtx.Done():
+		t.Fatal("headerless late upload did not finish")
+	}
+	select {
+	case got := <-currentDone:
+		if got.err != nil || got.status != http.StatusConflict || got.ack.Failure == nil {
+			t.Fatalf("headerless current upload was accepted: %+v", got)
+		}
+	case <-currentCtx.Done():
+		t.Fatal("headerless current upload did not finish")
+	}
+	f.tx.mu.Lock()
+	sequence := f.tx.sequence
+	f.tx.mu.Unlock()
+	if sequence != 0 {
+		t.Fatalf("headerless current upload consumed sequence %d", sequence)
+	}
+	activeCtx, cancelActive := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelActive()
+	active := sendHTTPOutcome(activeCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
+		httpBindingDigest(httpJobBinding(job)), "")
+	if active.err != nil || active.status != http.StatusOK || active.ack.Failure != nil {
+		t.Fatalf("hinted current outcome after headerless uploads: %+v", active)
+	}
+	if got := f.result(t); got.err != nil {
+		t.Fatalf("hinted current outcome failed: %v", got.err)
 	}
 }
 

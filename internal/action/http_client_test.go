@@ -137,6 +137,9 @@ func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 					httpClientTestJSON(t, w, httpAcknowledgement{httpBinding: binding, Sequence: value.Status.Sequence, Kind: kind})
 					return
 				case "outcome":
+					if got := r.Header.Get(httpOutcomeBindingHeader); got != httpBindingDigest(binding) {
+						t.Errorf("worker Outcome binding header = %q", got)
+					}
 					var value httpOutcome
 					if err := httpDecode(r.Body, httpOutcomeBytes, &value); err != nil {
 						t.Error(err)

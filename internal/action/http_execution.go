@@ -12,7 +12,7 @@ import (
 
 const httpControlTimeout = 30 * time.Second
 
-// A scheduling hint only; the decoded Result must still match the active binding.
+// Required for a current remote Outcome's read lane; the decoded Result still decides admission.
 const httpOutcomeBindingHeader = "X-Minion-Outcome-Binding"
 
 type httpBinding struct {

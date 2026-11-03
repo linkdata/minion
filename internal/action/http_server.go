@@ -1019,6 +1019,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed callback admission"))
 		return
 	}
+	if decodedOutcome != nil && r.Header.Get(httpOutcomeBindingHeader) != httpBindingDigest(tx.binding) {
+		tx.mu.Unlock()
+		tx.mutation.Unlock()
+		httpServerReject(w, kind, http.StatusConflict, tx.binding, decodedOutcome.Sequence,
+			errors.New("current HTTP outcome requires its binding header"))
+		return
+	}
 	tx.handlers.Add(1)
 	tx.mu.Unlock()
 	defer tx.handlers.Done()
