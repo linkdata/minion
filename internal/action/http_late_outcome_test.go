@@ -23,6 +23,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 type lateOutcomeFixture struct {
@@ -497,6 +498,99 @@ func TestLateRemoteOutcomeReplaysParentCaptureLimitDiagnostic(t *testing.T) {
 	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens {
 		t.Fatalf("capture marker replay lost usage: %+v found=%t error=%v", record, found, err)
+	}
+}
+
+func TestLateRemoteOutcomeAugmentsParentOnlyCaptureLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		failFirst        bool
+		afterReplacement bool
+	}{
+		{name: "direct"},
+		{name: "retry before replacement", failFirst: true},
+		{name: "retry after replacement", failFirst: true, afterReplacement: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLateOutcomeFixture(t, true)
+			parent := Result{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head}
+			if err := f.owner.retainWorkerDiagnostics(f.job, withCaptureLimitDiagnostic(parent), errors.New("outcome lost")); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var initial retainedWorkerDiagnostics
+			if err := json.Unmarshal(before, &initial); err != nil || initial.WorkerReportedFailure != nil ||
+				!reflect.DeepEqual(initial.WorkerReportedDiagnostics, []Diagnostic{{Code: "capture_limit", Message: captureLimitMessage}}) {
+				t.Fatalf("parent did not save only its fixed marker: %+v error=%v", initial, err)
+			}
+			writes := 0
+			if tc.failFirst {
+				f.owner.lateDiagnosticSave = func(path string, data []byte, dirs ...string) error {
+					writes++
+					if writes == 1 {
+						if tc.afterReplacement {
+							if err := workspace.WriteAtomic(path, data, dirs...); err != nil {
+								return err
+							}
+						}
+						return errors.New("injected ambiguous diagnostic save")
+					}
+					return workspace.WriteAtomic(path, data, dirs...)
+				}
+			}
+			_, client, origin := lateOutcomeEndpoint(t, f.owner)
+			if tc.failFirst {
+				if status, ack := postLateOutcome(t, client, origin, f.outcome); status != http.StatusInternalServerError ||
+					ack.Failure == nil || strings.Contains(ack.Failure.Message, "injected") {
+					t.Fatalf("ambiguous diagnostic save ACK: status=%d ack=%+v", status, ack)
+				}
+			}
+			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+				t.Fatalf("late parent-marker augmentation status=%d", status)
+			}
+			if tc.failFirst {
+				want := 2
+				if tc.afterReplacement {
+					want = 1
+				}
+				if writes != want {
+					t.Fatalf("ambiguous diagnostic retry wrote %d times, want %d", writes, want)
+				}
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || bytes.Equal(before, after) {
+				t.Fatalf("late worker facts did not augment parent marker: before=%q after=%q error=%v", before, after, err)
+			}
+			var retained retainedWorkerDiagnostics
+			if err := json.Unmarshal(after, &retained); err != nil || retained.Identity != f.job.Identity ||
+				retained.SourceRef != f.job.Source.Head || retained.WorkerReportedFailure == nil ||
+				retained.WorkerReportedFailure.Message != f.outcome.Failure.Message ||
+				!reflect.DeepEqual(retained.WorkerReportedDiagnostics, []Diagnostic{
+					f.outcome.Result.Diagnostics[0], {Code: "capture_limit", Message: captureLimitMessage},
+				}) {
+				t.Fatalf("augmented worker facts: %+v error=%v", retained, err)
+			}
+			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+				t.Fatalf("identical augmented replay status=%d", status)
+			}
+			conflict := f.outcome
+			conflict.Result.Diagnostics = []Diagnostic{{Code: "late_detail", Message: "different private detail"}}
+			if status, _ := postLateOutcome(t, client, origin, conflict); status != http.StatusConflict {
+				t.Fatalf("conflicting augmented replay status=%d", status)
+			}
+			stable, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(stable, after) {
+				t.Fatalf("augmented record changed on replay: before=%q after=%q error=%v", after, stable, err)
+			}
+			record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens {
+				t.Fatalf("marker replay lost usage: %+v found=%t error=%v", record, found, err)
+			}
+		})
 	}
 }
 

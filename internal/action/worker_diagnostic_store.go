@@ -34,6 +34,11 @@ func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr er
 
 // retainWorkerDiagnosticsLocked runs while the private-record lock is held.
 func (e *Orchestrator) retainWorkerDiagnosticsLocked(job Job, result Result, runErr error) error {
+	return e.retainWorkerDiagnosticsWithCaptureUpgradeLocked(job, result, runErr, false)
+}
+
+// Only the late receiver may augment an exact parent-only capture marker.
+func (e *Orchestrator) retainWorkerDiagnosticsWithCaptureUpgradeLocked(job Job, result Result, runErr error, allowCaptureUpgrade bool) error {
 	var failure *workerFailureError
 	if errors.As(runErr, &failure) && failure != nil {
 		if err := failure.failure.validate(); err != nil {
@@ -76,9 +81,41 @@ func (e *Orchestrator) retainWorkerDiagnosticsLocked(job Job, result Result, run
 	}
 	if err == nil {
 		if !bytes.Equal(previous, data) {
-			return fmt.Errorf("%w: %w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob, errPrivateRecordConflict)
-		}
-		if err := syncPrivateRecordDirectories(root, filepath.Dir(root)); err != nil {
+			conflict := fmt.Errorf("%w: %w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob, errPrivateRecordConflict)
+			if !allowCaptureUpgrade || cleanupUnverified {
+				return conflict
+			}
+			marker := Diagnostic{Code: "capture_limit", Message: captureLimitMessage}
+			markers := 0
+			for _, diagnostic := range diagnostics {
+				if diagnostic.Code == marker.Code {
+					if diagnostic != marker {
+						return conflict
+					}
+					markers++
+				}
+			}
+			if markers != 1 {
+				return conflict
+			}
+			parentOnly, err := json.Marshal(retainedWorkerDiagnostics{
+				Identity: job.Identity, SourceRef: job.Source.Head,
+				WorkerReportedDiagnostics: []Diagnostic{marker},
+			})
+			if err != nil {
+				return fmt.Errorf("%w: encode parent capture marker: %w", monitor.ErrTerminalJob, err)
+			}
+			if !bytes.Equal(previous, parentOnly) {
+				return conflict
+			}
+			save := workspace.WriteAtomic
+			if e.lateDiagnosticSave != nil {
+				save = e.lateDiagnosticSave
+			}
+			if err := save(path, data, filepath.Dir(root)); err != nil {
+				return retainedRecordFailure("upgrade private worker diagnostics", err)
+			}
+		} else if err := syncPrivateRecordDirectories(root, filepath.Dir(root)); err != nil {
 			return retainedRecordFailure("sync private worker diagnostics", err)
 		}
 	} else if err := workspace.WriteAtomic(path, data, filepath.Dir(root)); err != nil {

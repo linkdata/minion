@@ -103,9 +103,7 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 			capped := result
 			capped.Diagnostics = slices.Clone(result.Diagnostics)
 			capped = withCaptureLimitDiagnostic(capped)
-			if !slices.Equal(capped.Diagnostics, result.Diagnostics) {
-				return e.retainWorkerDiagnosticsLocked(job, capped, failure)
-			}
+			return e.retainWorkerDiagnosticsWithCaptureUpgradeLocked(job, capped, failure, true)
 		}
 		return err
 	})
