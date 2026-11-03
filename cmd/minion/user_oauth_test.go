@@ -77,6 +77,30 @@ func oauthStart(t *testing.T, handler http.Handler, method, path string, session
 	return stateCookie, query
 }
 
+func TestOAuthRedirectMatchesBrowserDefaultPort(t *testing.T) {
+	for _, test := range []struct {
+		name, redirectURL, requestURL string
+		want                          bool
+	}{
+		{"HTTPS default port", "https://admin.example:443/auth/callback", "https://admin.example/auth/callback", true},
+		{"HTTPS padded default port", "https://admin.example:0443/auth/callback", "https://admin.example/auth/callback", true},
+		{"loopback HTTP default port", "http://127.0.0.1:80/auth/callback", "http://127.0.0.1/auth/callback", true},
+		{"other host", "https://admin.example:443/auth/callback", "https://other.example/auth/callback", false},
+		{"other port", "https://admin.example:443/auth/callback", "https://admin.example:8443/auth/callback", false},
+		{"other scheme", "https://admin.example:443/auth/callback", "http://admin.example/auth/callback", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, test.requestURL, nil)
+			if strings.HasPrefix(test.requestURL, "https://") {
+				r.TLS = &tls.ConnectionState{}
+			}
+			if got := (oauthProvider{redirectURL: test.redirectURL}).matchesRequest(r); got != test.want {
+				t.Fatalf("redirect %q with request host %q: matched=%t, want %t", test.redirectURL, r.Host, got, test.want)
+			}
+		})
+	}
+}
+
 func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	cfg := config.AdminConfig{

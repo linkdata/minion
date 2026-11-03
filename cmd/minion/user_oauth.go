@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -249,7 +250,19 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 
 func (p oauthProvider) matchesRequest(r *http.Request) bool {
 	redirect, err := url.Parse(p.redirectURL)
-	return err == nil && strings.EqualFold(redirect.Host, r.Host) && (redirect.Scheme == "https") == (r.TLS != nil)
+	if err != nil || (redirect.Scheme == "https") != (r.TLS != nil) {
+		return false
+	}
+	if strings.EqualFold(redirect.Host, r.Host) {
+		return true
+	}
+	defaultPort := 80
+	if r.TLS != nil {
+		defaultPort = 443
+	}
+	port, err := strconv.Atoi(redirect.Port())
+	return err == nil && port == defaultPort &&
+		strings.EqualFold(strings.TrimSuffix(redirect.Host, ":"+redirect.Port()), r.Host)
 }
 
 func (a *oauthAccess) callback(w http.ResponseWriter, r *http.Request) {
