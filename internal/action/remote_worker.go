@@ -183,3 +183,21 @@ func (w *remoteWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	}
 	return result, err
 }
+
+func (w *remoteWorker) stopCleanupVerified() bool {
+	if w.unclean.Load() {
+		return false
+	}
+	w.executor.mu.Lock()
+	unavailable, active := w.executor.unavailable, w.executor.active != nil
+	w.executor.mu.Unlock()
+	if unavailable || active {
+		return false
+	}
+	select {
+	case <-w.endpoint.serveDone:
+		return false
+	default:
+		return true
+	}
+}

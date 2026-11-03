@@ -18,15 +18,23 @@ type DashboardSnapshot struct {
 	TrackedAccepted   uint64
 	InProgress        int
 	Action            *DashboardAction
+	LastStop          *DashboardStop
 	Worker            DashboardWorker
 	MaxRuntime        time.Duration
 	InactivityTimeout time.Duration
 }
 
 type DashboardAction struct {
+	JobID, AttemptID              string
 	Repository, Requester, Action string
 	AcceptedAt, Deadline          time.Time
 	Phase                         string
+	Stoppable                     bool
+}
+
+type DashboardStop struct {
+	JobID, AttemptID, RequestedBy, Status string
+	RequestedAt                           time.Time
 }
 
 type DashboardWorker struct {
@@ -140,7 +148,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if e == nil || e.Store == nil {
 		return DashboardSnapshot{}, errors.New("dashboard state is unavailable")
 	}
-	data, err := readDashboardState(e.Store.ReadSaved, runtime.GOOS == "windows")
+	data, err := readDashboardState(e.Store.ReadSavedDurable, runtime.GOOS == "windows")
 	if err != nil {
 		return DashboardSnapshot{}, err
 	}
@@ -160,6 +168,19 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 		snapshot.Worker.Readiness = observation.readiness
 	}
 	accepted := data.Accepted
+	if data.LastStopJobID != "" {
+		var request state.StopRequest
+		var attemptID string
+		if accepted != nil && accepted.JobID == data.LastStopJobID && accepted.StopRequest != (state.StopRequest{}) {
+			request, attemptID = accepted.StopRequest, accepted.AttemptID
+		} else if decision := data.TerminalDecisions[data.LastStopJobID]; decision.StopRequest != (state.StopRequest{}) {
+			request, attemptID = decision.StopRequest, decision.AttemptID
+		}
+		if request != (state.StopRequest{}) {
+			snapshot.LastStop = &DashboardStop{JobID: data.LastStopJobID, AttemptID: attemptID,
+				RequestedBy: request.RequestedBy, RequestedAt: request.RequestedAt, Status: request.Status}
+		}
+	}
 	if accepted == nil {
 		return snapshot, nil
 	}
@@ -175,9 +196,13 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 		}
 	}
 	snapshot.InProgress = 1
-	action := &DashboardAction{Repository: accepted.Repository, Requester: accepted.Requester, Action: accepted.Action,
+	action := &DashboardAction{JobID: accepted.JobID, AttemptID: accepted.AttemptID,
+		Repository: accepted.Repository, Requester: accepted.Requester, Action: accepted.Action,
 		AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-		Phase: "preparing"}
+		Phase: "preparing", Stoppable: !accepted.Terminal && e.Store.SelectedStopActive(accepted.JobID, accepted.AttemptID)}
+	if _, decided := data.TerminalDecisions[accepted.JobID]; decided {
+		action.Stoppable = false
+	}
 	if accepted.Assigned {
 		action.Phase = "assigned"
 	}

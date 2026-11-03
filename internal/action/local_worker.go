@@ -214,6 +214,27 @@ func (w *localWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (R
 	return result, err
 }
 
+func (w *localWorker) stopCleanupVerified() bool {
+	if w.unclean.Load() {
+		return false
+	}
+	w.executor.mu.Lock()
+	unavailable, active := w.executor.unavailable, w.executor.active != nil
+	w.executor.mu.Unlock()
+	if unavailable || active {
+		return false
+	}
+	if w.reuse.Load() == workerRetired {
+		select {
+		case <-w.exited:
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // WaitCapacity releases capacity only after an authenticated pull is held at
 // this endpoint while the direct child is live, initially and after each outcome.
 func (w *localWorker) WaitCapacity(ctx context.Context) error {

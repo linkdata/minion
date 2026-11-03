@@ -140,6 +140,10 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	if status.String() != workerStatus+" In progress 0." {
 		t.Fatalf("live status summary: %q", status.String())
 	}
+	var stopStatus bytes.Buffer
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil || stopStatus.Len() != 0 {
+		t.Fatalf("unexpected initial stop announcement: %q, %v", stopStatus.String(), err)
+	}
 	page.Dot.View.Snapshot.TrackedAccepted = 1
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
@@ -205,10 +209,57 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 		actionBefore.String() != actionAfter.String() || !strings.Contains(actionAfter.String(), "owner/repo") {
 		t.Fatalf("worker heartbeat changed action HTML: %q, %q, %v", actionBefore.String(), actionAfter.String(), err)
 	}
+	page.Dot.View.Action.JobID, page.Dot.View.Action.AttemptID = "job-1", "attempt-1"
+	page.Dot.View.Action.Stoppable = true
+	var stopBefore, stopAfter bytes.Buffer
+	if err := pages.ExecuteTemplate(&stopBefore, "dashboard-stop-control", page); err != nil ||
+		!strings.Contains(stopBefore.String(), "Force stop this attempt") {
+		t.Fatalf("selected stop control missing: %q, %v", stopBefore.String(), err)
+	}
+	page.Dot.View.Action.Phase = "publishing"
+	if err := pages.ExecuteTemplate(&stopAfter, "dashboard-stop-control", page); err != nil ||
+		stopBefore.String() != stopAfter.String() {
+		t.Fatalf("phase update replaced the focused stop control: %q, %q, %v", stopBefore.String(), stopAfter.String(), err)
+	}
+	page.Dot.View.Snapshot.LastStop = &action.DashboardStop{AttemptID: "attempt-1", Status: "requested"}
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
+		stopStatus.String() != "Latest force stop for attempt attempt-1: requested." {
+		t.Fatalf("stop request missing from dedicated status: %q, %v", stopStatus.String(), err)
+	}
+	page.Dot.View.Snapshot.Worker.Phase = "idle"
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		!strings.Contains(status.String(), "Worker phase idle.") || strings.Contains(status.String(), "Latest force stop") {
+		t.Fatalf("worker change repeated stop announcement: %q, %v", status.String(), err)
+	}
+	stopStatus.Reset()
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
+		stopStatus.String() != "Latest force stop for attempt attempt-1: requested." {
+		t.Fatalf("worker change replaced stop status: %q, %v", stopStatus.String(), err)
+	}
+	page.Dot.View.Snapshot.LastStop.Status = "confirmed"
+	stopStatus.Reset()
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
+		stopStatus.String() != "Latest force stop for attempt attempt-1: confirmed." {
+		t.Fatalf("confirmed stop was not announced: %q, %v", stopStatus.String(), err)
+	}
+	body.Reset()
+	if err := pages.ExecuteTemplate(&body, "dashboard-live", page); err != nil ||
+		!strings.Contains(body.String(), "Latest force stop") || strings.Contains(body.String(), `aria-live="polite"`) {
+		t.Fatalf("visual stop panel duplicated live announcement: %q, %v", body.String(), err)
+	}
 	page.Auth.IsAdmin = false
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil || status.String() != "Admin session ended." {
 		t.Fatalf("revoked live status: %q, %v", status.String(), err)
+	}
+	stopStatus.Reset()
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil || stopStatus.Len() != 0 {
+		t.Fatalf("revoked stop status: %q, %v", stopStatus.String(), err)
+	}
+	stopAfter.Reset()
+	if err := pages.ExecuteTemplate(&stopAfter, "dashboard-stop-control", page); err != nil || stopAfter.Len() != 0 {
+		t.Fatalf("revoked stop control: %q, %v", stopAfter.String(), err)
 	}
 }
 
@@ -306,6 +357,100 @@ func TestAdminDashboardUnchangedDirtyPatch(t *testing.T) {
 	}
 }
 
+func TestAdminForceStopUsesSessionAndSelectedAttempt(t *testing.T) {
+	handler, _, store, _ := dashboardTestServer(t)
+	accepted := dashboardTestAccepted(time.Now().UTC())
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"job_id": {accepted.JobID}, "attempt_id": {accepted.AttemptID}, "requested_by": {"spoofed"}}
+	cookie := dashboardTestCookie(t, handler)
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		strings.Contains(got.Body.String(), "Force stop this attempt") {
+		t.Fatalf("preparation showed stop control: status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, nil, "https://admin.example"); got.Code != http.StatusForbidden {
+		t.Fatalf("anonymous stop status=%d", got.Code)
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusConflict {
+		t.Fatalf("preparation stop status=%d", got.Code)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancel)
+	defer unregister()
+	for _, test := range []struct {
+		name string
+		form url.Values
+	}{
+		{"duplicate job", url.Values{"job_id": {accepted.JobID, accepted.JobID}, "attempt_id": {accepted.AttemptID}}},
+		{"duplicate attempt", url.Values{"job_id": {accepted.JobID}, "attempt_id": {accepted.AttemptID, accepted.AttemptID}}},
+		{"invalid job", url.Values{"job_id": {"../job"}, "attempt_id": {accepted.AttemptID}}},
+		{"invalid attempt", url.Values{"job_id": {accepted.JobID}, "attempt_id": {"../attempt"}}},
+		{"oversized body", url.Values{"job_id": {accepted.JobID}, "attempt_id": {accepted.AttemptID}, "padding": {strings.Repeat("x", 1024)}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := adminResponse(handler, http.MethodPost, "/admin/stop", test.form, cookie, "https://admin.example"); got.Code != http.StatusBadRequest {
+				t.Fatalf("invalid stop status=%d body=%s", got.Code, got.Body.String())
+			}
+			saved, err := store.ReadSaved()
+			if err != nil || saved.Accepted == nil || saved.Accepted.StopRequest != (state.StopRequest{}) || ctx.Err() != nil {
+				t.Fatalf("invalid stop changed selected run: state=%+v canceled=%v error=%v", saved, ctx.Err(), err)
+			}
+		})
+	}
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), `name="attempt_id" value="attempt-1"`) ||
+		!strings.Contains(got.Body.String(), "Force stop this attempt") {
+		t.Fatalf("current action missing exact-attempt stop form: status=%d body=%s", got.Code, got.Body.String())
+	}
+	stale := url.Values{"job_id": {accepted.JobID}, "attempt_id": {"older-attempt"}}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", stale, cookie, "https://admin.example"); got.Code != http.StatusConflict {
+		t.Fatalf("stale attempt stop status=%d", got.Code)
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://other.example"); got.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin stop status=%d", got.Code)
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusSeeOther {
+		t.Fatalf("stop status=%d body=%s", got.Code, got.Body.String())
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("admin stop did not cancel selected run")
+	}
+	saved, err := store.ReadSaved()
+	if err != nil || saved.Accepted == nil || !saved.Accepted.Terminal || saved.Accepted.StopRequest.RequestedBy != "operator" ||
+		saved.Accepted.StopRequest.Status != "requested" {
+		t.Fatalf("stop did not save session requester/fence: state=%+v error=%v", saved, err)
+	}
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), "Waiting for the stop to be verified.") ||
+		strings.Contains(got.Body.String(), "Force stop this attempt") {
+		t.Fatalf("requested status/form incorrect: status=%d body=%s", got.Code, got.Body.String())
+	}
+	if err := store.ResolveStop(accepted.JobID, accepted.AttemptID, "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "canceled", time.Now().UTC()); err != nil {
+			return err
+		}
+		store.Data.Accepted = nil
+		return store.Save()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unregister()
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), "The attempt stopped cleanly.") ||
+		!strings.Contains(got.Body.String(), "operator") {
+		t.Fatalf("confirmed stop disappeared after accepted cleanup: status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusSeeOther {
+		t.Fatalf("completed repeat status=%d", got.Code)
+	}
+}
+
 func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	handler, jw, store, owner := dashboardTestServer(t)
 	cookie := dashboardTestCookie(t, handler)
@@ -341,10 +486,16 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 
 func TestAdminDashboardAllLiveRegionsRedactAfterLogout(t *testing.T) {
 	handler, jw, store, owner := dashboardTestServer(t)
-	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
+	now := time.Now().UTC()
+	store.Data.Accepted = dashboardTestAccepted(now)
+	store.Data.LastStopJobID = "prior-job"
+	store.Data.TerminalDecisions["prior-job"] = state.TerminalDecision{AttemptID: "prior-attempt", Outcome: "canceled", DecidedAt: now,
+		StopRequest: state.StopRequest{RequestedBy: "private-operator", RequestedAt: now, Status: "confirmed"}}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
+	unregister := store.RegisterSelectedStop(store.Data.Accepted.JobID, store.Data.Accepted.AttemptID, func() {})
+	defer unregister()
 	cookie := dashboardTestCookie(t, handler)
 	request := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
 	request.AddCookie(cookie)
@@ -360,22 +511,44 @@ func TestAdminDashboardAllLiveRegionsRedactAfterLogout(t *testing.T) {
 	page := &adminDashboardPage{owner: owner}
 	for _, part := range []struct{ tag, name string }{
 		{tag: "p", name: "dashboard-status"},
+		{tag: "p", name: "dashboard-stop-status"},
 		{tag: "section", name: "dashboard-live"},
 		{tag: "section", name: "dashboard-action"},
+		{tag: "div", name: "dashboard-stop-control"},
 	} {
 		if err := rw.Template(part.tag, part.name, page); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if initial := tr.BodyString(); !strings.Contains(initial, "owner/repo") || !strings.Contains(initial, "Selected worker") {
+	if initial := tr.BodyString(); !strings.Contains(initial, "owner/repo") || !strings.Contains(initial, "Selected worker") ||
+		!strings.Contains(initial, "Force stop this attempt") || !strings.Contains(initial, "private-operator") {
 		t.Fatalf("missing initial private dashboard regions: %s", initial)
 	}
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
 	jw.Dirty(adminDashboardDirty)
-	for range 3 {
-		dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker", "Worker readiness")
+	ended := 0
+	for range 5 {
+		select {
+		case patch, ok := <-tr.OutCh:
+			if !ok {
+				t.Fatal("live channel closed before all revoked region patches")
+			}
+			for _, private := range []string{"owner/repo", "Selected worker", "Worker readiness", "Force stop this attempt", "private-operator"} {
+				if strings.Contains(patch.Data, private) {
+					t.Fatalf("revoked live patch exposed %q: %s", private, patch.Data)
+				}
+			}
+			if strings.Contains(patch.Data, "Admin session ended") {
+				ended++
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing revoked live region patch")
+		}
+	}
+	if ended != 3 {
+		t.Fatalf("revoked dashboard sent %d session-ended patches, want 3", ended)
 	}
 }
 

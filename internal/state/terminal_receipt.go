@@ -42,7 +42,7 @@ func decodeStateData(reader io.Reader) (Data, error) {
 	return data, nil
 }
 
-// ReadSavedDurable confirms the visible state entry before a late receipt ACK.
+// ReadSavedDurable confirms the visible state entry before acknowledging it.
 func (s *Store) ReadSavedDurable() (Data, error) {
 	return s.readSavedDurable(workspace.SyncDirectories)
 }
@@ -65,6 +65,9 @@ func validateData(data Data) error {
 	}
 	if data.PublicationScanCursor != "" && !workspace.ValidIdentitySegment(data.PublicationScanCursor) {
 		return errors.New("invalid publication scan cursor")
+	}
+	if data.LastStopJobID != "" && !workspace.ValidIdentitySegment(data.LastStopJobID) {
+		return errors.New("invalid last stop job ID")
 	}
 	if data.Accepted != nil {
 		if err := data.Accepted.Validate(); err != nil {

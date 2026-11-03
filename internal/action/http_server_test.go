@@ -454,6 +454,80 @@ func TestHTTPExecutorCancellationDrainsBeforeDelivery(t *testing.T) {
 	}
 }
 
+func TestClaimedAssignmentDeliveredAfterStopDoesNotStartModel(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	deliveryClaimed, releaseResponse := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(releaseResponse) }) }
+	defer unblock()
+	var modelCalls, beforeCalls atomic.Int32
+	wrapper := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/next" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			buffered := &httpRepullRecorder{httptest.NewRecorder()}
+			next.ServeHTTP(buffered, r) // Parent claims the assigned transaction here.
+			close(deliveryClaimed)
+			<-releaseResponse // Worker receives those bytes only after parent stop.
+			for key, values := range buffered.Header() {
+				for _, value := range values {
+					w.Header().Add(key, value)
+				}
+			}
+			w.WriteHeader(buffered.Code)
+			_, _ = w.Write(buffered.Body.Bytes())
+		})
+	}
+	job := testJob(command.Comment)
+	workRoot := t.TempDir()
+	f := newHTTPServerTestWithStopServer(t, ctx, job, runnerExecutionCheckpoints{
+		before: func(CallCheckpoint) error { beforeCalls.Add(1); return nil },
+	}, wrapper, httptest.NewServer, 10*time.Second)
+	workerDone := make(chan error, 1)
+	go func() {
+		workerDone <- RunHTTP(t.Context(), f.server.Client(), f.server.URL, job.Identity.ExecutorID,
+			&Runner{WorkRoot: workRoot, runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				modelCalls.Add(1)
+				return aicli.Result{}, nil
+			}})
+	}()
+	select {
+	case <-deliveryClaimed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parent did not claim the assignment")
+	}
+	f.tx.mu.Lock()
+	claimed := f.tx.delivered
+	f.tx.mu.Unlock()
+	if !claimed {
+		t.Fatal("assignment was not committed before stop")
+	}
+	cancel()
+	select {
+	case <-f.tx.stop:
+	case <-time.After(5 * time.Second):
+		t.Fatal("parent did not start stop control")
+	}
+	unblock()
+	select {
+	case err := <-workerDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("worker did not observe cancellation after stopped delivery: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("worker did not finish after stop")
+	}
+	if modelCalls.Load() != 0 || beforeCalls.Load() != 0 {
+		t.Fatalf("stopped in-flight assignment started model work: models=%d before=%d", modelCalls.Load(), beforeCalls.Load())
+	}
+	if got := f.result(t); got.err == nil {
+		t.Fatal("parent reported success after canceled assignment")
+	}
+}
+
 func TestHTTPExecutorDisconnectedPullDoesNotClaimSavedAssignment(t *testing.T) {
 	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, nil)
 	entered, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
