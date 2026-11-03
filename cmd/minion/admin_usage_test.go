@@ -139,7 +139,8 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 	}
 	page = adminResponse(handler, http.MethodGet, "/admin/usage?repository_id=17", nil, cookie, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="repository_id" value="17"`) ||
-		strings.Contains(page.Body.String(), "<td>18</td>") || !strings.Contains(page.Body.String(), "renamed-repo") {
+		strings.Contains(page.Body.String(), "<td>18</td>") || !strings.Contains(page.Body.String(), "renamed-repo") ||
+		!strings.Contains(page.Body.String(), "Repository ID filters exclude older usage records") {
 		t.Fatalf("repository ID page filter: status=%d body=%s", page.Code, page.Body.String())
 	}
 	for _, test := range []struct {
@@ -155,7 +156,8 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 		if export.Code != http.StatusOK || json.Unmarshal(export.Body.Bytes(), &selected) != nil || selected.Totals.Attempts != test.want {
 			t.Fatalf("repository filter %q: status=%d report=%+v body=%s", test.query, export.Code, selected, export.Body.String())
 		}
-		if test.query == "repository_id=17" && selected.Filters.RepositoryID != 17 {
+		if test.query == "repository_id=17" &&
+			(selected.Filters.RepositoryID != 17 || !strings.Contains(selected.TokenNote, "Repository ID filters exclude older records")) {
 			t.Fatalf("repository ID omitted from export: %+v", selected.Filters)
 		}
 	}

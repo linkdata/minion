@@ -71,6 +71,7 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
     </section>
     <p class="hint">Action coverage: {{.Report.ActionCoverage}}.
       Actions without usage files are excluded. Billed credits: unknown.
+      Repository ID filters exclude older usage records without a numeric repository ID.
       Tokens are executor-reported; incomplete usage can omit unknown amounts.
       An attempt using multiple services can appear in more than one service group,
       while the totals above count it once.</p>
