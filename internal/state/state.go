@@ -289,8 +289,8 @@ type Store struct {
 	lock           *os.File
 	mu             sync.Mutex
 	privateRecords sync.Mutex
-	activeStop selectedStopCancel // Guarded by mu.
-	syncDir        string // Test-only extra directory for a post-rename sync failure.
+	activeStop     selectedStopCancel // Guarded by mu.
+	syncDir        string             // Test-only extra directory for a post-rename sync failure.
 	Data           Data
 }
 

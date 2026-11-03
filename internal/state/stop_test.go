@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,6 +31,11 @@ func stopStoreFixture(t *testing.T) (*Store, string, AcceptedAction) {
 
 func TestRequestStopChecksAttemptAndPreservesFirstRequester(t *testing.T) {
 	store, _, accepted := stopStoreFixture(t)
+	accepted.OutcomeBinding = strings.Repeat("a", 64)
+	store.Data.Accepted.OutcomeBinding = accepted.OutcomeBinding
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancel)
@@ -53,7 +59,7 @@ func TestRequestStopChecksAttemptAndPreservesFirstRequester(t *testing.T) {
 		t.Fatalf("pending cleanup repeat without live slot changed request: request=%+v error=%v", repeated, err)
 	}
 	decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", at.Add(time.Second))
-	if err != nil || decision.Outcome != "canceled" || decision.StopRequest != request {
+	if err != nil || decision.Outcome != "canceled" || decision.StopRequest != request || decision.OutcomeBinding != accepted.OutcomeBinding {
 		t.Fatalf("completion overwrote stop: decision=%+v error=%v", decision, err)
 	}
 	if err := store.ResolveStop(accepted.JobID, accepted.AttemptID, "confirmed"); err != nil {
@@ -130,6 +136,42 @@ func TestRequestStopPostReplacementErrorStillCancelsAndRecovers(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	if reopened.Data.Accepted == nil || reopened.Data.Accepted.StopRequest != request || !reopened.Data.Accepted.Terminal {
 		t.Fatalf("restart forgot durable stop: %+v", reopened.Data)
+	}
+}
+
+func TestRequestStopUnconfirmedDirectorySyncCancelsWithoutAcknowledgment(t *testing.T) {
+	store, path, accepted := stopStoreFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancel)
+	store.syncDir = filepath.Join(filepath.Dir(path), "missing-sync")
+	readWithoutConfirmedSync := func() (Data, error) {
+		return store.readSavedDurable(func(dirs ...string) error {
+			if len(dirs) != 1 || dirs[0] != filepath.Dir(path) {
+				t.Fatalf("wrong state directory sync: %v", dirs)
+			}
+			return os.ErrPermission
+		})
+	}
+	request, err := store.requestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC(), readWithoutConfirmedSync)
+	if err == nil || ctx.Err() != context.Canceled || request.Status != "requested" {
+		t.Fatalf("unconfirmed directory sync: request=%+v error=%v canceled=%v", request, err, ctx.Err())
+	}
+	if saved, err := store.ReadSaved(); err != nil || saved.Accepted == nil || saved.Accepted.StopRequest != request {
+		t.Fatalf("replacement is not visible: state=%+v error=%v", saved, err)
+	}
+	unregister()
+	if _, err := store.requestStop(accepted.JobID, accepted.AttemptID, "other-admin", time.Now().UTC(), readWithoutConfirmedSync); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("repeat acknowledged unsynced request: %v", err)
+	}
+	if _, err := store.requestStop(accepted.JobID, "stale-attempt", "other-admin", time.Now().UTC(), readWithoutConfirmedSync); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("stale attempt acknowledged unsynced request: %v", err)
+	}
+	if repeated, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "other-admin", time.Now().UTC()); err != nil || repeated != request {
+		t.Fatalf("repeat after directory sync: request=%+v error=%v", repeated, err)
+	}
+	if _, err := store.RequestStop(accepted.JobID, "stale-attempt", "other-admin", time.Now().UTC()); !errors.Is(err, ErrStopConflict) {
+		t.Fatalf("stale attempt accepted after directory sync: %v", err)
 	}
 }
 

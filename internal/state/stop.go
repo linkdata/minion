@@ -20,6 +20,10 @@ type selectedStopCancel struct {
 // RequestStop saves the first request and fences new assignment/publication
 // before canceling the live selected execution. A repeat preserves its author.
 func (s *Store) RequestStop(jobID, attemptID, requestedBy string, at time.Time) (StopRequest, error) {
+	return s.requestStop(jobID, attemptID, requestedBy, at, s.ReadSavedDurable)
+}
+
+func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, readSavedDurable func() (Data, error)) (StopRequest, error) {
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(attemptID) ||
 		!workspace.ValidIdentitySegment(requestedBy) || at.IsZero() {
 		return StopRequest{}, errors.New("invalid stop request")
@@ -28,8 +32,8 @@ func (s *Store) RequestStop(jobID, attemptID, requestedBy string, at time.Time) 
 	err := s.WithLock(func() error {
 		if active := s.activeStop; active.cancel == nil || active.jobID != jobID || active.attemptID != attemptID {
 			// Preparation and terminal cleanup still use the monitor's private
-			// state path. Read only the committed file outside the live run.
-			saved, err := s.ReadSaved()
+			// state path. Confirm the saved request before acknowledging a repeat.
+			saved, err := readSavedDurable()
 			if err != nil {
 				return fmt.Errorf("read saved stop request: %w", err)
 			}
@@ -64,14 +68,17 @@ func (s *Store) RequestStop(jobID, attemptID, requestedBy string, at time.Time) 
 		}
 		request = accepted.StopRequest
 		if err := s.Save(); err != nil {
-			// WriteAtomic may report a directory-sync error after replacement.
-			// A readable committed fence must still stop the live worker now.
-			saved, readErr := s.ReadSaved()
-			durable := readErr == nil && saved.Accepted != nil && saved.Accepted.JobID == jobID &&
+			// A failed directory sync can leave the replacement visible but
+			// unconfirmed. Stop its live worker even when that sync also fails.
+			saved, readErr := readSavedDurable()
+			if readErr != nil {
+				saved, readErr = s.ReadSaved()
+			}
+			visible := readErr == nil && saved.Accepted != nil && saved.Accepted.JobID == jobID &&
 				saved.Accepted.AttemptID == attemptID && saved.Accepted.Terminal && saved.Accepted.StopRequest == request
-			if durable {
+			if visible || readErr != nil {
 				s.cancelSelectedLocked(jobID, attemptID)
-			} else if readErr == nil {
+			} else {
 				*accepted = previous
 				s.Data.LastStopJobID = previousLastStop
 			}
