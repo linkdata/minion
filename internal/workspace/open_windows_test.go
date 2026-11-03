@@ -48,7 +48,7 @@ func TestWindowsCollectionRefusesLinkParents(t *testing.T) {
 			if kind == "junction" {
 				windowsJunction(t, parent, outside)
 			} else if err := os.Symlink(outside, parent); err != nil {
-				t.Skipf("Windows symlink privilege unavailable: %v", err)
+				t.Fatalf("create directory symlink: %v", err)
 			}
 			name := filepath.Join(parent, "secret")
 			if data, err := ReadRegular(name, MaxBytes); err == nil {
@@ -57,7 +57,8 @@ func TestWindowsCollectionRefusesLinkParents(t *testing.T) {
 			if changes, err := ReadChanges(t.Context(), root, []Change{{Path: "parent/secret", Mode: Regular}}); err == nil || len(changes) != 0 {
 				t.Fatalf("selected import followed %s parent: changes=%+v error=%v", kind, changes, err)
 			}
-			if err := CheckUnchanged(t.Context(), root, nil); err == nil {
+			matchingTarget := []File{{Path: "parent/secret", Mode: Regular, Data: []byte("outside contents")}}
+			if err := CheckUnchanged(t.Context(), root, matchingTarget); err == nil {
 				t.Fatalf("source scan accepted %s parent", kind)
 			}
 			visited := false
@@ -100,28 +101,37 @@ func TestWindowsWalkRefusesDirectoryReplacedAfterListing(t *testing.T) {
 }
 
 func TestWindowsCollectionRefusesReparseRootForDeleteOnlySelection(t *testing.T) {
-	outside := privateRoot(t)
-	if err := os.WriteFile(filepath.Join(outside, "file"), []byte("outside"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	root := filepath.Join(t.TempDir(), "job")
-	windowsJunction(t, root, outside)
-	for _, check := range []func() error{
-		func() error { return CheckRoot(root) },
-		func() error { return CheckUnchanged(t.Context(), root, nil) },
-		func() error { _, err := ReadChanges(t.Context(), root, nil); return err },
-		func() error {
-			_, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Delete: true}})
-			return err
-		},
-		func() error { return Apply(root, []Change{{Path: "file", Delete: true}}) },
-	} {
-		if err := check(); err == nil {
-			t.Fatal("reparse root accepted")
-		}
-	}
-	if data, err := os.ReadFile(filepath.Join(outside, "file")); err != nil || string(data) != "outside" {
-		t.Fatalf("refused deletion changed outside file: %q, %v", data, err)
+	for _, kind := range []string{"symlink", "junction"} {
+		t.Run(kind, func(t *testing.T) {
+			outside := privateRoot(t)
+			if err := os.WriteFile(filepath.Join(outside, "file"), []byte("outside"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(t.TempDir(), "job")
+			if kind == "junction" {
+				windowsJunction(t, root, outside)
+			} else if err := os.Symlink(outside, root); err != nil {
+				t.Fatalf("create root directory symlink: %v", err)
+			}
+			matchingTarget := []File{{Path: "file", Mode: Regular, Data: []byte("outside")}}
+			for _, check := range []func() error{
+				func() error { return CheckRoot(root) },
+				func() error { return CheckUnchanged(t.Context(), root, matchingTarget) },
+				func() error { _, err := ReadChanges(t.Context(), root, nil); return err },
+				func() error {
+					_, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Delete: true}})
+					return err
+				},
+				func() error { return Apply(root, []Change{{Path: "file", Delete: true}}) },
+			} {
+				if err := check(); err == nil {
+					t.Fatal("reparse root accepted")
+				}
+			}
+			if data, err := os.ReadFile(filepath.Join(outside, "file")); err != nil || string(data) != "outside" {
+				t.Fatalf("refused deletion changed outside file: %q, %v", data, err)
+			}
+		})
 	}
 }
 
@@ -219,7 +229,7 @@ func TestWindowsReadStabilityRejectsChangedMetadata(t *testing.T) {
 		change func(*windowsChangedInfo)
 	}{
 		{"size", func(after *windowsChangedInfo) { after.size++ }},
-		{"mode", func(after *windowsChangedInfo) { after.mode ^= os.ModeSetuid }},
+		{"mode", func(after *windowsChangedInfo) { after.mode &^= 0222 }},
 		{"mtime", func(after *windowsChangedInfo) { after.modified = after.modified.Add(time.Second) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -235,17 +245,37 @@ func TestWindowsReadStabilityRejectsChangedMetadata(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(time.Millisecond)
-		if err := os.Chtimes(name, before.ModTime(), before.ModTime()); err != nil {
+		anchor, err := os.OpenRoot(filepath.Dir(name))
+		if err != nil {
 			t.Fatal(err)
 		}
-		after, err := file.Stat()
-		if err != nil || !after.ModTime().Equal(before.ModTime()) {
-			t.Fatalf("mtime-restored fixture changed file: %v, %v", after, err)
-		}
-		afterChange, err := changeTime(after, file)
-		if err != nil || beforeChange == afterChange {
-			t.Fatalf("Windows change time did not observe metadata update: before=%v after=%v error=%v", beforeChange, afterChange, err)
+		defer anchor.Close()
+		var after os.FileInfo
+		var afterChange [2]int64
+		deadline := time.Now().Add(time.Second)
+		for {
+			// Root.Chtimes opens a write-attributes handle sharing reads, writes, and deletes.
+			if err := anchor.Chtimes(filepath.Base(name), time.Time{}, before.ModTime().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			if err := anchor.Chtimes(filepath.Base(name), time.Time{}, before.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			after, err = file.Stat()
+			if err != nil || !after.ModTime().Equal(before.ModTime()) {
+				t.Fatalf("mtime-restored fixture changed file: %v, %v", after, err)
+			}
+			afterChange, err = changeTime(after, file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if beforeChange != afterChange {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("Windows change time did not observe metadata update: before=%v after=%v", beforeChange, afterChange)
+			}
+			time.Sleep(time.Millisecond)
 		}
 		if err := checkReadStability(before, after, int(before.Size()), file, beforeChange == afterChange); err == nil || !strings.Contains(err.Error(), "file changed") {
 			t.Fatalf("changed file time accepted: %v", err)
