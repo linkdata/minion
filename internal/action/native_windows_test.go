@@ -25,6 +25,10 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 		if helper != string(command.Comment) && helper != string(command.Fix) {
 			t.Fatalf("unexpected model helper mode %q", helper)
 		}
+		dir, err := os.Getwd()
+		if expected := os.Getenv("MINION_WINDOWS_MODEL_HELPER_DIR"); err != nil || expected == "" || !strings.EqualFold(filepath.Clean(dir), filepath.Clean(expected)) {
+			t.Fatalf("unexpected model helper directory %q, expected %q: %v", dir, expected, err)
+		}
 		if helper == string(command.Fix) {
 			if err := os.WriteFile("source.txt", []byte("fixed\n"), 0600); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -38,6 +42,19 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("reject inherited helper", func(t *testing.T) {
+		dir := t.TempDir()
+		cmd := exec.Command(binary, "-test.run=^TestNativeWindowsActionMaterializesGitAndRunsCommand$")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER=fix", "MINION_WINDOWS_MODEL_HELPER_DIR=")
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "unexpected model helper directory") {
+			t.Fatalf("inherited helper result: %v: %s", err, out)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, "source.txt")); !os.IsNotExist(err) {
+			t.Fatalf("inherited helper wrote into work directory: %v", err)
+		}
+	})
 	git, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +77,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 				}
 				cmd := exec.CommandContext(ctx, binary, "-test.run=^TestNativeWindowsActionMaterializesGitAndRunsCommand$")
 				cmd.Dir = request.dir
-				cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER="+string(action))
+				cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER="+string(action), "MINION_WINDOWS_MODEL_HELPER_DIR="+request.dir)
 				var output bytes.Buffer
 				cmd.Stdout = &output
 				cmd.Stderr = os.Stderr
