@@ -114,7 +114,7 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-The bundled [config.json](config.json) includes an optional `admin` block with an `admin` account whose `password_hash` is the inert `PASTE_GENERATED_HASH_HERE` placeholder. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you replace the placeholder with a generated hash and restart Minion. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+The bundled [config.json](config.json) includes an optional `admin` block with an `admin` account whose `password_hash` is the inert `PASTE_GENERATED_HASH_HERE` placeholder. With the sample config, `-loop` starts a loopback listener that returns HTTP 403 on every route, including login, until you replace the placeholder with a generated hash and restart Minion. The placeholder is not a working default account. OAuth providers can enable user sign-in without administrator accounts; admin routes still return HTTP 403. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
@@ -142,6 +142,22 @@ During a live selected run, **Force stop this attempt** requests cancellation of
 JaWS keeps sessions in memory, so they end on restart or after one minute without an attached JaWS page. Sessions are also bound to the client IP seen by Minion, so changing networks can require signing in again. The signed-in `/admin/login` page does not attach a JaWS request, so its session expires after roughly one minute even while the page stays open. Failed logins are limited per configured username and in one shared bucket for unknown usernames. These separate limits can reveal configured usernames after repeated failures; usernames should not be treated as secrets. At most two password hashes run concurrently.
 
 An empty `listen` uses `127.0.0.1:8377`. The admin server runs only with `-loop`. Anything other than a literal loopback IP address in `listen` requires both `tls_cert_file` and `tls_key_file`; relative file paths resolve against the config directory. The certificate must be trusted by the browser and cover the address used. `-check` verifies configured admin TLS files without binding the listener; `-loop` verifies them before binding. One-pass polling neither loads unused admin TLS files nor starts the listener. An admin listener failure stops `-loop` with exit status 1. The admin listener is separate from the worker HTTPS endpoint and does not use its token.
+
+To enable user sign-in, register a [GitHub OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app) or a [GitLab OAuth application](https://docs.gitlab.com/integration/oauth_provider/), then add its credentials under `admin`. Register the exact `/auth/callback` URL used by the browser. For example, with a trusted certificate covering `minion.example`:
+
+```json
+"admin": {
+  "listen": "0.0.0.0:8377",
+  "tls_cert_file": "cert.pem",
+  "tls_key_file": "key.pem",
+  "github_oauth": {"client_id": "GITHUB_CLIENT_ID", "client_secret": "GITHUB_CLIENT_SECRET", "redirect_url": "https://minion.example:8377/auth/callback"},
+  "gitlab_oauth": {"client_id": "GITLAB_CLIENT_ID", "client_secret": "GITLAB_CLIENT_SECRET", "redirect_url": "https://minion.example:8377/auth/callback", "base_url": "https://gitlab.com"}
+}
+```
+
+Either provider may be omitted. `gitlab_oauth.base_url` defaults to `https://gitlab.com` and may name another HTTPS GitLab host. A redirect URL must use HTTPS, except literal loopback HTTP for local use. Keep the config private: it contains client secrets. Open `/auth/login` to sign in. The flow uses one-use state and PKCE, requests only GitHub `read:user` or GitLab `read_user`, reads the provider's immutable numeric user ID, then discards the access token. The current username is a display label; it never links accounts. A signed-in user can use the link buttons to prove a second provider identity. Link requests need the existing user session to remain live through the callback, so retry if its one-minute unattached lifetime expires. `POST /auth/logout` revokes the user session. User sessions do not grant administrator access.
+
+Account links survive restart in the `state_path.user-links.json` file. It records provider, host and immutable user IDs, never OAuth tokens or client secrets. Minion writes the file with owner-only permissions on Unix; on Windows, restrict the state directory with an ACL. Linking lets a live session for either proven identity use the combined account. Sign-in alone grants no repository access, does not enable GitLab action discovery, and does not change Minion's existing command-author permission checks. Removing the file separates linked identities on the next startup.
 
 To use one remote executor, add `remote_executor` to the orchestrator config with `executor_id`, `listen` (host:port), `tls_cert_file`, `tls_key_file`, and `token`. The certificate must be trusted by the worker host and cover the name in its HTTPS URL. Use the same 32-random-byte unpadded base64url token in a separate worker config:
 

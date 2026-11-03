@@ -39,7 +39,7 @@ type adminAccess struct {
 	hashSlots chan struct{}
 }
 
-func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator) (http.Handler, error) {
+func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess) (http.Handler, error) {
 	if err := registerAdminDashboard(jw); err != nil {
 		return nil, err
 	}
@@ -68,6 +68,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
+	oauth.routes(mux)
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
 	// body-reading callback, which must not inherit an immediate read deadline.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +83,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			return
 		}
 		mux.ServeHTTP(w, r)
-	}), access.allowed)), nil
+	}), func(r *http.Request) bool { return access.allowed(r) || oauth.allowed(r) })), nil
 }
 
 func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action.Orchestrator) {

@@ -1,0 +1,63 @@
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net/netip"
+	"net/url"
+	"strings"
+)
+
+func (a *AdminConfig) validateOAuth() error {
+	for _, entry := range []struct {
+		name   string
+		client *OAuthClient
+	}{
+		{"github_oauth", a.GitHubOAuth},
+		{"gitlab_oauth", a.GitLabOAuth},
+	} {
+		if entry.client == nil {
+			continue
+		}
+		client := entry.client
+		if client.ClientID == "" || len(client.ClientID) > 512 || client.ClientSecret == "" || len(client.ClientSecret) > 4096 ||
+			strings.ContainsAny(client.ClientID+client.ClientSecret, "\x00\r\n") {
+			return fmt.Errorf("admin.%s requires a bounded client_id and client_secret", entry.name)
+		}
+		redirect, err := url.Parse(client.RedirectURL)
+		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != "/auth/callback" ||
+			redirect.RawQuery != "" || redirect.Fragment != "" || redirect.RawPath != "" {
+			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP /auth/callback URL", entry.name)
+		}
+		if entry.name == "github_oauth" {
+			if client.BaseURL != "" {
+				return errors.New("admin.github_oauth base_url is fixed to https://github.com")
+			}
+			continue
+		}
+		if client.BaseURL == "" {
+			client.BaseURL = "https://gitlab.com"
+		}
+		base, err := url.Parse(client.BaseURL)
+		if err != nil || !validOAuthOrigin(base, false) || base.Path != "" && base.Path != "/" ||
+			base.RawQuery != "" || base.Fragment != "" || base.RawPath != "" {
+			return errors.New("admin.gitlab_oauth base_url must be an HTTPS origin")
+		}
+		client.BaseURL = "https://" + strings.ToLower(base.Host)
+	}
+	return nil
+}
+
+func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
+	if u == nil || u.Host == "" || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	if u.Scheme != "http" || !allowLoopbackHTTP {
+		return false
+	}
+	addr, err := netip.ParseAddr(u.Hostname())
+	return err == nil && addr.Unmap().IsLoopback()
+}

@@ -115,6 +115,17 @@ type AdminConfig struct {
 	TLSCertFile    string         `json:"tls_cert_file,omitempty"`
 	TLSKeyFile     string         `json:"tls_key_file,omitempty"`
 	Administrators []AdminAccount `json:"administrators,omitempty"`
+	GitHubOAuth    *OAuthClient   `json:"github_oauth,omitempty"`
+	GitLabOAuth    *OAuthClient   `json:"gitlab_oauth,omitempty"`
+}
+
+// OAuthClient configures one operator-registered sign-in application.
+type OAuthClient struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RedirectURL  string `json:"redirect_url"`
+	// BaseURL selects a GitLab instance; GitHub uses its fixed public endpoints.
+	BaseURL string `json:"base_url,omitempty"`
 }
 
 // CodexConfig contains authentication, model settings, and job skill paths.
@@ -359,6 +370,9 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
 	}
 	if admin := c.Admin; admin != nil {
+		if err := admin.validateOAuth(); err != nil {
+			return err
+		}
 		seen := make(map[string]bool, len(admin.Administrators))
 		for _, account := range admin.Administrators {
 			if !workspace.ValidIdentitySegment(account.Username) || seen[strings.ToLower(account.Username)] {
