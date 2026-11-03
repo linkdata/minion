@@ -141,6 +141,36 @@ func TestWindowsHostilePullRequestTreeFailsBeforeCheckout(t *testing.T) {
 	}
 }
 
+func TestWindowsPullRequestUsesSafeHeadAndSelectedBaseFiles(t *testing.T) {
+	fixture := newFixture(t)
+	blob := fixture.gitInput(fixture.source, "safe\n", "hash-object", "-w", "--stdin")
+	baseTree := windowsRawTree(fixture,
+		fmt.Sprintf("100644 blob %s\tReadme", blob),
+		fmt.Sprintf("100644 blob %s\tREADME", blob))
+	base := windowsTreeCommit(fixture, baseTree)
+	headTree := windowsRawTree(fixture, fmt.Sprintf("100644 blob %s\tReadme", blob))
+	head := fixture.gitInput(fixture.source, "safe head\n", "commit-tree", headTree, "-p", base)
+	fixture.git(fixture.source, "push", fixture.remote, base+":refs/heads/main")
+	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
+	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = checkout.Close() })
+	snapshot, err := checkout.Snapshot(t.Context())
+	if err != nil || snapshot.Head != head || snapshot.MergeBase != base || len(snapshot.Files) != 1 || snapshot.Files[0].Path != "Readme" || len(snapshot.BaseFiles) != 1 || snapshot.BaseFiles[0].Path != "README" {
+		t.Fatalf("safe PR comparison snapshot=%+v error=%v", snapshot, err)
+	}
+	if err := workspace.ValidateSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, files := range [][]workspace.File{snapshot.Files, snapshot.BaseFiles} {
+		if err := workspace.Materialize(t.TempDir(), files); err != nil {
+			t.Fatalf("safe comparison files could not materialize: %v", err)
+		}
+	}
+}
+
 func TestWindowsImportRejectsHostileResultPathsBeforeMutation(t *testing.T) {
 	for _, test := range []struct {
 		name   string

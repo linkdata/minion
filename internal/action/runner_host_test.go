@@ -101,23 +101,11 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
+			want := test.want
 			if runtime.GOOS == "windows" && (test.name == "source materialization" || test.name == "context materialization") {
-				probe := filepath.Join(runner.WorkRoot, "case-probe")
-				if err := os.WriteFile(probe, nil, 0600); err != nil {
-					t.Fatal(err)
-				}
-				_, caseErr := os.Stat(filepath.Join(runner.WorkRoot, "CASE-PROBE"))
-				if err := os.Remove(probe); err != nil {
-					t.Fatal(err)
-				}
-				if errors.Is(caseErr, os.ErrNotExist) {
-					t.Skip("case alias fixture requires a case-insensitive work root")
-				}
-				if caseErr != nil {
-					t.Fatal(caseErr)
-				}
+				want = "duplicate source path"
 			}
-			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
+			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
 				t.Fatalf("preparation result=%+v error=%v", result, err)
 			}
 		})

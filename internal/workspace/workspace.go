@@ -262,6 +262,11 @@ func validatePaths(paths []string, folded bool) error {
 	return nil
 }
 
+// ValidateSourceLayout checks bounded Git tree paths after entry syntax, modes and sizes are verified.
+func ValidateSourceLayout(paths []string, folded bool) error {
+	return validatePaths(paths, folded)
+}
+
 // ValidateFixPaths checks a validated snapshot's stricter writable layout, including omissions.
 func ValidateFixPaths(files []File, omitted []string) error {
 	paths := make([]string, len(files), len(files)+len(omitted))

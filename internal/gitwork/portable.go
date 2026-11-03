@@ -27,6 +27,15 @@ const maxBatchHeaderBytes = 128
 
 // sourceTree validates bounded local metadata before materialization.
 func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, error) {
+	return c.sourceTreeWithFold(ctx, ref, runtime.GOOS == "windows")
+}
+
+// A comparison base is inspected through Git objects; only selected base files are materialized.
+func (c *Checkout) comparisonBaseTree(ctx context.Context, ref string) ([]sourceEntry, error) {
+	return c.sourceTreeWithFold(ctx, ref, false)
+}
+
+func (c *Checkout) sourceTreeWithFold(ctx context.Context, ref string, folded bool) ([]sourceEntry, error) {
 	if entries, ok := c.sourceTrees[ref]; ok {
 		return entries, nil
 	}
@@ -40,18 +49,25 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	if truncated {
 		return nil, fmt.Errorf("%w: source tree listing exceeds %d bytes", ErrCheckoutTooLarge, maxSourceTreeListBytes)
 	}
-	entries, err := parseSourceEntries(ref, output)
+	entries, err := parseSourceEntriesWithFold(ref, output, folded)
 	if err != nil {
 		return nil, err
 	}
-	if c.sourceTrees == nil {
-		c.sourceTrees = make(map[string][]sourceEntry)
+	// An exact-only Windows base cannot satisfy a later folded head preflight.
+	if folded || runtime.GOOS != "windows" {
+		if c.sourceTrees == nil {
+			c.sourceTrees = make(map[string][]sourceEntry)
+		}
+		c.sourceTrees[ref] = entries
 	}
-	c.sourceTrees[ref] = entries
 	return entries, nil
 }
 
 func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
+	return parseSourceEntriesWithFold(ref, output, runtime.GOOS == "windows")
+}
+
+func parseSourceEntriesWithFold(ref string, output []byte, folded bool) ([]sourceEntry, error) {
 	lines, err := splitNUL(output)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid Git tree listing: %w", ErrUnsupportedSource, err)
@@ -120,7 +136,11 @@ func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
 		validation = append(validation, file)
 		entries = append(entries, source)
 	}
-	if err := workspace.ValidateSnapshot(workspace.Snapshot{Head: ref, Files: validation}); err != nil {
+	paths := make([]string, len(validation))
+	for i, file := range validation {
+		paths[i] = file.Path
+	}
+	if err := workspace.ValidateSourceLayout(paths, folded); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
 	return entries, nil
@@ -208,7 +228,7 @@ func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int6
 			}
 			return s, err
 		}
-		if baseEntries, err = c.sourceTree(ctx, s.MergeBase); err != nil {
+		if baseEntries, err = c.comparisonBaseTree(ctx, s.MergeBase); err != nil {
 			return s, err
 		}
 		paths, _, err := c.boundedGit(ctx, nil, maxPathListBytes, false, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", s.MergeBase, s.Head, "--")
