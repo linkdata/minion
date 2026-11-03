@@ -123,44 +123,15 @@ The bundled [config.json](config.json) includes an optional `admin` block with n
 }
 ```
 
-Generate the Argon2id PHC hash without putting the password in shell history or process arguments. This example uses a temporary Python environment and prompts for the password without echo:
+Generate the Argon2id PHC hash with Minion on Linux, macOS, or Windows. It prompts once without echo and needs no config or GitHub access:
 
 ```sh
-admin_hash_env=$(mktemp -d)
-python3 -m venv "$admin_hash_env"
-"$admin_hash_env/bin/python" -m pip install argon2-cffi
-"$admin_hash_env/bin/python" - <<'PY'
-import getpass
-from argon2 import PasswordHasher
-
-password = getpass.getpass("Admin password: ")
-if not 1 <= len(password.encode("utf-8")) <= 4096:
-    raise SystemExit("Admin password must be 1 to 4096 UTF-8 bytes")
-print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
-                     hash_len=32, salt_len=16).hash(password))
-PY
-rm -r "$admin_hash_env"
+./bin/minion -mode=hash
 ```
 
-On native Windows, use PowerShell with Python installed:
+In Windows PowerShell, run `.\bin\minion.exe -mode=hash`.
 
-```powershell
-$adminHashEnv = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
-py -3 -m venv $adminHashEnv
-& "$adminHashEnv\Scripts\python.exe" -m pip install argon2-cffi
-$hashScript = @'
-import getpass
-from argon2 import PasswordHasher
-
-password = getpass.getpass("Admin password: ")
-if not 1 <= len(password.encode("utf-8")) <= 4096:
-    raise SystemExit("Admin password must be 1 to 4096 UTF-8 bytes")
-print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
-                     hash_len=32, salt_len=16).hash(password))
-'@
-& "$adminHashEnv\Scripts\python.exe" -c $hashScript
-Remove-Item -Recurse -Force $adminHashEnv
-```
+Do not put the password in the command line; the hash command rejects positional arguments. Passwords must contain 1 to 4096 UTF-8 bytes.
 
 Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; success opens `/`, whose form sends `POST /admin/logout` to revoke the session. The live dashboard shows the current action from preparation through publication, worker readiness and phase, the last received worker status and the worker-reported time since execution progress at that status. It checks for changes every two seconds while connected. Repository, requester and action filters apply only to the current action and live in the URL, not the session. The tracked accepted-action total begins when this counter is introduced; older accepted actions are not backfilled from incomplete usage records or terminal decisions. A worker status alone does not prove readiness or reset the configured inactivity limit.
 
