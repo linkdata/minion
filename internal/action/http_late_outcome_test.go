@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -878,6 +879,11 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
 	stateHeld, lateEntered, releaseLate := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	abort := make(chan struct{})
+	defer close(abort)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLate) }) }
+	defer release()
 	f.owner.lateUsageSave = func(record usage.Record) error {
 		close(lateEntered) // The late receipt already holds the private-record lock.
 		<-releaseLate
@@ -887,12 +893,20 @@ func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
 	go func() {
 		terminalDone <- f.store.WithLock(func() error {
 			close(stateHeld)
-			<-lateEntered // Admission must reach the private lock without taking the state lock.
+			select {
+			case <-lateEntered: // Admission must reach the private lock without taking the state lock.
+			case <-abort:
+				return nil
+			}
 			f.owner.CompleteTerminalUsage(monitor.Job{ID: f.job.Identity.JobID, AttemptID: f.job.Identity.AttemptID}, "lost", time.Now())
 			return nil
 		})
 	}()
-	<-stateHeld
+	select {
+	case <-stateHeld:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal save did not hold the state lock")
+	}
 	lateDone := make(chan error, 1)
 	go func() { lateDone <- f.owner.receiveLateOutcome("remote", f.outcome) }()
 	select {
@@ -900,7 +914,7 @@ func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("late receipt waited for the held state lock")
 	}
-	close(releaseLate)
+	release()
 	if err := waitLateError(t, terminalDone); err != nil {
 		t.Fatal(err)
 	}
@@ -912,6 +926,9 @@ func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
 func TestLateRemoteReceiptCannotRecreatePrunedDiagnostics(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
 	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSave := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseSave()
 	f.owner.lateUsageSave = func(record usage.Record) error {
 		close(entered)
 		<-release
@@ -945,7 +962,7 @@ func TestLateRemoteReceiptCannotRecreatePrunedDiagnostics(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("prune did not select the expired attempt")
 	}
-	close(release)
+	releaseSave()
 	if err := waitLateError(t, lateDone); err != nil {
 		t.Fatal(err)
 	}
