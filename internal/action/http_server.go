@@ -951,25 +951,39 @@ func (tx *httpTransaction) stopRequiredDelivery(err error) {
 	tx.stopExecution(nil, true)
 }
 
+func (tx *httpTransaction) currentOutcomeReadable() bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	return !tx.fenced && (tx.stopUntil.IsZero() || time.Now().Before(tx.stopUntil))
+}
+
+func (e *HTTPExecutor) lockOutcomeRead(tx *httpTransaction, current bool) (*sync.Mutex, bool) {
+	readLane := &e.lateOutcomeRead
+	if current {
+		readLane = &tx.outcomeRead
+	}
+	readLane.Lock()
+	if current && !tx.currentOutcomeReadable() {
+		// The transaction may have closed while this request waited for its lane.
+		// Move it behind late uploads before consuming a global body slot.
+		readLane.Unlock()
+		readLane = &e.lateOutcomeRead
+		readLane.Lock()
+		current = false
+	}
+	return readLane, current
+}
+
 func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	kind := strings.TrimPrefix(r.URL.Path, "/")
 	tx := e.transaction()
 	var decodedOutcome *httpOutcome
 	if kind == "outcome" && e.lateOutcome != nil {
-		// An optional binding hint keeps a slow old upload off the current lane.
+		// The current worker's binding header keeps a slow old upload off its lane.
 		// Both lanes remain bounded; the decoded body still decides admission.
 		matchingHint := tx != nil && r.Header.Get(httpOutcomeBindingHeader) == httpBindingDigest(tx.binding)
-		current := matchingHint
-		if current {
-			tx.mu.Lock()
-			current = !tx.fenced && (tx.stopUntil.IsZero() || time.Now().Before(tx.stopUntil))
-			tx.mu.Unlock()
-		}
-		readLane := &e.lateOutcomeRead
-		if current {
-			readLane = &tx.outcomeRead
-		}
-		readLane.Lock()
+		current := matchingHint && tx.currentOutcomeReadable()
+		readLane, current := e.lockOutcomeRead(tx, current)
 		defer readLane.Unlock()
 		select {
 		case e.outcomeReads <- struct{}{}:

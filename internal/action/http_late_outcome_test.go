@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -285,6 +286,39 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired private diagnostic recreated: %v", err)
+	}
+}
+
+func TestLateRemoteOutcomeExpiryKeepsPendingBillingUnchanged(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
+	decision.DecidedAt = time.Now().UTC().Add(-privateRecordRetention)
+	f.store.Data.TerminalDecisions[f.job.Identity.JobID] = decision
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	before, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || len(before.Calls) != 1 || before.Calls[0].FinishedAt != nil {
+		t.Fatalf("expected pending usage before expiry: %+v found=%t error=%v", before, found, err)
+	}
+	beforeTotals, err := f.owner.Usage.Query(usage.Filter{}, nil, false)
+	if err != nil || beforeTotals.Totals.Attempts != 1 {
+		t.Fatalf("usage totals before expiry: %+v error=%v", beforeTotals.Totals, err)
+	}
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusConflict {
+		t.Fatalf("expired pending receipt status=%d", status)
+	}
+	after, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || !reflect.DeepEqual(before, after) {
+		t.Fatalf("expired receipt changed pending usage: before=%+v after=%+v found=%t error=%v", before, after, found, err)
+	}
+	afterTotals, err := f.owner.Usage.Query(usage.Filter{}, nil, false)
+	if err != nil || !reflect.DeepEqual(beforeTotals.Totals, afterTotals.Totals) {
+		t.Fatalf("expired receipt changed billing totals: before=%+v after=%+v error=%v", beforeTotals.Totals, afterTotals.Totals, err)
+	}
+	if _, err := os.Stat(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired receipt created private diagnostics: %v", err)
 	}
 }
 
@@ -926,6 +960,83 @@ func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
 	}
 	if old.err != nil || old.status != http.StatusOK || old.ack.Failure != nil {
 		t.Fatalf("old fenced upload failed late receipt: %+v", old)
+	}
+}
+
+func TestQueuedCurrentOutcomeMovesBehindLateReadAfterFence(t *testing.T) {
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := &httpTransaction{}
+	old.mu.Lock()
+	old.outcomeRead.Lock()          // An old current upload holds its read lane.
+	executor.lateOutcomeRead.Lock() // A separate late upload holds the late lane.
+	executor.outcomeReads <- struct{}{}
+	releaseOld := sync.OnceFunc(old.outcomeRead.Unlock)
+	releaseLate := sync.OnceFunc(executor.lateOutcomeRead.Unlock)
+	releaseState := sync.OnceFunc(old.mu.Unlock)
+	done := make(chan struct{})
+	defer func() {
+		releaseState()
+		releaseOld()
+		releaseLate()
+		close(done)
+	}()
+	type selection struct {
+		lane    *sync.Mutex
+		current bool
+	}
+	queued := make(chan selection, 1)
+	go func() {
+		lane, current := executor.lockOutcomeRead(old, true)
+		queued <- selection{lane, current}
+		<-done
+		lane.Unlock()
+	}()
+	releaseOld()
+	deadline := time.Now().Add(5 * time.Second)
+	for old.outcomeRead.TryLock() {
+		old.outcomeRead.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("queued old upload did not acquire its original read lane")
+		}
+		runtime.Gosched()
+	}
+	old.fenced = true // It closes while the queued upload waits for old.mu.
+	releaseState()
+	newer := &httpTransaction{}
+	newSelected := make(chan selection, 1)
+	go func() {
+		lane, current := executor.lockOutcomeRead(newer, true)
+		newSelected <- selection{lane, current}
+		<-done
+		lane.Unlock()
+	}()
+	var newRead selection
+	select {
+	case newRead = <-newSelected:
+	case <-time.After(5 * time.Second):
+		releaseLate()
+		t.Fatal("new current upload waited behind the stalled late lane")
+	}
+	if !newRead.current || newRead.lane != &newer.outcomeRead {
+		t.Fatal("new current upload lost its own read lane")
+	}
+	select {
+	case executor.outcomeReads <- struct{}{}:
+		<-executor.outcomeReads
+	default:
+		t.Fatal("stale queued upload consumed the newer Result's body slot")
+	}
+	releaseLate()
+	select {
+	case got := <-queued:
+		if got.current || got.lane != &executor.lateOutcomeRead {
+			t.Fatalf("stale queued upload retained current lane: %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stale queued upload did not move to the late lane")
 	}
 }
 
