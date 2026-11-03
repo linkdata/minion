@@ -174,7 +174,7 @@ func ValidateSnapshot(s Snapshot) error {
 			}
 			paths = append(paths, name)
 		}
-		if err := validatePaths(paths, false); err != nil {
+		if err := validatePaths(paths, runtime.GOOS == "windows"); err != nil {
 			return err
 		}
 	}
@@ -184,7 +184,7 @@ func ValidateSnapshot(s Snapshot) error {
 			paths = append(paths, file.Path)
 		}
 		paths = append(paths, s.Omitted...)
-		if err := validatePaths(paths, false); err != nil {
+		if err := validatePaths(paths, runtime.GOOS == "windows"); err != nil {
 			return err
 		}
 	}

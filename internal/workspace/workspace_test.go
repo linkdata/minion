@@ -155,11 +155,15 @@ func TestDefaultSnapshotRejectsOmittedFileOverlap(t *testing.T) {
 			}
 		})
 	}
-	for _, test := range []struct{ file, omitted string }{
-		{"Foo/a", "Foo/b"}, {"Foo/a", "foo/b"},
+	for _, test := range []struct {
+		file, omitted string
+		windowsReject bool
+	}{
+		{"Foo/a", "Foo/b", false}, {"Foo/a", "foo/b", true},
 	} {
-		if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omitted}}); err != nil {
-			t.Fatalf("rejected disjoint default omission: %+v,%v", test, err)
+		err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omitted}})
+		if (err != nil) != (runtime.GOOS == "windows" && test.windowsReject) {
+			t.Fatalf("default omission validation: %+v,%v", test, err)
 		}
 	}
 }
@@ -605,8 +609,8 @@ func TestUnicodeFoldCollisionsInFixLayouts(t *testing.T) {
 	pair := [2]string{"ſ", "s"}
 	for _, names := range [][2]string{pair, {pair[0] + "/a", pair[1] + "/b"}} {
 		files := []File{{Path: names[0], Mode: Regular}, {Path: names[1], Mode: Regular}}
-		if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err != nil {
-			t.Fatalf("rejected exact source names: %v", err)
+		if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); (err != nil) != (runtime.GOOS == "windows") {
+			t.Fatalf("unexpected snapshot collision validation: %v", err)
 		}
 		if err := ValidateFixPaths(files, nil); err == nil {
 			t.Fatalf("accepted folded fix source collision: %q", names)

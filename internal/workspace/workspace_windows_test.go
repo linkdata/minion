@@ -178,6 +178,31 @@ func TestWindowsSnapshotRejectsCaseAliasesBeforeMaterialize(t *testing.T) {
 	}
 }
 
+func TestWindowsSnapshotFoldsCurrentOmissionsOnly(t *testing.T) {
+	for _, test := range []struct {
+		name, file, omission string
+	}{
+		{"file", "Link", "link"},
+		{"directory", "Docs/a", "docs/b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omission}}
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatal("default snapshot accepted current case alias")
+			}
+			snapshot.Base, snapshot.MergeBase = strings.Repeat("b", 40), strings.Repeat("b", 40)
+			snapshot.HeadOmitted = []string{test.omission}
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatal("comparison snapshot accepted current case alias")
+			}
+			snapshot.HeadOmitted = nil // The omission belongs only to the base revision.
+			if err := ValidateSnapshot(snapshot); err != nil {
+				t.Fatalf("base-only case alias rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestWindowsOpenPathRejectsLink(t *testing.T) {
 	root := t.TempDir()
 	name := filepath.Join(root, "source")
