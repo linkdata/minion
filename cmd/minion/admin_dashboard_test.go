@@ -140,6 +140,10 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	if status.String() != workerStatus+" In progress 0." {
 		t.Fatalf("live status summary: %q", status.String())
 	}
+	var stopStatus bytes.Buffer
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil || stopStatus.Len() != 0 {
+		t.Fatalf("unexpected initial stop announcement: %q, %v", stopStatus.String(), err)
+	}
 	page.Dot.View.Snapshot.TrackedAccepted = 1
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
@@ -218,10 +222,26 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 		t.Fatalf("phase update replaced the focused stop control: %q, %q, %v", stopBefore.String(), stopAfter.String(), err)
 	}
 	page.Dot.View.Snapshot.LastStop = &action.DashboardStop{AttemptID: "attempt-1", Status: "requested"}
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
+		stopStatus.String() != "Latest force stop for attempt attempt-1: requested." {
+		t.Fatalf("stop request missing from dedicated status: %q, %v", stopStatus.String(), err)
+	}
+	page.Dot.View.Snapshot.Worker.Phase = "idle"
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		!strings.Contains(status.String(), "Latest force stop for attempt attempt-1: requested.") {
-		t.Fatalf("stop request missing from persistent status: %q, %v", status.String(), err)
+		!strings.Contains(status.String(), "Worker phase idle.") || strings.Contains(status.String(), "Latest force stop") {
+		t.Fatalf("worker change repeated stop announcement: %q, %v", status.String(), err)
+	}
+	stopStatus.Reset()
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
+		stopStatus.String() != "Latest force stop for attempt attempt-1: requested." {
+		t.Fatalf("worker change replaced stop status: %q, %v", stopStatus.String(), err)
+	}
+	page.Dot.View.Snapshot.LastStop.Status = "confirmed"
+	stopStatus.Reset()
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
+		stopStatus.String() != "Latest force stop for attempt attempt-1: confirmed." {
+		t.Fatalf("confirmed stop was not announced: %q, %v", stopStatus.String(), err)
 	}
 	body.Reset()
 	if err := pages.ExecuteTemplate(&body, "dashboard-live", page); err != nil ||
@@ -232,6 +252,10 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil || status.String() != "Admin session ended." {
 		t.Fatalf("revoked live status: %q, %v", status.String(), err)
+	}
+	stopStatus.Reset()
+	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil || stopStatus.Len() != 0 {
+		t.Fatalf("revoked stop status: %q, %v", stopStatus.String(), err)
 	}
 	stopAfter.Reset()
 	if err := pages.ExecuteTemplate(&stopAfter, "dashboard-stop-control", page); err != nil || stopAfter.Len() != 0 {
@@ -483,6 +507,7 @@ func TestAdminDashboardAllLiveRegionsRedactAfterLogout(t *testing.T) {
 	page := &adminDashboardPage{owner: owner}
 	for _, part := range []struct{ tag, name string }{
 		{tag: "p", name: "dashboard-status"},
+		{tag: "p", name: "dashboard-stop-status"},
 		{tag: "section", name: "dashboard-live"},
 		{tag: "section", name: "dashboard-action"},
 		{tag: "div", name: "dashboard-stop-control"},

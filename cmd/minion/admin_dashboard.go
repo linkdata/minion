@@ -51,13 +51,15 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
       <button type="submit">Apply filters</button>
     </form>
     {{$.Template "p" "dashboard-status" .Dot "role=status aria-live=polite class=visually-hidden"}}
+    {{$.Template "p" "dashboard-stop-status" .Dot "role=status aria-live=polite class=visually-hidden"}}
     {{$.Template "section" "dashboard-live" .Dot}}
     {{$.Template "section" "dashboard-action" .Dot "class=\"panel actions\""}}
     {{$.Template "div" "dashboard-stop-control" .Dot}}
   </main>{{$.TailHTML}}
 </body>
 </html>{{end}}
-{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker readiness {{.Snapshot.Worker.Readiness}}. Reported state {{.Snapshot.Worker.State}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}not observed{{end}}. Tracked accepted actions {{.Snapshot.TrackedAccepted}}. In progress {{.Snapshot.InProgress}}.{{if .Action}} Current {{.Action.Action}} action in {{.Action.Repository}} for {{.Action.Requester}}, accepted {{utc .Action.AcceptedAt}}, phase {{.Action.Phase}}.{{end}}{{if .Snapshot.LastStop}} Latest force stop for attempt {{.Snapshot.LastStop.AttemptID}}: {{.Snapshot.LastStop.Status}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
+{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker readiness {{.Snapshot.Worker.Readiness}}. Reported state {{.Snapshot.Worker.State}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}not observed{{end}}. Tracked accepted actions {{.Snapshot.TrackedAccepted}}. In progress {{.Snapshot.InProgress}}.{{if .Action}} Current {{.Action.Action}} action in {{.Action.Repository}} for {{.Action.Requester}}, accepted {{utc .Action.AcceptedAt}}, phase {{.Action.Phase}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
+{{define "dashboard-stop-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Snapshot.LastStop}}Latest force stop for attempt {{.Snapshot.LastStop.AttemptID}}: {{.Snapshot.LastStop.Status}}.{{end}}{{end}}{{end}}{{end}}
 {{define "dashboard-live"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p role="alert">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="metrics">
