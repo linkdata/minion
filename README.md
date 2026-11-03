@@ -114,7 +114,7 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-To enable admin sign-in, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+The bundled [config.json](config.json) includes an optional `admin` block with no accounts. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you add an administrator with a password hash. Remove the block to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {

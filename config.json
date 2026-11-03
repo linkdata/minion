@@ -1,5 +1,9 @@
 {
   "bot_login": "example-bot",
+  "admin": {
+    "listen": "127.0.0.1:8377",
+    "administrators": []
+  },
   "main": "codex",
   "adversarial": "",
   "critic_stopping": {
