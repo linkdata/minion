@@ -64,7 +64,10 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 		if !time.Now().Before(decidedAt.Add(privateRecordRetention)) {
 			return errLateOutcomeRejected
 		}
-		if e.Usage != nil {
+		usageErr := func() error {
+			if e.Usage == nil {
+				return nil
+			}
 			record, found, err := e.Usage.Load(result.Identity.AttemptID)
 			if err != nil {
 				return fmt.Errorf("load late action usage: %w", err)
@@ -103,17 +106,27 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 					return fmt.Errorf("save late action usage: %w", saveErr)
 				}
 			}
+			return nil
+		}()
+		if errors.Is(usageErr, errLateOutcomeRejected) {
+			return usageErr // A conflicting receipt cannot write private facts.
 		}
 		job := Job{Version: ProtocolVersion, Identity: result.Identity, Source: workspace.Snapshot{Head: result.SourceRef}}
 		failure := outcome.Failure.workerErr()
-		err := e.retainWorkerDiagnosticsLocked(job, result, failure)
-		if errors.Is(err, errPrivateRecordConflict) {
+		diagnosticErr := e.retainWorkerDiagnosticsLocked(job, result, failure)
+		if errors.Is(diagnosticErr, errPrivateRecordConflict) {
 			// The live parent may have added this fixed marker before saving diagnostics.
 			capped := result
 			capped.Diagnostics = slices.Clone(result.Diagnostics)
 			capped = withCaptureLimitDiagnostic(capped)
-			return e.retainWorkerDiagnosticsWithCaptureUpgradeLocked(job, capped, failure, true)
+			diagnosticErr = e.retainWorkerDiagnosticsWithCaptureUpgradeLocked(job, capped, failure, true)
 		}
-		return err
+		if usageErr != nil {
+			if diagnosticErr != nil {
+				e.logf("late remote diagnostic retention also failed job=%s attempt=%s: %v", result.Identity.JobID, result.Identity.AttemptID, diagnosticErr)
+			}
+			return usageErr // A storage failure remains retryable after independent diagnostic retention.
+		}
+		return diagnosticErr
 	})
 }

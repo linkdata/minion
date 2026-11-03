@@ -669,6 +669,41 @@ func TestLateRemoteOutcomeKeepsUsageWhenDiagnosticsConflict(t *testing.T) {
 	}
 }
 
+func TestLateRemoteOutcomeKeepsDiagnosticsWhenUsageStorageFails(t *testing.T) {
+	for _, failure := range []string{"load", "save"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newLateOutcomeFixture(t, true)
+			prior, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			if err != nil || !found {
+				t.Fatalf("load pending usage: found=%t error=%v", found, err)
+			}
+			if failure == "load" {
+				path := filepath.Join(f.owner.Usage.Dir, f.job.Identity.AttemptID+".json")
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				f.owner.lateUsageSave = func(usage.Record) error { return errors.New("injected usage save failure") }
+			}
+			_, client, origin := lateOutcomeEndpoint(t, f.owner)
+			if status, ack := postLateOutcome(t, client, origin, f.outcome); status != http.StatusInternalServerError ||
+				ack.Failure == nil || strings.Contains(ack.Failure.Message, "injected") {
+				t.Fatalf("failed usage storage ACK: status=%d ack=%+v", status, ack)
+			}
+			data, err := os.ReadFile(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
+			if err != nil || !bytes.Contains(data, []byte("private late detail")) || !bytes.Contains(data, []byte("worker failed")) {
+				t.Fatalf("usage storage failure lost diagnostics: %q error=%v", data, err)
+			}
+			if failure == "save" {
+				after, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+				if err != nil || !found || !reflect.DeepEqual(prior, after) {
+					t.Fatalf("failed usage save changed durable record: before=%+v after=%+v found=%t error=%v", prior, after, found, err)
+				}
+			}
+		})
+	}
+}
+
 func TestLateRemoteOutcomeWhileNewerTransactionIsActive(t *testing.T) {
 	old := newLateOutcomeFixture(t, true)
 	newJob := testJob(command.Comment)
