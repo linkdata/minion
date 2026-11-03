@@ -11,7 +11,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// ReadSaved reads one committed state file without touching concurrently mutable Data.
+// ReadSaved reads one visible state file without touching concurrently mutable Data.
 func (s *Store) ReadSaved() (Data, error) {
 	f, err := os.Open(s.path)
 	if err != nil {
