@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -83,8 +84,11 @@ func TestOAuthRedirectMatchesBrowserDefaultPort(t *testing.T) {
 		want                          bool
 	}{
 		{"HTTPS default port", "https://admin.example:443/auth/callback", "https://admin.example/auth/callback", true},
+		{"HTTPS request default port", "https://admin.example/auth/callback", "https://admin.example:443/auth/callback", true},
 		{"HTTPS padded default port", "https://admin.example:0443/auth/callback", "https://admin.example/auth/callback", true},
 		{"loopback HTTP default port", "http://127.0.0.1:80/auth/callback", "http://127.0.0.1/auth/callback", true},
+		{"loopback HTTP request default port", "http://127.0.0.1/auth/callback", "http://127.0.0.1:80/auth/callback", true},
+		{"IPv6 request default port", "https://[::1]/auth/callback", "https://[::1]:443/auth/callback", true},
 		{"other host", "https://admin.example:443/auth/callback", "https://other.example/auth/callback", false},
 		{"other port", "https://admin.example:443/auth/callback", "https://admin.example:8443/auth/callback", false},
 		{"other scheme", "https://admin.example:443/auth/callback", "http://admin.example/auth/callback", false},
@@ -98,6 +102,64 @@ func TestOAuthRedirectMatchesBrowserDefaultPort(t *testing.T) {
 				t.Fatalf("redirect %q with request host %q: matched=%t, want %t", test.redirectURL, r.Host, got, test.want)
 			}
 		})
+	}
+	for _, host := range []string{"admin.example:0", "admin.example:65536", "admin.example:invalid", "admin.example:", "other.example@admin.example"} {
+		t.Run("invalid request host "+host, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/callback", nil)
+			r.TLS = &tls.ConnectionState{}
+			r.Host = host
+			if (oauthProvider{redirectURL: "https://admin.example/auth/callback"}).matchesRequest(r) {
+				t.Fatalf("accepted invalid request host %q", host)
+			}
+		})
+	}
+}
+
+func TestOAuthCallbackReleasesPerIPBudget(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jw.Close()
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/callback"}}
+	client := &http.Client{Transport: oauthTransportFunc(func(*http.Request) (*http.Response, error) {
+		return oauthTestResponse(`{}`), nil
+	})}
+	a, err := newOAuthAccess(jw, cfg, filepath.Join(t.TempDir(), "state.json"), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, cfg, nil, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(path, remote string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "https://admin.example"+path, nil)
+		r.TLS = &tls.ConnectionState{}
+		r.RemoteAddr = remote
+		return r
+	}
+	for i := range 24 {
+		remote := fmt.Sprintf("192.0.2.%d:1234", i+1)
+		start := httptest.NewRecorder()
+		handler.ServeHTTP(start, request("/auth/github", remote))
+		if start.Code != http.StatusSeeOther {
+			t.Fatalf("IP %d sign-in start: %d", i, start.Code)
+		}
+		state := oauthCookie(t, start, oauthStateCookie)
+		callback := request("/auth/callback?state="+state.Value+"&code=invalid", remote)
+		callback.AddCookie(state)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, callback)
+		if response.Code != http.StatusBadGateway {
+			t.Fatalf("IP %d failed provider exchange: %d", i, response.Code)
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inflight != 0 || len(a.byIP) != 0 {
+		t.Fatalf("completed exchanges retained in-flight budgets: global=%d IPs=%d", a.inflight, len(a.byIP))
 	}
 }
 

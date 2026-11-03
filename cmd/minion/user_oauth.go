@@ -250,19 +250,29 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 
 func (p oauthProvider) matchesRequest(r *http.Request) bool {
 	redirect, err := url.Parse(p.redirectURL)
-	if err != nil || (redirect.Scheme == "https") != (r.TLS != nil) {
+	if err != nil || redirect.Hostname() == "" || strings.HasSuffix(redirect.Host, ":") {
 		return false
 	}
-	if strings.EqualFold(redirect.Host, r.Host) {
-		return true
-	}
-	defaultPort := 80
+	scheme, defaultPort := "http", 80
 	if r.TLS != nil {
-		defaultPort = 443
+		scheme, defaultPort = "https", 443
 	}
-	port, err := strconv.Atoi(redirect.Port())
-	return err == nil && port == defaultPort &&
-		strings.EqualFold(strings.TrimSuffix(redirect.Host, ":"+redirect.Port()), r.Host)
+	requestHost, err := url.Parse("//" + r.Host)
+	if err != nil || redirect.Scheme != scheme || requestHost.Host != r.Host ||
+		requestHost.Hostname() == "" || strings.HasSuffix(r.Host, ":") {
+		return false
+	}
+	redirectPort, requestPort := redirect.Port(), requestHost.Port()
+	if redirectPort == "" {
+		redirectPort = strconv.Itoa(defaultPort)
+	}
+	if requestPort == "" {
+		requestPort = strconv.Itoa(defaultPort)
+	}
+	configured, redirectErr := strconv.Atoi(redirectPort)
+	requested, requestErr := strconv.Atoi(requestPort)
+	return redirectErr == nil && requestErr == nil && configured > 0 && configured <= 65535 &&
+		configured == requested && strings.EqualFold(redirect.Hostname(), requestHost.Hostname())
 }
 
 func (a *oauthAccess) callback(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +307,9 @@ func (a *oauthAccess) callback(w http.ResponseWriter, r *http.Request) {
 			a.mu.Lock()
 			a.inflight--
 			a.byIP[pending.clientIP]--
+			if a.byIP[pending.clientIP] == 0 {
+				delete(a.byIP, pending.clientIP)
+			}
 			a.mu.Unlock()
 		}()
 	}
