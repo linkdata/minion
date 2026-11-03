@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/jaws"
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/webserv"
 )
@@ -25,10 +26,11 @@ type adminServer struct {
 	cancel    context.CancelFunc
 	serveDone chan struct{}
 	jawsDone  chan struct{}
+	tickDone  chan struct{}
 	serveErr  error // read only after serveDone closes
 }
 
-func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure func()) (*adminServer, error) {
+func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, onFailure func()) (*adminServer, error) {
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
 	if cfg.TLSCertFile != "" {
@@ -66,8 +68,14 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
 	jw.Logger = slog.Default()
+	handler, err := newAdminHandler(jw, cfg, owner)
+	if err != nil {
+		jw.Close()
+		_ = listener.Close()
+		return nil, err
+	}
 	server := &http.Server{
-		Handler:                      newAdminHandler(jw, cfg),
+		Handler:                      handler,
 		ReadHeaderTimeout:            5 * time.Second,
 		ReadTimeout:                  30 * time.Second,
 		IdleTimeout:                  time.Minute,
@@ -75,7 +83,20 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 		DisableGeneralOptionsHandler: true,
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
-	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{})}
+	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	go func() {
+		defer close(a.tickDone)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-serveCtx.Done():
+				return
+			case <-ticker.C:
+				jw.Dirty(adminDashboardDirty)
+			}
+		}
+	}()
 	go func() {
 		defer close(a.jawsDone)
 		jw.Serve()
@@ -118,8 +139,9 @@ func closeUnreadAdminBody(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminServer) Close() error {
-	a.jaws.Close()
 	a.cancel()
+	<-a.tickDone
+	a.jaws.Close()
 	<-a.serveDone
 	// Force-close connections left after webserv's graceful shutdown deadline.
 	err := a.server.Close()

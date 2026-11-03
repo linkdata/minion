@@ -3,6 +3,7 @@ module github.com/linkdata/minion
 go 1.27.0
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/linkdata/jaws v0.901.1
 	github.com/linkdata/webserv v1.5.0
 	golang.org/x/crypto v0.58.0
@@ -11,8 +12,8 @@ require (
 )
 
 require (
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/linkdata/deadlock v0.5.5 // indirect
+	github.com/linkdata/jq v0.6.0 // indirect
 	github.com/linkdata/rate v1.17.1 // indirect
 	github.com/linkdata/secureheaders v1.5.0 // indirect
 	github.com/linkdata/staticserve v1.1.8 // indirect

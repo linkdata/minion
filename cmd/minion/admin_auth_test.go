@@ -43,7 +43,10 @@ func testAdminHandler(t *testing.T, administrators []config.AdminAccount) (http.
 	}
 	logs := new(bytes.Buffer)
 	jw.Logger = slog.New(slog.NewTextHandler(logs, nil))
-	handler := newAdminHandler(jw, config.AdminConfig{Administrators: administrators})
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: administrators}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	go func() { jw.Serve(); close(done) }()
 	t.Cleanup(func() { jw.Close(); <-done })
@@ -92,8 +95,9 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	}
 	form.Set("password", "correct-password")
 	response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "")
-	if response.Code != http.StatusSeeOther || response.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("valid login: status=%d noStore=%t", response.Code, response.Header().Get("Cache-Control") == "no-store")
+	if response.Code != http.StatusSeeOther || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Location") != "/" {
+		t.Fatalf("valid login: status=%d noStore=%t location=%q", response.Code,
+			response.Header().Get("Cache-Control") == "no-store", response.Header().Get("Location"))
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) != 1 {
@@ -168,7 +172,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile,
 		Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +223,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +275,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +302,10 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			headers: "Content-Type: text/plain\r\n", want: http.StatusBadRequest},
 		{name: "authenticated JaWS rejection", method: http.MethodPost, path: "/jaws/.ping",
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusMethodNotAllowed},
+		{name: "authenticated dashboard", method: http.MethodGet, path: "/",
+			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
+		{name: "authenticated stylesheet", method: http.MethodGet, path: "/admin/dashboard.css",
+			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
 		{name: "cross-origin logout", method: http.MethodPost, path: "/admin/logout",
 			headers: "Origin: http://other.example\r\nCookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
 		{name: "logout", method: http.MethodPost, path: "/admin/logout",
@@ -480,7 +488,10 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{account}})
+		handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{account}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		done := make(chan struct{})
 		go func() { jw.Serve(); close(done) }()
 		defer func() { jw.Close(); <-done }()
