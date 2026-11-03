@@ -79,6 +79,10 @@ func (e *Orchestrator) retainWorkerDiagnosticsWithCaptureUpgradeLocked(job Job, 
 		}
 		return retainedRecordFailure("read private worker diagnostics", err)
 	}
+	save := workspace.WriteAtomic
+	if e.lateDiagnosticSave != nil {
+		save = e.lateDiagnosticSave
+	}
 	if err == nil {
 		if !bytes.Equal(previous, data) {
 			conflict := fmt.Errorf("%w: %w: private worker diagnostics changed within an attempt", monitor.ErrTerminalJob, errPrivateRecordConflict)
@@ -108,17 +112,13 @@ func (e *Orchestrator) retainWorkerDiagnosticsWithCaptureUpgradeLocked(job Job, 
 			if !bytes.Equal(previous, parentOnly) {
 				return conflict
 			}
-			save := workspace.WriteAtomic
-			if e.lateDiagnosticSave != nil {
-				save = e.lateDiagnosticSave
-			}
 			if err := save(path, data, filepath.Dir(root)); err != nil {
 				return retainedRecordFailure("upgrade private worker diagnostics", err)
 			}
 		} else if err := syncPrivateRecordDirectories(root, filepath.Dir(root)); err != nil {
 			return retainedRecordFailure("sync private worker diagnostics", err)
 		}
-	} else if err := workspace.WriteAtomic(path, data, filepath.Dir(root)); err != nil {
+	} else if err := save(path, data, filepath.Dir(root)); err != nil {
 		return retainedRecordFailure("save private worker diagnostics", err)
 	}
 	id := job.Identity

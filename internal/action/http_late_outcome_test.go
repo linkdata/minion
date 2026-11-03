@@ -595,6 +595,59 @@ func TestLateRemoteOutcomeAugmentsParentOnlyCaptureLimit(t *testing.T) {
 	}
 }
 
+func TestLateRemoteOutcomeRetriesAmbiguousFirstDiagnosticWrite(t *testing.T) {
+	for _, afterReplacement := range []bool{false, true} {
+		name := "before replacement"
+		if afterReplacement {
+			name = "after replacement"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newLateOutcomeFixture(t, true)
+			path := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+			writes := 0
+			f.owner.lateDiagnosticSave = func(path string, data []byte, dirs ...string) error {
+				writes++
+				if writes == 1 {
+					if afterReplacement {
+						if err := workspace.WriteAtomic(path, data, dirs...); err != nil {
+							return err
+						}
+					}
+					return errors.New("injected ambiguous first diagnostic write")
+				}
+				return workspace.WriteAtomic(path, data, dirs...)
+			}
+			_, client, origin := lateOutcomeEndpoint(t, f.owner)
+			if status, ack := postLateOutcome(t, client, origin, f.outcome); status != http.StatusInternalServerError ||
+				ack.Failure == nil || strings.Contains(ack.Failure.Message, "injected") {
+				t.Fatalf("ambiguous first diagnostic write ACK: status=%d ack=%+v", status, ack)
+			}
+			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+				t.Fatalf("retry after ambiguous first diagnostic write status=%d", status)
+			}
+			wantWrites := 2
+			if afterReplacement {
+				wantWrites = 1
+			}
+			if writes != wantWrites {
+				t.Fatalf("diagnostic retry wrote %d times, want %d", writes, wantWrites)
+			}
+			beforeReplay, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(beforeReplay, []byte("private late detail")) ||
+				!bytes.Contains(beforeReplay, []byte("worker failed")) {
+				t.Fatalf("first diagnostic write lost worker facts: %q error=%v", beforeReplay, err)
+			}
+			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+				t.Fatalf("deduplicated first-write replay status=%d", status)
+			}
+			afterReplay, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(beforeReplay, afterReplay) || writes != wantWrites {
+				t.Fatalf("first-write replay changed diagnostics: before=%q after=%q writes=%d error=%v", beforeReplay, afterReplay, writes, err)
+			}
+		})
+	}
+}
+
 func TestLateRemoteOutcomeKeepsUsageWhenDiagnosticsConflict(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
 	prior := f.outcome.Result
