@@ -137,31 +137,51 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	const workerStatus = "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / verification."
-	if status.String() != workerStatus {
+	if status.String() != workerStatus+" In progress 0." {
 		t.Fatalf("live status summary: %q", status.String())
 	}
 	page.Dot.View.Action = &action.DashboardAction{Repository: "owner/repo", Requester: "writer", Action: "review",
 		Phase: "critic", AcceptedAt: time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC), Deadline: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)}
+	page.Dot.View.Snapshot.InProgress = 1
+	const actionSummary = " In progress 1. Current review action in owner/repo for writer, accepted 2026-11-03T11:00:00Z, phase critic."
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != workerStatus+" Action phase critic." {
+		status.String() != workerStatus+actionSummary {
 		t.Fatalf("action phase did not change live status summary: %q, %v", status.String(), err)
 	}
+	firstAction := page.Dot.View.Action
+	replacement := *firstAction
+	replacement.AcceptedAt = replacement.AcceptedAt.Add(time.Second)
+	page.Dot.View.Action = &replacement
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		!strings.Contains(status.String(), "accepted 2026-11-03T11:00:01Z") ||
+		strings.Contains(status.String(), "accepted 2026-11-03T11:00:00Z") {
+		t.Fatalf("same-phase replacement did not change live status summary: %q, %v", status.String(), err)
+	}
+	page.Dot.View.Action = firstAction
 	var actionBefore bytes.Buffer
 	if err := pages.ExecuteTemplate(&actionBefore, "dashboard-action", page); err != nil {
 		t.Fatal(err)
 	}
 	page.Dot.View.Snapshot.Worker.LastContact = page.Dot.View.Snapshot.Worker.LastContact.Add(time.Second)
 	page.Dot.View.Snapshot.Worker.ReportedProgressAge = 13 * time.Second
+	body.Reset()
+	if err := pages.ExecuteTemplate(&body, "dashboard-live", page); err != nil ||
+		!strings.Contains(body.String(), "<dt>Last worker status received</dt><dd>2026-11-03T12:00:01Z</dd>") ||
+		!strings.Contains(body.String(), "<dt>Worker-reported progress age at last status</dt><dd>13s</dd>") ||
+		strings.Contains(body.String(), "<dd>2026-11-03T12:00:00Z</dd>") || strings.Contains(body.String(), "<dd>7s</dd>") {
+		t.Fatalf("worker telemetry did not update: %q, %v", body.String(), err)
+	}
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != workerStatus+" Action phase critic." {
+		status.String() != workerStatus+actionSummary {
 		t.Fatalf("heartbeat changed live status summary: %q, %v", status.String(), err)
 	}
 	page.Dot.View.Snapshot.Worker.ReviewPhase = "full"
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / full. Action phase critic." {
+		status.String() != "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / full."+actionSummary {
 		t.Fatalf("review phase did not change live status summary: %q, %v", status.String(), err)
 	}
 	page.Dot.View.Snapshot.Worker.State = "stopping"
@@ -170,7 +190,7 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	page.Dot.View.Snapshot.Worker.ReviewPhase = ""
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != "Worker readiness busy. Reported state stopping. Worker phase cleanup. Action phase critic." {
+		status.String() != "Worker readiness busy. Reported state stopping. Worker phase cleanup."+actionSummary {
 		t.Fatalf("worker state did not change live status summary: %q, %v", status.String(), err)
 	}
 	var actionAfter bytes.Buffer
@@ -444,8 +464,25 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 			}
 		}
 	}
-	if patch := readPatch(matching, "owner/repo"); !strings.Contains(patch, "Current action") {
-		t.Fatalf("ticker patch omitted action section: %s", patch)
+	seenMetrics, seenAction := false, false
+	for !seenMetrics || !seenAction {
+		_, patch, err := matching.Read(wsContext)
+		if err != nil {
+			t.Fatalf("ticker did not patch matching WebSocket: %v", err)
+		}
+		body := string(patch)
+		if strings.Contains(body, `<h2>Tracked accepted actions</h2><p class=\"metric\">1</p>`) {
+			if !strings.Contains(body, `<h2>In progress</h2><p class=\"metric\">1</p>`) {
+				t.Fatalf("ticker patch omitted updated metrics: %s", body)
+			}
+			seenMetrics = true
+		}
+		if strings.Contains(body, "Current action") {
+			if !strings.Contains(body, "owner/repo") {
+				t.Fatalf("ticker patch omitted current action: %s", body)
+			}
+			seenAction = true
+		}
 	}
 	readPatch(other, "No current action matches these filters.", "owner/repo")
 }
