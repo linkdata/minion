@@ -32,7 +32,7 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
   <main>
     <div class="heading">
       <p class="eyebrow">ACCOUNTING</p><h1>Usage and billing</h1>
-      <p>All dates are UTC. The To boundary is exclusive.</p>
+      <p>Date filters use attempt start times in UTC. The To boundary is exclusive.</p>
     </div>
     <form class="filters" method="get" action="/admin/usage">
       <label>From (UTC)<input name="from" value="{{.From}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
@@ -49,19 +49,19 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
       </select></label>
       <button type="submit">Apply filters</button>
     </form>
-    <p><a href="{{.ExportURL}}">Download filtered JSON</a></p>
+    <p><a href="{{.ExportURL}}">Download filtered JSON</a>. With a service filter, <code>totals</code> and <code>selected_usage</code> reflect that service; each attempt's <code>tokens</code> and <code>total_tokens</code> retain all services.</p>
     <div class="metrics">
       <article><h2>Attempts</h2><p class="metric">{{.Report.Totals.Attempts}}</p></article>
       <article><h2>Reported tokens</h2><p class="metric">{{.Report.Totals.TotalTokens}}</p></article>
       <article><h2>Unallocated tokens</h2><p class="metric">{{.Report.Totals.UnallocatedTokens.Total}}</p></article>
-      <article><h2>Incomplete attempts</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
+      <article><h2>{{if .Service}}Attempts with incomplete selected usage{{else}}Incomplete attempts{{end}}</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
     </div>
     <section class="panel actions" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading">Usage by repository, requester, and service</h2>
       {{if .Report.Groups}}<table><thead><tr>
         <th scope="col">Repository</th><th scope="col">Repository ID</th>
         <th scope="col">Requester</th><th scope="col">Requester ID</th><th scope="col">Service</th>
         <th scope="col">Attempts</th><th scope="col">Total tokens</th>
-        <th scope="col">Unallocated tokens</th><th scope="col">Incomplete attempts</th>
+        <th scope="col">Unallocated tokens</th><th scope="col">{{if .Service}}Attempts with incomplete selected usage{{else}}Incomplete attempts{{end}}</th>
       </tr></thead><tbody>{{range .Report.Groups}}<tr>
         <td>{{.Repo}}</td><td>{{if .RepositoryID}}{{.RepositoryID}}{{else}}Unknown{{end}}</td>
         <td>{{.User}}</td><td>{{if .RequesterID}}{{.RequesterID}}{{else}}Unknown{{end}}</td><td>{{.Service}}</td>
@@ -71,7 +71,7 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
     </section>
     <p class="hint">Action coverage: {{.Report.ActionCoverage}}.
       Actions without usage files are excluded. Billed credits: unknown.
-      Repository ID filters exclude older usage records without a numeric repository ID.
+      Repository and requester ID filters exclude older usage records without the corresponding numeric IDs.
       Tokens are executor-reported; incomplete usage can omit unknown amounts.
       An attempt using multiple services can appear in more than one service group,
       while the totals above count it once.</p>

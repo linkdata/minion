@@ -34,8 +34,11 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		!strings.Contains(page.Body.String(), `aria-labelledby="usage-groups-heading" tabindex="0"`) ||
 		!strings.Contains(page.Body.String(), `<h2 id="usage-groups-heading">`) ||
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
+		!strings.Contains(page.Body.String(), "attempt start times in UTC") ||
 		!strings.Contains(page.Body.String(), `<th scope="col">Unallocated tokens</th>`) ||
-		!strings.Contains(page.Body.String(), "Incomplete attempts") ||
+		!strings.Contains(page.Body.String(), "Attempts with incomplete selected usage") ||
+		!strings.Contains(page.Body.String(), "<code>totals</code> and <code>selected_usage</code> reflect that service") ||
+		!strings.Contains(page.Body.String(), "<code>tokens</code> and <code>total_tokens</code> retain all services") ||
 		!strings.Contains(page.Body.String(), "Billed credits: unknown") ||
 		!strings.Contains(page.Body.String(), "Actions without usage files are excluded") ||
 		!strings.Contains(page.Body.String(), "/jaws/") ||
@@ -74,6 +77,7 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	}
 	unfiltered := adminResponse(handler, http.MethodGet, "/admin/usage", nil, cookie, "")
 	if unfiltered.Code != http.StatusOK || !strings.Contains(unfiltered.Body.String(), "example-owner/second-repo") ||
+		!strings.Contains(unfiltered.Body.String(), "Incomplete attempts") ||
 		strings.Contains(unfiltered.Body.String(), `name="user" value="ALICE"`) {
 		t.Fatalf("usage filter leaked to another request: status=%d body=%s", unfiltered.Code, unfiltered.Body.String())
 	}
@@ -239,7 +243,7 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 	page = adminResponse(handler, http.MethodGet, "/admin/usage?repository_id=17", nil, cookie, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="repository_id" value="17"`) ||
 		strings.Contains(page.Body.String(), "<td>18</td>") || !strings.Contains(page.Body.String(), "renamed-repo") ||
-		!strings.Contains(page.Body.String(), "Repository ID filters exclude older usage records") {
+		!strings.Contains(page.Body.String(), "Repository and requester ID filters exclude older usage records") {
 		t.Fatalf("repository ID page filter: status=%d body=%s", page.Code, page.Body.String())
 	}
 	page = adminResponse(handler, http.MethodGet, "/admin/usage?requester_id=8", nil, cookie, "")
