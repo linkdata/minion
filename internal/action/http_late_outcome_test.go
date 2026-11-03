@@ -644,15 +644,19 @@ func TestLateRemoteUsageReloadsAfterAmbiguousSave(t *testing.T) {
 			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 				t.Fatalf("late retry after ambiguous save status=%d", status)
 			}
+			if calls != 2 {
+				t.Fatalf("retry failed to resync usage after replacement: saves=%d", calls)
+			}
+			beforeReplay, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			if err != nil || !found {
+				t.Fatalf("load usage after retry: found=%t error=%v", found, err)
+			}
 			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 				t.Fatalf("deduplicated replay status=%d", status)
 			}
-			if calls != 3 {
-				t.Fatalf("retry failed to resync usage after replacement: saves=%d", calls)
-			}
 			record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 			if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
-				len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+				len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil || !reflect.DeepEqual(beforeReplay, record) {
 				t.Fatalf("ambiguous retry usage: %+v found=%t err=%v", record, found, err)
 			}
 		})

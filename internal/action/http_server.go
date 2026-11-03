@@ -956,7 +956,6 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	tx := e.transaction()
 	var decodedOutcome *httpOutcome
 	if kind == "outcome" && e.lateOutcome != nil {
-		tx = e.transaction()
 		// An optional binding hint keeps a slow old upload off the current lane.
 		// Both lanes remain bounded; the decoded body still decides admission.
 		current := tx != nil && r.Header.Get(httpOutcomeBindingHeader) == httpBindingDigest(tx.binding)
@@ -1071,14 +1070,14 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			outcome = *decodedOutcome
 		} else {
 			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+			if err == nil {
+				err = httpResultShape(outcome.Result)
+			}
+			if err == nil {
+				err = outcome.Failure.validate()
+			}
 		}
 		binding, sequence = httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}, outcome.Sequence
-		if err == nil {
-			err = httpResultShape(outcome.Result)
-		}
-		if err == nil {
-			err = outcome.Failure.validate()
-		}
 		failedOutcome = outcome.Failure != nil
 		apply = func() error {
 			// An entered Status save may continue after its request is canceled.
