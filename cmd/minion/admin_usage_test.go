@@ -36,8 +36,9 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
 		!strings.Contains(page.Body.String(), "attempt start times in UTC") ||
 		!strings.Contains(page.Body.String(), `<th scope="col">Unallocated tokens</th>`) ||
-		!strings.Contains(page.Body.String(), "Attempts with incomplete selected usage") ||
-		!strings.Contains(page.Body.String(), "<code>totals</code> and <code>selected_usage</code> reflect that service") ||
+		!strings.Contains(page.Body.String(), "<h2>Attempts with incomplete usage or still running</h2>") ||
+		!strings.Contains(page.Body.String(), "token counts in <code>totals</code> and <code>selected_usage</code> reflect that service") ||
+		!strings.Contains(page.Body.String(), "outcome counts remain attempt-level") ||
 		!strings.Contains(page.Body.String(), "<code>tokens</code> and <code>total_tokens</code> retain all services") ||
 		!strings.Contains(page.Body.String(), "Billed credits: unknown") ||
 		!strings.Contains(page.Body.String(), "Actions without usage files are excluded") ||
@@ -77,7 +78,7 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	}
 	unfiltered := adminResponse(handler, http.MethodGet, "/admin/usage", nil, cookie, "")
 	if unfiltered.Code != http.StatusOK || !strings.Contains(unfiltered.Body.String(), "example-owner/second-repo") ||
-		!strings.Contains(unfiltered.Body.String(), "Incomplete attempts") ||
+		!strings.Contains(unfiltered.Body.String(), `<th scope="col">Attempts with incomplete usage or still running</th>`) ||
 		strings.Contains(unfiltered.Body.String(), `name="user" value="ALICE"`) {
 		t.Fatalf("usage filter leaked to another request: status=%d body=%s", unfiltered.Code, unfiltered.Body.String())
 	}
@@ -267,7 +268,7 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 			t.Fatalf("usage filter %q: status=%d report=%+v body=%s", test.query, export.Code, selected, export.Body.String())
 		}
 		if test.query == "repository_id=17" &&
-			(selected.Filters.RepositoryID != 17 || !strings.Contains(selected.TokenNote, "Repository ID filters exclude older records")) {
+			(selected.Filters.RepositoryID != 17 || !strings.Contains(selected.TokenNote, "Repository and requester ID filters exclude older records")) {
 			t.Fatalf("repository ID omitted from export: %+v", selected.Filters)
 		}
 	}

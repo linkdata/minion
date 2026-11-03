@@ -49,19 +49,19 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
       </select></label>
       <button type="submit">Apply filters</button>
     </form>
-    <p><a href="{{.ExportURL}}">Download filtered JSON</a>. With a service filter, <code>totals</code> and <code>selected_usage</code> reflect that service; each attempt's <code>tokens</code> and <code>total_tokens</code> retain all services.</p>
+    <p><a href="{{.ExportURL}}">Download filtered JSON</a>. With a service filter, token counts in <code>totals</code> and <code>selected_usage</code> reflect that service; outcome counts remain attempt-level. Each attempt's <code>tokens</code> and <code>total_tokens</code> retain all services.</p>
     <div class="metrics">
       <article><h2>Attempts</h2><p class="metric">{{.Report.Totals.Attempts}}</p></article>
       <article><h2>Reported tokens</h2><p class="metric">{{.Report.Totals.TotalTokens}}</p></article>
       <article><h2>Unallocated tokens</h2><p class="metric">{{.Report.Totals.UnallocatedTokens.Total}}</p></article>
-      <article><h2>{{if .Service}}Attempts with incomplete selected usage{{else}}Incomplete attempts{{end}}</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
+      <article><h2>Attempts with incomplete usage or still running</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
     </div>
     <section class="panel actions" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading">Usage by repository, requester, and service</h2>
       {{if .Report.Groups}}<table><thead><tr>
         <th scope="col">Repository</th><th scope="col">Repository ID</th>
         <th scope="col">Requester</th><th scope="col">Requester ID</th><th scope="col">Service</th>
         <th scope="col">Attempts</th><th scope="col">Total tokens</th>
-        <th scope="col">Unallocated tokens</th><th scope="col">{{if .Service}}Attempts with incomplete selected usage{{else}}Incomplete attempts{{end}}</th>
+        <th scope="col">Unallocated tokens</th><th scope="col">Attempts with incomplete usage or still running</th>
       </tr></thead><tbody>{{range .Report.Groups}}<tr>
         <td>{{.Repo}}</td><td>{{if .RepositoryID}}{{.RepositoryID}}{{else}}Unknown{{end}}</td>
         <td>{{.User}}</td><td>{{if .RequesterID}}{{.RequesterID}}{{else}}Unknown{{end}}</td><td>{{.Service}}</td>
