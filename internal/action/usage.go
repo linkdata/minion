@@ -149,6 +149,12 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 			if actionErr != nil {
 				record.Status = "failed"
 			}
+			if e.finalUsageSave != nil {
+				if err := e.finalUsageSave(*record); err != nil {
+					return fmt.Errorf("save action usage %s: %w", record.ID, err)
+				}
+				return nil
+			}
 			return checkpoint.save()
 		}
 		var err error
@@ -200,12 +206,21 @@ func (e *Orchestrator) completeTerminalUsage(job monitor.Job, outcome string, at
 		e.logf("action usage attempt %s belongs to another job", job.AttemptID)
 		return
 	}
+	if !setTerminalUsage(&record, outcome, at) {
+		return
+	}
+	if err := e.Usage.Save(record); err != nil {
+		e.logf("final action usage checkpoint failed: %q", err)
+	}
+}
+
+func setTerminalUsage(record *usage.Record, outcome string, at time.Time) bool {
 	status := "failed"
 	if outcome == "succeeded" {
 		status = "succeeded"
 	}
 	if record.Status == status {
-		return
+		return false
 	}
 	finished := at.UTC()
 	if finished.IsZero() {
@@ -218,7 +233,5 @@ func (e *Orchestrator) completeTerminalUsage(job monitor.Job, outcome string, at
 		finished = *record.FinishedAt
 	}
 	record.FinishedAt, record.Status = &finished, status
-	if err := e.Usage.Save(record); err != nil {
-		e.logf("final action usage checkpoint failed: %q", err)
-	}
+	return true
 }

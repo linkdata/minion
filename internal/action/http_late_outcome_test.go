@@ -303,6 +303,10 @@ func TestLateSuccessfulOutcomeDoesNotPublish(t *testing.T) {
 		f.store.Data.TerminalDecisions[f.job.Identity.JobID].Outcome != "lost" {
 		t.Fatalf("successful late outcome reopened publication: result=%t accepted=%+v error=%v", result, f.store.Data.Accepted, err)
 	}
+	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || record.Status != "failed" || record.FinishedAt == nil {
+		t.Fatalf("worker success overrode durable terminal usage status: %+v found=%t error=%v", record, found, err)
+	}
 }
 
 func TestLateRemoteOutcomeRequiresSavedPendingCall(t *testing.T) {
@@ -851,6 +855,72 @@ func TestLateRemoteUsageReloadsAfterAmbiguousSave(t *testing.T) {
 			if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
 				len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil || !reflect.DeepEqual(beforeReplay, record) {
 				t.Fatalf("ambiguous retry usage: %+v found=%t err=%v", record, found, err)
+			}
+		})
+	}
+}
+
+func TestLateRemoteOutcomeCompletesUsageAfterFailedTerminalSave(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		name := "zero calls"
+		if pending {
+			name = "saved pending call"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newLateOutcomeFixture(t, pending)
+			finalSaves := 0
+			f.owner.finalUsageSave = func(record usage.Record) error {
+				finalSaves++
+				if record.Status != "failed" || record.FinishedAt == nil {
+					t.Fatalf("terminal usage save did not reach finished status: %+v", record)
+				}
+				return errors.New("injected failed terminal usage save")
+			}
+			if err := f.finish(errors.New("lost outcome")); err == nil || finalSaves != 1 {
+				t.Fatalf("terminal usage save did not fail before replacement: error=%v saves=%d", err, finalSaves)
+			}
+			before, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			if err != nil || !found || before.Status != "running" || before.FinishedAt != nil {
+				t.Fatalf("failed terminal save changed durable usage: %+v found=%t error=%v", before, found, err)
+			}
+			lateSaves := 0
+			f.owner.lateUsageSave = func(record usage.Record) error {
+				lateSaves++
+				if lateSaves == 1 {
+					return errors.New("injected failed late usage save")
+				}
+				return f.owner.Usage.Save(record)
+			}
+			_, client, origin := lateOutcomeEndpoint(t, f.owner)
+			if status, ack := postLateOutcome(t, client, origin, f.outcome); status != http.StatusInternalServerError ||
+				ack.Failure == nil || strings.Contains(ack.Failure.Message, "injected") {
+				t.Fatalf("failed late status save ACK: status=%d ack=%+v", status, ack)
+			}
+			stillRunning, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			if err != nil || !found || !reflect.DeepEqual(stillRunning, before) {
+				t.Fatalf("failed late save changed durable usage: before=%+v after=%+v found=%t error=%v", before, stillRunning, found, err)
+			}
+			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+				t.Fatalf("late terminal usage retry status=%d", status)
+			}
+			if lateSaves != 2 {
+				t.Fatalf("late terminal usage retry saves=%d", lateSaves)
+			}
+			after, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
+			if err != nil || !found || after.Status != "failed" || after.FinishedAt == nil ||
+				!after.FinishedAt.Equal(decision.DecidedAt) || len(after.Calls) != len(f.outcome.Result.Calls) {
+				t.Fatalf("late upload did not finish usage from terminal decision: %+v found=%t error=%v", after, found, err)
+			}
+			if pending && (after.Tokens != f.outcome.Result.Calls[0].Tokens || after.Calls[0].FinishedAt == nil) {
+				t.Fatalf("late terminal usage lost call receipt: %+v", after)
+			}
+			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+				t.Fatalf("completed terminal usage replay status=%d", status)
+			}
+			replayed, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+			if err != nil || !found || !reflect.DeepEqual(after, replayed) {
+				t.Fatalf("terminal usage replay changed record: before=%+v after=%+v found=%t error=%v", after, replayed, found, err)
 			}
 		})
 	}

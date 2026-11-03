@@ -64,17 +64,23 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 		if !time.Now().Before(decidedAt.Add(privateRecordRetention)) {
 			return errLateOutcomeRejected
 		}
-		if len(result.Calls) != 0 && e.Usage != nil {
+		if e.Usage != nil {
 			record, found, err := e.Usage.Load(result.Identity.AttemptID)
 			if err != nil {
 				return fmt.Errorf("load late action usage: %w", err)
 			}
-			trailingPending := len(record.Calls) == len(result.Calls)+1 && record.Calls[len(record.Calls)-1].FinishedAt == nil
-			if !found || record.JobID != result.Identity.JobID || record.RepositoryID != result.Identity.RepositoryID ||
+			if found && (record.JobID != result.Identity.JobID || record.RepositoryID != result.Identity.RepositoryID ||
 				record.RequesterID != result.Identity.RequesterID || record.Number != result.Identity.Number ||
-				record.Repo != result.Identity.Repository || record.ExecutorID != result.Identity.ExecutorID ||
-				record.SourceRef != result.SourceRef || len(record.Calls) != len(result.Calls) && !trailingPending {
+				record.Repo != result.Identity.Repository || record.User != result.Identity.Requester ||
+				record.ExecutorID != "" && (record.ExecutorID != result.Identity.ExecutorID || record.SourceRef != result.SourceRef)) {
 				return errLateOutcomeRejected
+			}
+			if len(result.Calls) != 0 {
+				trailingPending := len(record.Calls) == len(result.Calls)+1 && record.Calls[len(record.Calls)-1].FinishedAt == nil
+				if !found || record.ExecutorID != result.Identity.ExecutorID || record.SourceRef != result.SourceRef ||
+					len(record.Calls) != len(result.Calls) && !trailingPending {
+					return errLateOutcomeRejected
+				}
 			}
 			for i, call := range result.Calls {
 				entry := usageCall(i+1, call)
@@ -85,14 +91,17 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 					return fmt.Errorf("%w: %v", errLateOutcomeRejected, err)
 				}
 			}
-			var saveErr error
-			if e.lateUsageSave != nil {
-				saveErr = e.lateUsageSave(record)
-			} else {
-				saveErr = e.Usage.Save(record)
-			}
-			if saveErr != nil {
-				return fmt.Errorf("save late action usage: %w", saveErr)
+			if found {
+				setTerminalUsage(&record, decision.Outcome, decidedAt)
+				var saveErr error
+				if e.lateUsageSave != nil {
+					saveErr = e.lateUsageSave(record)
+				} else {
+					saveErr = e.Usage.Save(record)
+				}
+				if saveErr != nil {
+					return fmt.Errorf("save late action usage: %w", saveErr)
+				}
 			}
 		}
 		job := Job{Version: ProtocolVersion, Identity: result.Identity, Source: workspace.Snapshot{Head: result.SourceRef}}
