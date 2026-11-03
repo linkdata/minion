@@ -22,6 +22,9 @@ import (
 
 func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 	if helper := os.Getenv("MINION_WINDOWS_MODEL_HELPER"); helper != "" {
+		if helper != string(command.Comment) && helper != string(command.Fix) {
+			t.Fatalf("unexpected model helper mode %q", helper)
+		}
 		if helper == string(command.Fix) {
 			if err := os.WriteFile("source.txt", []byte("fixed\n"), 0600); err != nil {
 				fmt.Fprintln(os.Stderr, err)
@@ -60,13 +63,14 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 				cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER="+string(action))
 				var output bytes.Buffer
 				cmd.Stdout = &output
+				cmd.Stderr = os.Stderr
 				if err := executil.Run(cmd); err != nil {
 					return aicli.Result{}, err
 				}
 				return aicli.Result{Answer: output.String(), UsageComplete: true}, nil
 			}}
 			result, err := runner.Run(t.Context(), job)
-			if err != nil || calls != 1 || len(result.Calls) != 1 || strings.TrimSpace(result.Answer) != "native model answer" || result.Identity != job.Identity || result.SourceRef != job.Source.Head {
+			if err != nil || calls != 1 || len(result.Calls) != 1 || result.Answer != "native model answer" || result.Identity != job.Identity || result.SourceRef != job.Source.Head {
 				t.Fatalf("native action result=%+v calls=%d error=%v", result, calls, err)
 			}
 			if action == command.Comment && len(result.Changes) != 0 {
