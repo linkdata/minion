@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -102,6 +103,9 @@ func TestReadSavedIgnoresUncommittedDataAndBestEffortReplacements(t *testing.T) 
 	}()
 	for range 50 {
 		saved, err := store.ReadSaved()
+		if runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33))) {
+			continue // Windows can deny an open while Save replaces the file.
+		}
 		if err != nil || saved.AcceptedTotal < 2 || saved.AcceptedTotal > 50 {
 			t.Fatalf("torn saved state: total=%d err=%v", saved.AcceptedTotal, err)
 		}

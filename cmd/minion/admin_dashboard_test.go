@@ -136,14 +136,15 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil {
 		t.Fatal(err)
 	}
-	if status.String() != "Worker busy. Worker phase critic." {
+	const workerStatus = "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / verification."
+	if status.String() != workerStatus {
 		t.Fatalf("live status summary: %q", status.String())
 	}
 	page.Dot.View.Action = &action.DashboardAction{Repository: "owner/repo", Requester: "writer", Action: "review",
 		Phase: "critic", AcceptedAt: time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC), Deadline: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)}
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != "Worker busy. Worker phase critic. Action phase critic." {
+		status.String() != workerStatus+" Action phase critic." {
 		t.Fatalf("action phase did not change live status summary: %q, %v", status.String(), err)
 	}
 	var actionBefore bytes.Buffer
@@ -154,8 +155,23 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	page.Dot.View.Snapshot.Worker.ReportedProgressAge = 13 * time.Second
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		status.String() != "Worker busy. Worker phase critic. Action phase critic." {
+		status.String() != workerStatus+" Action phase critic." {
 		t.Fatalf("heartbeat changed live status summary: %q, %v", status.String(), err)
+	}
+	page.Dot.View.Snapshot.Worker.ReviewPhase = "full"
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		status.String() != "Worker readiness busy. Reported state busy. Worker phase critic / round 2 / full. Action phase critic." {
+		t.Fatalf("review phase did not change live status summary: %q, %v", status.String(), err)
+	}
+	page.Dot.View.Snapshot.Worker.State = "stopping"
+	page.Dot.View.Snapshot.Worker.Phase = "cleanup"
+	page.Dot.View.Snapshot.Worker.Round = 0
+	page.Dot.View.Snapshot.Worker.ReviewPhase = ""
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		status.String() != "Worker readiness busy. Reported state stopping. Worker phase cleanup. Action phase critic." {
+		t.Fatalf("worker state did not change live status summary: %q, %v", status.String(), err)
 	}
 	var actionAfter bytes.Buffer
 	if err := pages.ExecuteTemplate(&actionAfter, "dashboard-action", page); err != nil ||
@@ -293,6 +309,46 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	jw.Dirty(adminDashboardDirty)
 	for _, request := range []*jawstest.TestRequest{tr, other, otherRequester, otherAction, unfiltered} {
 		dashboardReadPatch(t, request, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker")
+	}
+}
+
+func TestAdminDashboardAllLiveRegionsRedactAfterLogout(t *testing.T) {
+	handler, jw, store, owner := dashboardTestServer(t)
+	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	cookie := dashboardTestCookie(t, handler)
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	request.AddCookie(cookie)
+	tr := jawstest.NewTestRequest(jw, request)
+	<-tr.ReadyCh
+	t.Cleanup(func() {
+		tr.Close()
+		for range tr.OutCh {
+		}
+		<-tr.DoneCh
+	})
+	rw := ui.RequestWriter{Request: tr.Request, Writer: tr.Recorder}
+	page := &adminDashboardPage{owner: owner}
+	for _, part := range []struct{ tag, name string }{
+		{tag: "p", name: "dashboard-status"},
+		{tag: "section", name: "dashboard-live"},
+		{tag: "section", name: "dashboard-action"},
+	} {
+		if err := rw.Template(part.tag, part.name, page); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if initial := tr.BodyString(); !strings.Contains(initial, "owner/repo") || !strings.Contains(initial, "Selected worker") {
+		t.Fatalf("missing initial private dashboard regions: %s", initial)
+	}
+	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
+		t.Fatalf("logout status=%d", logout.Code)
+	}
+	jw.Dirty(adminDashboardDirty)
+	for range 3 {
+		dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker", "Worker readiness")
 	}
 }
 

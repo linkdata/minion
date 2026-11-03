@@ -55,7 +55,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   </main>{{$.TailHTML}}
 </body>
 </html>{{end}}
-{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker {{.Snapshot.Worker.Readiness}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{else}}not observed{{end}}.{{if .Action}} Action phase {{.Action.Phase}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
+{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker readiness {{.Snapshot.Worker.Readiness}}. Reported state {{.Snapshot.Worker.State}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}not observed{{end}}.{{if .Action}} Action phase {{.Action.Phase}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
 {{define "dashboard-live"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p role="alert">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="metrics">
