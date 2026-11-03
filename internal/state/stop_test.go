@@ -48,6 +48,10 @@ func TestRequestStopChecksAttemptAndPreservesFirstRequester(t *testing.T) {
 	if repeated, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "other-admin", at.Add(time.Minute)); err != nil || repeated != request {
 		t.Fatalf("repeat changed first requester: request=%+v error=%v", repeated, err)
 	}
+	unregister()
+	if repeated, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "other-admin", at.Add(2*time.Minute)); err != nil || repeated != request {
+		t.Fatalf("pending cleanup repeat without live slot changed request: request=%+v error=%v", repeated, err)
+	}
 	decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", at.Add(time.Second))
 	if err != nil || decision.Outcome != "canceled" || decision.StopRequest != request {
 		t.Fatalf("completion overwrote stop: decision=%+v error=%v", decision, err)
@@ -130,8 +134,8 @@ func TestRequestStopPostReplacementErrorStillCancelsAndRecovers(t *testing.T) {
 }
 
 func TestRequestStopBeforeReplacementFailureCanRetry(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory permissions do not block atomic replacement on Windows")
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions do not block atomic replacement on this runner")
 	}
 	store, path, accepted := stopStoreFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -156,5 +160,42 @@ func TestRequestStopBeforeReplacementFailureCanRetry(t *testing.T) {
 	}
 	if _, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC()); err != nil || ctx.Err() != context.Canceled {
 		t.Fatalf("retry did not cancel after save: error=%v canceled=%v", err, ctx.Err())
+	}
+}
+
+func TestResolveStopRetriesPreReplacementFailure(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permissions do not block atomic replacement on this runner")
+	}
+	store, path, accepted := stopStoreFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancel)
+	defer unregister()
+	if _, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC()); err != nil || ctx.Err() != context.Canceled {
+		t.Fatalf("request: %v canceled=%v", err, ctx.Err())
+	}
+	dir := filepath.Dir(path)
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) })
+	resolveErr := store.ResolveStop(accepted.JobID, accepted.AttemptID, "confirmed")
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if resolveErr == nil {
+		t.Fatal("pre-replacement status save unexpectedly succeeded")
+	}
+	saved, err := store.ReadSaved()
+	if err != nil || saved.Accepted == nil || saved.Accepted.StopRequest.Status != "requested" {
+		t.Fatalf("failed status save changed disk: state=%+v error=%v", saved, err)
+	}
+	if err := store.ResolveStop(accepted.JobID, accepted.AttemptID, "unverified"); err != nil {
+		t.Fatal(err)
+	}
+	saved, err = store.ReadSaved()
+	if err != nil || saved.Accepted == nil || saved.Accepted.StopRequest.Status != "confirmed" {
+		t.Fatalf("resolution retry lost first clean evidence: state=%+v error=%v", saved, err)
 	}
 }

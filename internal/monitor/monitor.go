@@ -1849,7 +1849,11 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
 		if accepted.StopRequest.Status == "requested" {
-			if err := store.ResolveStop(job.ID, job.AttemptID, "unverified"); err != nil {
+			status := "unverified"
+			if !accepted.Assigned && !failure.ModelCallStarted {
+				status = "confirmed"
+			}
+			if err := store.ResolveStop(job.ID, job.AttemptID, status); err != nil {
 				return fmt.Errorf("%w: recover stop request: %w", ErrAcceptanceState, err)
 			}
 			decision = store.Data.TerminalDecisions[job.ID]
@@ -1861,7 +1865,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if accepted.StopRequest != (state.StopRequest{}) {
 		status, outcome := "confirmed", "canceled"
-		if accepted.Assigned || failure.ModelCallStarted {
+		if (accepted.Assigned || failure.ModelCallStarted) && accepted.StopRequest.Status != "confirmed" {
 			status, outcome = "unverified", "lost"
 		}
 		if err := store.ResolveStop(job.ID, job.AttemptID, status); err != nil {
@@ -2038,14 +2042,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
 	unregisterSelectedStop := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
-	var unregisterOnce sync.Once
-	unregisterStop := func() { unregisterOnce.Do(unregisterSelectedStop) }
-	defer unregisterStop()
-	finishSelected := finish
-	finish = func(err error) error {
-		unregisterStop()
-		return finishSelected(err)
-	}
+	defer unregisterSelectedStop()
 	controlCtx := actionCtx
 	var cancelControls context.CancelFunc
 	if job.Command.Action == command.Fix {
@@ -2153,7 +2150,6 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() {
 			cancelForSavedResult := selectedResultReady()
-			unregisterStop()
 			done <- result
 			if job.Command.Action == command.Fix || cancelForSavedResult {
 				cancelControls()
@@ -2161,6 +2157,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		}()
 		result = run(actionCtx, job)
 		workerResult := result
+		unregisterSelectedStop() // A completed run cannot accept a new request without cleanup evidence.
 		completionMu.Lock()
 		completedAt := time.Now().UTC()
 		cause := actionCtx.Err()
@@ -2175,11 +2172,20 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 				terminalReturn = true
 			}
 		}
-		stopStatus := "confirmed"
-		if errors.Is(workerResult, ErrExecutionOutcomeUnknown) {
-			stopStatus = "unverified"
-		} else if cleaner, ok := m.Handler.(interface{ StopCleanupVerified() bool }); ok && !cleaner.StopCleanupVerified() {
-			stopStatus = "unverified"
+		stopStatus := "unverified"
+		if !errors.Is(workerResult, ErrExecutionOutcomeUnknown) {
+			if cleaner, ok := m.Handler.(interface{ StopCleanupVerified() bool }); ok && cleaner.StopCleanupVerified() {
+				stopStatus = "confirmed"
+			} else {
+				_ = store.WithLock(func() error {
+					accepted := store.Data.Accepted
+					failure := store.Data.JobFailures[job.ID]
+					if accepted != nil && AssignmentMatchesAccepted(job, *accepted) && !accepted.Assigned && !failure.ModelCallStarted {
+						stopStatus = "confirmed" // No worker was dispatched.
+					}
+					return nil
+				})
+			}
 		}
 		if err := store.ResolveStop(job.ID, job.AttemptID, stopStatus); err != nil {
 			result = errors.Join(result, fmt.Errorf("%w: resolve stop request: %w", ErrAcceptanceState, err))
@@ -2219,12 +2225,25 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		})
 		return decided
 	}
+	stopRequested := func() bool {
+		var requested bool
+		_ = store.WithLock(func() error {
+			accepted := store.Data.Accepted
+			requested = accepted != nil && AssignmentMatchesAccepted(job, *accepted) && accepted.StopRequest != (state.StopRequest{})
+			return nil
+		})
+		return requested
+	}
 	abort := func(err error) error {
 		deadline := errors.Is(err, context.DeadlineExceeded) && errors.Is(actionCtx.Err(), context.DeadlineExceeded)
 		readDone()
 		if completed {
 			if completedWithDecision() {
 				return finish(result)
+			}
+			if errors.Is(actionCtx.Err(), context.Canceled) && stopRequested() {
+				stopErr := stopWorker(err)
+				return errors.Join(finish(result), stopErr)
 			}
 			if parentErr := ctx.Err(); parentErr != nil {
 				stopErr := stopWorker(parentErr)
@@ -2239,6 +2258,9 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		stopErr := stopWorker(err)
 		result = <-done // The state lock and store must outlive Execute.
 		completed = true
+		if errors.Is(actionCtx.Err(), context.Canceled) && stopRequested() {
+			return errors.Join(finish(result), stopErr)
+		}
 		if ctx.Err() != nil {
 			return errors.Join(finish(result), stopErr, ctx.Err())
 		}

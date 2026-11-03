@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,17 +20,22 @@ func (h *stopCleanupHandler) StopCleanupVerified() bool { return h.clean }
 func TestForceStopFencesPublicationAndWaitsForCleanupEvidence(t *testing.T) {
 	for _, test := range []struct {
 		name, wantStatus string
-		clean            bool
+		clean, hook      bool
 		workerErr        error
 	}{
-		{name: "clean cancellation", wantStatus: "confirmed", clean: true, workerErr: context.Canceled},
-		{name: "unknown outcome", wantStatus: "unverified", clean: true, workerErr: errors.Join(context.Canceled, ErrExecutionOutcomeUnknown)},
-		{name: "unclean worker", wantStatus: "unverified", clean: false, workerErr: context.Canceled},
-		{name: "completed at stop", wantStatus: "confirmed", clean: true},
+		{name: "clean cancellation", wantStatus: "confirmed", clean: true, hook: true, workerErr: context.Canceled},
+		{name: "unknown outcome", wantStatus: "unverified", clean: true, hook: true, workerErr: errors.Join(context.Canceled, ErrExecutionOutcomeUnknown)},
+		{name: "unclean worker", wantStatus: "unverified", clean: false, hook: true, workerErr: context.Canceled},
+		{name: "missing cleanup hook", wantStatus: "unverified", workerErr: context.Canceled},
+		{name: "completed at stop", wantStatus: "confirmed", clean: true, hook: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			m, store, job, gh, _ := assignmentValidationFixture(t)
-			m.Handler = &stopCleanupHandler{clean: test.clean}
+			if test.hook {
+				m.Handler = &stopCleanupHandler{clean: test.clean}
+			} else {
+				m.Handler = &fakeHandler{}
+			}
 			store.Data.Accepted.Assigned = true
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
@@ -128,5 +134,155 @@ func TestRecoverRequestedStopNeverDispatches(t *testing.T) {
 				t.Fatalf("recovery dispatched/stopped incorrectly: decision=%+v state=%+v jobs=%d comments=%d", decision, store.Data, len(handler.jobs), gh.commentCalls)
 			}
 		})
+	}
+}
+
+func TestRecoverConfirmedAssignedStopBeforeTerminalDecision(t *testing.T) {
+	m, store, job, gh, _ := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
+	if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); err != nil || ctx.Err() != context.Canceled {
+		t.Fatalf("request: %v canceled=%v", err, ctx.Err())
+	}
+	unregister()
+	if err := store.ResolveStop(job.ID, job.AttemptID, "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.recoverAccepted(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	decision := store.Data.TerminalDecisions[job.ID]
+	if decision.Outcome != "canceled" || decision.StopRequest.Status != "confirmed" ||
+		store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || gh.commentCalls != 0 {
+		t.Fatalf("confirmed stop became lost or published: decision=%+v state=%+v comments=%d", decision, store.Data, gh.commentCalls)
+	}
+}
+
+func TestRecoverUndispatchedStopWithEarlyDecisionIsConfirmed(t *testing.T) {
+	m, store, job, gh, _ := assignmentValidationFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
+	if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("undispatched selected run did not receive stop")
+	}
+	unregister()
+	if _, err := decideAccepted(store, job, "canceled", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.recoverAccepted(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	decision := store.Data.TerminalDecisions[job.ID]
+	if decision.Outcome != "canceled" || decision.StopRequest.Status != "confirmed" ||
+		store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || gh.commentCalls != 0 {
+		t.Fatalf("undispatched stop was not confirmed: decision=%+v state=%+v comments=%d", decision, store.Data, gh.commentCalls)
+	}
+}
+
+func TestForceStopDuringControlCancellationCompletesCleanup(t *testing.T) {
+	m, store, job, gh, _ := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	store.Data.NextInviteCheckAt = time.Now().Add(-time.Second)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	controlEntered, controlRelease := make(chan struct{}), make(chan struct{})
+	workerEntered, workerRelease := make(chan struct{}), make(chan struct{})
+	var enteredOnce sync.Once
+	gh.beforeList = func() {
+		enteredOnce.Do(func() { close(controlEntered) })
+		<-controlRelease
+	}
+	finished := make(chan error, 1)
+	go func() {
+		finished <- m.runSelectedWithControls(t.Context(), store, job, "", nil,
+			func(ctx context.Context, _ Job) error {
+				close(workerEntered)
+				<-ctx.Done()
+				<-workerRelease
+				return ctx.Err()
+			}, func(err error) error { return m.completeSelected(t.Context(), store, job, time.Now().UTC(), err) })
+	}()
+	select {
+	case <-workerEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not start")
+	}
+	select {
+	case <-controlEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("invitation control did not start")
+	}
+	if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	close(controlRelease)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var decided bool
+		_ = store.WithLock(func() error { _, decided = store.Data.TerminalDecisions[job.ID]; return nil })
+		if decided {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control cancellation did not enter the stop path")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(workerRelease)
+	select {
+	case err := <-finished:
+		if errors.Is(err, ErrAcceptanceState) {
+			t.Fatalf("normal operator stop abandoned cleanup: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("control cancellation did not finish")
+	}
+	if store.Data.Accepted != nil || store.Data.Processed[job.ID].IsZero() || gh.commentCalls != 0 {
+		t.Fatalf("control cancellation left active action or published reply: state=%+v comments=%d", store.Data, gh.commentCalls)
+	}
+}
+
+func TestStopAfterWorkerReturnCannotMissCleanupEvidence(t *testing.T) {
+	m, store, job, _, _ := assignmentValidationFixture(t)
+	store.Data.Accepted.Assigned = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	returned, release := make(chan struct{}), make(chan struct{})
+	m.afterSelectedRunReturn = func() {
+		close(returned)
+		<-release
+	}
+	finished := make(chan error, 1)
+	go func() {
+		finished <- m.runSelectedWithControls(t.Context(), store, job, "", nil,
+			func(context.Context, Job) error { return nil }, func(error) error { return nil })
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker did not reach return handoff")
+	}
+	if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); !errors.Is(err, state.ErrStopConflict) {
+		t.Fatalf("completed run accepted late stop without cleanup evidence: %v", err)
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("selected run did not finish")
+	}
+	if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "succeeded" || decision.StopRequest != (state.StopRequest{}) {
+		t.Fatalf("late stop changed completed outcome: %+v", decision)
 	}
 }

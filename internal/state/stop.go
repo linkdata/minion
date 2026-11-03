@@ -133,9 +133,10 @@ func (s *Store) ResolveStop(jobID, attemptID, status string) error {
 			return nil
 		}
 		if accepted.StopRequest.Status != "requested" {
-			return nil
+			status = accepted.StopRequest.Status // The first observed resolution wins.
+		} else {
+			accepted.StopRequest.Status = status
 		}
-		accepted.StopRequest.Status = status
 		if decision, ok := s.Data.TerminalDecisions[jobID]; ok && decision.AttemptID == attemptID {
 			decision.StopRequest = accepted.StopRequest
 			s.Data.TerminalDecisions[jobID] = decision

@@ -109,11 +109,11 @@ func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action
 	}
 	_, err := owner.Store.RequestStop(jobID, attemptID, requestedBy, time.Now().UTC())
 	if errors.Is(err, state.ErrStopConflict) {
-		http.Error(w, "Selected attempt changed or already ended", http.StatusConflict)
+		http.Error(w, "Selected attempt is not stoppable", http.StatusConflict)
 		return
 	}
 	if err != nil {
-		http.Error(w, "Stop request could not be saved", http.StatusServiceUnavailable)
+		http.Error(w, "Stop persistence could not be confirmed; reload the dashboard", http.StatusServiceUnavailable)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
