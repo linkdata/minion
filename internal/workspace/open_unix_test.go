@@ -13,28 +13,8 @@ import (
 	"time"
 )
 
-// macOS temp paths may contain /var -> /private/var; resolve them before
-// testing the anchored no-symlink traversal itself.
-func anchoredUnixRoot(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return root
-}
-
-func anchoredPrivateUnixRoot(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.EvalSymlinks(privateRoot(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return root
-}
-
 func TestCollectionRefusesSymlinkParents(t *testing.T) {
-	root, outside := anchoredUnixRoot(t), anchoredUnixRoot(t)
+	root, outside := t.TempDir(), t.TempDir()
 	secret := filepath.Join(outside, "secret")
 	if err := os.WriteFile(secret, []byte("outside contents"), 0600); err != nil {
 		t.Fatal(err)
@@ -55,8 +35,8 @@ func TestCollectionRefusesSymlinkParents(t *testing.T) {
 }
 
 func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
-	root := anchoredUnixRoot(t)
-	outside := filepath.Join(anchoredUnixRoot(t), "outside")
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside")
 	const contents = "outside file contents"
 	if err := os.WriteFile(outside, []byte(contents), 0600); err != nil {
 		t.Fatal(err)
@@ -94,8 +74,8 @@ func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
 }
 
 func TestApplyRefusesHardlinkedTargetsBeforeTruncation(t *testing.T) {
-	root := anchoredPrivateUnixRoot(t)
-	outside := filepath.Join(anchoredUnixRoot(t), "outside")
+	root := privateRoot(t)
+	outside := filepath.Join(t.TempDir(), "outside")
 	const contents = "outside contents"
 	if err := os.WriteFile(outside, []byte(contents), 0640); err != nil {
 		t.Fatal(err)
@@ -134,8 +114,8 @@ func TestApplyRefusesHardlinkedTargetsBeforeTruncation(t *testing.T) {
 	}
 }
 
-func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
-	root, outside := anchoredUnixRoot(t), anchoredUnixRoot(t)
+func TestWalkRefusesDirectoryReplacedAfterListing(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
 	parent := filepath.Join(root, "parent")
 	if err := os.Mkdir(parent, 0700); err != nil {
 		t.Fatal(err)
@@ -143,27 +123,30 @@ func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside contents"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	visitedOutside := false
+	visitedOutside, replaced := false, false
 	err := walk(t.Context(), root, false, func(name string, entry fs.DirEntry) error {
 		if name == parent {
 			if err := os.Rename(parent, filepath.Join(root, "original")); err != nil {
 				return err
 			}
-			return os.Symlink(outside, parent)
+			if err := os.Symlink(outside, parent); err != nil {
+				return err
+			}
+			replaced = true
 		}
 		if entry.Name() == "secret" {
 			visitedOutside = true
 		}
 		return nil
 	})
-	if err == nil || visitedOutside {
-		t.Fatalf("queued directory followed replacement symlink: visited=%v error=%v", visitedOutside, err)
+	if !replaced || visitedOutside || !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("listed directory followed replacement symlink: replaced=%v visited=%v error=%v", replaced, visitedOutside, err)
 	}
 }
 
 func TestCollectionRefusesRootSymlinksEvenForDeleteOnlySelections(t *testing.T) {
-	root := filepath.Join(anchoredUnixRoot(t), "link")
-	outside := anchoredPrivateUnixRoot(t)
+	root := filepath.Join(t.TempDir(), "link")
+	outside := privateRoot(t)
 	base := []File{{Path: "file", Mode: Regular, Data: []byte("outside")}}
 	if err := Materialize(outside, base); err != nil {
 		t.Fatal(err)
@@ -206,7 +189,7 @@ func (info fileInfoWithStat) Mode() fs.FileMode  { return info.mode }
 func (info fileInfoWithStat) ModTime() time.Time { return info.modified }
 
 func TestReadStabilityRejectsChangedMetadata(t *testing.T) {
-	name := filepath.Join(anchoredUnixRoot(t), "source")
+	name := filepath.Join(t.TempDir(), "source")
 	if err := os.WriteFile(name, []byte("source"), 0600); err != nil {
 		t.Fatal(err)
 	}
