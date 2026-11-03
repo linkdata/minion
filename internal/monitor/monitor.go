@@ -1698,9 +1698,15 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 		var ok bool
 		failure, ok = store.Data.JobFailures[accepted.JobID]
 		if err := accepted.Validate(); err != nil || !AssignmentMatchesAccepted(job, accepted) ||
-			m.SelectedExecutorID != accepted.ExecutorID || accepted.Terminal ||
+			m.SelectedExecutorID != accepted.ExecutorID ||
 			!ok || failure.Attempts <= 0 || failure.ModelCallStarted ||
 			!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
+			return fmt.Errorf("%w: accepted action changed before assignment", ErrAcceptanceState)
+		}
+		if accepted.Terminal {
+			if accepted.StopRequest != (state.StopRequest{}) {
+				return fmt.Errorf("%w: selected action was stopped before assignment", ErrTerminalJob)
+			}
 			return fmt.Errorf("%w: accepted action changed before assignment", ErrAcceptanceState)
 		}
 		return nil
@@ -1718,7 +1724,18 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 	}
 	_, _, valid, err := m.validateAcceptedSource(ctx, accepted, true)
 	return store.WithLock(func() error {
-		if store.Data.Accepted == nil || *store.Data.Accepted != accepted || store.Data.JobFailures[accepted.JobID] != failure {
+		current := store.Data.Accepted
+		if current == nil || store.Data.JobFailures[accepted.JobID] != failure {
+			return fmt.Errorf("%w: accepted action changed during assignment validation", ErrAcceptanceState)
+		}
+		if *current != accepted {
+			if current.Terminal && current.StopRequest != (state.StopRequest{}) {
+				stopped := *current
+				stopped.Terminal, stopped.StopRequest = accepted.Terminal, accepted.StopRequest
+				if stopped == accepted {
+					return fmt.Errorf("%w: selected action was stopped during assignment validation", ErrTerminalJob)
+				}
+			}
 			return fmt.Errorf("%w: accepted action changed during assignment validation", ErrAcceptanceState)
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -2449,6 +2466,9 @@ selectedLoop:
 				result = <-done
 				completed = true
 			}
+			if errors.Is(err, context.Canceled) && ctx.Err() == nil && stopRequested() {
+				return errors.Join(finish(result), stopErr)
+			}
 			return errors.Join(finish(result), stopErr, err)
 		}
 		readDone()
@@ -2480,6 +2500,9 @@ selectedLoop:
 			stopErr := stopWorker(actionCtx.Err())
 			result = <-done
 			completed = true
+			if errors.Is(actionCtx.Err(), context.Canceled) && ctx.Err() == nil && stopRequested() {
+				return errors.Join(finish(result), stopErr)
+			}
 			return errors.Join(finish(result), stopErr, actionCtx.Err())
 		}
 	}

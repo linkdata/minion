@@ -68,7 +68,7 @@ func TestForceStopFencesPublicationAndWaitsForCleanupEvidence(t *testing.T) {
 			if err := m.RevalidatePublication(t.Context(), store, job, true); !errors.Is(err, ErrTerminalJob) {
 				t.Fatalf("publication passed force-stop fence: error=%v", err)
 			}
-			if err := m.RevalidateAssignment(t.Context(), store, job); !errors.Is(err, ErrAcceptanceState) {
+			if err := m.RevalidateAssignment(t.Context(), store, job); !errors.Is(err, ErrTerminalJob) || errors.Is(err, ErrAcceptanceState) {
 				t.Fatalf("assignment passed force-stop fence: %v", err)
 			}
 			deadline := time.Now().Add(5 * time.Second)
@@ -88,7 +88,10 @@ func TestForceStopFencesPublicationAndWaitsForCleanupEvidence(t *testing.T) {
 			}
 			close(release)
 			select {
-			case <-finished:
+			case err := <-finished:
+				if test.name == "clean cancellation" && err != nil {
+					t.Fatalf("clean operator stop returned a poll error: %v", err)
+				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("selected stop did not finish")
 			}
@@ -99,6 +102,48 @@ func TestForceStopFencesPublicationAndWaitsForCleanupEvidence(t *testing.T) {
 				t.Fatalf("incorrect stop cleanup: decision=%+v state=%+v comments=%d", decision, store.Data, gh.commentCalls)
 			}
 		})
+	}
+}
+
+func TestForceStopDuringAssignmentValidationKeepsMonitorRunning(t *testing.T) {
+	m, store, job, gh, _ := assignmentValidationFixture(t)
+	store.Data.NextInviteCheckAt = time.Now().Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	gh.beforeRepository = func() { close(entered); <-release }
+	m.Handler = selectedHandler(func(Job) error { return m.RevalidateAssignment(t.Context(), store, job) })
+	finished := make(chan error, 1)
+	go func() { finished <- m.executeSelected(t.Context(), store, job, time.Now().UTC()) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("assignment validation did not start")
+	}
+	if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("valid stop exited monitor: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopped assignment did not finish")
+	}
+	if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "canceled" ||
+		decision.StopRequest.Status != "confirmed" || store.Data.Accepted != nil ||
+		store.Data.Processed[job.ID].IsZero() {
+		t.Fatalf("stopped assignment was not cleaned up: %+v state=%+v", decision, store.Data)
+	}
+	gh.beforeRepository = nil
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatalf("monitor could not continue after valid stop: %v", err)
 	}
 }
 
@@ -241,8 +286,8 @@ func TestForceStopDuringControlCancellationCompletesCleanup(t *testing.T) {
 	close(workerRelease)
 	select {
 	case err := <-finished:
-		if errors.Is(err, ErrAcceptanceState) {
-			t.Fatalf("normal operator stop abandoned cleanup: %v", err)
+		if err != nil {
+			t.Fatalf("normal operator stop returned a poll error: %v", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("control cancellation did not finish")

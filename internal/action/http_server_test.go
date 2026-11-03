@@ -513,7 +513,10 @@ func TestClaimedAssignmentDeliveredAfterStopDoesNotStartModel(t *testing.T) {
 	}
 	unblock()
 	select {
-	case <-workerDone:
+	case err := <-workerDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("worker did not observe cancellation after stopped delivery: %v", err)
+		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("worker did not finish after stop")
 	}

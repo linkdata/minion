@@ -53,10 +53,11 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     {{$.Template "p" "dashboard-status" .Dot "role=status aria-live=polite class=visually-hidden"}}
     {{$.Template "section" "dashboard-live" .Dot}}
     {{$.Template "section" "dashboard-action" .Dot "class=\"panel actions\""}}
+    {{$.Template "div" "dashboard-stop-control" .Dot}}
   </main>{{$.TailHTML}}
 </body>
 </html>{{end}}
-{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker readiness {{.Snapshot.Worker.Readiness}}. Reported state {{.Snapshot.Worker.State}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}not observed{{end}}. Tracked accepted actions {{.Snapshot.TrackedAccepted}}. In progress {{.Snapshot.InProgress}}.{{if .Action}} Current {{.Action.Action}} action in {{.Action.Repository}} for {{.Action.Requester}}, accepted {{utc .Action.AcceptedAt}}, phase {{.Action.Phase}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
+{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker readiness {{.Snapshot.Worker.Readiness}}. Reported state {{.Snapshot.Worker.State}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}not observed{{end}}. Tracked accepted actions {{.Snapshot.TrackedAccepted}}. In progress {{.Snapshot.InProgress}}.{{if .Action}} Current {{.Action.Action}} action in {{.Action.Repository}} for {{.Action.Requester}}, accepted {{utc .Action.AcceptedAt}}, phase {{.Action.Phase}}.{{end}}{{if .Snapshot.LastStop}} Latest force stop for attempt {{.Snapshot.LastStop.AttemptID}}: {{.Snapshot.LastStop.Status}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
 {{define "dashboard-live"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p role="alert">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="metrics">
@@ -79,7 +80,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Executor inactivity</dt><dd>{{.Snapshot.InactivityTimeout}}</dd>
   </dl><p class="hint">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section>
 </div>
-{{if .Snapshot.LastStop}}<section class="panel stop-status" aria-live="polite"><h2>Latest force stop</h2>
+{{if .Snapshot.LastStop}}<section class="panel stop-status"><h2>Latest force stop</h2>
   <p><strong>{{.Snapshot.LastStop.Status}}</strong> · {{.Snapshot.LastStop.JobID}} / attempt {{.Snapshot.LastStop.AttemptID}}</p>
   <p class="hint">Requested by {{.Snapshot.LastStop.RequestedBy}} at {{utc .Snapshot.LastStop.RequestedAt}}.
   {{if eq .Snapshot.LastStop.Status "requested"}}Waiting for worker termination to be verified.{{else if eq .Snapshot.LastStop.Status "confirmed"}}Worker attempt termination was verified.{{else}}Worker termination could not be verified; inspect worker readiness before reuse.{{end}}</p>
@@ -95,10 +96,10 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <td>{{.Action.Repository}}</td><td>{{.Action.Requester}}</td><td>{{.Action.Action}}</td>
     <td>{{.Action.Phase}}</td><td>{{utc .Action.AcceptedAt}}</td><td>{{utc .Action.Deadline}}</td>
   </tr></tbody></table><p class="hint">Attempt {{.Action.AttemptID}}</p>
-  {{if .Action.Stoppable}}<form class="stop-action" method="post" action="/admin/stop"><input type="hidden" name="job_id" value="{{.Action.JobID}}"><input type="hidden" name="attempt_id" value="{{.Action.AttemptID}}"><button type="submit">Force stop this attempt</button></form>{{end}}
   {{else if .Snapshot.InProgress}}<p>No current action matches these filters.</p>
   {{else}}<p>No action is in progress.</p>{{end}}
-{{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}`
+{{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}
+{{define "dashboard-stop-control"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Action}}{{if .Action.Stoppable}}<form class="panel stop-action" method="post" action="/admin/stop"><input type="hidden" name="job_id" value="{{.Action.JobID}}"><input type="hidden" name="attempt_id" value="{{.Action.AttemptID}}"><button type="submit">Force stop this attempt</button></form>{{end}}{{end}}{{end}}{{end}}{{end}}`
 
 type adminDashboardFilter struct{ Repo, Requester, Action string }
 
