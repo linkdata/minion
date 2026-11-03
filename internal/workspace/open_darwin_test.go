@@ -10,6 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func bumpTestChangeTime(info *fileInfoWithStat) {
+	info.stat.Ctimespec.Sec++
+}
+
 func TestDarwinAnchoredReadRejectsLinksAndSpecialFiles(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

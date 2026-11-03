@@ -52,3 +52,16 @@ func TestDarwinRemoveAllRestoresLockedDirectoriesWithoutFollowingLinks(t *testin
 		t.Fatalf("outside secret changed: %v, %v", info, err)
 	}
 }
+
+func TestDarwinRemoveAllReportsCleanupFailure(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parent, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveAll(filepath.Join(parent, "child")); err == nil {
+		t.Fatal("cleanup failure was suppressed")
+	}
+	if data, err := os.ReadFile(parent); err != nil || string(data) != "untouched" {
+		t.Fatalf("failed cleanup changed parent file: %q, %v", data, err)
+	}
+}

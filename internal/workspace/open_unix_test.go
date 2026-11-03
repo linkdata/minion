@@ -1,0 +1,246 @@
+//go:build linux || darwin
+
+package workspace
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+)
+
+// macOS temp paths may contain /var -> /private/var; resolve them before
+// testing the anchored no-symlink traversal itself.
+func anchoredUnixRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func anchoredPrivateUnixRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(privateRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func TestCollectionRefusesSymlinkParents(t *testing.T) {
+	root, outside := anchoredUnixRoot(t), anchoredUnixRoot(t)
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("outside contents"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	parent := filepath.Join(root, "parent")
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(parent, "secret")
+	if data, err := ReadRegular(name, MaxBytes); err == nil {
+		t.Fatalf("read outside source through parent: %q", data)
+	}
+	visited := false
+	if err := walk(t.Context(), parent, false, func(string, fs.DirEntry) error { visited = true; return nil }); err == nil || visited {
+		t.Fatalf("walk followed root symlink: visited=%v error=%v", visited, err)
+	}
+}
+
+func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
+	root := anchoredUnixRoot(t)
+	outside := filepath.Join(anchoredUnixRoot(t), "outside")
+	const contents = "outside file contents"
+	if err := os.WriteFile(outside, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(root, "file")
+	if err := os.Link(outside, name); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		name string
+		read func() (int, error)
+	}{
+		{"regular file", func() (int, error) { data, err := ReadRegular(name, MaxBytes); return len(data), err }},
+		{"source scan", func() (int, error) {
+			return 0, CheckUnchanged(t.Context(), root, []File{{Path: "file", Mode: Regular, Data: []byte(contents)}})
+		}},
+		{"selected changes", func() (int, error) {
+			changes, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Mode: Regular}})
+			return len(changes), err
+		}},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			count, err := check.read()
+			if count != 0 || err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
+				t.Fatalf("hardlink collection returned %d entries/bytes, error=%v", count, err)
+			}
+		})
+	}
+	if err := os.Remove(outside); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := ReadRegular(name, MaxBytes); err != nil || string(data) != contents {
+		t.Fatalf("single remaining link=%q,%v", data, err)
+	}
+}
+
+func TestApplyRefusesHardlinkedTargetsBeforeTruncation(t *testing.T) {
+	root := anchoredPrivateUnixRoot(t)
+	outside := filepath.Join(anchoredUnixRoot(t), "outside")
+	const contents = "outside contents"
+	if err := os.WriteFile(outside, []byte(contents), 0640); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := filepath.Join(root, "file")
+	if err := os.Link(outside, name); err != nil {
+		t.Fatal(err)
+	}
+	change := []Change{{Path: "file", Mode: Executable, Data: []byte("updated")}}
+	if err := Apply(root, change); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
+		t.Fatalf("hardlinked target was accepted: %v", err)
+	}
+	for _, path := range []string{outside, name} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != contents {
+			t.Fatalf("hardlinked contents changed: %q, %v", data, err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || !os.SameFile(before, info) || info.Mode() != before.Mode() {
+			t.Fatalf("hardlinked inode or mode changed: %v, %v", info, err)
+		}
+	}
+	if err := os.Remove(outside); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(root, change); err != nil {
+		t.Fatalf("single-link update was refused: %v", err)
+	}
+	data, err := os.ReadFile(name)
+	if err != nil || string(data) != "updated" {
+		t.Fatalf("single-link update=%q, %v", data, err)
+	}
+}
+
+func TestWalkRefusesDirectoryReplacedAfterQueueing(t *testing.T) {
+	root, outside := anchoredUnixRoot(t), anchoredUnixRoot(t)
+	parent := filepath.Join(root, "parent")
+	if err := os.Mkdir(parent, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside contents"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	visitedOutside := false
+	err := walk(t.Context(), root, false, func(name string, entry fs.DirEntry) error {
+		if name == parent {
+			if err := os.Rename(parent, filepath.Join(root, "original")); err != nil {
+				return err
+			}
+			return os.Symlink(outside, parent)
+		}
+		if entry.Name() == "secret" {
+			visitedOutside = true
+		}
+		return nil
+	})
+	if err == nil || visitedOutside {
+		t.Fatalf("queued directory followed replacement symlink: visited=%v error=%v", visitedOutside, err)
+	}
+}
+
+func TestCollectionRefusesRootSymlinksEvenForDeleteOnlySelections(t *testing.T) {
+	root := filepath.Join(anchoredUnixRoot(t), "link")
+	outside := anchoredPrivateUnixRoot(t)
+	base := []File{{Path: "file", Mode: Regular, Data: []byte("outside")}}
+	if err := Materialize(outside, base); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, root); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []func() error{
+		func() error { return CheckRoot(root) },
+		func() error { return CheckUnchanged(t.Context(), root, base) },
+		func() error { _, err := ReadChanges(t.Context(), root, nil); return err },
+		func() error {
+			_, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Delete: true}})
+			return err
+		},
+	} {
+		if err := check(); !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
+			t.Fatalf("root symlink was not refused by anchored open: %v", err)
+		}
+	}
+	if err := Apply(root, []Change{{Path: "file", Delete: true}}); !errors.Is(err, syscall.ENOTDIR) && !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("Apply did not refuse the symlinked root through its anchored open: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(outside, "file")); err != nil || string(data) != "outside" {
+		t.Fatalf("symlink-root deletion changed outside file=%q,%v", data, err)
+	}
+}
+
+type fileInfoWithStat struct {
+	os.FileInfo
+	stat     syscall.Stat_t
+	size     int64
+	mode     fs.FileMode
+	modified time.Time
+}
+
+func (info fileInfoWithStat) Sys() any           { return &info.stat }
+func (info fileInfoWithStat) Size() int64        { return info.size }
+func (info fileInfoWithStat) Mode() fs.FileMode  { return info.mode }
+func (info fileInfoWithStat) ModTime() time.Time { return info.modified }
+
+func TestReadStabilityRejectsChangedMetadata(t *testing.T) {
+	name := filepath.Join(anchoredUnixRoot(t), "source")
+	if err := os.WriteFile(name, []byte("source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := fileInfoWithStat{FileInfo: info, stat: *info.Sys().(*syscall.Stat_t), size: info.Size(), mode: info.Mode(), modified: info.ModTime()}
+	beforeChange, err := changeTime(before, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*fileInfoWithStat)
+		want   string
+	}{
+		{"size", func(after *fileInfoWithStat) { after.size++ }, "file changed"},
+		{"mode", func(after *fileInfoWithStat) { after.mode ^= 0100 }, "file changed"},
+		{"mtime", func(after *fileInfoWithStat) { after.modified = after.modified.Add(time.Second) }, "file changed"},
+		{"ctime", bumpTestChangeTime, "file changed"},
+		{"hard link", func(after *fileInfoWithStat) { after.stat.Nlink++ }, "hard links changed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			after := before
+			test.change(&after)
+			afterChange, err := changeTime(after, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = checkReadStability(before, after, int(before.Size()), nil, beforeChange == afterChange)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("stability check=%v, want %q", err, test.want)
+			}
+		})
+	}
+}
