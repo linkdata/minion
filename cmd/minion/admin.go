@@ -67,7 +67,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	}
 	jw.Logger = slog.Default()
 	server := &http.Server{
-		Handler:                      jw.SecureHeadersMiddleware(adminGuard(jw, nil)),
+		Handler:                      newAdminHandler(jw, cfg),
 		ReadHeaderTimeout:            5 * time.Second,
 		ReadTimeout:                  30 * time.Second,
 		IdleTimeout:                  time.Minute,
@@ -93,23 +93,28 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, onFailure fun
 	return a, nil
 }
 
-// adminGuard is the single entry gate for all dashboard routes. The authorizer
-// is nil until admin sessions are implemented.
+// adminGuard is the single entry gate for all dashboard routes.
 func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// JaWS's year-long HSTS policy includes subdomains and could affect other services.
 		w.Header().Del("Strict-Transport-Security")
 		if allowed == nil || !allowed(r) {
+			closeUnreadAdminBody(w, r)
 			controller := http.NewResponseController(w)
-			if r.ProtoMajor == 1 && r.ContentLength != 0 {
-				_ = controller.SetReadDeadline(time.Now())
-			}
 			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Go's HTTP/1 server otherwise waits to drain an unread request body before
+// writing the response, even when a handler has already rejected the request.
+func closeUnreadAdminBody(w http.ResponseWriter, r *http.Request) {
+	if r.ProtoMajor == 1 && r.ContentLength != 0 {
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now())
+	}
 }
 
 func (a *adminServer) Close() error {
