@@ -41,11 +41,11 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
       <label>Repository<input name="repo" value="{{.Dot.Filter.Repo}}" maxlength="201" placeholder="owner/repo"></label>
       <label>Requester<input name="requester" value="{{.Dot.Filter.Requester}}" maxlength="105" placeholder="login"></label>
       <label>Action<select name="action">
-        <option value=""{{if .Dot.Filter.Selected ""}} selected{{end}}>All actions</option>
-        <option value="review"{{if .Dot.Filter.Selected "review"}} selected{{end}}>Review</option>
-        <option value="fix"{{if .Dot.Filter.Selected "fix"}} selected{{end}}>Fix</option>
-        <option value="comment"{{if .Dot.Filter.Selected "comment"}} selected{{end}}>Comment</option>
-        <option value="security-audit"{{if .Dot.Filter.Selected "security-audit"}} selected{{end}}>Security audit</option>
+        <option value=""{{if eq .Dot.Filter.Action ""}} selected{{end}}>All actions</option>
+        <option value="review"{{if eq .Dot.Filter.Action "review"}} selected{{end}}>Review</option>
+        <option value="fix"{{if eq .Dot.Filter.Action "fix"}} selected{{end}}>Fix</option>
+        <option value="comment"{{if eq .Dot.Filter.Action "comment"}} selected{{end}}>Comment</option>
+        <option value="security-audit"{{if eq .Dot.Filter.Action "security-audit"}} selected{{end}}>Security audit</option>
       </select></label>
       <button type="submit">Apply filters</button>
     </form>
@@ -91,8 +91,6 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 {{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}`
 
 type adminDashboardFilter struct{ Repo, Requester, Action string }
-
-func (f adminDashboardFilter) Selected(action string) bool { return f.Action == action }
 
 func (f adminDashboardFilter) matches(current *action.DashboardAction) bool {
 	return current != nil &&

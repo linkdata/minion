@@ -115,19 +115,30 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 		t.Fatalf("anonymous dashboard CSS status=%d, want 403", denied.Code)
 	}
 	cookie := dashboardTestCookie(t, handler)
+	acceptedMetric := `<h2>Tracked accepted actions</h2><p class="metric">3</p>`
+	inProgressMetric := `<h2>In progress</h2><p class="metric">1</p>`
 	matching := adminResponse(handler, http.MethodGet, "/?repo=OWNER&requester=writ&action=comment", nil, cookie, "")
 	if matching.Code != http.StatusOK || matching.Header().Get("Cache-Control") != "no-store" ||
 		matching.Header().Get("Content-Security-Policy") == "" || !strings.Contains(matching.Body.String(), "<td>owner/repo</td>") ||
-		!strings.Contains(matching.Body.String(), `<p class="metric">3</p>`) ||
-		!strings.Contains(matching.Body.String(), `<p class="metric">1</p>`) || !strings.Contains(matching.Body.String(), "7m0s") ||
-		!strings.Contains(matching.Body.String(), "1m0s") {
+		!strings.Contains(matching.Body.String(), acceptedMetric) || !strings.Contains(matching.Body.String(), inProgressMetric) ||
+		!strings.Contains(matching.Body.String(), "<dt>Hard action runtime</dt><dd>7m0s</dd>") ||
+		!strings.Contains(matching.Body.String(), "<dt>Executor inactivity</dt><dd>1m0s</dd>") {
 		t.Fatalf("matching dashboard: status=%d body=%s", matching.Code, matching.Body.String())
 	}
 	filtered := adminResponse(handler, http.MethodGet, "/?repo=other", nil, cookie, "")
 	if filtered.Code != http.StatusOK || strings.Contains(filtered.Body.String(), "<td>owner/repo</td>") ||
 		!strings.Contains(filtered.Body.String(), "No current action matches these filters.") ||
+		!strings.Contains(filtered.Body.String(), acceptedMetric) || !strings.Contains(filtered.Body.String(), inProgressMetric) ||
 		!strings.Contains(filtered.Body.String(), `name="repo" value="other"`) {
 		t.Fatalf("request-local filter failed: status=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+	for _, path := range []string{"/?requester=other", "/?action=review"} {
+		mismatch := adminResponse(handler, http.MethodGet, path, nil, cookie, "")
+		if mismatch.Code != http.StatusOK || strings.Contains(mismatch.Body.String(), "<td>owner/repo</td>") ||
+			!strings.Contains(mismatch.Body.String(), "No current action matches these filters.") ||
+			!strings.Contains(mismatch.Body.String(), acceptedMetric) || !strings.Contains(mismatch.Body.String(), inProgressMetric) {
+			t.Fatalf("filter %s did not preserve global counts: status=%d body=%s", path, mismatch.Code, mismatch.Body.String())
+		}
 	}
 	plain := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if plain.Code != http.StatusOK || !strings.Contains(plain.Body.String(), "<td>owner/repo</td>") ||
@@ -177,6 +188,9 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	cookie := dashboardTestCookie(t, handler)
 	tr := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{Repo: "owner/repo"})
 	other := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{Repo: "other/repo"})
+	otherRequester := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{Requester: "other"})
+	otherAction := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{Action: "review"})
+	unfiltered := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{})
 	if !strings.Contains(tr.BodyString(), "No action is in progress.") {
 		t.Fatalf("initial live region: %s", tr.BodyString())
 	}
@@ -189,18 +203,16 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	if patch := dashboardReadPatch(t, tr, "owner/repo", 3*time.Second); !strings.Contains(patch, "Current action") {
 		t.Fatalf("live patch omitted action section: %s", patch)
 	}
-	if patch := dashboardReadPatch(t, other, "No current action matches these filters.", 3*time.Second, "owner/repo"); strings.Contains(patch, "owner/repo") {
-		t.Fatalf("other request received the matching action: %s", patch)
+	for _, request := range []*jawstest.TestRequest{other, otherRequester, otherAction} {
+		dashboardReadPatch(t, request, "No current action matches these filters.", 3*time.Second, "owner/repo")
 	}
+	dashboardReadPatch(t, unfiltered, "owner/repo", 3*time.Second)
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
 	jw.Dirty(adminDashboardDirty)
-	if patch := dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker"); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
-		t.Fatalf("revoked session received private live state: %s", patch)
-	}
-	if patch := dashboardReadPatch(t, other, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker"); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
-		t.Fatalf("other revoked session received private live state: %s", patch)
+	for _, request := range []*jawstest.TestRequest{tr, other, otherRequester, otherAction, unfiltered} {
+		dashboardReadPatch(t, request, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker")
 	}
 }
 
