@@ -34,6 +34,26 @@ func TestCollectionRefusesSymlinkParents(t *testing.T) {
 	}
 }
 
+func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(name, 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := ReadRegular(name, MaxBytes)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not regular") {
+			t.Fatalf("FIFO validation=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("opening FIFO blocked waiting for a writer")
+	}
+}
+
 func TestCollectionRefusesHardlinkedFiles(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside")

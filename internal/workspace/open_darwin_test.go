@@ -6,8 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"golang.org/x/sys/unix"
 )
 
 func bumpTestChangeTime(info *fileInfoWithStat) {
@@ -41,12 +39,5 @@ func TestDarwinAnchoredReadRejectsLinksAndSpecialFiles(t *testing.T) {
 	}
 	if _, err := ReadRegular(file, 6); err == nil {
 		t.Fatal("accepted multiply linked file")
-	}
-	fifo := filepath.Join(dir, "fifo")
-	if err := unix.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ReadRegular(fifo, 6); err == nil {
-		t.Fatal("accepted FIFO")
 	}
 }

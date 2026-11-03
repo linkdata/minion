@@ -8,9 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 )
 
 func bumpTestChangeTime(info *fileInfoWithStat) {
@@ -80,26 +78,6 @@ func TestReadChangesUsesOnlySelectedRegularPaths(t *testing.T) {
 		if _, err := ReadChanges(t.Context(), root, test.selected); err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("selection %+v validation=%v want%q", test.selected, err, test.want)
 		}
-	}
-}
-
-func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
-	name := filepath.Join(t.TempDir(), "fifo")
-	if err := syscall.Mkfifo(name, 0600); err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan error, 1)
-	go func() {
-		_, err := ReadRegular(name, MaxBytes)
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "not regular") {
-			t.Fatalf("FIFO validation=%v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("opening FIFO blocked waiting for a writer")
 	}
 }
 
