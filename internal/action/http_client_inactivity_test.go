@@ -118,6 +118,16 @@ func assertHTTPModelRunning(t *testing.T, stopped <-chan time.Time) {
 	}
 }
 
+func assertHTTPModelRunningNearDeadline(t *testing.T, stopped <-chan time.Time, deadline time.Time) {
+	t.Helper()
+	remaining := time.Until(deadline.Add(-time.Second))
+	if remaining <= 0 {
+		t.Fatalf("model deadline %s is too close for a live check", deadline)
+	}
+	time.Sleep(remaining)
+	assertHTTPModelRunning(t, stopped)
+}
+
 func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	t.Helper()
 	err := <-f.done
@@ -475,14 +485,18 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		job.RuntimeBudget = 25 * time.Second
 		job.InactivityTimeout = 20 * time.Second
 		progress := make(chan func(), 1)
+		modelDeadline := make(chan time.Time, 1)
 		modelStopped := make(chan time.Time, 1)
 		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
 			defer func() { modelStopped <- time.Now() }()
+			deadline, _ := ctx.Deadline()
+			modelDeadline <- deadline
 			progress <- request.onProgress
 			<-ctx.Done()
 			return aicli.Result{}, ctx.Err()
 		})
 		f.waitModel(t)
+		deadline := <-modelDeadline
 		renew := <-progress
 		time.Sleep(4 * time.Second)
 		renew()
@@ -490,7 +504,8 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		time.Sleep(4 * time.Second)
 		renew()
 		assertHTTPModelRunning(t, modelStopped)
-		time.Sleep(18 * time.Second)
+		assertHTTPModelRunningNearDeadline(t, modelStopped, deadline)
+		time.Sleep(2 * time.Second)
 		var err error
 		select {
 		case err = <-f.done:
@@ -521,14 +536,18 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		job.RuntimeBudget = 30 * time.Second
 		job.InactivityTimeout = 12 * time.Second
 		progress := make(chan func(), 1)
+		modelDeadline := make(chan time.Time, 1)
 		modelStopped := make(chan time.Time, 1)
 		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
 			defer func() { modelStopped <- time.Now() }()
+			deadline, _ := ctx.Deadline()
+			modelDeadline <- deadline
 			progress <- request.onProgress
 			<-ctx.Done()
 			return aicli.Result{}, ctx.Err()
 		}, 20*time.Second)
 		f.waitModel(t)
+		deadline := <-modelDeadline
 		parentDeadline, ok := f.parent.tx.budget.Deadline()
 		if !ok {
 			t.Fatal("parent action has no hard deadline")
@@ -540,7 +559,8 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		time.Sleep(6 * time.Second)
 		renew()
 		assertHTTPModelRunning(t, modelStopped)
-		time.Sleep(9 * time.Second)
+		assertHTTPModelRunningNearDeadline(t, modelStopped, deadline)
+		time.Sleep(2 * time.Second)
 		var err error
 		select {
 		case err = <-f.done:
