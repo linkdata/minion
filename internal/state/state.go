@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -337,22 +336,9 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
-	decoder := json.NewDecoder(f)
-	decoder.DisallowUnknownFields()
-	if err = decoder.Decode(&store.Data); err != nil {
-		err = fmt.Errorf("decode state: %w", err)
-	}
-	if err == nil {
-		var trailing any
-		if decoder.Decode(&trailing) != io.EOF {
-			err = fmt.Errorf("decode state: trailing data")
-		}
-	}
+	store.Data, err = decodeStateData(f)
 	err = errors.Join(err, f.Close())
 	if err != nil {
-		return nil, errors.Join(err, store.Close())
-	}
-	if err := validateData(store.Data); err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
 	if store.Data.Processed == nil {

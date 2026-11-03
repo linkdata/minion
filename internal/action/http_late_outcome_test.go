@@ -55,12 +55,12 @@ func (b *outcomeReadBarrier) Read(data []byte) (int, error) {
 	return b.ReadCloser.Read(data)
 }
 
-func sendHTTPOutcome(client *http.Client, url string, outcome httpOutcome, hint, stall string) httpServerTestExchange {
+func sendHTTPOutcome(ctx context.Context, client *http.Client, url string, outcome httpOutcome, hint, stall string) httpServerTestExchange {
 	data, err := json.Marshal(outcome)
 	if err != nil {
 		return httpServerTestExchange{err: err}
 	}
-	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return httpServerTestExchange{err: err}
 	}
@@ -185,27 +185,13 @@ func lateOutcomeEndpoint(t *testing.T, owner *Orchestrator) (*RemoteEndpoint, *h
 
 func postLateOutcome(t *testing.T, client *http.Client, origin string, outcome httpOutcome) (int, httpAcknowledgement) {
 	t.Helper()
-	data, err := json.Marshal(outcome)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/outcome", bytes.NewReader(data))
-	if err != nil {
-		t.Fatal(err)
+	got := sendHTTPOutcome(ctx, client, origin+"/outcome", outcome, "", "")
+	if got.err != nil {
+		t.Fatal(got.err)
 	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var ack httpAcknowledgement
-	if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil {
-		t.Fatal(err)
-	}
-	return response.StatusCode, ack
+	return got.status, got.ack
 }
 
 func waitLateError(t *testing.T, done <-chan error) error {
@@ -551,8 +537,10 @@ func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
 	f.pull(t)
 	oldTx := f.tx
 	oldDone := make(chan httpServerTestExchange, 1)
+	oldCtx, cancelOld := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelOld()
 	go func() {
-		oldDone <- sendHTTPOutcome(f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
+		oldDone <- sendHTTPOutcome(oldCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
 			httpBindingDigest(httpJobBinding(f.job)), "old")
 	}()
 	select {
@@ -595,8 +583,20 @@ func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
 		}
 	}
 	f.pull(t)
-	current := sendHTTPOutcome(f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
-		httpBindingDigest(httpJobBinding(newJob)), "")
+	currentCtx, cancelCurrent := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelCurrent()
+	currentDone := make(chan httpServerTestExchange, 1)
+	go func() {
+		currentDone <- sendHTTPOutcome(currentCtx, f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
+			httpBindingDigest(httpJobBinding(newJob)), "")
+	}()
+	var current httpServerTestExchange
+	select {
+	case current = <-currentDone:
+	case <-currentCtx.Done():
+		close(release)
+		t.Fatal("new active upload waited for the stalled old read")
+	}
 	if current.err != nil || current.status != http.StatusOK || current.ack.Failure != nil {
 		t.Fatalf("new active upload waited for old read: %+v", current)
 	}
@@ -604,7 +604,13 @@ func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
 		t.Fatalf("new transaction failed: %v", got.err)
 	}
 	close(release)
-	if old := <-oldDone; old.err != nil || old.status != http.StatusOK || old.ack.Failure != nil {
+	var old httpServerTestExchange
+	select {
+	case old = <-oldDone:
+	case <-oldCtx.Done():
+		t.Fatal("old upload did not finish after its read barrier was released")
+	}
+	if old.err != nil || old.status != http.StatusOK || old.ack.Failure != nil {
 		t.Fatalf("old fenced upload failed late receipt: %+v", old)
 	}
 }

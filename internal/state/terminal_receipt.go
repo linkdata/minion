@@ -18,18 +18,26 @@ func (s *Store) ReadSaved() (Data, error) {
 		return Data{}, err
 	}
 	defer f.Close()
+	data, err := decodeStateData(f)
+	if err != nil {
+		return Data{}, fmt.Errorf("read saved state: %w", err)
+	}
+	return data, nil
+}
+
+func decodeStateData(reader io.Reader) (Data, error) {
 	var data Data
-	decoder := json.NewDecoder(f)
+	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&data); err != nil {
-		return Data{}, fmt.Errorf("decode saved state: %w", err)
+		return Data{}, fmt.Errorf("decode state: %w", err)
 	}
 	var trailing any
 	if decoder.Decode(&trailing) != io.EOF {
-		return Data{}, errors.New("decode saved state: trailing data")
+		return Data{}, errors.New("decode state: trailing data")
 	}
 	if err := validateData(data); err != nil {
-		return Data{}, fmt.Errorf("validate saved state: %w", err)
+		return Data{}, err
 	}
 	return data, nil
 }
