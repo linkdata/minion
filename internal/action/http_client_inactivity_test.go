@@ -21,6 +21,7 @@ import (
 type httpInactivityFixture struct {
 	parent         *httpServerTest
 	modelStarted   chan struct{}
+	assignedAt     chan time.Time
 	outcomeEntered chan struct{}
 	releaseOutcome func()
 	done           chan error
@@ -57,7 +58,7 @@ func (b *httpPullCloseSignal) Close() error {
 func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model func(context.Context, modelRun) (aicli.Result, error), workerBudget ...time.Duration) *httpInactivityFixture {
 	t.Helper()
 	f := &httpInactivityFixture{
-		modelStarted: make(chan struct{}, 1), outcomeEntered: make(chan struct{}, 1),
+		modelStarted: make(chan struct{}, 1), assignedAt: make(chan time.Time, 1), outcomeEntered: make(chan struct{}, 1),
 		done: make(chan error, 1),
 	}
 	releaseOutcome := make(chan struct{})
@@ -67,6 +68,7 @@ func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model fun
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/next" && len(workerBudget) != 0 {
 					next.(*HTTPExecutor).serveNextEncoded(w, r, func(assignment httpAssignment) ([]byte, error) {
+						f.assignedAt <- time.Now()
 						assignment.Job.RuntimeBudget = workerBudget[0]
 						return httpEncode(assignment, httpJobBytes)
 					})
@@ -126,6 +128,13 @@ func assertHTTPModelRunningNearDeadline(t *testing.T, stopped <-chan time.Time, 
 	}
 	time.Sleep(remaining)
 	assertHTTPModelRunning(t, stopped)
+}
+
+func assertHTTPDeadlineNear(t *testing.T, got, want time.Time) {
+	t.Helper()
+	if got.Before(want.Add(-time.Second)) || got.After(want.Add(time.Second)) {
+		t.Fatalf("model deadline %s differs from assigned hard deadline %s", got, want)
+	}
 }
 
 func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
@@ -497,6 +506,11 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		})
 		f.waitModel(t)
 		deadline := <-modelDeadline
+		parentDeadline, ok := f.parent.tx.budget.Deadline()
+		if !ok {
+			t.Fatal("parent action has no hard deadline")
+		}
+		assertHTTPDeadlineNear(t, deadline, parentDeadline)
 		renew := <-progress
 		time.Sleep(4 * time.Second)
 		renew()
@@ -548,6 +562,7 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		}, 20*time.Second)
 		f.waitModel(t)
 		deadline := <-modelDeadline
+		assertHTTPDeadlineNear(t, deadline, (<-f.assignedAt).Add(20*time.Second))
 		parentDeadline, ok := f.parent.tx.budget.Deadline()
 		if !ok {
 			t.Fatal("parent action has no hard deadline")
