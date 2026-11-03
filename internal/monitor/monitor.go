@@ -2034,11 +2034,12 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	if !time.Now().Before(job.Deadline) {
 		return finish(context.DeadlineExceeded)
 	}
-	var savedResultAtStart bool
+	var savedResultAtStart, resultReadyAtStart bool
 	_ = store.WithLock(func() error {
 		accepted := store.Data.Accepted
-		savedResultAtStart = accepted != nil && accepted.JobID == job.ID &&
-			accepted.AttemptID == job.AttemptID && savedReplyPriority(accepted, store.Data.PublicationWrites)
+		resultReadyAtStart = accepted != nil && accepted.JobID == job.ID &&
+			accepted.AttemptID == job.AttemptID && accepted.ResultReady
+		savedResultAtStart = resultReadyAtStart && savedReplyPriority(accepted, store.Data.PublicationWrites)
 		return nil
 	})
 	controlDeadline := job.Deadline.Add(-fixPublicationReserve)
@@ -2190,7 +2191,7 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			}
 		}
 		stopStatus := "unverified"
-		if !errors.Is(workerResult, ErrExecutionOutcomeUnknown) {
+		if !resultReadyAtStart && !errors.Is(workerResult, ErrExecutionOutcomeUnknown) {
 			if cleaner, ok := m.Handler.(interface{ StopCleanupVerified() bool }); ok && cleaner.StopCleanupVerified() {
 				stopStatus = "confirmed"
 			} else {

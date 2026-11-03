@@ -51,13 +51,16 @@ func TestRequestStopChecksAttemptAndPreservesFirstRequester(t *testing.T) {
 	if err != nil || ctx.Err() != context.Canceled || !store.Data.Accepted.Terminal || store.Data.LastStopJobID != accepted.JobID {
 		t.Fatalf("stop request: request=%+v error=%v state=%+v", request, err, store.Data)
 	}
+	savedPath := store.path
+	store.path = filepath.Join(filepath.Dir(savedPath), "missing", "state.json")
 	if repeated, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "other-admin", at.Add(time.Minute)); err != nil || repeated != request {
-		t.Fatalf("repeat changed first requester: request=%+v error=%v", repeated, err)
+		t.Fatalf("repeat rewrote a durable request: request=%+v error=%v", repeated, err)
 	}
 	unregister()
 	if repeated, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "other-admin", at.Add(2*time.Minute)); err != nil || repeated != request {
-		t.Fatalf("pending cleanup repeat without live slot changed request: request=%+v error=%v", repeated, err)
+		t.Fatalf("pending cleanup repeat rewrote a durable request: request=%+v error=%v", repeated, err)
 	}
+	store.path = savedPath
 	decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", at.Add(time.Second))
 	if err != nil || decision.Outcome != "canceled" || decision.StopRequest != request || decision.OutcomeBinding != accepted.OutcomeBinding {
 		t.Fatalf("completion overwrote stop: decision=%+v error=%v", decision, err)
@@ -112,6 +115,9 @@ func TestRequestStopCannotReplaceCompletedDecision(t *testing.T) {
 }
 
 func TestRequestStopPostReplacementErrorStillCancelsAndRecovers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not sync directories after atomic replacement")
+	}
 	store, path, accepted := stopStoreFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -140,6 +146,9 @@ func TestRequestStopPostReplacementErrorStillCancelsAndRecovers(t *testing.T) {
 }
 
 func TestRequestStopUnconfirmedDirectorySyncCancelsWithoutAcknowledgment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not sync directories after atomic replacement")
+	}
 	store, path, accepted := stopStoreFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()

@@ -17,6 +17,59 @@ type stopCleanupHandler struct {
 
 func (h *stopCleanupHandler) StopCleanupVerified() bool { return h.clean }
 
+type cleanRecoveredStopHandler struct {
+	fakeHandler
+	entered chan struct{}
+}
+
+func (*cleanRecoveredStopHandler) StopCleanupVerified() bool { return true }
+
+func (h *cleanRecoveredStopHandler) PublishRecovered(ctx context.Context, _ Job) error {
+	close(h.entered)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestForceStopDuringRecoveredPublicationCannotConfirmOldWorker(t *testing.T) {
+	store, path, accepted, _, m := storedRecoveryFixture(t)
+	if err := store.WriteAcceptedResult([]byte(`{"result":{"diagnostics":[{"code":"cleanup_failed"}]}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, accepted.AcceptedAt.Add(-time.Minute))
+	handler := &cleanRecoveredStopHandler{entered: make(chan struct{})}
+	m.Handler = handler
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	finished := make(chan error, 1)
+	go func() {
+		_, err := m.RunOnce(ctx, reopened)
+		finished <- err
+	}()
+	select {
+	case <-handler.entered:
+	case <-ctx.Done():
+		t.Fatal("saved publication did not start")
+	}
+	if _, err := reopened.RequestStop(accepted.JobID, accepted.AttemptID, "operator", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("saved publication stop: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("saved publication did not stop")
+	}
+	decision := reopened.Data.TerminalDecisions[accepted.JobID]
+	if decision.StopRequest.Status != "unverified" {
+		t.Fatalf("new idle executor confirmed old worker cleanup: %+v", decision)
+	}
+}
+
 func TestForceStopFencesPublicationAndWaitsForCleanupEvidence(t *testing.T) {
 	for _, test := range []struct {
 		name, wantStatus string

@@ -17,6 +17,11 @@ type selectedStopCancel struct {
 	cancel           context.CancelFunc
 }
 
+type savedStopRequest struct {
+	jobID, attemptID string
+	request          StopRequest
+}
+
 // RequestStop saves the first request and fences new assignment/publication
 // before canceling the live selected execution. A repeat preserves its author.
 func (s *Store) RequestStop(jobID, attemptID, requestedBy string, at time.Time) (StopRequest, error) {
@@ -30,9 +35,23 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 	}
 	var request StopRequest
 	err := s.WithLock(func() error {
+		cached := func(stop StopRequest) bool {
+			return s.savedStop.jobID == jobID && s.savedStop.attemptID == attemptID && s.savedStop.request == stop
+		}
+		remember := func(stop StopRequest) { s.savedStop = savedStopRequest{jobID, attemptID, stop} }
 		if active := s.activeStop; active.cancel == nil || active.jobID != jobID || active.attemptID != attemptID {
 			// Preparation and terminal cleanup still use the monitor's private
 			// state path. Confirm the saved request before acknowledging a repeat.
+			if accepted := s.Data.Accepted; accepted != nil && accepted.JobID == jobID && accepted.AttemptID == attemptID &&
+				accepted.StopRequest != (StopRequest{}) && cached(accepted.StopRequest) {
+				request = accepted.StopRequest
+				return nil
+			}
+			if decision := s.Data.TerminalDecisions[jobID]; decision.AttemptID == attemptID &&
+				decision.StopRequest != (StopRequest{}) && cached(decision.StopRequest) {
+				request = decision.StopRequest
+				return nil
+			}
 			saved, err := readSavedDurable()
 			if err != nil {
 				return fmt.Errorf("read saved stop request: %w", err)
@@ -40,10 +59,12 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 			if accepted := saved.Accepted; accepted != nil && accepted.JobID == jobID && accepted.AttemptID == attemptID &&
 				accepted.StopRequest != (StopRequest{}) {
 				request = accepted.StopRequest
+				remember(request)
 				return nil
 			}
 			if decision := saved.TerminalDecisions[jobID]; decision.AttemptID == attemptID && decision.StopRequest != (StopRequest{}) {
 				request = decision.StopRequest
+				remember(request)
 				return nil
 			}
 			return ErrStopConflict
@@ -58,6 +79,23 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 		}
 		if _, decided := s.Data.TerminalDecisions[jobID]; accepted.StopRequest == (StopRequest{}) && (accepted.Terminal || decided) {
 			return ErrStopConflict
+		}
+		if accepted.StopRequest != (StopRequest{}) {
+			request = accepted.StopRequest
+			if cached(request) {
+				s.cancelSelectedLocked(jobID, attemptID)
+				return nil
+			}
+			saved, err := readSavedDurable()
+			if err != nil {
+				return fmt.Errorf("read saved stop request: %w", err)
+			}
+			if current := saved.Accepted; current != nil && current.JobID == jobID && current.AttemptID == attemptID &&
+				current.StopRequest == request {
+				remember(request)
+				s.cancelSelectedLocked(jobID, attemptID)
+				return nil
+			}
 		}
 		previous := *accepted
 		previousLastStop := s.Data.LastStopJobID
@@ -84,6 +122,7 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 			}
 			return fmt.Errorf("save stop request: %w", err)
 		}
+		remember(request)
 		s.cancelSelectedLocked(jobID, attemptID)
 		return nil
 	})
@@ -151,6 +190,7 @@ func (s *Store) ResolveStop(jobID, attemptID, status string) error {
 		if err := s.Save(); err != nil {
 			return fmt.Errorf("save stop resolution: %w", err)
 		}
+		s.savedStop = savedStopRequest{jobID, attemptID, accepted.StopRequest}
 		return nil
 	})
 }

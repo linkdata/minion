@@ -290,6 +290,7 @@ type Store struct {
 	mu             sync.Mutex
 	privateRecords sync.Mutex
 	activeStop     selectedStopCancel // Guarded by mu.
+	savedStop      savedStopRequest   // Guarded by mu; successful persistence proof for repeats.
 	syncDir        string             // Test-only extra directory for a post-rename sync failure.
 	Data           Data
 }
