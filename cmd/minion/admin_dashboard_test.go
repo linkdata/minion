@@ -424,7 +424,7 @@ func TestAdminForceStopUsesSessionAndSelectedAttempt(t *testing.T) {
 		t.Fatalf("stop did not save session requester/fence: state=%+v error=%v", saved, err)
 	}
 	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
-		!strings.Contains(got.Body.String(), "Waiting for worker termination") ||
+		!strings.Contains(got.Body.String(), "Waiting for the stop to be verified.") ||
 		strings.Contains(got.Body.String(), "Force stop this attempt") {
 		t.Fatalf("requested status/form incorrect: status=%d body=%s", got.Code, got.Body.String())
 	}
@@ -442,7 +442,7 @@ func TestAdminForceStopUsesSessionAndSelectedAttempt(t *testing.T) {
 	}
 	unregister()
 	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
-		!strings.Contains(got.Body.String(), "Worker attempt termination was verified") ||
+		!strings.Contains(got.Body.String(), "The attempt stopped cleanly.") ||
 		!strings.Contains(got.Body.String(), "operator") {
 		t.Fatalf("confirmed stop disappeared after accepted cleanup: status=%d body=%s", got.Code, got.Body.String())
 	}

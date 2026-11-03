@@ -85,7 +85,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 {{if .Snapshot.LastStop}}<section class="panel stop-status"><h2>Latest force stop</h2>
   <p><strong>{{.Snapshot.LastStop.Status}}</strong> · {{.Snapshot.LastStop.JobID}} / attempt {{.Snapshot.LastStop.AttemptID}}</p>
   <p class="hint">Requested by {{.Snapshot.LastStop.RequestedBy}} at {{utc .Snapshot.LastStop.RequestedAt}}.
-  {{if eq .Snapshot.LastStop.Status "requested"}}Waiting for worker termination to be verified.{{else if eq .Snapshot.LastStop.Status "confirmed"}}The attempt stopped cleanly.{{else}}Worker termination could not be verified; inspect worker readiness before reuse.{{end}}</p>
+  {{if eq .Snapshot.LastStop.Status "requested"}}Waiting for the stop to be verified.{{else if eq .Snapshot.LastStop.Status "confirmed"}}The attempt stopped cleanly.{{else}}The stop could not be verified; inspect worker readiness before reuse.{{end}}</p>
 </section>{{end}}
 {{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}
 {{define "dashboard-action"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
