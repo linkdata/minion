@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -164,6 +165,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			select {
 			case <-preparing:
 			case <-ctx.Done():
+				logger.SetOutput(io.Discard)
 				t.Fatalf("preparation never paused: %v; log=%s", ctx.Err(), logs.String())
 			}
 			mu.Lock()
@@ -182,6 +184,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			select {
 			case <-finished:
 			case <-ctx.Done():
+				logger.SetOutput(io.Discard)
 				t.Fatalf("selected service did not finish: %v; log=%s", ctx.Err(), logs.String())
 			}
 			if err := store.Close(); err != nil {
