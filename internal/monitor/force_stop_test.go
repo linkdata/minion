@@ -32,9 +32,6 @@ func (h *cleanRecoveredStopHandler) PublishRecovered(ctx context.Context, _ Job)
 
 func TestForceStopDuringRecoveredPublicationCannotConfirmOldWorker(t *testing.T) {
 	store, path, accepted, _, m := storedRecoveryFixture(t)
-	if err := store.WriteAcceptedResult([]byte(`{"result":{"diagnostics":[{"code":"cleanup_failed"}]}}`)); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
