@@ -105,8 +105,11 @@ printf '{"type":"turn.completed","usage":{"input_tokens":%s,"cached_input_tokens
 	job.Critic = &RoleSettings{Provider: "codex", Model: "critic-model", Effort: "medium"}
 	job.CriticMaxRounds = 2
 	result, err := (&Runner{WorkRoot: root}).Run(t.Context(), job)
-	if err != nil || result.Answer != "done" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "candidate 2" || len(result.Calls) != 5 || result.Validate(job) != nil {
+	if err != nil || result.Answer != "done" || len(result.Changes) != 1 || string(result.Changes[0].Data) != "candidate 2" || len(result.Calls) != 5 {
 		t.Fatalf("Codex pair fix result=%+v error=%v", result, err)
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("Codex pair fix result failed validation: %v", err)
 	}
 	read := func(path string) string {
 		t.Helper()
