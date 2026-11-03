@@ -13,6 +13,7 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: .8rem clamp(1rem, 4vw, 3rem); border-bottom: 1px solid #39505b; background: #15242c; }
 .topbar strong { letter-spacing: .2em; color: #e8c88f; }
 .topbar span { color: #abb9b8; }
+.topbar a { color: #e8c88f; }
 .topbar button { background: transparent; color: #edf1ee; border-color: #788b90; }
 .topbar button:hover { background: #2c414b; }
 main { max-width: 100rem; margin: 0 auto; padding: 2rem clamp(1rem, 4vw, 3rem) 4rem; }

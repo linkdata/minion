@@ -54,6 +54,8 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("POST /admin/logout", access.logout)
 	mux.Handle("GET /{$}", adminDashboardHandler(jw, owner))
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
+	mux.Handle("GET /admin/usage", adminUsageHandler(owner, false))
+	mux.Handle("GET /admin/usage.json", adminUsageHandler(owner, true))
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
 	// body-reading callback, which must not inherit an immediate read deadline.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

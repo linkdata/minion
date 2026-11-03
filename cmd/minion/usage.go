@@ -116,31 +116,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(1, err)
 	}
-	output := usageOutput{GroupBy: []string{}, ActionCoverage: query.ActionCoverage, Groups: []usage.Summary{}, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
-	output.Filters.Repo, output.Filters.User = filter.Repo, filter.User
-	output.Filters.Service, output.Filters.RequesterID = filter.Service, filter.RequesterID
-	if !since.IsZero() {
-		output.Filters.From = since.Format(time.RFC3339Nano)
-	}
-	if !until.IsZero() {
-		output.Filters.To = until.Format(time.RFC3339Nano)
-	}
-	output.Totals = query.Totals
-	if details {
-		for _, detail := range query.Attempts {
-			record := detail.Record
-			record.UsageComplete = record.UsageComplete && record.Status != "running"
-			attempt := usageAttempt{Record: record, TotalTokens: record.Tokens.Total()}
-			if filter.Service != "" {
-				selected := detail.Usage
-				attempt.SelectedUsage = &selected
-			}
-			output.Attempts = append(output.Attempts, attempt)
-		}
-	} else {
-		output.GroupBy = groups
-		output.Groups = query.Groups
-	}
+	output := usageReport(filter, groups, query)
 	if *jsonOutput {
 		encoder := json.NewEncoder(stdout)
 		encoder.SetIndent("", "  ")
@@ -152,6 +128,35 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 		return fail(1, fmt.Errorf("write report: %w", err))
 	}
 	return 0
+}
+
+// usageReport keeps CLI and admin exports on the same accounting contract.
+func usageReport(filter usage.Filter, groups []string, query usage.QueryResult) usageOutput {
+	output := usageOutput{GroupBy: []string{}, ActionCoverage: query.ActionCoverage, Groups: []usage.Summary{}, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
+	output.Filters.Repo, output.Filters.User = filter.Repo, filter.User
+	output.Filters.Service, output.Filters.RequesterID = filter.Service, filter.RequesterID
+	if !filter.Since.IsZero() {
+		output.Filters.From = filter.Since.Format(time.RFC3339Nano)
+	}
+	if !filter.Until.IsZero() {
+		output.Filters.To = filter.Until.Format(time.RFC3339Nano)
+	}
+	output.Totals = query.Totals
+	if len(groups) != 0 {
+		output.GroupBy = groups
+	}
+	output.Groups = query.Groups
+	for _, detail := range query.Attempts {
+		record := detail.Record
+		record.UsageComplete = record.UsageComplete && record.Status != "running"
+		attempt := usageAttempt{Record: record, TotalTokens: record.Tokens.Total()}
+		if filter.Service != "" {
+			selected := detail.Usage
+			attempt.SelectedUsage = &selected
+		}
+		output.Attempts = append(output.Attempts, attempt)
+	}
+	return output
 }
 
 func parseUsageTime(value string) (time.Time, error) {

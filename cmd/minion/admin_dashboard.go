@@ -30,6 +30,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 <body>
   <header class="topbar">
     <div><strong>MINION</strong><span> / operator</span></div>
+    <nav><a href="/admin/usage">Usage</a></nav>
     <form method="post" action="/admin/logout"><button type="submit">Sign out</button></form>
   </header>
   <main>
