@@ -108,6 +108,16 @@ func (f *httpInactivityFixture) waitModel(t *testing.T) {
 	}
 }
 
+func assertHTTPModelRunning(t *testing.T, stopped <-chan time.Time) {
+	t.Helper()
+	synctest.Wait()
+	select {
+	case at := <-stopped:
+		t.Fatalf("model stopped before hard deadline at %s", at)
+	default:
+	}
+}
+
 func (f *httpInactivityFixture) assertInactivity(t *testing.T) {
 	t.Helper()
 	err := <-f.done
@@ -465,18 +475,22 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		job.RuntimeBudget = 25 * time.Second
 		job.InactivityTimeout = 20 * time.Second
 		progress := make(chan func(), 1)
+		modelStopped := make(chan time.Time, 1)
 		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			defer func() { modelStopped <- time.Now() }()
 			progress <- request.onProgress
 			<-ctx.Done()
 			return aicli.Result{}, ctx.Err()
 		})
 		f.waitModel(t)
 		renew := <-progress
-		time.Sleep(15 * time.Second)
+		time.Sleep(10 * time.Second)
 		renew()
-		time.Sleep(8 * time.Second)
+		assertHTTPModelRunning(t, modelStopped)
+		time.Sleep(10 * time.Second)
 		renew()
-		time.Sleep(3 * time.Second)
+		assertHTTPModelRunning(t, modelStopped)
+		time.Sleep(6 * time.Second)
 		var err error
 		select {
 		case err = <-f.done:
@@ -493,7 +507,9 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		// Parent stop and worker cap can race near the hard deadline.
 		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline ||
 			reported.failure.RuntimeCap != errors.Is(err, errExecutorRuntimeCap) ||
-			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport || len(got.result.Calls) != 1 {
+			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport ||
+			errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrRequestTransport) ||
+			len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
 		}
 	})
@@ -505,20 +521,26 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		job.RuntimeBudget = 30 * time.Second
 		job.InactivityTimeout = 12 * time.Second
 		progress := make(chan func(), 1)
+		modelStopped := make(chan time.Time, 1)
 		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			defer func() { modelStopped <- time.Now() }()
 			progress <- request.onProgress
 			<-ctx.Done()
 			return aicli.Result{}, ctx.Err()
 		}, 20*time.Second)
 		f.waitModel(t)
+		parentDeadline, ok := f.parent.tx.budget.Deadline()
+		if !ok {
+			t.Fatal("parent action has no hard deadline")
+		}
 		renew := <-progress
-		time.Sleep(10 * time.Second)
+		time.Sleep(6 * time.Second)
 		renew()
-		synctest.Wait()
-		time.Sleep(8 * time.Second)
+		assertHTTPModelRunning(t, modelStopped)
+		time.Sleep(6 * time.Second)
 		renew()
-		synctest.Wait()
-		time.Sleep(3 * time.Second)
+		assertHTTPModelRunning(t, modelStopped)
+		time.Sleep(9 * time.Second)
 		var err error
 		select {
 		case err = <-f.done:
@@ -529,10 +551,15 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) {
 			t.Fatalf("worker runtime cap did not stop chatty model: %v", err)
 		}
+		if stoppedAt := <-modelStopped; !stoppedAt.Before(parentDeadline) {
+			t.Fatalf("model stopped at %s after parent deadline %s", stoppedAt, parentDeadline)
+		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
 		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
-			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport || len(got.result.Calls) != 1 {
+			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport ||
+			errors.Is(got.err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(got.err, monitor.ErrRequestTransport) ||
+			len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost worker runtime cap: error=%v result=%+v", got.err, got.result)
 		}
 	})
