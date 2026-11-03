@@ -164,7 +164,7 @@ Remove-Item -Recurse -Force $adminHashEnv
 
 Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; success opens `/`, whose form sends `POST /admin/logout` to revoke the session. The live dashboard shows the current action from preparation through publication, worker readiness and phase, the last received worker status and the worker-reported time since execution progress at that status. It checks for changes every two seconds while connected. Repository, requester and action filters apply only to the current action and live in the URL, not the session. The tracked accepted-action total begins when this counter is introduced; older accepted actions are not backfilled from incomplete usage records or terminal decisions. A worker status alone does not prove readiness or reset the configured inactivity limit.
 
-The authenticated `/admin/usage` page filters usage by UTC start date (`from` inclusive, `to` exclusive), repository, requester login or ID, and service. `/admin/usage.json` exports the same filtered records and totals. Both use the `minion usage` accounting query; incomplete and unallocated usage remain labeled, and billed credits are unknown.
+The authenticated `/admin/usage` page filters usage by UTC start date (`from` inclusive, `to` exclusive), repository, requester login or ID, and service. `/admin/usage.json` exports the same filtered records and totals. With a service filter, totals and `selected_usage` reflect that service, while each attempt's `tokens` retains usage from all services in the attempt. Both use the `minion usage` accounting query; incomplete and unallocated usage remain labeled, and billed credits are unknown.
 
 JaWS keeps sessions in memory, so they end on restart or after one minute without an attached JaWS page. Sessions are also bound to the client IP seen by Minion, so changing networks can require signing in again. The signed-in `/admin/login` page does not attach a JaWS request, so its session expires after roughly one minute even while the page stays open. Failed logins are limited per configured username and in one shared bucket for unknown usernames. These separate limits can reveal configured usernames after repeated failures; usernames should not be treated as secrets. At most two password hashes run concurrently.
 
@@ -453,7 +453,8 @@ The service starts recording usage after command validation, duplicate-reply che
 ./bin/minion usage -service codex -requester-id 123 -json
 
 # Keep ID-bearing usage together across repository renames or reused names.
-./bin/minion usage -repository-id 456 -json
+# The default repo,user,action grouping still splits rows by historical names.
+./bin/minion usage -repository-id 456 -group-by repository_id -json
 
 # Export attempts with model, effort, outcome and source URL.
 # Executor and source commit are present when a model call was recorded.
