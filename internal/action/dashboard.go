@@ -161,6 +161,12 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if accepted == nil {
 		return snapshot, nil
 	}
+	decision, decided := data.TerminalDecisions[accepted.JobID]
+	if observation.kind == "remote" && snapshot.Worker.Readiness == "ready" &&
+		(accepted.ResultReady || accepted.Terminal || decided && decision.AttemptID == accepted.AttemptID) {
+		// The held pull can arrive after Outcome but before accepted cleanup retires it.
+		snapshot.Worker.Readiness = "waiting for accepted cleanup"
+	}
 	snapshot.InProgress = 1
 	remaining := accepted.Deadline.Sub(now)
 	if remaining < 0 {
@@ -178,7 +184,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if accepted.Terminal {
 		action.Phase = "terminal cleanup"
 	}
-	if decision, ok := data.TerminalDecisions[accepted.JobID]; ok && decision.AttemptID == accepted.AttemptID {
+	if decided && decision.AttemptID == accepted.AttemptID {
 		action.Phase = "terminal cleanup: " + decision.Outcome
 	}
 	snapshot.Action = action

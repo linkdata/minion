@@ -210,60 +210,76 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 		t.Fatalf("network login: status=%d cookies=%d", login.StatusCode, len(login.Cookies()))
 	}
 	cookie := login.Cookies()[0]
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.AddCookie(cookie)
-	page, err := client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pageBody, readErr := io.ReadAll(io.LimitReader(page.Body, 1<<20))
-	closeErr := page.Body.Close()
-	if readErr != nil || closeErr != nil {
-		t.Fatalf("read dashboard: read=%v close=%v", readErr, closeErr)
-	}
-	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "No action is in progress.") {
-		t.Fatalf("network dashboard: status=%d body=%s", page.StatusCode, pageBody)
-	}
-	_, afterKey, found := strings.Cut(string(pageBody), `<meta name="jawsKey" content="`)
-	if !found {
-		t.Fatal("dashboard omitted JaWS connection key")
-	}
-	key, _, found := strings.Cut(afterKey, `"`)
-	if !found || key == "" {
-		t.Fatal("dashboard JaWS connection key is empty")
-	}
 	wsContext, cancel := context.WithTimeout(t.Context(), 6*time.Second)
 	defer cancel()
-	header := http.Header{}
-	header.Set("Cookie", cookie.Name+"="+cookie.Value)
-	header.Set("Origin", baseURL)
-	conn, upgrade, err := websocket.Dial(wsContext, "ws://"+admin.listener.Addr().String()+"/jaws/"+key,
-		&websocket.DialOptions{HTTPHeader: header})
-	if err != nil {
-		t.Fatalf("authenticated dashboard WebSocket: %v", err)
+	connect := func(path string) *websocket.Conn {
+		t.Helper()
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.AddCookie(cookie)
+		page, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pageBody, readErr := io.ReadAll(io.LimitReader(page.Body, 1<<20))
+		closeErr := page.Body.Close()
+		if readErr != nil || closeErr != nil {
+			t.Fatalf("read dashboard: read=%v close=%v", readErr, closeErr)
+		}
+		if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "No action is in progress.") {
+			t.Fatalf("network dashboard %s: status=%d body=%s", path, page.StatusCode, pageBody)
+		}
+		_, afterKey, found := strings.Cut(string(pageBody), `<meta name="jawsKey" content="`)
+		if !found {
+			t.Fatal("dashboard omitted JaWS connection key")
+		}
+		key, _, found := strings.Cut(afterKey, `"`)
+		if !found || key == "" {
+			t.Fatal("dashboard JaWS connection key is empty")
+		}
+		header := http.Header{}
+		header.Set("Cookie", cookie.Name+"="+cookie.Value)
+		header.Set("Origin", baseURL)
+		conn, upgrade, err := websocket.Dial(wsContext, "ws://"+admin.listener.Addr().String()+"/jaws/"+key,
+			&websocket.DialOptions{HTTPHeader: header})
+		if err != nil {
+			t.Fatalf("authenticated dashboard WebSocket %s: %v", path, err)
+		}
+		if upgrade == nil || upgrade.StatusCode != http.StatusSwitchingProtocols {
+			t.Fatalf("dashboard WebSocket upgrade: %+v", upgrade)
+		}
+		return conn
 	}
-	defer conn.Close(websocket.StatusNormalClosure, "")
-	if upgrade == nil || upgrade.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("dashboard WebSocket upgrade: %+v", upgrade)
-	}
+	matching := connect("/?repo=owner")
+	defer matching.Close(websocket.StatusNormalClosure, "")
+	other := connect("/?repo=other")
+	defer other.Close(websocket.StatusNormalClosure, "")
 	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
 	store.Data.AcceptedTotal = 1
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		_, patch, err := conn.Read(wsContext)
-		if err != nil {
-			t.Fatalf("ticker did not patch authenticated WebSocket: %v", err)
-		}
-		if strings.Contains(string(patch), "owner/repo") {
-			if !strings.Contains(string(patch), "Current action") {
-				t.Fatalf("ticker patch omitted action section: %s", patch)
+	readPatch := func(conn *websocket.Conn, want string, forbidden ...string) string {
+		t.Helper()
+		for {
+			_, patch, err := conn.Read(wsContext)
+			if err != nil {
+				t.Fatalf("ticker did not patch authenticated WebSocket: %v", err)
 			}
-			break
+			for _, text := range forbidden {
+				if strings.Contains(string(patch), text) {
+					t.Fatalf("filtered WebSocket patch exposed %q: %s", text, patch)
+				}
+			}
+			if strings.Contains(string(patch), want) {
+				return string(patch)
+			}
 		}
 	}
+	if patch := readPatch(matching, "owner/repo"); !strings.Contains(patch, "Current action") {
+		t.Fatalf("ticker patch omitted action section: %s", patch)
+	}
+	readPatch(other, "No current action matches these filters.", "owner/repo")
 }

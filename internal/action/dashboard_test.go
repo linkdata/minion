@@ -169,3 +169,48 @@ func TestDashboardWorkerReadinessRequiresFreshPullAndCleanup(t *testing.T) {
 		t.Fatalf("closed remote endpoint: %+v", observed)
 	}
 }
+
+func TestDashboardRemoteReadinessWaitsForAcceptedCleanup(t *testing.T) {
+	at := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	job := testJob(command.Comment)
+	store := dashboardStore(t, at)
+	accepted := dashboardAccepted(job, at)
+	accepted.ExecutorID = "remote"
+	accepted.ResultReady = false
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.pull, executor.pullDone = true, make(chan struct{})
+	endpoint := &RemoteEndpoint{executor: executor, serveDone: make(chan struct{})}
+	worker := &remoteWorker{executor: executor, endpoint: endpoint}
+	owner := &Orchestrator{Store: store}
+	owner.setSelectedExecutor(worker)
+	if before, err := owner.DashboardSnapshot(at); err != nil || before.Worker.Readiness != "ready" {
+		t.Fatalf("pre-assignment pull should be ready: %+v, %v", before, err)
+	}
+	accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := owner.DashboardSnapshot(at); err != nil || pending.Worker.Readiness != "waiting for accepted cleanup" {
+		t.Fatalf("post-outcome pull preceded accepted cleanup: %+v, %v", pending, err)
+	}
+	store.Data.Accepted = nil
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	endpoint.RequireFreshPull()
+	if stale, err := owner.DashboardSnapshot(at); err != nil || stale.Worker.Readiness == "ready" {
+		t.Fatalf("retired pull should not be ready after accepted cleanup: %+v, %v", stale, err)
+	}
+	executor.pull, executor.pullDone, executor.pullStale = false, nil, false // The old handler released its slot.
+	executor.pull, executor.pullDone = true, make(chan struct{})             // A new pull is held.
+	if fresh, err := owner.DashboardSnapshot(at); err != nil || fresh.Worker.Readiness != "ready" {
+		t.Fatalf("fresh pull after accepted cleanup should be ready: %+v, %v", fresh, err)
+	}
+}
