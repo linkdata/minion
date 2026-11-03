@@ -484,7 +484,8 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 			t.Fatal("hard deadline did not stop the model")
 		}
 		if !errors.Is(err, context.DeadlineExceeded) ||
-			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
+			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) ||
+			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) {
 			t.Fatalf("hard runtime did not cap chatty model: %v", err)
 		}
 		got := f.parent.result(t)
@@ -492,7 +493,7 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		// Parent stop and worker cap can race near the hard deadline.
 		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline ||
 			reported.failure.RuntimeCap != errors.Is(err, errExecutorRuntimeCap) ||
-			reported.failure.Inactivity || len(got.result.Calls) != 1 {
+			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
 		}
 	})
@@ -524,13 +525,14 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("worker cap did not stop the model before the parent deadline")
 		}
-		if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
+		if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) ||
+			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) {
 			t.Fatalf("worker runtime cap did not stop chatty model: %v", err)
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
 		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
-			reported.failure.Inactivity || len(got.result.Calls) != 1 {
+			reported.failure.Inactivity || reported.failure.OutcomeUnknown || reported.failure.RequestTransport || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost worker runtime cap: error=%v result=%+v", got.err, got.result)
 		}
 	})
