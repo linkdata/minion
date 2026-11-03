@@ -113,6 +113,18 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 			if !found || latest.JobID != record.JobID {
 				return fmt.Errorf("final action usage %s belongs to another attempt", record.ID)
 			}
+			if len(latest.Calls) > len(record.Calls) {
+				last := latest.Calls[len(latest.Calls)-1]
+				if last.FinishedAt == nil {
+					// A failed BeforeCall save may have replaced the file without sending an ACK.
+					if err := latest.DiscardPendingCall(last.Ordinal); err != nil {
+						return fmt.Errorf("discard unacknowledged final usage call %s: %w", record.ID, err)
+					}
+					if len(latest.Calls) == 0 {
+						latest.ExecutorID, latest.SourceRef = "", ""
+					}
+				}
+			}
 			for _, call := range record.Calls {
 				if call.FinishedAt == nil {
 					continue
@@ -138,6 +150,9 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		}
 		var err error
 		if e.Store != nil {
+			if e.finalUsageWaiting != nil {
+				e.finalUsageWaiting()
+			}
 			err = e.Store.WithPrivateRecords(saveFinal)
 		} else {
 			err = saveFinal()

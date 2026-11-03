@@ -34,6 +34,53 @@ type lateOutcomeFixture struct {
 	finish    func(error) error
 }
 
+type outcomeReadBarrier struct {
+	io.ReadCloser
+	entered chan struct{}
+	release <-chan struct{}
+	first   bool
+}
+
+func (b *outcomeReadBarrier) Read(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if !b.first {
+		b.first = true
+		n, err := b.ReadCloser.Read(data[:1])
+		close(b.entered) // The server has acquired its read lane and begun decoding.
+		return n, err
+	}
+	<-b.release
+	return b.ReadCloser.Read(data)
+}
+
+func sendHTTPOutcome(client *http.Client, url string, outcome httpOutcome, hint, stall string) httpServerTestExchange {
+	data, err := json.Marshal(outcome)
+	if err != nil {
+		return httpServerTestExchange{err: err}
+	}
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		return httpServerTestExchange{err: err}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if hint != "" {
+		request.Header.Set(httpOutcomeBindingHeader, hint)
+	}
+	if stall != "" {
+		request.Header.Set("X-Test-Stall", stall)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return httpServerTestExchange{err: err}
+	}
+	defer response.Body.Close()
+	result := httpServerTestExchange{status: response.StatusCode}
+	result.err = httpDecode(response.Body, httpControlBytes, &result.ack)
+	return result
+}
+
 func newLateOutcomeFixture(t *testing.T, pending bool) *lateOutcomeFixture {
 	return newLateOutcomeFixtureForJob(t, testJob(command.Comment), pending)
 }
@@ -253,6 +300,23 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 }
 
+func TestLateSuccessfulOutcomeDoesNotPublish(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	f.outcome.Failure = nil
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("successful late outcome status=%d", status)
+	}
+	if data, err := os.ReadFile(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); err != nil ||
+		!bytes.Contains(data, []byte("private late detail")) {
+		t.Fatalf("successful late outcome lost private facts: %q error=%v", data, err)
+	}
+	if result, err := f.store.HasAcceptedResult(); err != nil || result || f.store.Data.Accepted != nil ||
+		f.store.Data.TerminalDecisions[f.job.Identity.JobID].Outcome != "lost" {
+		t.Fatalf("successful late outcome reopened publication: result=%t accepted=%+v error=%v", result, f.store.Data.Accepted, err)
+	}
+}
+
 func TestLateRemoteOutcomeRequiresSavedPendingCall(t *testing.T) {
 	f := newLateOutcomeFixture(t, false)
 	_, client, origin := lateOutcomeEndpoint(t, f.owner)
@@ -386,9 +450,18 @@ func TestLateRemoteOutcomeReplaysParentCaptureLimitDiagnostic(t *testing.T) {
 	if err := f.owner.retainWorkerDiagnostics(f.job, capped, f.outcome.Failure.workerErr()); err != nil {
 		t.Fatal(err)
 	}
+	path := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, client, origin := lateOutcomeEndpoint(t, f.owner)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("raw replay after parent capture marker status=%d", status)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("parent capture marker changed on replay: before=%q after=%q error=%v", before, after, err)
 	}
 	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens {
@@ -456,6 +529,86 @@ func TestLateRemoteOutcomeAcrossFencedTransactionHandoff(t *testing.T) {
 	}
 }
 
+func TestNewOutcomePassesStalledPriorActiveUpload(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" && r.Header.Get("X-Test-Stall") == "old" {
+				r.Body = &outcomeReadBarrier{ReadCloser: r.Body, entered: entered, release: release}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	f := newHTTPServerTest(t, t.Context(), testJob(command.Comment), runnerExecutionCheckpoints{}, wrap)
+	f.executor.lateOutcome = func(httpOutcome) error { return nil }
+	f.pull(t)
+	oldTx := f.tx
+	oldDone := make(chan httpServerTestExchange, 1)
+	go func() {
+		oldDone <- sendHTTPOutcome(f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
+			httpBindingDigest(httpJobBinding(f.job)), "old")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old active upload did not enter its read lane")
+	}
+	// A legacy request can complete that transaction while its first upload is still decoding.
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatalf("first transaction failed: %v", got.err)
+	}
+	newJob := f.job
+	newJob.Identity.JobID = "new-job"
+	newJob.Identity.AttemptID = strings.Repeat("b", 32)
+	newDone := make(chan httpServerTestResult, 1)
+	go func() {
+		result, err := f.executor.Execute(t.Context(), newJob, runnerExecutionCheckpoints{})
+		newDone <- httpServerTestResult{result: result, err: err}
+	}()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		f.executor.mu.Lock()
+		tx, changed := f.executor.active, f.executor.changed
+		f.executor.mu.Unlock()
+		if tx != nil && tx != oldTx {
+			tx.mu.Lock()
+			ready := tx.ready
+			tx.mu.Unlock()
+			if ready {
+				f.job, f.tx, f.done = newJob, tx, newDone
+				break
+			}
+		}
+		select {
+		case <-changed:
+		case <-timer.C:
+			t.Fatal("new transaction did not become ready")
+		}
+	}
+	f.pull(t)
+	current := sendHTTPOutcome(f.server.Client(), f.server.URL+"/outcome", f.outcome(1, nil),
+		httpBindingDigest(httpJobBinding(newJob)), "")
+	if current.err != nil || current.status != http.StatusOK || current.ack.Failure != nil {
+		t.Fatalf("new active upload waited for old read: %+v", current)
+	}
+	if got := f.result(t); got.err != nil {
+		t.Fatalf("new transaction failed: %v", got.err)
+	}
+	close(release)
+	if old := <-oldDone; old.err != nil || old.status != http.StatusOK || old.ack.Failure != nil {
+		t.Fatalf("old fenced upload failed late receipt: %+v", old)
+	}
+}
+
 func TestLateRemoteUsageReloadsAfterAmbiguousSave(t *testing.T) {
 	for _, afterReplacement := range []bool{false, true} {
 		name := "before replacement"
@@ -516,12 +669,16 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 		t.Fatal("late usage save did not start")
 	}
 	finishDone := make(chan error, 1)
-	finishStarted := make(chan struct{})
+	finishWaiting := make(chan struct{})
+	f.owner.finalUsageWaiting = func() { close(finishWaiting) }
 	go func() {
-		close(finishStarted)
 		finishDone <- f.finish(errors.New("lost outcome"))
 	}()
-	<-finishStarted
+	select {
+	case <-finishWaiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("final usage did not reach the private-record lock")
+	}
 	select {
 	case err := <-finishDone:
 		t.Fatalf("final usage save bypassed the held late receipt: %v", err)

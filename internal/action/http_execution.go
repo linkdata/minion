@@ -12,6 +12,9 @@ import (
 
 const httpControlTimeout = 30 * time.Second
 
+// A scheduling hint only; the decoded Result must still match the active binding.
+const httpOutcomeBindingHeader = "X-Minion-Outcome-Binding"
+
 type httpBinding struct {
 	Version   int      `json:"version"`
 	Identity  Identity `json:"identity"`

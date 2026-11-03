@@ -42,7 +42,7 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 		validDiagnostics(result.Diagnostics) != nil {
 		return errLateOutcomeRejected
 	}
-	saved, err := e.Store.ReadSaved()
+	saved, err := e.Store.ReadSavedDurable()
 	if err != nil {
 		return fmt.Errorf("read saved terminal decision: %w", err)
 	}

@@ -283,6 +283,8 @@ func TestOpenRejectsInvalidTerminalDecision(t *testing.T) {
 		{name: "invalid attempt ID", jobID: "job-1", decision: TerminalDecision{AttemptID: "../attempt", Outcome: "succeeded", DecidedAt: at}},
 		{name: "unknown outcome", jobID: "job-1", decision: TerminalDecision{AttemptID: "attempt-1", Outcome: "unknown", DecidedAt: at}},
 		{name: "missing decision time", jobID: "job-1", decision: TerminalDecision{AttemptID: "attempt-1", Outcome: "succeeded"}},
+		{name: "malformed outcome binding", jobID: "job-1", decision: TerminalDecision{AttemptID: "attempt-1", Outcome: "succeeded", DecidedAt: at, OutcomeBinding: "not-hex"}},
+		{name: "noncanonical outcome binding", jobID: "job-1", decision: TerminalDecision{AttemptID: "attempt-1", Outcome: "succeeded", DecidedAt: at, OutcomeBinding: strings.Repeat("A", 64)}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
@@ -529,6 +531,38 @@ func TestReadSavedDistinguishesAmbiguousTerminalDecisionSaves(t *testing.T) {
 	}
 }
 
+func TestReadSavedRejectsUnconfirmedStateDirectorySync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	accepted := acceptedActionFixture()
+	accepted.OutcomeBinding = strings.Repeat("a", 64)
+	store, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", accepted.Deadline)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	_, err = store.readSavedDurable(func(dirs ...string) error {
+		calls++
+		if len(dirs) != 1 || dirs[0] != filepath.Dir(path) {
+			t.Fatalf("wrong state directory sync: %v", dirs)
+		}
+		return os.ErrPermission
+	})
+	if calls != 1 || !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("failed state directory sync admitted a decision: calls=%d error=%v", calls, err)
+	}
+}
+
 func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	const childMarker = "minion-state-restart-child"
@@ -616,6 +650,9 @@ func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 		{"unsupported action", func(a *AcceptedAction) { a.Action = "unknown" }},
 		{"missing accepted time", func(a *AcceptedAction) { a.AcceptedAt = time.Time{} }},
 		{"nonpositive deadline", func(a *AcceptedAction) { a.Deadline = a.AcceptedAt }},
+		{"malformed outcome binding", func(a *AcceptedAction) { a.OutcomeBinding = "not-hex" }},
+		{"noncanonical outcome binding", func(a *AcceptedAction) { a.OutcomeBinding = strings.Repeat("A", 64) }},
+		{"unassigned outcome binding", func(a *AcceptedAction) { a.Assigned = false; a.OutcomeBinding = strings.Repeat("a", 64) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

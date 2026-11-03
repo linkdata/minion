@@ -583,6 +583,7 @@ func (c *httpExecutionClient) openObserved(ctx context.Context, kind string, dat
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Accept-Encoding", "identity")
 	if kind == "outcome" {
+		request.Header.Set(httpOutcomeBindingHeader, httpBindingDigest(binding))
 		c.outcomeSent.Store(true)
 	}
 	response, err := c.client.Do(request)

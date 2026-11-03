@@ -481,6 +481,40 @@ func TestFinalUsageReloadKeepsReturnedReceiptAfterPreReplacementError(t *testing
 	}
 }
 
+func TestFinalUsageDiscardsUnacknowledgedPostReplacementStart(t *testing.T) {
+	store := &usage.Store{Dir: t.TempDir()}
+	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex"})
+	finish, err := tracked.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := tracked.usageCheckpoint
+	checkpoint.record.ExecutorID, checkpoint.record.SourceRef = "remote", strings.Repeat("a", 40)
+	persist := checkpoint.save
+	checkpoint.save = func() error {
+		if err := persist(); err != nil {
+			return err
+		}
+		return errors.New("injected post-replacement start save error")
+	}
+	if err := checkpoint.beforeCall(1, CallUsage{Provider: "codex", Role: roleMain, Round: 1}); err == nil || len(checkpoint.record.Calls) != 0 {
+		t.Fatalf("failed call start changed memory: calls=%+v error=%v", checkpoint.record.Calls, err)
+	}
+	stored, found, err := store.Load(tracked.attemptID)
+	if err != nil || !found || len(stored.Calls) != 1 || stored.Calls[0].FinishedAt != nil {
+		t.Fatalf("post-replacement pending call missing: %+v found=%t error=%v", stored, found, err)
+	}
+	checkpoint.save = persist
+	if err := finish(errors.New("attempt failed")); err == nil {
+		t.Fatal("finalization hid the attempt error")
+	}
+	final, found, err := store.Load(tracked.attemptID)
+	if err != nil || !found || final.Status != "failed" || len(final.Calls) != 0 || final.CodexCalls != 0 ||
+		final.Tokens != (usage.Tokens{}) || final.ExecutorID != "" || final.SourceRef != "" {
+		t.Fatalf("unacknowledged call was counted: %+v found=%t error=%v", final, found, err)
+	}
+}
+
 func TestUsageDefaultsUnspecifiedModelLabels(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "claude", Adversarial: "codex"})

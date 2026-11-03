@@ -23,28 +23,30 @@ type pullGenerationContextKey struct{}
 
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
-	mu             sync.Mutex
-	outcomeRead    sync.Mutex
-	executorID     string
-	workRoot       string
-	credentials    WorkerCredentials
-	credentialsSet bool
-	active         *httpTransaction
-	pull           bool
-	pullDone       <-chan struct{}
-	pullStale      bool
-	pullGeneration uint64
-	closed         bool
-	unavailable    bool
-	changed        chan struct{}
-	outcomeGrace   time.Duration
-	status         Status
-	statusAt       time.Time
-	lateOutcome    func(httpOutcome) error
+	mu              sync.Mutex
+	lateOutcomeRead sync.Mutex
+	outcomeReads    chan struct{}
+	executorID      string
+	workRoot        string
+	credentials     WorkerCredentials
+	credentialsSet  bool
+	active          *httpTransaction
+	pull            bool
+	pullDone        <-chan struct{}
+	pullStale       bool
+	pullGeneration  uint64
+	closed          bool
+	unavailable     bool
+	changed         chan struct{}
+	outcomeGrace    time.Duration
+	status          Status
+	statusAt        time.Time
+	lateOutcome     func(httpOutcome) error
 }
 
 type httpTransaction struct {
 	mu           sync.Mutex
+	outcomeRead  sync.Mutex
 	mutation     sync.Mutex
 	observation  sync.Mutex
 	recordSync   sync.Mutex
@@ -104,7 +106,8 @@ func NewHTTPExecutor(executorID string) (*HTTPExecutor, error) {
 	if !workspace.ValidIdentitySegment(executorID) {
 		return nil, errors.New("invalid HTTP executor identity")
 	}
-	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout}, nil
+	return &HTTPExecutor{executorID: executorID, changed: make(chan struct{}), outcomeGrace: httpControlTimeout,
+		outcomeReads: make(chan struct{}, 2)}, nil
 }
 
 // SetWorkRoot enables durable attempt records before the executor starts.
@@ -953,13 +956,30 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	tx := e.transaction()
 	var decodedOutcome *httpOutcome
 	if kind == "outcome" && e.lateOutcome != nil {
-		// Keep at most one decoded full result live through admission and retention.
-		e.outcomeRead.Lock()
-		defer e.outcomeRead.Unlock()
 		tx = e.transaction()
+		// An optional binding hint keeps a slow old upload off the current lane.
+		// Both lanes remain bounded; the decoded body still decides admission.
+		current := tx != nil && r.Header.Get(httpOutcomeBindingHeader) == httpBindingDigest(tx.binding)
+		readLane := &e.lateOutcomeRead
+		if current {
+			readLane = &tx.outcomeRead
+		}
+		readLane.Lock()
+		defer readLane.Unlock()
+		select {
+		case e.outcomeReads <- struct{}{}:
+			defer func() { <-e.outcomeReads }()
+		case <-r.Context().Done():
+			return
+		}
 		var outcome httpOutcome
-		// Decode independently: a closed attempt must not inherit a newer transaction's stop deadline.
-		err := httpServerRead(w, r, httpOutcomeBytes, &outcome)
+		// A closed attempt must not inherit a newer transaction's stop deadline.
+		var err error
+		if current {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+		} else {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome)
+		}
 		binding := httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}
 		if err == nil {
 			err = httpResultShape(outcome.Result)
