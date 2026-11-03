@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -81,6 +82,99 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		if denied := adminResponse(handler, http.MethodGet, path, nil, cookie, ""); denied.Code != http.StatusForbidden {
 			t.Fatalf("revoked %s status=%d", path, denied.Code)
 		}
+	}
+}
+
+func TestAdminUsageConcurrentCLIAndAdminReads(t *testing.T) {
+	handler, _, _, owner := dashboardTestServer(t)
+	dir := t.TempDir()
+	saveReportFixture(t, dir)
+	owner.Usage = &usage.Store{Dir: dir}
+	cookie := dashboardTestCookie(t, handler)
+	record, found, err := owner.Usage.Load("00000000000000000000000000000001")
+	if err != nil || !found {
+		t.Fatalf("load fixture: found=%t err=%v", found, err)
+	}
+	ready := make(chan struct{}, 3)
+	start := make(chan struct{})
+	firstReads := make(chan struct{}, 2)
+	done := make(chan error, 3)
+	go func() {
+		ready <- struct{}{}
+		<-start
+		for i := int64(0); i < 20; i++ {
+			next := record
+			next.Tokens.Input = 100 + i
+			if err := owner.Usage.Save(next); err != nil {
+				done <- err
+				return
+			}
+			if i == 0 {
+				<-firstReads
+				<-firstReads
+			}
+		}
+		done <- nil
+	}()
+	go func() {
+		ready <- struct{}{}
+		<-start
+		for i := 0; i < 20; i++ {
+			path := "/admin/usage.json"
+			if i%2 != 0 {
+				path = "/admin/usage"
+			}
+			response := adminResponse(handler, http.MethodGet, path, nil, cookie, "")
+			if i == 0 {
+				firstReads <- struct{}{}
+			}
+			if response.Code != http.StatusOK {
+				done <- fmt.Errorf("admin read %s: status=%d", path, response.Code)
+				return
+			}
+			if path == "/admin/usage.json" {
+				var report usageOutput
+				if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil || report.Totals.Attempts != 4 {
+					done <- fmt.Errorf("admin export: attempts=%d: %v", report.Totals.Attempts, err)
+					return
+				}
+			}
+		}
+		done <- nil
+	}()
+	go func() {
+		ready <- struct{}{}
+		<-start
+		for i := 0; i < 20; i++ {
+			var output, diagnostic bytes.Buffer
+			status := runUsageWithOutput([]string{"-dir", dir, "-json"}, &output, &diagnostic)
+			if i == 0 {
+				firstReads <- struct{}{}
+			}
+			if status != 0 {
+				done <- fmt.Errorf("CLI read: status=%d: %s", status, diagnostic.String())
+				return
+			}
+			var report usageOutput
+			if err := json.Unmarshal(output.Bytes(), &report); err != nil || report.Totals.Attempts != 4 {
+				done <- fmt.Errorf("CLI report: attempts=%d: %v", report.Totals.Attempts, err)
+				return
+			}
+		}
+		done <- nil
+	}()
+	for range 3 {
+		<-ready
+	}
+	close(start)
+	var firstErr error
+	for range 3 {
+		if err := <-done; err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		t.Fatal(firstErr)
 	}
 }
 
