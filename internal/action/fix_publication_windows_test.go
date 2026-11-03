@@ -45,6 +45,25 @@ func TestMain(m *testing.M) {
 }
 
 func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		changes   []workspace.Change
+		published bool
+	}{
+		{"supported", []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}, true},
+		{"hostile", []workspace.Change{
+			{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")},
+			{Path: "NUL", Mode: workspace.Regular, Data: []byte("unreviewed\n")},
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testWindowsFixPublication(t, test.changes, test.published)
+		})
+	}
+}
+
+func testWindowsFixPublication(t *testing.T, changes []workspace.Change, published bool) {
+	t.Helper()
 	realGit, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		t.Fatal(err)
@@ -140,8 +159,21 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepared := &preparedAction{job: Job{Version: ProtocolVersion, Action: command.Fix, Source: workspace.Snapshot{Head: base}}, request: request, issueNodeID: "issue-node", checkout: checkout, repository: repo, fork: fork, branch: branch}
-	result := Result{Changes: []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}}
-	if err := orchestrator.publishFix(t.Context(), prepared, result, publication{answer: "Fixed."}); err != nil {
+	result := Result{Changes: changes}
+	err = orchestrator.publishFix(t.Context(), prepared, result, publication{answer: "Fixed."})
+	if !published {
+		if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe or duplicate") {
+			t.Fatalf("hostile publication was not refused before push: %v", err)
+		}
+		if refs := git("--git-dir="+forkRemote, "for-each-ref", "--format=%(refname)", "refs/heads"); strings.Contains(refs, "refs/heads/"+branch) || git("--git-dir="+forkRemote, "rev-parse", "refs/heads/main") != base {
+			t.Fatalf("hostile publication changed fork refs: %q", refs)
+		}
+		if len(store.Data.PendingFixes) != 0 || len(store.Data.PublicationWrites) != 0 || comment != "" {
+			t.Fatalf("hostile publication saved push or reply: pushes=%v writes=%v reply=%q", store.Data.PendingFixes, store.Data.PublicationWrites, comment)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
 	wantSHA := git("--git-dir="+forkRemote, "rev-parse", "refs/heads/"+branch)

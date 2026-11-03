@@ -65,7 +65,7 @@ func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 		{name: "drive component", paths: []string{"C:"}},
 		{name: "UNC spelling", paths: []string{`\\server`}},
 		{name: "file case collision", paths: []string{"Readme", "README"}, reason: "duplicate source path"},
-		{name: "directory case collision", paths: []string{"Docs/file", "docs/file"}, directoryCollision: true, reason: "source directory spelling collision"},
+		{name: "directory case collision", paths: []string{"Docs/a", "docs/b"}, directoryCollision: true, reason: "source directory spelling collision"},
 		{name: "omitted link case collision", paths: []string{"Link", "link"}, linkCollision: true, reason: "duplicate source path"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -73,10 +73,11 @@ func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 			blob := fixture.gitInput(fixture.source, "hostile\n", "hash-object", "-w", "--stdin")
 			var records []string
 			if test.directoryCollision {
-				child := windowsRawTree(fixture, fmt.Sprintf("100644 blob %s\tfile", blob))
+				upper := windowsRawTree(fixture, fmt.Sprintf("100644 blob %s\ta", blob))
+				lower := windowsRawTree(fixture, fmt.Sprintf("100644 blob %s\tb", blob))
 				records = []string{
-					fmt.Sprintf("040000 tree %s\tDocs", child),
-					fmt.Sprintf("040000 tree %s\tdocs", child),
+					fmt.Sprintf("040000 tree %s\tDocs", upper),
+					fmt.Sprintf("040000 tree %s\tdocs", lower),
 				}
 			} else if test.linkCollision {
 				records = []string{
