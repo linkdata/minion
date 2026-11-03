@@ -219,9 +219,6 @@ func (j Job) Validate() error {
 		if len(j.Critic.Skills) != 0 {
 			return errors.New("critic role accepts only always-on skills")
 		}
-		if j.Critic.Provider == j.Main.Provider {
-			return errors.New("main and critic currently require different providers")
-		}
 	}
 	unexpectedRounds := j.Critic == nil && (j.CriticMaxRounds != 0 || j.CriticNonblockingRounds != 0 || j.CriticConsecutiveNoBlockerRounds != 0)
 	invalidRounds := j.Critic != nil && (j.CriticMaxRounds < 1 || j.CriticMaxRounds > config.MaxCriticMaxRounds || j.CriticNonblockingRounds < 0 || j.CriticNonblockingRounds > j.CriticMaxRounds)

@@ -55,6 +55,21 @@ func TestPreflightSelectionRequiresFrozenSelectionAndWorkRoot(t *testing.T) {
 	}
 }
 
+func TestSelectedWorkerGatesNativeSameProviderBeforePreflight(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		selection := WorkerSelection{
+			Commands: map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{testReviewSkillURL}}},
+			Main:     RoleSettings{Provider: provider, Model: "main-model", Effort: "high"},
+			Critic:   &RoleSettings{Provider: provider, Model: "critic-model", Effort: "low"},
+		}
+		runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, selection)
+		if err != nil {
+			t.Fatalf("portable selection %s pair rejected: %v", provider, err)
+		}
+		requirePreflightMessage(t, runner.PreflightSelection(t.Context()), preflightRolePairUnavailable)
+	}
+}
+
 func TestPreflightSelectionRejectsUnsupportedEvidenceDirectoriesBeforePull(t *testing.T) {
 	runner := selectedPreflightRunner(t, map[string]config.CommandMapping{
 		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},

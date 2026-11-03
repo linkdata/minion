@@ -66,6 +66,36 @@ func TestOrchestratorWorkerSelectionResolvedCriticRoles(t *testing.T) {
 	}
 }
 
+func TestWorkerSelectionFreezesDistinctSameProviderRoles(t *testing.T) {
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	cfg := config.Config{Main: "codex", Adversarial: "codex", MainSettings: config.RoleModelConfig{Model: "main-model", Effort: "high"},
+		CriticSettings: config.RoleModelConfig{Model: "critic-model", Effort: "low"}, Commands: commands,
+		Repositories: []config.Repository{{Actions: []string{"inspect"}}}}
+	e := Orchestrator{Main: cfg.Main, Adversarial: cfg.Adversarial, Commands: commands,
+		MainModel: cfg.MainSettings.Model, MainEffort: cfg.MainSettings.Effort,
+		CriticModel: cfg.CriticSettings.Model, CriticEffort: cfg.CriticSettings.Effort}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil || selected.Main.Model != "main-model" || selected.Critic == nil || selected.Critic.Model != "critic-model" {
+		t.Fatalf("distinct same-provider selection: %+v, %v", selected, err)
+	}
+	job := testJob(command.Comment)
+	job.Command = "inspect"
+	job.Main, job.Critic = selected.Main, selected.Critic
+	job.Main.Skills = commands["inspect"].Skills
+	job.CriticMaxRounds = 1
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewSelectedRunner(Runner{}, selected)
+	if err != nil || runner.selection.matches(job) != nil {
+		t.Fatalf("same-provider assignment lost role settings: %v", err)
+	}
+	job.Critic.Model = "main-model"
+	if err := runner.selection.matches(job); err == nil || !strings.Contains(err.Error(), "critic role differs") {
+		t.Fatalf("critic model drift accepted: %v", err)
+	}
+}
+
 func TestOrchestratorWorkerSelectionRejectsMappingMismatch(t *testing.T) {
 	configured := config.CommandMapping{Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}
 	for _, used := range []config.CommandMapping{
@@ -91,6 +121,22 @@ func TestOrchestratorWorkerSelectionRejectsProviderDrift(t *testing.T) {
 	e.Main, e.Adversarial = "codex", "claude"
 	if _, err := e.WorkerSelection(cfg); err == nil || !strings.Contains(err.Error(), "critic provider differs") {
 		t.Fatalf("config without critic accepted orchestrator critic: %v", err)
+	}
+}
+
+func TestWorkerSelectionRejectsResolvedRoleSettingsDrift(t *testing.T) {
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	cfg := config.Config{Main: "codex", Adversarial: "claude", MainSettings: config.RoleModelConfig{Model: "main-model", Effort: "high"},
+		CriticSettings: config.RoleModelConfig{Model: "critic-model", Effort: "low"}, Commands: commands,
+		Repositories: []config.Repository{{Actions: []string{"inspect"}}}}
+	e := Orchestrator{Main: "codex", Adversarial: "claude", Commands: commands, MainModel: "wrong-main", MainEffort: "high", CriticModel: "critic-model", CriticEffort: "low"}
+	if _, err := e.WorkerSelection(cfg); err == nil || !strings.Contains(err.Error(), "main model settings differ") {
+		t.Fatalf("main setting drift accepted: %v", err)
+	}
+	e.MainModel = "main-model"
+	e.CriticEffort = "wrong-effort"
+	if _, err := e.WorkerSelection(cfg); err == nil || !strings.Contains(err.Error(), "critic model settings differ") {
+		t.Fatalf("critic setting drift accepted: %v", err)
 	}
 }
 

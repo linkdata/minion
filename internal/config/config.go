@@ -147,6 +147,12 @@ type ClaudeConfig struct {
 	OutputSchema string `json:"-"`
 }
 
+// RoleModelConfig overrides a selected provider's model defaults for one role.
+type RoleModelConfig struct {
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
+}
+
 // SecurityAuditSkill returns the selected security-audit skill path for this job.
 func (c CodexConfig) SecurityAuditSkill() string {
 	for _, path := range c.Skills {
@@ -189,8 +195,10 @@ type Config struct {
 	BotLogin string `json:"bot_login"`
 	// Main selects codex or claude; an empty value selects codex.
 	Main string `json:"main,omitempty"`
-	// Adversarial optionally selects the other provider as a read-only critic.
+	// Adversarial optionally selects a read-only critic.
 	Adversarial    string                `json:"adversarial,omitempty"`
+	MainSettings   RoleModelConfig       `json:"main_settings,omitzero"`
+	CriticSettings RoleModelConfig       `json:"critic_settings,omitzero"`
 	CriticStopping CriticStopping        `json:"critic_stopping"`
 	Codex          CodexConfig           `json:"codex,omitempty"`
 	Claude         ClaudeConfig          `json:"claude,omitempty"`
@@ -214,6 +222,28 @@ type Config struct {
 	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
 	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
 	Repositories          []Repository     `json:"repositories"`
+}
+
+// RoleModelSettings applies optional role overrides to provider defaults.
+func (c Config) RoleModelSettings(critic bool) RoleModelConfig {
+	if critic && c.Adversarial == "" {
+		return RoleModelConfig{}
+	}
+	provider, override := c.Main, c.MainSettings
+	if critic {
+		provider, override = c.Adversarial, c.CriticSettings
+	}
+	defaults := RoleModelConfig{Model: c.Codex.Model, Effort: c.Codex.ReasoningEffort}
+	if provider == "claude" {
+		defaults = RoleModelConfig{Model: c.Claude.Model, Effort: c.Claude.Effort}
+	}
+	if override.Model != "" {
+		defaults.Model = override.Model
+	}
+	if override.Effort != "" {
+		defaults.Effort = override.Effort
+	}
+	return defaults
 }
 
 // Load reads and validates configuration.
@@ -293,8 +323,15 @@ func (c *Config) Validate(configDir string) error {
 	if c.Adversarial != "" && c.Adversarial != "codex" && c.Adversarial != "claude" {
 		return fmt.Errorf("adversarial must be codex or claude")
 	}
-	if c.Adversarial == c.Main {
-		return fmt.Errorf("adversarial must differ from main")
+	for _, role := range []*RoleModelConfig{&c.MainSettings, &c.CriticSettings} {
+		role.Model = strings.TrimSpace(role.Model)
+		role.Effort = strings.TrimSpace(role.Effort)
+		if !validModelSetting(role.Model) || !validModelSetting(role.Effort) {
+			return fmt.Errorf("role model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
+		}
+	}
+	if c.Adversarial == "" && c.CriticSettings != (RoleModelConfig{}) {
+		return errors.New("critic_settings requires adversarial")
 	}
 	maxRounds, nonblockingAfterRound, consecutiveNoBlockerRounds := c.CriticStopping.Resolve()
 	c.CriticStopping.MaxRounds = maxRounds
@@ -382,11 +419,11 @@ func (c *Config) Validate(configDir string) error {
 		if err != nil || len(token) != 32 || base64.RawURLEncoding.EncodeToString(token) != remote.Token {
 			return errors.New("remote_executor.token must be 32 bytes in unpadded base64url")
 		}
-		if (c.Main == "codex" || c.Adversarial == "codex") && (c.Codex.Model == "" || c.Codex.ReasoningEffort == "") ||
-			(c.Main == "claude" || c.Adversarial == "claude") && (c.Claude.Model == "" || c.Claude.Effort == "") {
-			return errors.New("remote_executor requires explicit model and effort for each selected provider")
+		main, critic := c.RoleModelSettings(false), c.RoleModelSettings(true)
+		if main.Model == "" || main.Effort == "" || c.Adversarial != "" && (critic.Model == "" || critic.Effort == "") {
+			return errors.New("remote_executor requires explicit model and effort for each selected role")
 		}
-		if (c.Main == "claude" || c.Adversarial == "claude") && c.Claude.Model == "default" {
+		if c.Main == "claude" && main.Model == "default" || c.Adversarial == "claude" && critic.Model == "default" {
 			return errors.New("remote_executor requires a concrete Claude model, not the default alias")
 		}
 	}

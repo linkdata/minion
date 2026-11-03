@@ -23,11 +23,17 @@ type remoteWorker struct {
 // AttachRemoteWorker starts the configured listener. Capacity becomes available
 // only while an authenticated worker holds a pull at that listener.
 func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Certificate) (map[string]bool, *RemoteEndpoint, error) {
+	if err := CheckNativeRolePair(e.mainProvider(), e.Adversarial); err != nil {
+		return nil, nil, err
+	}
 	if e.Executor != nil || cfg.RemoteExecutor == nil {
 		return nil, nil, errors.New("remote executor is already selected or not configured")
 	}
 	if cmp.Or(cfg.Main, "codex") != e.mainProvider() || cfg.Adversarial != e.Adversarial {
 		return nil, nil, errors.New("remote executor provider selection differs from config")
+	}
+	if err := e.matchConfiguredRoleModels(cfg); err != nil {
+		return nil, nil, err
 	}
 	commands := make(map[string]bool)
 	for _, repo := range cfg.Repositories {

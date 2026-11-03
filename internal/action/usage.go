@@ -88,10 +88,10 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 		StartedAt: startedAt, Status: "running", UsageCoverage: usage.Coverage{Scope: "attempt"}, UsageComplete: true,
 	}}
 	record := &checkpoint.record
-	main := e.roleSettings(record.Provider, nil)
+	main := e.mainRoleSettings(nil)
 	record.Model, record.Effort = cmp.Or(main.Model, "default"), main.Effort
 	if record.CriticProvider != "" {
-		critic := e.roleSettings(record.CriticProvider, nil)
+		critic := e.criticRoleSettings()
 		record.CriticModel, record.CriticEffort = cmp.Or(critic.Model, "default"), critic.Effort
 	}
 	checkpoint.save = func() error {

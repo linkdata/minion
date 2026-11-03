@@ -60,6 +60,8 @@ type Orchestrator struct {
 	AlwaysOnSkills            []string
 	CodexModel, CodexEffort   string
 	ClaudeModel, ClaudeEffort string
+	MainModel, MainEffort     string
+	CriticModel, CriticEffort string
 	GitHub                    *github.Client
 	BotLogin                  string
 	BotID                     int64
@@ -298,13 +300,23 @@ func (e *Orchestrator) validateCommand(job monitor.Job) error {
 	}
 	configured := e.Runner
 	configured.Logger = nil // Execution logs optional skill skips once after validation.
-	if err := configured.ConfigureRole(e.roleSettings(e.mainProvider(), mapping.Skills)); err != nil {
+	if err := configured.ConfigureRole(e.mainRoleSettings(mapping.Skills)); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (e *Orchestrator) mainProvider() string { return cmp.Or(e.Main, "codex") }
+
+const nativeRolePairUnverified = "same-provider native role pairing is not verified"
+
+// CheckNativeRolePair gates real CLI combinations until #146 verifies them.
+func CheckNativeRolePair(main, critic string) error {
+	if critic != "" && main == critic {
+		return errors.New(nativeRolePairUnverified)
+	}
+	return nil
+}
 
 func (e *Orchestrator) logf(format string, args ...any) {
 	if e.Logger != nil {

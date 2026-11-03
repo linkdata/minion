@@ -475,6 +475,22 @@ func TestRunChecksGitBeforeProvidersAndGitHub(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsUnverifiedSameProviderPairBeforeWorkerStartup(t *testing.T) {
+	cfg := config.Config{BotLogin: "fixture", Main: "codex", Adversarial: "codex",
+		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Fatal("unverified role pair reached Git preflight")
+			return nil
+		})
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "same-provider native role pairing is not verified") {
+		t.Fatalf("unverified pair passed -check: code=%d output=%q", code, output)
+	}
+}
+
 func TestInstallSkillsBypassesGitAndProviderPreflight(t *testing.T) {
 	for _, extra := range []string{"", "-check", "-loop"} {
 		t.Run("extra="+extra, func(t *testing.T) {

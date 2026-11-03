@@ -165,6 +165,28 @@ func (e *Orchestrator) roleSettings(provider string, required []string) RoleSett
 	return role
 }
 
+func (e *Orchestrator) mainRoleSettings(required []string) RoleSettings {
+	role := e.roleSettings(e.mainProvider(), required)
+	if e.MainModel != "" {
+		role.Model = e.MainModel
+	}
+	if e.MainEffort != "" {
+		role.Effort = e.MainEffort
+	}
+	return role
+}
+
+func (e *Orchestrator) criticRoleSettings() RoleSettings {
+	role := e.roleSettings(e.Adversarial, nil)
+	if e.CriticModel != "" {
+		role.Model = e.CriticModel
+	}
+	if e.CriticEffort != "" {
+		role.Effort = e.CriticEffort
+	}
+	return role
+}
+
 func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title, description string) (Job, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -192,11 +214,11 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		},
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
-		Main: e.roleSettings(e.mainProvider(), e.Commands[request.Command.Name].Skills), RuntimeBudget: budget,
+		Main: e.mainRoleSettings(e.Commands[request.Command.Name].Skills), RuntimeBudget: budget,
 		InactivityTimeout: cmp.Or(e.InactivityTimeout, config.DefaultInactivityTimeout),
 	}
 	if e.Adversarial != "" {
-		critic := e.roleSettings(e.Adversarial, nil)
+		critic := e.criticRoleSettings()
 		job.Critic = &critic
 		job.CriticMaxRounds, job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = e.CriticStopping.Resolve()
 	}

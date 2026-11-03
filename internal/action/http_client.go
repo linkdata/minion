@@ -141,6 +141,11 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 	if err := job.Validate(); err != nil {
 		return httpClientUnknown("next", err)
 	}
+	if job.Critic != nil && runner.runModel == nil {
+		if err := CheckNativeRolePair(job.Main.Provider, job.Critic.Provider); err != nil {
+			return httpClientUnknown("next", err)
+		}
+	}
 	if job.Identity.ExecutorID != executorID {
 		return httpClientUnknown("next", errors.New("assignment executor differs from pull"))
 	}

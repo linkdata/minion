@@ -248,6 +248,11 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 	}
+	if r.runModel == nil && job.Critic != nil {
+		if err := CheckNativeRolePair(job.Main.Provider, job.Critic.Provider); err != nil {
+			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -313,23 +318,28 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		}
 		return nil
 	}
-	if err := configured.ConfigureRole(job.Main); err != nil {
+	mainSkills, err := configured.resolveRoleSkills(job.Main)
+	if err != nil {
 		return result, err
 	}
+	var criticSkills []string
 	if job.Critic != nil {
-		if err := configured.ConfigureRole(*job.Critic); err != nil {
+		criticSkills, err = configured.resolveRoleSkills(*job.Critic)
+		if err != nil {
 			return result, err
 		}
 	}
 	if configured.eventSink != nil {
 		configured.eventSink = guardAttemptRecordText(configured.eventSink, configured.secretValues())
 	}
-	auditSkill := configured.Codex.SecurityAuditSkill()
+	auditSettings := configured.Codex
+	auditSettings.Skills = mainSkills
+	auditSkill := auditSettings.SecurityAuditSkill()
 	workRoot := r.WorkRoot
 	if workRoot == "" {
 		return result, fmt.Errorf("%w: work root is required", monitor.ErrTerminalJob)
 	}
-	workRoot, err := workspace.CanonicalPath(workRoot)
+	workRoot, err = workspace.CanonicalPath(workRoot)
 	if err != nil {
 		return result, err
 	}
@@ -510,6 +520,10 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		dispatch := func(ctx context.Context, request modelRun) (aicli.Result, error) {
 			if err := ctx.Err(); err != nil {
 				return aicli.Result{}, err
+			}
+			request.skills = mainSkills
+			if request.role == roleCritic {
+				request.skills = criticSkills
 			}
 			entry := CallUsage{Provider: request.provider, Role: request.role, Round: request.round, ReviewPhase: request.reviewPhase, Model: request.model, Effort: request.effort}
 			checkpoint := CallCheckpoint{Version: result.Version, Identity: result.Identity, SourceRef: result.SourceRef, Ordinal: len(result.Calls) + 1, Call: entry}

@@ -256,7 +256,6 @@ func TestJobValidate(t *testing.T) {
 		{"critic required skills", func(j *Job) {
 			j.Critic = &RoleSettings{Provider: "claude", Skills: []string{skills.BuiltinAntiPromptInjection}}
 		}, "only always-on skills"},
-		{"same provider", func(j *Job) { j.Critic = &RoleSettings{Provider: j.Main.Provider} }, "require different providers"},
 		{"runtime maximum", func(j *Job) { j.RuntimeBudget = config.MaxActionRuntime + time.Nanosecond }, "invalid action runtime budget"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

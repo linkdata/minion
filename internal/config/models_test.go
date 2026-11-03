@@ -28,8 +28,11 @@ func TestLoadModelProviders(t *testing.T) {
 		{name: "zero rounds", fields: `,"critic_stopping":{"max_rounds":0}`, main: "codex", rounds: 5},
 		{name: "unknown main", fields: `,"main":"other"`, wantError: "main must be"},
 		{name: "unknown critic", fields: `,"adversarial":"other"`, wantError: "adversarial must be"},
-		{name: "same default provider", fields: `,"adversarial":"codex"`, wantError: "adversarial must differ"},
-		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, wantError: "adversarial must differ"},
+		{name: "same default provider", fields: `,"adversarial":"codex"`, main: "codex", adversarial: "codex", rounds: 5},
+		{name: "same explicit provider", fields: `,"main":"claude","adversarial":"claude"`, main: "claude", adversarial: "claude", rounds: 5},
+		{name: "critic settings without critic", fields: `,"critic_settings":{"model":"other"}`, wantError: "critic_settings requires adversarial"},
+		{name: "role model too long", fields: fmt.Sprintf(`,"main_settings":{"model":%q}`, strings.Repeat("m", MaxModelSettingBytes+1)), wantError: "role model and effort"},
+		{name: "role effort NUL", fields: `,"adversarial":"claude","critic_settings":{"effort":"bad\u0000effort"}`, wantError: "role model and effort"},
 		{name: "negative rounds", fields: `,"critic_stopping":{"max_rounds":-1}`, wantError: "critic_stopping.max_rounds"},
 		{name: "too many rounds", fields: `,"critic_stopping":{"max_rounds":21}`, wantError: "critic_stopping.max_rounds"},
 		{name: "model and effort at limit", fields: fmt.Sprintf(`,"codex":{"model":%q,"reasoning_effort":%q},"claude":{"model":%q,"effort":%q}`, strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes), strings.Repeat("m", MaxModelSettingBytes), strings.Repeat("e", MaxModelSettingBytes)), main: "codex", rounds: 5},
@@ -76,6 +79,39 @@ func TestValidateRejectsInvalidModelUTF8(t *testing.T) {
 	}
 	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "codex model and reasoning_effort") {
 		t.Fatalf("invalid UTF-8 setting accepted: %v", err)
+	}
+}
+
+func TestRoleModelSettingsOverridesProviderDefaultsByRole(t *testing.T) {
+	if got := (Config{Codex: CodexConfig{Model: "default"}}).RoleModelSettings(true); got != (RoleModelConfig{}) {
+		t.Fatalf("disabled critic inherited provider settings: %+v", got)
+	}
+	for _, pair := range [][2]string{{"codex", "claude"}, {"claude", "codex"}, {"codex", "codex"}, {"claude", "claude"}} {
+		cfg := Config{
+			Main: pair[0], Adversarial: pair[1],
+			Codex:          CodexConfig{Model: "codex-default", ReasoningEffort: "medium"},
+			Claude:         ClaudeConfig{Model: "claude-default", Effort: "low"},
+			MainSettings:   RoleModelConfig{Model: "main-model", Effort: "high"},
+			CriticSettings: RoleModelConfig{Model: "critic-model", Effort: "max"},
+		}
+		if main, critic := cfg.RoleModelSettings(false), cfg.RoleModelSettings(true); main != cfg.MainSettings || critic != cfg.CriticSettings {
+			t.Fatalf("pair %v mixed role overrides: main=%+v critic=%+v", pair, main, critic)
+		}
+		cfg.CriticSettings = RoleModelConfig{Effort: "high"}
+		wantModel := "codex-default"
+		if pair[1] == "claude" {
+			wantModel = "claude-default"
+		}
+		if got := cfg.RoleModelSettings(true); got.Model != wantModel || got.Effort != "high" {
+			t.Fatalf("pair %v lost provider fallback: %+v", pair, got)
+		}
+	}
+}
+
+func TestUnsetRoleSettingsDoNotChangeSerializedConfig(t *testing.T) {
+	data, err := json.Marshal(Config{})
+	if err != nil || strings.Contains(string(data), "main_settings") || strings.Contains(string(data), "critic_settings") {
+		t.Fatalf("unset role settings serialized: %s, %v", data, err)
 	}
 }
 

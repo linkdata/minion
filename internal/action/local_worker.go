@@ -123,6 +123,9 @@ func startLocalWorker(executorID, path string, args []string, readyTimeout time.
 // AttachLocalWorker connects one selected direct child. The caller watches its
 // exit and owns the close function.
 func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config, path string, args []string, readyTimeout time.Duration, configure func(*exec.Cmd, LocalEndpointAccess, WorkerSelection, WorkerCredentials) error) (WorkerSelection, <-chan struct{}, func() error, error) {
+	if err := CheckNativeRolePair(e.mainProvider(), e.Adversarial); err != nil {
+		return WorkerSelection{}, nil, nil, err
+	}
 	if e.Executor != nil {
 		return WorkerSelection{}, nil, nil, errors.New("orchestrator already has an executor")
 	}

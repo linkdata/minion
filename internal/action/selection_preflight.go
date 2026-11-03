@@ -17,6 +17,7 @@ import (
 const (
 	preflightRunnerUnavailable          = "worker runner unavailable"
 	preflightSelectionUnavailable       = "frozen worker selection unavailable"
+	preflightRolePairUnavailable        = nativeRolePairUnverified
 	preflightWorkRootUnavailable        = "worker work root unavailable"
 	preflightCanceled                   = "worker preflight canceled"
 	preflightWorkRootInvalid            = "worker work root invalid"
@@ -33,7 +34,7 @@ const (
 
 func validPreflightMessage(message string) bool {
 	switch message {
-	case preflightRunnerUnavailable, preflightSelectionUnavailable, preflightWorkRootUnavailable,
+	case preflightRunnerUnavailable, preflightSelectionUnavailable, preflightRolePairUnavailable, preflightWorkRootUnavailable,
 		preflightCanceled, preflightWorkRootInvalid, preflightEvidenceDirsUnsupported,
 		preflightCommandSkillUnavailable, preflightAuditSkillUnavailable,
 		preflightAuditToolchainUnavailable, preflightGitReadinessUnavailable,
@@ -69,6 +70,12 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	message = preflightSelectionUnavailable
 	if r.selection == nil {
 		return errors.New("worker runner has no frozen selection")
+	}
+	if r.selection.Critic != nil {
+		if err := CheckNativeRolePair(r.selection.Main.Provider, r.selection.Critic.Provider); err != nil && r.runModel == nil {
+			message = preflightRolePairUnavailable
+			return err
+		}
 	}
 	message = preflightWorkRootUnavailable
 	if r.WorkRoot == "" {

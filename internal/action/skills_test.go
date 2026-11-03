@@ -168,6 +168,14 @@ func TestPortableJobCarriesAlwaysOnSkillsToBothRoles(t *testing.T) {
 		!slices.Equal(job.Main.AlwaysOnSkills, orchestrator.AlwaysOnSkills) || !slices.Equal(job.Critic.AlwaysOnSkills, orchestrator.AlwaysOnSkills) {
 		t.Fatalf("portable role skills: main=%+v critic=%+v", job.Main, job.Critic)
 	}
+	orchestrator.Adversarial = "codex"
+	orchestrator.MainModel, orchestrator.MainEffort = "main-model", "high"
+	orchestrator.CriticModel, orchestrator.CriticEffort = "critic-model", "low"
+	job, err = attemptFixture(orchestrator).portableJob(testActionContext(t), &preparedAction{checkout: checkout, request: request}, "title", "body")
+	if err != nil || job.Critic == nil || job.Main.Provider != "codex" || job.Critic.Provider != "codex" ||
+		job.Main.Model != "main-model" || job.Critic.Model != "critic-model" || job.Validate() != nil {
+		t.Fatalf("portable same-provider roles: main=%+v critic=%+v error=%v", job.Main, job.Critic, err)
+	}
 }
 
 func TestRunnerRequiresEverySkillAndLoadsOptionalSkills(t *testing.T) {

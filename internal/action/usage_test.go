@@ -288,13 +288,16 @@ func TestUsageDoesNotCountCanceledDispatch(t *testing.T) {
 func TestUsageTracksBothModelRoles(t *testing.T) {
 	codex := RoleSettings{Provider: "codex", Model: "codex-model", Effort: "high"}
 	claude := RoleSettings{Provider: "claude", Model: "claude-model", Effort: "medium"}
-	for _, roles := range [][2]RoleSettings{{codex, claude}, {claude, codex}} {
+	for _, roles := range [][2]RoleSettings{{codex, claude}, {claude, codex},
+		{codex, {Provider: "codex", Model: "critic-codex", Effort: "low"}},
+		{claude, {Provider: "claude", Model: "critic-claude", Effort: "high"}}} {
 		main, critic := roles[0], roles[1]
-		t.Run(main.Provider, func(t *testing.T) {
+		t.Run(main.Provider+"/"+critic.Provider, func(t *testing.T) {
 			store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 			runErr := context.Canceled
 			e := &Orchestrator{Usage: store, Main: main.Provider, Adversarial: critic.Provider,
 				CodexModel: "codex-model", CodexEffort: "high", ClaudeModel: "claude-model", ClaudeEffort: "medium",
+				MainModel: main.Model, MainEffort: main.Effort, CriticModel: critic.Model, CriticEffort: critic.Effort,
 			}
 			tracked := attemptFixture(e)
 			finish, err := tracked.trackUsage(usageJob())
@@ -349,7 +352,15 @@ func TestUsageTracksBothModelRoles(t *testing.T) {
 			if got.Provider != main.Provider || got.CriticProvider != critic.Provider || got.Model != main.Model || got.Effort != main.Effort || got.CriticModel != critic.Model || got.CriticEffort != critic.Effort || got.Status != "failed" || got.UsageComplete || got.Tokens != (usage.Tokens{Input: 210, CacheCreationInput: 21, CachedInput: 168, Output: 42}) || got.UsageCoverage != (usage.Coverage{Scope: "attempt", PartialReport: true, UnverifiedHelpers: true}) {
 				t.Fatalf("inaccurate mixed usage: %+v", got)
 			}
-			if main.Provider == "codex" && (got.CodexCalls != 2 || got.ClaudeCalls != 1) || main.Provider == "claude" && (got.ClaudeCalls != 2 || got.CodexCalls != 1) {
+			wantCodex, wantClaude := 0, 0
+			for _, provider := range []string{main.Provider, main.Provider, critic.Provider} {
+				if provider == "codex" {
+					wantCodex++
+				} else {
+					wantClaude++
+				}
+			}
+			if got.CodexCalls != wantCodex || got.ClaudeCalls != wantClaude {
 				t.Fatalf("wrong provider counts: %+v", got)
 			}
 		})

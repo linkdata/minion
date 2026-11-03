@@ -27,9 +27,12 @@ func (e *Orchestrator) WorkerSelection(cfg config.Config) (WorkerSelection, erro
 	if cfg.Adversarial != e.Adversarial {
 		return WorkerSelection{}, errors.New("worker selection critic provider differs from config")
 	}
-	selected := WorkerSelection{Commands: make(map[string]config.CommandMapping), Main: e.roleSettings(e.mainProvider(), nil)}
+	if err := e.matchConfiguredRoleModels(cfg); err != nil {
+		return WorkerSelection{}, err
+	}
+	selected := WorkerSelection{Commands: make(map[string]config.CommandMapping), Main: e.mainRoleSettings(nil)}
 	if e.Adversarial != "" {
-		critic := e.roleSettings(e.Adversarial, nil)
+		critic := e.criticRoleSettings()
 		selected.Critic = &critic
 	}
 	seen := make(map[string]bool)
@@ -63,6 +66,26 @@ func (e *Orchestrator) WorkerSelection(cfg config.Config) (WorkerSelection, erro
 	return *runner.selection, nil
 }
 
+func (e *Orchestrator) matchConfiguredRoleModels(cfg config.Config) error {
+	for _, role := range []struct {
+		name       string
+		configured config.RoleModelConfig
+		selected   RoleSettings
+	}{
+		{name: "main", configured: cfg.RoleModelSettings(false), selected: e.mainRoleSettings(nil)},
+		{name: "critic", configured: cfg.RoleModelSettings(true), selected: e.criticRoleSettings()},
+	} {
+		if role.name == "critic" && cfg.Adversarial == "" {
+			continue
+		}
+		if role.configured.Model != "" && role.configured.Model != role.selected.Model ||
+			role.configured.Effort != "" && role.configured.Effort != role.selected.Effort {
+			return fmt.Errorf("worker %s model settings differ from config", role.name)
+		}
+	}
+	return nil
+}
+
 // NewSelectedRunner freezes one direct worker's assignment boundary for reuse.
 func NewSelectedRunner(runner Runner, selected WorkerSelection) (*Runner, error) {
 	if runner.selection != nil {
@@ -84,8 +107,8 @@ func NewSelectedRunner(runner Runner, selected WorkerSelection) (*Runner, error)
 		if selected.Critic.Model == "" || selected.Critic.Provider == "codex" && selected.Critic.Effort == "" {
 			return nil, errors.New("worker critic selection requires a resolved model and Codex effort")
 		}
-		if len(selected.Critic.Skills) != 0 || selected.Critic.Provider == selected.Main.Provider {
-			return nil, errors.New("worker critic selection must use the other provider and only always-on skills")
+		if len(selected.Critic.Skills) != 0 {
+			return nil, errors.New("worker critic selection accepts only always-on skills")
 		}
 	}
 	frozen := WorkerSelection{Commands: make(map[string]config.CommandMapping, len(selected.Commands)), Main: cloneRoleSettings(selected.Main)}
