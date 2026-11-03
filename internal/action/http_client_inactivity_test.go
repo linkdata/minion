@@ -484,13 +484,13 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		})
 		f.waitModel(t)
 		renew := <-progress
-		time.Sleep(10 * time.Second)
+		time.Sleep(4 * time.Second)
 		renew()
 		assertHTTPModelRunning(t, modelStopped)
-		time.Sleep(10 * time.Second)
+		time.Sleep(4 * time.Second)
 		renew()
 		assertHTTPModelRunning(t, modelStopped)
-		time.Sleep(6 * time.Second)
+		time.Sleep(18 * time.Second)
 		var err error
 		select {
 		case err = <-f.done:
