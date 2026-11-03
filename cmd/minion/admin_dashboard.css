@@ -36,6 +36,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
 table { border-collapse: collapse; min-width: 60rem; width: 100%; text-align: left; }
 th, td { border-bottom: 1px solid #39505b; padding: .7rem .6rem; vertical-align: top; overflow-wrap: anywhere; }
 th { color: #abb9b8; font-size: .78rem; font-weight: 600; }
+.number { text-align: right; font-variant-numeric: tabular-nums; }
 .hint { margin-bottom: 0; font-size: .82rem; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 50rem) {
