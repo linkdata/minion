@@ -151,6 +151,12 @@ func TestUsageServiceAndRequesterFiltersKeepOriginalDetail(t *testing.T) {
 	if got := reportJSON(t, "-dir", dir, "-requester-id", "23"); got.Totals.Attempts != 0 {
 		t.Fatalf("wrong requester selected: %+v", got)
 	}
+	if got := reportJSON(t, "-dir", dir, "-repository-id", "11"); got.Totals.Attempts != 1 || got.Filters.RepositoryID != 11 {
+		t.Fatalf("repository ID filter lost: %+v", got)
+	}
+	if got := reportJSON(t, "-dir", dir, "-repository-id", "12"); got.Totals.Attempts != 0 {
+		t.Fatalf("wrong repository selected: %+v", got)
+	}
 }
 
 func TestUsageDetailsAndTables(t *testing.T) {
@@ -266,7 +272,8 @@ func TestUsageRejectsInvalidArguments(t *testing.T) {
 		{"-from", "2026-10-10", "-to", "2026-10-09"},
 		{"-group-by", "repo,repo"}, {"-group-by", "week"},
 		{"-group-by", "none,repo"}, {"-group-by", ""},
-		{"-service", "other"}, {"-requester-id", "-1"}, {"-requester-id", "0"}, {"-requester-id", "bad"},
+		{"-service", "other"}, {"-repository-id", "-1"}, {"-repository-id", "0"}, {"-repository-id", "bad"},
+		{"-requester-id", "-1"}, {"-requester-id", "0"}, {"-requester-id", "bad"},
 		{"-dir", ""}, {"-dir", "records", "-config", "config.json"},
 		{"-loop"}, {"-check"}, {"extra"},
 	} {

@@ -30,12 +30,13 @@ type usageOutput struct {
 	GroupBy        []string `json:"group_by"`
 	ActionCoverage string   `json:"action_coverage"`
 	Filters        struct {
-		Repo        string `json:"repo,omitempty"`
-		User        string `json:"user,omitempty"`
-		Service     string `json:"service,omitempty"`
-		RequesterID int64  `json:"requester_id,omitempty"`
-		From        string `json:"from,omitempty"`
-		To          string `json:"to,omitempty"`
+		Repo         string `json:"repo,omitempty"`
+		RepositoryID int64  `json:"repository_id,omitempty"`
+		User         string `json:"user,omitempty"`
+		Service      string `json:"service,omitempty"`
+		RequesterID  int64  `json:"requester_id,omitempty"`
+		From         string `json:"from,omitempty"`
+		To           string `json:"to,omitempty"`
 	} `json:"filters"`
 	Totals    usage.Summary   `json:"totals"`
 	Groups    []usage.Summary `json:"groups"`
@@ -53,6 +54,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	configPath := flags.String("config", "config.local.json", "path to JSON configuration")
 	dir := flags.String("dir", "", "read usage records directly, without loading configuration")
 	repo := flags.String("repo", "", "filter by owner/repo (case insensitive)")
+	repositoryID := flags.Int64("repository-id", 0, "filter by numeric repository ID")
 	user := flags.String("user", "", "filter by invoking GitHub login (case insensitive)")
 	service := flags.String("service", "", "filter by call provider: codex, claude, or unknown")
 	requesterID := flags.Int64("requester-id", 0, "filter by numeric requester ID")
@@ -73,14 +75,18 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if flags.NArg() != 0 {
 		return fail(2, fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " ")))
 	}
-	var dirSet, configSet, requesterSet bool
+	var dirSet, configSet, repositorySet, requesterSet bool
 	flags.Visit(func(f *flag.Flag) {
 		dirSet = dirSet || f.Name == "dir"
 		configSet = configSet || f.Name == "config"
+		repositorySet = repositorySet || f.Name == "repository-id"
 		requesterSet = requesterSet || f.Name == "requester-id"
 	})
 	if dirSet && (configSet || strings.TrimSpace(*dir) == "") {
 		return fail(2, fmt.Errorf("-dir must be nonempty and cannot be combined with -config"))
+	}
+	if repositorySet && *repositoryID <= 0 {
+		return fail(2, fmt.Errorf("-repository-id must be positive"))
 	}
 	if requesterSet && *requesterID <= 0 {
 		return fail(2, fmt.Errorf("-requester-id must be positive"))
@@ -93,7 +99,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(2, fmt.Errorf("-to: %w", err))
 	}
-	filter := usage.Filter{Repo: strings.TrimSpace(*repo), User: strings.TrimSpace(*user), Service: strings.TrimSpace(*service), RequesterID: *requesterID, Since: since, Until: until}
+	filter := usage.Filter{Repo: strings.TrimSpace(*repo), RepositoryID: *repositoryID, User: strings.TrimSpace(*user), Service: strings.TrimSpace(*service), RequesterID: *requesterID, Since: since, Until: until}
 	groups := strings.Split(*groupBy, ",")
 	for i := range groups {
 		groups[i] = strings.TrimSpace(groups[i])
@@ -133,7 +139,7 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 // usageReport keeps CLI and admin exports on the same accounting contract.
 func usageReport(filter usage.Filter, groups []string, query usage.QueryResult) usageOutput {
 	output := usageOutput{GroupBy: []string{}, ActionCoverage: query.ActionCoverage, Groups: []usage.Summary{}, Attempts: []usageAttempt{}, TokenNote: usageTokenNote}
-	output.Filters.Repo, output.Filters.User = filter.Repo, filter.User
+	output.Filters.Repo, output.Filters.RepositoryID, output.Filters.User = filter.Repo, filter.RepositoryID, filter.User
 	output.Filters.Service, output.Filters.RequesterID = filter.Service, filter.RequesterID
 	if !filter.Since.IsZero() {
 		output.Filters.From = filter.Since.Format(time.RFC3339Nano)

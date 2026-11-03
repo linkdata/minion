@@ -38,6 +38,7 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
       <label>From (UTC)<input name="from" value="{{.From}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
       <label>To, exclusive (UTC)<input name="to" value="{{.To}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
       <label>Repository<input name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
+      <label>Repository ID<input name="repository_id" value="{{.RepositoryID}}" inputmode="numeric" maxlength="20"></label>
       <label>Requester<input name="user" value="{{.User}}" maxlength="105" placeholder="GitHub login"></label>
       <label>Requester ID<input name="requester_id" value="{{.RequesterID}}" inputmode="numeric" maxlength="20"></label>
       <label>Service<select name="service">
@@ -80,8 +81,8 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
 var adminUsageGroups = []string{"repo", "repository_id", "user", "requester_id", "service"}
 
 type adminUsageQuery struct {
-	From, To, Repo, User, RequesterID, Service, ExportURL string
-	Report                                                usageOutput
+	From, To, Repo, RepositoryID, User, RequesterID, Service, ExportURL string
+	Report                                                              usageOutput
 }
 
 func parseAdminUsageQuery(raw string) (adminUsageQuery, usage.Filter, error) {
@@ -92,7 +93,7 @@ func parseAdminUsageQuery(raw string) (adminUsageQuery, usage.Filter, error) {
 	if err != nil {
 		return adminUsageQuery{}, usage.Filter{}, errAdminUsageFilter
 	}
-	limits := map[string]int{"from": 35, "to": 35, "repo": 201, "user": 105, "requester_id": 20, "service": 7}
+	limits := map[string]int{"from": 35, "to": 35, "repo": 201, "repository_id": 20, "user": 105, "requester_id": 20, "service": 7}
 	for name, entries := range values {
 		limit, allowed := limits[name]
 		if !allowed || len(entries) != 1 || len(entries[0]) > limit || !utf8.ValidString(entries[0]) || strings.ContainsAny(entries[0], "\x00\r\n") {
@@ -115,6 +116,14 @@ func parseAdminUsageQuery(raw string) (adminUsageQuery, usage.Filter, error) {
 	if err != nil || !since.IsZero() && !until.IsZero() && !since.Before(until) {
 		return adminUsageQuery{}, usage.Filter{}, errAdminUsageFilter
 	}
+	var repositoryID int64
+	if value := values.Get("repository_id"); value != "" {
+		repositoryID, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || repositoryID <= 0 {
+			return adminUsageQuery{}, usage.Filter{}, errAdminUsageFilter
+		}
+		query.RepositoryID = value
+	}
 	var requesterID int64
 	if value := values.Get("requester_id"); value != "" {
 		requesterID, err = strconv.ParseInt(value, 10, 64)
@@ -123,7 +132,7 @@ func parseAdminUsageQuery(raw string) (adminUsageQuery, usage.Filter, error) {
 		}
 		query.RequesterID = value
 	}
-	return query, usage.Filter{Repo: query.Repo, User: query.User, Service: query.Service, RequesterID: requesterID, Since: since, Until: until}, nil
+	return query, usage.Filter{Repo: query.Repo, RepositoryID: repositoryID, User: query.User, Service: query.Service, RequesterID: requesterID, Since: since, Until: until}, nil
 }
 
 var errAdminUsageFilter = errors.New("invalid admin usage filter")

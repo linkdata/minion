@@ -476,12 +476,14 @@ func readRecord(root *os.Root, name string) (Record, error) {
 type Filter struct {
 	Repo, User   string
 	Service      string
+	RepositoryID int64
 	RequesterID  int64
 	Since, Until time.Time
 }
 
 func (f Filter) Match(record Record) bool {
 	return (f.Repo == "" || strings.EqualFold(f.Repo, record.Repo)) &&
+		(f.RepositoryID == 0 || f.RepositoryID == record.RepositoryID) &&
 		(f.User == "" || strings.EqualFold(f.User, record.User)) &&
 		(f.RequesterID == 0 || f.RequesterID == record.RequesterID) &&
 		(f.Service == "" || f.Service == "unknown" && len(record.Calls) == 0 ||
@@ -573,6 +575,9 @@ func (s Store) Query(filter Filter, groupBy []string, details bool) (QueryResult
 func validateQuery(filter Filter, groupBy []string) error {
 	if !filter.Since.IsZero() && !filter.Until.IsZero() && !filter.Since.Before(filter.Until) {
 		return fmt.Errorf("since must precede until")
+	}
+	if filter.RepositoryID < 0 {
+		return fmt.Errorf("repository ID must be positive")
 	}
 	if filter.RequesterID < 0 {
 		return fmt.Errorf("requester ID must be positive")

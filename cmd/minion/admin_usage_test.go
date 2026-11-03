@@ -131,6 +131,34 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 	if len(pairs) != 0 {
 		t.Fatalf("missing identity groups: %v", pairs)
 	}
+	renamed := source
+	renamed.ID, renamed.JobID = fmt.Sprintf("%032x", 9), "renamed-repository"
+	renamed.Repo, renamed.RepositoryID, renamed.RequesterID = "example-owner/renamed-repo", 17, 7
+	if err := owner.Usage.Save(renamed); err != nil {
+		t.Fatal(err)
+	}
+	page = adminResponse(handler, http.MethodGet, "/admin/usage?repository_id=17", nil, cookie, "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="repository_id" value="17"`) ||
+		strings.Contains(page.Body.String(), "<td>18</td>") || !strings.Contains(page.Body.String(), "renamed-repo") {
+		t.Fatalf("repository ID page filter: status=%d body=%s", page.Code, page.Body.String())
+	}
+	for _, test := range []struct {
+		query string
+		want  int
+	}{
+		{"repository_id=17", 3},
+		{"repo=example-owner%2Fexample-repo&repository_id=17", 2},
+		{"repo=example-owner%2Fexample-repo", 3},
+	} {
+		export := adminResponse(handler, http.MethodGet, "/admin/usage.json?"+test.query, nil, cookie, "")
+		var selected usageOutput
+		if export.Code != http.StatusOK || json.Unmarshal(export.Body.Bytes(), &selected) != nil || selected.Totals.Attempts != test.want {
+			t.Fatalf("repository filter %q: status=%d report=%+v body=%s", test.query, export.Code, selected, export.Body.String())
+		}
+		if test.query == "repository_id=17" && selected.Filters.RepositoryID != 17 {
+			t.Fatalf("repository ID omitted from export: %+v", selected.Filters)
+		}
+	}
 }
 
 func TestAdminUsageRejectsBadFiltersAndDamagedRecords(t *testing.T) {
@@ -145,7 +173,7 @@ func TestAdminUsageRejectsBadFiltersAndDamagedRecords(t *testing.T) {
 		t.Fatalf("unescaped usage filter: status=%d body=%s", escaped.Code, escaped.Body.String())
 	}
 	for _, query := range []string{
-		"from=2026-10-10&to=2026-10-09", "from=tomorrow", "to=0001-01-01", "from=0001-01-01T00:00:00Z", "service=other", "requester_id=0",
+		"from=2026-10-10&to=2026-10-09", "from=tomorrow", "to=0001-01-01", "from=0001-01-01T00:00:00Z", "service=other", "requester_id=0", "repository_id=0", "repository_id=bad",
 		"repo=a&repo=b", "other=1", "user=%FF", "repo=%00",
 	} {
 		for _, route := range []string{"/admin/usage?", "/admin/usage.json?"} {
