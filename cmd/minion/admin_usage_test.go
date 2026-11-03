@@ -70,6 +70,7 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		"-user", "ALICE", "-service", "unknown", "-group-by", "repo,repository_id,user,requester_id,service")
 	if got.Totals != want.Totals || !reflect.DeepEqual(got.Groups, want.Groups) ||
 		got.Filters != want.Filters || got.ActionCoverage != "unknown" || got.TokenNote != usageTokenNote ||
+		!strings.Contains(got.TokenNote, "Status counts describe each matching attempt's overall outcome") ||
 		len(got.Attempts) != 1 || got.Attempts[0].SelectedUsage == nil || got.Attempts[0].SelectedUsage.TotalTokens != got.Totals.TotalTokens {
 		t.Fatalf("admin export differs from CLI report: got=%+v want=%+v", got, want)
 	}
