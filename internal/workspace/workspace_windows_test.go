@@ -151,6 +151,33 @@ func TestWindowsSourcePaths(t *testing.T) {
 	}
 }
 
+func TestWindowsSnapshotRejectsCaseAliasesBeforeMaterialize(t *testing.T) {
+	for _, test := range []struct {
+		name, reason string
+		paths        [2]string
+	}{
+		{name: "files", reason: "duplicate source path", paths: [2]string{"Readme", "README"}},
+		{name: "directories", reason: "source directory spelling collision", paths: [2]string{"Docs/a", "docs/b"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			files := []File{
+				{Path: test.paths[0], Mode: Regular, Data: []byte("first")},
+				{Path: test.paths[1], Mode: Regular, Data: []byte("second")},
+			}
+			if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("case alias passed snapshot preflight: %v", err)
+			}
+			root := privateRoot(t)
+			if err := Materialize(root, files); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("case alias reached materialization: %v", err)
+			}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("case alias wrote source before rejection: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestWindowsOpenPathRejectsLink(t *testing.T) {
 	root := t.TempDir()
 	name := filepath.Join(root, "source")

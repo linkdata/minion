@@ -224,7 +224,7 @@ func validateFiles(files []File) error {
 		}
 		total += len(file.Data)
 	}
-	return validatePaths(paths, false)
+	return validatePaths(paths, runtime.GOOS == "windows")
 }
 
 func validatePaths(paths []string, folded bool) error {
