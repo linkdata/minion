@@ -169,6 +169,14 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	if response := oauthRequest(handler, http.MethodGet, "/jaws/.ping", "", ghSession); response.Code != http.StatusForbidden {
 		t.Fatalf("user session granted protected JaWS route: %d", response.Code)
 	}
+	for _, path := range []string{"/", "/admin/usage", "/admin/usage.json", "/admin/dashboard.css"} {
+		if response := oauthRequest(handler, http.MethodGet, path, "", ghSession); response.Code != http.StatusForbidden {
+			t.Fatalf("user session granted admin route %s: %d", path, response.Code)
+		}
+	}
+	if response := oauthRequest(handler, http.MethodPost, "/admin/stop", "https://admin.example", ghSession); response.Code != http.StatusForbidden {
+		t.Fatalf("user session granted stop route: %d", response.Code)
+	}
 	if response := oauthRequest(handler, http.MethodGet, "/admin/login", "", ghSession); response.Code != http.StatusOK || strings.Contains(response.Body.String(), "Signed in") {
 		t.Fatalf("user session granted admin page: status=%d body=%q", response.Code, response.Body.String())
 	}
@@ -185,6 +193,9 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	}
 	adminSession.Set(adminSessionKey, "operator")
 	adminCookie := oauthCookie(t, adminSessionResponse, jw.CookieName)
+	if response := oauthRequest(handler, http.MethodGet, "/auth/login", "", adminCookie); response.Code != http.StatusOK || strings.Contains(response.Body.String(), "Signed in as") {
+		t.Fatalf("admin-only session appeared as an OAuth user: status=%d body=%q", response.Code, response.Body.String())
+	}
 	if response := oauthRequest(handler, http.MethodPost, "/auth/logout", "https://admin.example", adminCookie); response.Code != http.StatusForbidden {
 		t.Fatalf("user logout accepted an admin-only session: %d", response.Code)
 	}
