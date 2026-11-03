@@ -76,7 +76,7 @@ func parseSourceEntriesWithFold(ref string, output []byte, folded bool) ([]sourc
 		return nil, fmt.Errorf("%w: more than %d metadata entries", ErrCheckoutTooLarge, workspace.MaxEntries)
 	}
 	var entries []sourceEntry
-	var validation []workspace.File
+	var paths []string
 	seen := make(map[string]bool, len(lines))
 	var total int64
 	for _, line := range lines {
@@ -118,10 +118,6 @@ func parseSourceEntriesWithFold(ref string, output []byte, folded bool) ([]sourc
 			return nil, fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, workspace.MaxFiles)
 		}
 		source := sourceEntry{file: workspace.File{Path: path, Mode: uint32(mode)}, sha: fields[2], omitted: fields[1] == "commit" || fields[0] == "120000"}
-		file := source.file
-		if source.omitted {
-			file.Mode = workspace.Regular
-		}
 		// A gitlink has no blob; all blob sizes, including symlinks, count.
 		if fields[1] == "blob" {
 			source.size, err = strconv.ParseInt(fields[3], 10, 64)
@@ -133,12 +129,8 @@ func parseSourceEntriesWithFold(ref string, output []byte, folded bool) ([]sourc
 			}
 			total += source.size
 		}
-		validation = append(validation, file)
+		paths = append(paths, path)
 		entries = append(entries, source)
-	}
-	paths := make([]string, len(validation))
-	for i, file := range validation {
-		paths[i] = file.Path
 	}
 	if err := workspace.ValidateSourceLayout(paths, folded); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
