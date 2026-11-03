@@ -38,8 +38,8 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
       <p>Worker and action state updates every two seconds while this page is connected.</p>
     </div></div>
     <form class="filters" method="get" action="/">
-      <label>Repository<input name="repo" value="{{.Dot.Filter.Repo}}" maxlength="100" placeholder="owner/repo"></label>
-      <label>Requester<input name="requester" value="{{.Dot.Filter.Requester}}" maxlength="100" placeholder="login"></label>
+      <label>Repository<input name="repo" value="{{.Dot.Filter.Repo}}" maxlength="201" placeholder="owner/repo"></label>
+      <label>Requester<input name="requester" value="{{.Dot.Filter.Requester}}" maxlength="105" placeholder="login"></label>
       <label>Action<select name="action">
         <option value=""{{if .Dot.Filter.Selected ""}} selected{{end}}>All actions</option>
         <option value="review"{{if .Dot.Filter.Selected "review"}} selected{{end}}>Review</option>
@@ -106,10 +106,14 @@ func parseAdminDashboardFilter(rawQuery string) (adminDashboardFilter, error) {
 	if err != nil {
 		return adminDashboardFilter{}, err
 	}
-	for _, name := range []string{"repo", "requester", "action"} {
-		if len(values[name]) > 1 || len(values.Get(name)) > 100 || !utf8.ValidString(values.Get(name)) ||
-			strings.ContainsAny(values.Get(name), "\x00\r\n") {
-			return adminDashboardFilter{}, fmt.Errorf("invalid %s filter", name)
+	for _, field := range []struct {
+		name  string
+		limit int
+	}{{"repo", 201}, {"requester", 105}, {"action", 100}} {
+		value := values.Get(field.name)
+		if len(values[field.name]) > 1 || len(value) > field.limit || !utf8.ValidString(value) ||
+			strings.ContainsAny(value, "\x00\r\n") {
+			return adminDashboardFilter{}, fmt.Errorf("invalid %s filter", field.name)
 		}
 	}
 	filter := adminDashboardFilter{Repo: strings.TrimSpace(values.Get("repo")), Requester: strings.TrimSpace(values.Get("requester")), Action: values.Get("action")}

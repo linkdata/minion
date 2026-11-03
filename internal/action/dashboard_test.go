@@ -176,6 +176,7 @@ func TestDashboardRemoteReadinessWaitsForAcceptedCleanup(t *testing.T) {
 	store := dashboardStore(t, at)
 	accepted := dashboardAccepted(job, at)
 	accepted.ExecutorID = "remote"
+	accepted.Assigned = false
 	accepted.ResultReady = false
 	store.Data.Accepted = accepted
 	if err := store.Save(); err != nil {
@@ -192,6 +193,13 @@ func TestDashboardRemoteReadinessWaitsForAcceptedCleanup(t *testing.T) {
 	owner.setSelectedExecutor(worker)
 	if before, err := owner.DashboardSnapshot(at); err != nil || before.Worker.Readiness != "ready" {
 		t.Fatalf("pre-assignment pull should be ready: %+v, %v", before, err)
+	}
+	accepted.Assigned = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if assigned, err := owner.DashboardSnapshot(at); err != nil || assigned.Worker.Readiness != "assigned action in progress" {
+		t.Fatalf("assigned action with early repull should not be ready: %+v, %v", assigned, err)
 	}
 	accepted.ResultReady = true
 	if err := store.Save(); err != nil {
@@ -212,5 +220,42 @@ func TestDashboardRemoteReadinessWaitsForAcceptedCleanup(t *testing.T) {
 	executor.pull, executor.pullDone = true, make(chan struct{})             // A new pull is held.
 	if fresh, err := owner.DashboardSnapshot(at); err != nil || fresh.Worker.Readiness != "ready" {
 		t.Fatalf("fresh pull after accepted cleanup should be ready: %+v, %v", fresh, err)
+	}
+}
+
+func TestDashboardSnapshotShowsDeferredAcceptedPhases(t *testing.T) {
+	at := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	store := dashboardStore(t, at)
+	accepted := dashboardAccepted(testJob(command.Comment), at)
+	accepted.Assigned = false
+	accepted.ResultReady = false
+	accepted.RetryAt = at.Add(2 * time.Minute)
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	owner := &Orchestrator{Store: store}
+	if deferred, err := owner.DashboardSnapshot(at); err != nil || deferred.Action == nil ||
+		deferred.Action.Phase != "action deferred until 2026-11-03T12:02:00Z" {
+		t.Fatalf("preparation retry did not show deferred phase: %+v, %v", deferred, err)
+	}
+	accepted.Assigned = true
+	accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if deferred, err := owner.DashboardSnapshot(at); err != nil || deferred.Action == nil ||
+		deferred.Action.Phase != "publication deferred until 2026-11-03T12:02:00Z" {
+		t.Fatalf("publication retry did not show deferred phase: %+v, %v", deferred, err)
+	}
+	if due, err := owner.DashboardSnapshot(at.Add(2 * time.Minute)); err != nil || due.Action == nil || due.Action.Phase != "publishing" {
+		t.Fatalf("due retry retained deferred phase: %+v, %v", due, err)
+	}
+	accepted.Terminal = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if terminal, err := owner.DashboardSnapshot(at); err != nil || terminal.Action == nil || terminal.Action.Phase != "terminal cleanup" {
+		t.Fatalf("terminal action retained deferred phase: %+v, %v", terminal, err)
 	}
 }

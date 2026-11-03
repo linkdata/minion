@@ -162,10 +162,15 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 		return snapshot, nil
 	}
 	decision, decided := data.TerminalDecisions[accepted.JobID]
-	if observation.kind == "remote" && snapshot.Worker.Readiness == "ready" &&
-		(accepted.ResultReady || accepted.Terminal || decided && decision.AttemptID == accepted.AttemptID) {
-		// The held pull can arrive after Outcome but before accepted cleanup retires it.
-		snapshot.Worker.Readiness = "waiting for accepted cleanup"
+	matchingDecision := decided && decision.AttemptID == accepted.AttemptID
+	if observation.kind == "remote" && snapshot.Worker.Readiness == "ready" {
+		// A repull can arrive before the accepted action is durably released.
+		switch {
+		case accepted.ResultReady || accepted.Terminal || matchingDecision:
+			snapshot.Worker.Readiness = "waiting for accepted cleanup"
+		case accepted.Assigned:
+			snapshot.Worker.Readiness = "assigned action in progress"
+		}
 	}
 	snapshot.InProgress = 1
 	remaining := accepted.Deadline.Sub(now)
@@ -184,8 +189,16 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if accepted.Terminal {
 		action.Phase = "terminal cleanup"
 	}
-	if decided && decision.AttemptID == accepted.AttemptID {
+	if matchingDecision {
 		action.Phase = "terminal cleanup: " + decision.Outcome
+	}
+	retryPending := accepted.RetryAt.After(now) && !accepted.Terminal && !matchingDecision
+	if retryPending {
+		stage := "action"
+		if accepted.ResultReady {
+			stage = "publication"
+		}
+		action.Phase = stage + " deferred until " + accepted.RetryAt.UTC().Format(time.RFC3339)
 	}
 	snapshot.Action = action
 	status := observation.status
@@ -203,7 +216,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	snapshot.Worker.ReviewPhase = status.ReviewPhase
 	snapshot.Worker.LastContact = observation.statusAt
 	snapshot.Worker.LastProgress = observation.statusAt.Add(-status.ProgressAge)
-	if !accepted.ResultReady && !accepted.Terminal {
+	if !accepted.ResultReady && !accepted.Terminal && !retryPending && status.Phase != "" {
 		action.Phase = status.Phase
 	}
 	return snapshot, nil

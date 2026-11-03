@@ -719,6 +719,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 	}()
 	var observation httpObservation
 	err := httpServerRead(w, r, httpControlBytes, &observation, tx)
+	receivedAt := time.Now()
 	status := observation.Status
 	binding := httpBinding{status.Version, status.Identity, status.SourceRef}
 	code := httpInputStatus(err)
@@ -771,7 +772,7 @@ func (e *HTTPExecutor) serveStatus(w http.ResponseWriter, r *http.Request) {
 				appendFailed = err != nil
 				if err == nil {
 					e.mu.Lock()
-					e.status, e.statusAt = status, time.Now()
+					e.status, e.statusAt = status, receivedAt
 					e.mu.Unlock()
 				}
 			}

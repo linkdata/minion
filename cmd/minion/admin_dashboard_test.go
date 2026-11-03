@@ -139,6 +139,24 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 		!strings.Contains(hostile.Body.String(), "&lt;script&gt;") {
 		t.Fatalf("unescaped filter: status=%d body=%s", hostile.Code, hostile.Body.String())
 	}
+	longRepo := strings.Repeat("o", 100) + "/" + strings.Repeat("r", 100)
+	longRequester := strings.Repeat("u", 100) + "[bot]"
+	store.Data.Accepted.Repository, store.Data.Accepted.Requester = longRepo, longRequester
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	longURL := "/?repo=" + url.QueryEscape(longRepo) + "&requester=" + url.QueryEscape(longRequester)
+	longNames := adminResponse(handler, http.MethodGet, longURL, nil, cookie, "")
+	if longNames.Code != http.StatusOK || !strings.Contains(longNames.Body.String(), "<td>"+longRepo+"</td>") ||
+		!strings.Contains(longNames.Body.String(), "<td>"+longRequester+"</td>") ||
+		!strings.Contains(longNames.Body.String(), `maxlength="201"`) || !strings.Contains(longNames.Body.String(), `maxlength="105"`) {
+		t.Fatalf("valid maximum-length filters failed: status=%d body=%s", longNames.Code, longNames.Body.String())
+	}
+	for _, tooLong := range []string{"/?repo=" + strings.Repeat("r", 202), "/?requester=" + strings.Repeat("u", 106)} {
+		if invalid := adminResponse(handler, http.MethodGet, tooLong, nil, cookie, ""); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("overlong filter %q status=%d, want 400", tooLong, invalid.Code)
+		}
+	}
 	if invalid := adminResponse(handler, http.MethodGet, "/?action=publish", nil, cookie, ""); invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid action filter status=%d, want 400", invalid.Code)
 	}
