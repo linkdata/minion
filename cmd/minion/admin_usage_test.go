@@ -31,7 +31,8 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	page := adminResponse(handler, http.MethodGet, path, nil, cookie, "")
 	if page.Code != http.StatusOK || page.Header().Get("Cache-Control") != "no-store" ||
 		page.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
-		!strings.Contains(page.Body.String(), `role="region" aria-labelledby="usage-groups-heading" tabindex="0"`) ||
+		!strings.Contains(page.Body.String(), `aria-labelledby="usage-groups-heading" tabindex="0"`) ||
+		!strings.Contains(page.Body.String(), `<h2 id="usage-groups-heading">`) ||
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
 		!strings.Contains(page.Body.String(), `<th scope="col">Unallocated tokens</th>`) ||
 		!strings.Contains(page.Body.String(), "Incomplete attempts") ||
@@ -259,7 +260,7 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 		export := adminResponse(handler, http.MethodGet, "/admin/usage.json?"+test.query, nil, cookie, "")
 		var selected usageOutput
 		if export.Code != http.StatusOK || json.Unmarshal(export.Body.Bytes(), &selected) != nil || selected.Totals.Attempts != test.want {
-			t.Fatalf("repository filter %q: status=%d report=%+v body=%s", test.query, export.Code, selected, export.Body.String())
+			t.Fatalf("usage filter %q: status=%d report=%+v body=%s", test.query, export.Code, selected, export.Body.String())
 		}
 		if test.query == "repository_id=17" &&
 			(selected.Filters.RepositoryID != 17 || !strings.Contains(selected.TokenNote, "Repository ID filters exclude older records")) {
