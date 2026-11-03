@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,23 @@ import (
 // The linked or copied test binary redirects production Git URLs to local bare fixtures.
 func TestMain(m *testing.M) {
 	if realGit := os.Getenv("MINION_WINDOWS_GIT_PROXY"); realGit != "" {
+		if log := os.Getenv("MINION_WINDOWS_GIT_PUSH_LOG"); log != "" {
+			for _, arg := range os.Args[1:] {
+				if arg != "push" {
+					continue
+				}
+				file, err := os.OpenFile(log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err == nil {
+					_, writeErr := fmt.Fprintln(file, "push")
+					err = errors.Join(writeErr, file.Close())
+				}
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				break
+			}
+		}
 		args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "include.path=" + filepath.ToSlash(os.Getenv("MINION_WINDOWS_GIT_CONFIG"))}, os.Args[1:]...)
 		cmd := exec.Command(realGit, args...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -44,7 +62,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
+func TestWindowsFixPublication(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		changes   []workspace.Change
@@ -97,11 +115,14 @@ func testWindowsFixPublication(t *testing.T, changes []workspace.Change, publish
 
 	proxyDir := t.TempDir()
 	testsupport.LinkTestExecutable(t, filepath.Join(proxyDir, "git.exe"))
+	pushLog := filepath.Join(t.TempDir(), "push-calls")
 	t.Setenv("PATH", proxyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MINION_WINDOWS_GIT_PROXY", realGit)
 	t.Setenv("MINION_WINDOWS_GIT_CONFIG", configFile)
+	t.Setenv("MINION_WINDOWS_GIT_PUSH_LOG", pushLog)
 
 	var comment string
+	var commentPosts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
@@ -112,6 +133,7 @@ func testWindowsFixPublication(t *testing.T, changes []workspace.Change, publish
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Issue","bodyText":"Details","lastEditedAt":null}}}`)
 		case captureComment(t, w, r, &comment):
+			commentPosts.Add(1)
 		default:
 			t.Errorf("unexpected GitHub fixture request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -168,13 +190,19 @@ func testWindowsFixPublication(t *testing.T, changes []workspace.Change, publish
 		if refs := git("--git-dir="+forkRemote, "for-each-ref", "--format=%(refname)", "refs/heads"); strings.Contains(refs, "refs/heads/"+branch) || git("--git-dir="+forkRemote, "rev-parse", "refs/heads/main") != base {
 			t.Fatalf("hostile publication changed fork refs: %q", refs)
 		}
-		if len(store.Data.PendingFixes) != 0 || len(store.Data.PublicationWrites) != 0 || comment != "" {
-			t.Fatalf("hostile publication saved push or reply: pushes=%v writes=%v reply=%q", store.Data.PendingFixes, store.Data.PublicationWrites, comment)
+		if data, err := os.ReadFile(pushLog); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("hostile publication attempted Git push: log=%q error=%v", data, err)
+		}
+		if len(store.Data.PendingFixes) != 0 || len(store.Data.PublicationWrites) != 0 || comment != "" || commentPosts.Load() != 0 {
+			t.Fatalf("hostile publication saved push or attempted reply: pushes=%v writes=%v reply=%q posts=%d", store.Data.PendingFixes, store.Data.PublicationWrites, comment, commentPosts.Load())
 		}
 		return
 	}
 	if err != nil {
 		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(pushLog); err != nil || strings.Count(string(data), "push\n") != 1 || commentPosts.Load() != 1 {
+		t.Fatalf("supported publication did not attempt one push and reply: pushes=%q error=%v posts=%d", data, err, commentPosts.Load())
 	}
 	wantSHA := git("--git-dir="+forkRemote, "rev-parse", "refs/heads/"+branch)
 	if pending := store.Data.PendingFixes[request.ID]; pending.SHA != wantSHA || wantSHA == base {
