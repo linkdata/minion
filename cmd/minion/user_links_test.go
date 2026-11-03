@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestUserLinksMergeExistingGroupsAndHostIdentity(t *testing.T) {
@@ -56,4 +59,54 @@ func TestUserLinksRejectCorruptFile(t *testing.T) {
 	if _, err := openUserLinks(path); err == nil {
 		t.Fatal("cyclic links were accepted")
 	}
+}
+
+func TestUserLinksRecoverAfterWriteFailure(t *testing.T) {
+	first := (userIdentity{Provider: "github", Host: "github.com", ID: 7}).key()
+	second := (userIdentity{Provider: "gitlab", Host: "gitlab.example", ID: 8}).key()
+	third := (userIdentity{Provider: "github", Host: "github.com", ID: 9}).key()
+	next := map[string]string{second: first}
+	t.Run("before replacement", func(t *testing.T) {
+		store, err := openUserLinks(filepath.Join(t.TempDir(), "links.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.recoverAfterWriteFailure(errors.New("synthetic write failure"), next); err == nil || store.account(first) != first {
+			t.Fatalf("recover old state: error=%v account=%q", err, store.account(first))
+		}
+		if err := store.link(first, second); err != nil {
+			t.Fatalf("later link failed after a recoverable write error: %v", err)
+		}
+	})
+	t.Run("after replacement", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "links.json")
+		store, err := openUserLinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := []byte(`{"version":1,"links":{"` + second + `":"` + first + `"}}`)
+		if err := workspace.WriteAtomic(path, data); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.recoverAfterWriteFailure(errors.New("synthetic post-rename failure"), next); err == nil || store.account(second) != first {
+			t.Fatalf("recover visible replacement: error=%v account=%q", err, store.account(second))
+		}
+		if err := store.link(second, third); err != nil || store.account(third) != first {
+			t.Fatalf("later link after reconciliation: error=%v account=%q", err, store.account(third))
+		}
+	})
+	t.Run("unexpected replacement", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "links.json")
+		store, err := openUserLinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := []byte(`{"version":1,"links":{"` + third + `":"` + first + `"}}`)
+		if err := workspace.WriteAtomic(path, data); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.recoverAfterWriteFailure(errors.New("synthetic unexpected replacement"), next); err == nil || store.account(first) != "" {
+			t.Fatalf("unexpected visible map did not fail closed: error=%v account=%q", err, store.account(first))
+		}
+	})
 }

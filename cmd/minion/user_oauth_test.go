@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/config"
@@ -61,7 +63,7 @@ func oauthStart(t *testing.T, handler http.Handler, method, path string, session
 		t.Fatalf("start %s: status=%d body=%q", path, response.Code, response.Body.String())
 	}
 	stateCookie := oauthCookie(t, response, oauthStateCookie)
-	if !stateCookie.Secure || !stateCookie.HttpOnly || stateCookie.SameSite != http.SameSiteLaxMode || stateCookie.Path != "/auth/callback" {
+	if !stateCookie.Secure || !stateCookie.HttpOnly || stateCookie.SameSite != http.SameSiteLaxMode || stateCookie.Path != "/" || stateCookie.Domain != "" {
 		t.Fatalf("state cookie attributes: %+v", stateCookie)
 	}
 	location, err := url.Parse(response.Header().Get("Location"))
@@ -83,6 +85,7 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 		GitLabOAuth:    &config.OAuthClient{ClientID: "gitlab-id", ClientSecret: "gitlab-secret", RedirectURL: "https://admin.example/auth/callback", BaseURL: "https://gitlab.example"},
 	}
 	challenges := make(map[string]string)
+	redeemed := make(map[string]bool)
 	providerCalls := 0
 	client := &http.Client{Transport: oauthTransportFunc(func(r *http.Request) (*http.Response, error) {
 		providerCalls++
@@ -92,6 +95,10 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 				t.Fatal(err)
 			}
 			code := r.PostForm.Get("code")
+			if redeemed[code] {
+				t.Fatalf("authorization code %q redeemed twice", code)
+			}
+			redeemed[code] = true
 			challenge := sha256.Sum256([]byte(r.PostForm.Get("code_verifier")))
 			if challenges[code] != base64.RawURLEncoding.EncodeToString(challenge[:]) ||
 				r.PostForm.Get("redirect_uri") != "https://admin.example/auth/callback" ||
@@ -113,7 +120,7 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 			return oauthTestResponse(`{"id":42,"login":"same-name","email":"same@example.test"}`), nil
 		case "https://gitlab.example/api/v4/user":
 			switch r.Header.Get("Authorization") {
-			case "Bearer synthetic-gl1":
+			case "Bearer synthetic-gl1", "Bearer synthetic-glLink":
 				return oauthTestResponse(`{"id":42,"username":"same-name","email":"same@example.test"}`), nil
 			case "Bearer synthetic-gl2":
 				return oauthTestResponse(`{"id":84,"username":"another-name"}`), nil
@@ -126,6 +133,7 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	jw.CookieName = "__Host-minion_session"
 	oauth, err := newOAuthAccess(jw, cfg, statePath, client)
 	if err != nil {
 		t.Fatal(err)
@@ -147,12 +155,15 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 
 	ghState, ghQuery := oauthStart(t, handler, http.MethodGet, "/auth/github", nil)
 	challenges["gh1"] = ghQuery.Get("code_challenge")
+	if response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+ghState.Value+"&code=gh1", "", ghState, ghState); response.Code != http.StatusBadRequest || providerCalls != 0 {
+		t.Fatalf("duplicate state cookie: status=%d calls=%d", response.Code, providerCalls)
+	}
 	ghResponse := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+ghState.Value+"&code=gh1", "", ghState)
 	if ghResponse.Code != http.StatusSeeOther {
 		t.Fatalf("GitHub callback status=%d body=%q", ghResponse.Code, ghResponse.Body.String())
 	}
 	ghSession := oauthCookie(t, ghResponse, jw.CookieName)
-	if ghSession.Value == "" || !ghSession.Secure || !ghSession.HttpOnly {
+	if ghSession.Value == "" || ghSession.Name != "__Host-minion_session" || !ghSession.Secure || !ghSession.HttpOnly || ghSession.Path != "/" || ghSession.Domain != "" {
 		t.Fatalf("invalid user session cookie: %+v", ghSession)
 	}
 	if response := oauthRequest(handler, http.MethodGet, "/jaws/.ping", "", ghSession); response.Code != http.StatusForbidden {
@@ -163,6 +174,28 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	}
 	if response := oauthRequest(handler, http.MethodGet, "/auth/login", "", ghSession); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Signed in as same-name") {
 		t.Fatalf("user session missing: status=%d body=%q", response.Code, response.Body.String())
+	}
+	adminRequest := httptest.NewRequest(http.MethodGet, "https://admin.example/admin/login", nil)
+	adminRequest.TLS = &tls.ConnectionState{}
+	adminRequest.RemoteAddr = "192.0.2.7:12345"
+	adminSessionResponse := httptest.NewRecorder()
+	adminSession := jw.NewSession(adminSessionResponse, adminRequest)
+	if adminSession == nil {
+		t.Fatal("could not create admin session")
+	}
+	adminSession.Set(adminSessionKey, "operator")
+	adminCookie := oauthCookie(t, adminSessionResponse, jw.CookieName)
+	if response := oauthRequest(handler, http.MethodPost, "/auth/logout", "https://admin.example", adminCookie); response.Code != http.StatusForbidden {
+		t.Fatalf("user logout accepted an admin-only session: %d", response.Code)
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/admin/login", "", adminCookie); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Signed in") {
+		t.Fatalf("user logout revoked the admin session: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := oauthRequest(handler, http.MethodPost, "/admin/logout", "https://admin.example", adminCookie); response.Code != http.StatusSeeOther {
+		t.Fatalf("admin logout status=%d", response.Code)
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/admin/login", "", adminCookie); strings.Contains(response.Body.String(), "Signed in") {
+		t.Fatal("admin session remained live after admin logout")
 	}
 	beforeReplay := providerCalls
 	if response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+ghState.Value+"&code=gh1", "", ghState); response.Code != http.StatusBadRequest || providerCalls != beforeReplay {
@@ -198,6 +231,12 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 		t.Fatalf("GitLab callback status=%d body=%q", glResponse.Code, glResponse.Body.String())
 	}
 	glSession := oauthCookie(t, glResponse, jw.CookieName)
+	if response := oauthRequest(handler, http.MethodGet, "/auth/login", "", ghSession, glSession); response.Code != http.StatusForbidden {
+		t.Fatalf("two live session cookies on the same client IP: status=%d", response.Code)
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/admin/login", "", ghSession, glSession); response.Code != http.StatusForbidden {
+		t.Fatalf("two live session cookies reached admin login: status=%d", response.Code)
+	}
 	ghKey := userIdentity{Provider: "github", Host: "github.com", ID: 42}.key()
 	glKey := userIdentity{Provider: "gitlab", Host: "gitlab.example", ID: 42}.key()
 	if oauth.links.account(ghKey) == oauth.links.account(glKey) {
@@ -205,18 +244,21 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	}
 
 	linkState, linkQuery := oauthStart(t, handler, http.MethodPost, "/auth/link/gitlab", ghSession)
-	challenges["gl1"] = linkQuery.Get("code_challenge")
-	linked := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+linkState.Value+"&code=gl1", "", ghSession, linkState)
+	challenges["glLink"] = linkQuery.Get("code_challenge")
+	linked := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+linkState.Value+"&code=glLink", "", ghSession, linkState)
 	if linked.Code != http.StatusSeeOther || oauth.links.account(glKey) != oauth.links.account(ghKey) {
 		t.Fatalf("dual-proof link: status=%d gh=%q gl=%q", linked.Code, oauth.links.account(ghKey), oauth.links.account(glKey))
 	}
-	oldSessionRequest := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)
-	oldSessionRequest.RemoteAddr = "192.0.2.7:12345"
-	oldSessionRequest.AddCookie(glSession)
 	if response := oauthRequest(handler, http.MethodGet, "/auth/login", "", glSession); response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), "Signed in as same-name") ||
-		oauth.links.account(oauth.userIdentity(oldSessionRequest)) != oauth.links.account(ghKey) {
+		oauth.links.account(glKey) != oauth.links.account(ghKey) {
 		t.Fatalf("older GitLab session did not resolve merged account: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if response := oauthRequest(handler, http.MethodPost, "/admin/logout", "https://admin.example", glSession); response.Code != http.StatusSeeOther {
+		t.Fatalf("admin logout of user-only session status=%d", response.Code)
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/auth/login", "", glSession); strings.Contains(response.Body.String(), "Signed in as") {
+		t.Fatal("shared JaWS logout left the user session live")
 	}
 	reopened, err := openUserLinks(statePath + ".user-links.json")
 	if err != nil {
@@ -228,6 +270,11 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	data, err := os.ReadFile(statePath + ".user-links.json")
 	if err != nil || strings.Contains(string(data), "synthetic-") || strings.Contains(string(data), "-secret") {
 		t.Fatalf("persisted provider credential: read_error=%v", err)
+	}
+	missingSessionState, _ := oauthStart(t, handler, http.MethodPost, "/auth/link/gitlab", ghSession)
+	beforeMissingSession := providerCalls
+	if response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+missingSessionState.Value+"&code=glWithoutSession", "", missingSessionState); response.Code != http.StatusForbidden || providerCalls != beforeMissingSession {
+		t.Fatalf("linking without a current first session: status=%d calls=%d", response.Code, providerCalls-beforeMissingSession)
 	}
 
 	lateState, lateQuery := oauthStart(t, handler, http.MethodPost, "/auth/link/gitlab", ghSession)
@@ -278,6 +325,152 @@ func TestOAuthPendingStateBound(t *testing.T) {
 	oauth.mu.Unlock()
 	if response := oauthRequest(handler, http.MethodGet, "/auth/github", ""); response.Code != http.StatusSeeOther {
 		t.Fatalf("expired pending state did not release capacity: status=%d", response.Code)
+	}
+}
+
+func TestOAuthRepeatedStartRetiresBrowserState(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jw.Close()
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/callback"}}
+	a, err := newOAuthAccess(jw, cfg, filepath.Join(t.TempDir(), "state.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, cfg, nil, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var previous, first *http.Cookie
+	for range maxPendingOAuthPerIP + 2 {
+		response := oauthRequest(handler, http.MethodGet, "/auth/github", "", previous)
+		if response.Code != http.StatusSeeOther {
+			t.Fatalf("repeat start: status=%d", response.Code)
+		}
+		if previous == nil {
+			first = oauthCookie(t, response, oauthStateCookie)
+		}
+		previous = oauthCookie(t, response, oauthStateCookie)
+		a.mu.Lock()
+		count := len(a.pending)
+		a.mu.Unlock()
+		if count != 1 {
+			t.Fatalf("repeated starts retained %d states", count)
+		}
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+first.Value+"&code=stale", "", first); response.Code != http.StatusBadRequest {
+		t.Fatalf("retired browser state was accepted: %d", response.Code)
+	}
+}
+
+func TestOAuthProviderExchangeAndPendingBounds(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jw.Close()
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/callback"}}
+	started := make(chan struct{}, maxOAuthExchanges+1)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	client := &http.Client{Transport: oauthTransportFunc(func(*http.Request) (*http.Response, error) {
+		started <- struct{}{}
+		<-release
+		return nil, errors.New("synthetic provider outage")
+	})}
+	a, err := newOAuthAccess(jw, cfg, filepath.Join(t.TempDir(), "state.json"), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, cfg, nil, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := make(chan int, maxOAuthExchanges)
+	for range maxOAuthExchanges {
+		state, _ := oauthStart(t, handler, http.MethodGet, "/auth/github", nil)
+		go func() {
+			response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+state.Value+"&code=blocked", "", state)
+			completed <- response.Code
+		}()
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("provider exchange did not start")
+		}
+	}
+	busyState, _ := oauthStart(t, handler, http.MethodGet, "/auth/github", nil)
+	busyDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+busyState.Value+"&code=busy", "", busyState)
+		busyDone <- response
+	}()
+	select {
+	case response := <-busyDone:
+		if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("fifth provider exchange status=%d cookies=%v, want retryable 503", response.Code, response.Result().Cookies())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("fifth provider exchange blocked instead of rejecting admission")
+	}
+	for range maxPendingOAuthPerIP - maxOAuthExchanges - 1 {
+		if response := oauthRequest(handler, http.MethodGet, "/auth/github", ""); response.Code != http.StatusSeeOther {
+			t.Fatalf("pending admission with in-flight requests: status=%d", response.Code)
+		}
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/auth/github", ""); response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("in-flight requests escaped pending budget: status=%d", response.Code)
+	}
+	close(release)
+	released = true
+	for range maxOAuthExchanges {
+		if code := <-completed; code != http.StatusBadGateway {
+			t.Fatalf("provider outage status=%d", code)
+		}
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+busyState.Value+"&code=busy", "", busyState); response.Code != http.StatusBadGateway {
+		t.Fatalf("busy callback could not retry after capacity returned: status=%d", response.Code)
+	}
+	if response := oauthRequest(handler, http.MethodGet, "/auth/github", ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("completed exchanges did not release capacity: status=%d", response.Code)
+	}
+}
+
+func TestOAuthLoopbackStateCookie(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jw.Close()
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret",
+		RedirectURL: "http://127.0.0.1:8377/auth/callback"}}
+	a, err := newOAuthAccess(jw, cfg, filepath.Join(t.TempDir(), "state.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8377/auth/github", nil)
+	r.RemoteAddr = "127.0.0.1:12345"
+	w := httptest.NewRecorder()
+	handler, err := newAdminHandler(jw, cfg, nil, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler.ServeHTTP(w, r)
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("loopback sign-in status=%d", w.Code)
+	}
+	cookie := oauthCookie(t, w, loopbackStateCookie)
+	if cookie.Secure || cookie.Path != "/" || cookie.Domain != "" {
+		t.Fatalf("loopback state cookie: %+v", cookie)
 	}
 }
 

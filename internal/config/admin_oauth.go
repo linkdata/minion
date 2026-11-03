@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -43,7 +44,11 @@ func (a *AdminConfig) validateOAuth() error {
 			base.RawQuery != "" || base.Fragment != "" || base.RawPath != "" {
 			return errors.New("admin.gitlab_oauth base_url must be an HTTPS origin")
 		}
-		client.BaseURL = "https://" + strings.ToLower(base.Host)
+		host := strings.ToLower(base.Host)
+		if port, _ := strconv.Atoi(base.Port()); port == 443 {
+			host = strings.TrimSuffix(host, ":"+base.Port())
+		}
+		client.BaseURL = "https://" + host
 	}
 	return nil
 }
@@ -51,6 +56,12 @@ func (a *AdminConfig) validateOAuth() error {
 func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if u == nil || u.Host == "" || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
 		return false
+	}
+	if port := u.Port(); port != "" {
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return false
+		}
 	}
 	if u.Scheme == "https" {
 		return true

@@ -67,6 +67,9 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		_ = listener.Close()
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
+	if cfg.TLSCertFile != "" {
+		jw.CookieName = "__Host-minion_session"
+	}
 	jw.Logger = slog.Default()
 	oauth, err := newOAuthAccess(jw, cfg, statePath, nil)
 	if err != nil {

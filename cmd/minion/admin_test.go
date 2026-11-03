@@ -36,6 +36,9 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if admin.jaws.CookieName == "__Host-minion_session" {
+		t.Fatal("loopback HTTP server used a Secure-only cookie name")
+	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
 			t.Errorf("close admin server: %v", err)
@@ -134,6 +137,9 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if admin.jaws.CookieName != "__Host-minion_session" {
+		t.Fatalf("HTTPS JaWS cookie name = %q", admin.jaws.CookieName)
 	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {

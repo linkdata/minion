@@ -20,6 +20,11 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if good.Admin.GitLabOAuth.BaseURL != "https://gitlab.com" {
 		t.Fatalf("default GitLab origin = %q", good.Admin.GitLabOAuth.BaseURL)
 	}
+	defaultPort := valid()
+	defaultPort.Admin.GitLabOAuth.BaseURL = "https://GITLAB.example:443"
+	if err := defaultPort.Validate(t.TempDir()); err != nil || defaultPort.Admin.GitLabOAuth.BaseURL != "https://gitlab.example" {
+		t.Fatalf("default GitLab port was not normalized: base=%q error=%v", defaultPort.Admin.GitLabOAuth.BaseURL, err)
+	}
 	for _, test := range []struct {
 		name string
 		edit func(*Config)

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -157,9 +159,28 @@ func (s *userLinks) link(current, proved string) error {
 		return errors.New("user links exceed limit")
 	}
 	if err := workspace.WriteAtomic(s.path, data); err != nil {
-		s.bad = fmt.Errorf("save user links: %w", err)
-		return s.bad
+		return s.recoverAfterWriteFailure(err, next)
 	}
 	s.links = next
 	return nil
+}
+
+// recoverAfterWriteFailure reconciles pre-rename and post-rename failures.
+// The caller holds s.mu.
+func (s *userLinks) recoverAfterWriteFailure(writeErr error, next map[string]string) error {
+	if err := workspace.SyncDirectories(filepath.Dir(s.path)); err != nil {
+		s.bad = fmt.Errorf("save user links: %w", errors.Join(writeErr, err))
+		return s.bad
+	}
+	saved, err := openUserLinks(s.path)
+	if err != nil {
+		s.bad = fmt.Errorf("save user links: %w", errors.Join(writeErr, err))
+		return s.bad
+	}
+	if !maps.Equal(saved.links, s.links) && !maps.Equal(saved.links, next) {
+		s.bad = fmt.Errorf("save user links: visible links differ from both old and replacement records: %w", writeErr)
+		return s.bad
+	}
+	s.links = saved.links
+	return fmt.Errorf("save user links: %w", writeErr)
 }

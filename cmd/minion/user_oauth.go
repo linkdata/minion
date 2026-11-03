@@ -26,10 +26,12 @@ import (
 const (
 	userSessionKey       = "minion.user.identity"
 	userLabelKey         = "minion.user.label"
-	oauthStateCookie     = "minion_oauth_state"
+	oauthStateCookie     = "__Host-minion_oauth_state"
+	loopbackStateCookie  = "minion_oauth_state"
 	oauthStateLifetime   = 10 * time.Minute
 	maxPendingOAuth      = 128
 	maxPendingOAuthPerIP = 8
+	maxOAuthExchanges    = 4
 	maxOAuthResponse     = 32 << 10
 	maxOAuthAccessToken  = 4096
 )
@@ -53,6 +55,9 @@ type oauthAccess struct {
 	providers map[string]oauthProvider
 	mu        sync.Mutex
 	pending   map[string]pendingOAuth
+	inflight  int
+	byIP      map[string]int
+	exchanges chan struct{}
 }
 
 func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, client *http.Client) (*oauthAccess, error) {
@@ -72,7 +77,8 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	bounded := *client
 	bounded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	a := &oauthAccess{jaws: jw, links: links, client: &bounded,
-		providers: make(map[string]oauthProvider, 2), pending: make(map[string]pendingOAuth)}
+		providers: make(map[string]oauthProvider, 2), pending: make(map[string]pendingOAuth), byIP: make(map[string]int),
+		exchanges: make(chan struct{}, maxOAuthExchanges)}
 	if c := cfg.GitHubOAuth; c != nil {
 		a.providers["github"] = oauthProvider{name: "github", host: "github.com",
 			authorizeURL: "https://github.com/login/oauth/authorize", tokenURL: "https://github.com/login/oauth/access_token",
@@ -125,22 +131,14 @@ func (a *oauthAccess) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /auth/logout", a.logout)
 }
 
-func (a *oauthAccess) userIdentity(r *http.Request) string {
-	sess := a.jaws.GetSession(r)
-	key, _ := sess.Get(userSessionKey).(string)
-	if a.links.account(key) == "" {
-		return ""
-	}
-	return key
-}
-
 func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = io.WriteString(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Minion sign-in</title></head><body><main>`)
-	if key := a.userIdentity(r); key != "" {
-		sess := a.jaws.GetSession(r)
+	sess := a.jaws.GetSession(r)
+	key, _ := sess.Get(userSessionKey).(string)
+	if a.links.account(key) != "" {
 		label, _ := sess.Get(userLabelKey).(string)
 		_, _ = fmt.Fprintf(w, "<h1>Signed in as %s</h1>", html.EscapeString(label))
 		for _, name := range []string{"github", "gitlab"} {
@@ -166,6 +164,28 @@ func randomOAuthValue() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+}
+
+func stateCookieName(r *http.Request) string {
+	if r.TLS != nil {
+		return oauthStateCookie
+	}
+	return loopbackStateCookie
+}
+
+func stateCookieValue(r *http.Request) (string, bool) {
+	var value string
+	seen := false
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == stateCookieName(r) {
+			if seen {
+				return "", false
+			}
+			seen = true
+			value = cookie.Value
+		}
+	}
+	return value, true
 }
 
 func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
@@ -197,16 +217,21 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sign-in unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	previous, unique := stateCookieValue(r)
+	if !unique {
+		http.Error(w, "Invalid sign-in state", http.StatusBadRequest)
+		return
+	}
 	a.mu.Lock()
 	perIP := 0
 	for key, older := range a.pending {
-		if !time.Now().Before(older.expires) {
+		if !time.Now().Before(older.expires) || key == previous && older.clientIP == clientIP {
 			delete(a.pending, key)
 		} else if older.clientIP == clientIP {
 			perIP++
 		}
 	}
-	if len(a.pending) >= maxPendingOAuth || perIP >= maxPendingOAuthPerIP {
+	if len(a.pending)+a.inflight >= maxPendingOAuth || perIP+a.byIP[clientIP] >= maxPendingOAuthPerIP {
 		a.mu.Unlock()
 		http.Error(w, "Sign-in busy", http.StatusServiceUnavailable)
 		return
@@ -217,7 +242,7 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 	query := url.Values{"client_id": {provider.clientID}, "redirect_uri": {provider.redirectURL},
 		"response_type": {"code"}, "scope": {provider.scope}, "state": {state},
 		"code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
-	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Value: state, Path: "/auth/callback",
+	http.SetCookie(w, &http.Cookie{Name: stateCookieName(r), Value: state, Path: "/",
 		MaxAge: int(oauthStateLifetime.Seconds()), HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, provider.authorizeURL+"?"+query.Encode(), http.StatusSeeOther)
 }
@@ -236,25 +261,34 @@ func (a *oauthAccess) callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid sign-in callback", http.StatusBadRequest)
 		return
 	}
-	var cookieValue string
-	for _, cookie := range r.Cookies() {
-		if cookie.Name == oauthStateCookie {
-			if cookieValue != "" {
-				http.Error(w, "Invalid sign-in state", http.StatusBadRequest)
-				return
-			}
-			cookieValue = cookie.Value
-		}
-	}
-	if len(cookieValue) != len(states[0]) || subtle.ConstantTimeCompare([]byte(cookieValue), []byte(states[0])) != 1 {
+	cookieValue, unique := stateCookieValue(r)
+	if !unique || len(cookieValue) != len(states[0]) || subtle.ConstantTimeCompare([]byte(cookieValue), []byte(states[0])) != 1 {
 		http.Error(w, "Invalid sign-in state", http.StatusBadRequest)
+		return
+	}
+	// Leave the one-use state and cookie available when all provider slots are busy.
+	select {
+	case a.exchanges <- struct{}{}:
+		defer func() { <-a.exchanges }()
+	default:
+		http.Error(w, "Sign-in busy", http.StatusServiceUnavailable)
 		return
 	}
 	a.mu.Lock()
 	pending, found := a.pending[states[0]]
 	delete(a.pending, states[0])
+	if found && time.Now().Before(pending.expires) {
+		a.inflight++
+		a.byIP[pending.clientIP]++
+		defer func() {
+			a.mu.Lock()
+			a.inflight--
+			a.byIP[pending.clientIP]--
+			a.mu.Unlock()
+		}()
+	}
 	a.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: oauthStateCookie, Path: "/auth/callback", MaxAge: -1,
+	http.SetCookie(w, &http.Cookie{Name: stateCookieName(r), Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode})
 	provider, configured := a.providers[pending.provider]
 	if !found || !configured || !time.Now().Before(pending.expires) || !provider.matchesRequest(r) {

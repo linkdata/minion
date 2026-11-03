@@ -83,7 +83,18 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			return
 		}
 		mux.ServeHTTP(w, r)
-	}), func(r *http.Request) bool { return access.allowed(r) || oauth.allowed(r) })), nil
+	}), func(r *http.Request) bool {
+		seen := false
+		for _, cookie := range r.Cookies() {
+			if cookie.Name == jw.CookieName {
+				if seen {
+					return false
+				}
+				seen = true
+			}
+		}
+		return access.allowed(r) || oauth.allowed(r)
+	})), nil
 }
 
 func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action.Orchestrator) {
