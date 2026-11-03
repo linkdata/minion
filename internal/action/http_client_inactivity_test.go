@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -54,7 +55,7 @@ func (b *httpPullCloseSignal) Close() error {
 	return err
 }
 
-func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model func(context.Context, modelRun) (aicli.Result, error)) *httpInactivityFixture {
+func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model func(context.Context, modelRun) (aicli.Result, error), workerBudget ...time.Duration) *httpInactivityFixture {
 	t.Helper()
 	f := &httpInactivityFixture{
 		modelStarted: make(chan struct{}, 1), outcomeEntered: make(chan struct{}, 1),
@@ -82,6 +83,30 @@ func newHTTPInactivityFixture(t *testing.T, job Job, holdOutcome bool, model fun
 	}
 	client := f.parent.server.Client()
 	client.Timeout = 0
+	if len(workerBudget) != 0 {
+		base := client.Transport
+		client.Transport = httpClientTestTransport(func(r *http.Request) (*http.Response, error) {
+			response, err := base.RoundTrip(r)
+			if err != nil || r.URL.Path != "/next" || response.StatusCode != http.StatusOK {
+				return response, err
+			}
+			var assignment httpAssignment
+			decodeErr := httpDecode(response.Body, httpJobBytes, &assignment)
+			closeErr := response.Body.Close()
+			if err := errors.Join(decodeErr, closeErr); err != nil {
+				return nil, err
+			}
+			assignment.Job.RuntimeBudget = workerBudget[0]
+			data, err := httpEncode(assignment, httpJobBytes)
+			if err != nil {
+				return nil, err
+			}
+			response.Body = io.NopCloser(bytes.NewReader(data))
+			response.ContentLength = int64(len(data))
+			response.Header.Set("Content-Length", strconv.Itoa(len(data)))
+			return response, nil
+		})
+	}
 	runner := &Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
 		f.modelStarted <- struct{}{}
 		return model(ctx, request)
@@ -477,11 +502,44 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
-		// Parent and worker share the hard deadline; either may report it first.
-		if !errors.As(got.err, &reported) || !reported.failure.Deadline ||
+		// Parent stop and worker cap can race near the hard deadline.
+		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline ||
 			reported.failure.RuntimeCap != errors.Is(err, errExecutorRuntimeCap) ||
 			reported.failure.Inactivity || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
+		}
+	})
+}
+
+func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		job := testJob(command.Comment)
+		job.RuntimeBudget = 30 * time.Second
+		job.InactivityTimeout = 20 * time.Second
+		progress := make(chan func(), 1)
+		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
+			progress <- request.onProgress
+			<-ctx.Done()
+			return aicli.Result{}, ctx.Err()
+		}, 20*time.Second)
+		f.waitModel(t)
+		renew := <-progress
+		time.Sleep(10 * time.Second)
+		renew()
+		synctest.Wait()
+		time.Sleep(8 * time.Second)
+		renew()
+		synctest.Wait()
+		time.Sleep(3 * time.Second)
+		err := <-f.done
+		if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
+			t.Fatalf("worker runtime cap did not stop chatty model: %v", err)
+		}
+		got := f.parent.result(t)
+		var reported *workerFailureError
+		if !errors.As(got.err, &reported) || !reported.failure.Terminal || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
+			reported.failure.Inactivity || len(got.result.Calls) != 1 {
+			t.Fatalf("parent lost worker runtime cap: error=%v result=%+v", got.err, got.result)
 		}
 	})
 }
