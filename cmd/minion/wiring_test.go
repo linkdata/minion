@@ -22,6 +22,8 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 	cfg := config.Config{
 		WorkRoot: "/private/work", StatePath: "/private/state.json", BotLogin: "bot",
 		Main: "claude", Adversarial: "codex",
+		MainSettings:             config.RoleModelConfig{Model: "main-pinned", Effort: "high"},
+		CriticSettings:           config.RoleModelConfig{Model: "critic-pinned", Effort: "low"},
 		CriticStopping:           config.CriticStopping{MaxRounds: 5, NonblockingAfterRound: &strict, ConsecutiveNoBlockerRounds: &consecutive},
 		InactivityTimeoutMinutes: 3, MaxRuntimeMinutes: 7, PublicationGraceSeconds: 11, MaxGitHubContextBytes: 1234,
 		AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection},
@@ -41,7 +43,9 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 	}
 	if orchestrator.Main != cfg.Main || orchestrator.Adversarial != cfg.Adversarial || !reflect.DeepEqual(orchestrator.CriticStopping, cfg.CriticStopping) ||
 		orchestrator.CodexModel != cfg.Codex.Model || orchestrator.CodexEffort != cfg.Codex.ReasoningEffort ||
-		orchestrator.ClaudeModel != cfg.Claude.Model || orchestrator.ClaudeEffort != cfg.Claude.Effort {
+		orchestrator.ClaudeModel != cfg.Claude.Model || orchestrator.ClaudeEffort != cfg.Claude.Effort ||
+		orchestrator.MainModel != cfg.MainSettings.Model || orchestrator.MainEffort != cfg.MainSettings.Effort ||
+		orchestrator.CriticModel != cfg.CriticSettings.Model || orchestrator.CriticEffort != cfg.CriticSettings.Effort {
 		t.Fatal("service lost pinned provider roles, models, efforts or critic budget")
 	}
 	if orchestrator.MaxRuntime != 7*time.Minute || orchestrator.InactivityTimeout != 3*time.Minute || orchestrator.PublicationGrace != 11*time.Second ||

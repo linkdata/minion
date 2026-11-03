@@ -58,6 +58,7 @@ type modelRun struct {
 	criticPrompt      func(mapping, outputDir string) string
 	proposedAnswer    string
 	model, effort     string
+	skills            []string
 	onEvent           func(aicli.StreamEvent)
 	onInput           func(aicli.PreparedInput)
 	onProgress        func()
@@ -87,6 +88,7 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 	case "codex":
 		settings := r.Codex
 		settings.Model, settings.ReasoningEffort = request.model, request.effort
+		settings.Skills = slices.Clone(request.skills)
 		settings.ReadOnlyDirs = slices.Clone(request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
 		if request.freshConversation {
@@ -103,6 +105,7 @@ func (r *Runner) runNative(ctx context.Context, request modelRun) (aicli.Result,
 	case "claude":
 		settings := r.Claude
 		settings.Model, settings.Effort = request.model, request.effort
+		settings.Skills = slices.Clone(request.skills)
 		settings.ReadOnlyDirs = slices.Clone(request.readOnlyDirs)
 		settings.OutputSchema = request.outputSchema
 		if request.freshConversation {

@@ -5,13 +5,91 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestRunnerRoutesEachRolePairAndDisabledCritic(t *testing.T) {
+	for _, pair := range [][2]string{{"codex", "claude"}, {"claude", "codex"}, {"codex", "codex"}, {"claude", "claude"}, {"codex", ""}} {
+		t.Run(pair[0]+"/"+pair[1], func(t *testing.T) {
+			installActionTestSkills(t, testReviewSkillURL)
+			writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
+			job := testJob(command.Comment)
+			job.Main = RoleSettings{Provider: pair[0], Model: "main-model", Effort: "high", Skills: []string{testReviewSkillURL}, AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection}}
+			if pair[1] != "" {
+				job.Critic = &RoleSettings{Provider: pair[1], Model: "critic-model", Effort: "low", AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection}}
+				job.CriticMaxRounds = 1
+			}
+			var calls []modelRun
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				calls = append(calls, request)
+				if request.role == roleMain {
+					if request.provider != pair[0] || request.model != "main-model" || request.effort != "high" || request.writable ||
+						!slices.ContainsFunc(request.skills, func(skill string) bool { return strings.Contains(skill, "ponytail-review") }) ||
+						!slices.Contains(request.skills, skills.BuiltinAntiPromptInjection) {
+						t.Fatalf("main role settings mixed: %+v", request)
+					}
+					if job.Critic == nil {
+						return aicli.Result{Answer: "answer"}, nil
+					}
+					return aicli.Result{Answer: proposalJSON("answer", "")}, nil
+				}
+				if request.provider != pair[1] || request.model != "critic-model" || request.effort != "low" || request.writable ||
+					len(request.skills) != 1 || request.skills[0] != skills.BuiltinAntiPromptInjection || !request.freshConversation || request.outputSchema != criticOutputSchema {
+					t.Fatalf("critic role settings mixed: %+v", request)
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(t.Context(), job)
+			wantCalls := 1
+			if job.Critic != nil {
+				wantCalls = 2
+			}
+			if err != nil || result.Answer != "answer" || len(calls) != wantCalls || len(result.Calls) != wantCalls || result.Validate(job) != nil {
+				t.Fatalf("pair %v result=%+v calls=%d error=%v validation=%v", pair, result, len(calls), err, result.Validate(job))
+			}
+			if job.Critic != nil && (calls[0].session == calls[1].session || result.Calls[0].Role != roleMain || result.Calls[1].Role != roleCritic ||
+				result.Calls[0].Model != "main-model" || result.Calls[1].Model != "critic-model" || result.CriticStopReason != "approved") {
+				t.Fatalf("pair %v merged call identity or review policy: %+v", pair, result)
+			}
+		})
+	}
+}
+
+func TestSameProviderCriticReadsFrozenFixCandidate(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			installActionTestSkills(t, testReviewSkillURL)
+			writeActionTestSkills(t, os.Getenv("HOME"), ".claude", testReviewSkillURL)
+			job := testJob(command.Fix)
+			job.Main.Provider, job.Main.Skills = provider, []string{testReviewSkillURL}
+			job.Critic, job.CriticMaxRounds = &RoleSettings{Provider: provider}, 1
+			var mainDir string
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+				if request.role == roleMain {
+					mainDir = request.dir
+					writeFixtureFile(t, mainDir, "source.txt", []byte("frozen candidate"))
+					return aicli.Result{Answer: proposalJSON("done", "")}, nil
+				}
+				candidate, err := os.ReadFile(filepath.Join(request.dir, "source.txt"))
+				if err != nil || request.dir == mainDir || request.writable || string(candidate) != "frozen candidate" {
+					t.Fatalf("%s critic did not read frozen candidate: dir=%q main=%q candidate=%q error=%v", provider, request.dir, mainDir, candidate, err)
+				}
+				return aicli.Result{Answer: approvedCritiqueJSON}, nil
+			}}
+			result, err := runner.Run(t.Context(), job)
+			if err != nil || len(result.Changes) != 1 || string(result.Changes[0].Data) != "frozen candidate" || result.Validate(job) != nil {
+				t.Fatalf("%s frozen review failed: result=%+v error=%v validation=%v", provider, result, err, result.Validate(job))
+			}
+		})
+	}
+}
 
 func TestRunnerKeepsRoleSessionsWithinEachAction(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))

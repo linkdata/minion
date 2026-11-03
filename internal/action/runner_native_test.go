@@ -29,6 +29,20 @@ func TestRunnerMissingProviderIsNotTerminalAndRecordsIncompleteUsage(t *testing.
 	}
 }
 
+func TestNativeSameProviderPairWaitsForCapabilityVerification(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		job := withClaudeCritic(testJob(command.Comment))
+		job.Main.Provider, job.Critic.Provider = provider, provider
+		if err := job.Validate(); err != nil {
+			t.Fatalf("portable %s pair rejected: %v", provider, err)
+		}
+		result, err := (&Runner{WorkRoot: t.TempDir()}).Run(t.Context(), job)
+		if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), nativeRolePairUnverified) || len(result.Calls) != 0 {
+			t.Fatalf("%s native pair reached model work: result=%+v error=%v", provider, result, err)
+		}
+	}
+}
+
 func TestRunnerMissingGitIsRetryableBeforeModelWork(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	result, err := (&Runner{WorkRoot: t.TempDir()}).Run(t.Context(), testJob(command.Comment))

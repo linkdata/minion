@@ -3,6 +3,7 @@ package action
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
@@ -20,6 +21,19 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
+
+func TestRemoteAttachRejectsRoleSettingsDriftBeforeListening(t *testing.T) {
+	cfg := config.Config{Main: "codex", Adversarial: "claude", MainSettings: config.RoleModelConfig{Model: "main-model", Effort: "high"},
+		CriticSettings: config.RoleModelConfig{Model: "critic-model", Effort: "low"}, RemoteExecutor: &config.RemoteExecutorConfig{}}
+	e := Orchestrator{Main: cfg.Main, Adversarial: cfg.Adversarial, MainModel: "main-model", MainEffort: "high", CriticModel: "wrong", CriticEffort: "low"}
+	if _, _, err := e.AttachRemoteWorker(cfg, tls.Certificate{}); err == nil || !strings.Contains(err.Error(), "critic model settings differ") {
+		t.Fatalf("remote role drift reached listener: %v", err)
+	}
+	cfg.Adversarial, e.Adversarial = "codex", "codex"
+	if _, _, err := e.AttachRemoteWorker(cfg, tls.Certificate{}); err == nil || !strings.Contains(err.Error(), nativeRolePairUnverified) {
+		t.Fatalf("unverified native pair reached remote listener: %v", err)
+	}
+}
 
 func TestRemoteWorkerCapacityRequiresLivePull(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

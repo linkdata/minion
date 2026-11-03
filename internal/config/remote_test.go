@@ -123,3 +123,17 @@ func TestLocalConfigDoesNotRequireExplicitModels(t *testing.T) {
 		t.Fatalf("local config changed: %v", err)
 	}
 }
+
+func TestRemoteRoleSettingsCanSupplyExplicitModelAndEffort(t *testing.T) {
+	cfg := remoteTestConfig()
+	cfg.Main, cfg.Adversarial = "codex", "codex"
+	cfg.Codex = CodexConfig{}
+	cfg.MainSettings = RoleModelConfig{Model: "main-model", Effort: "high"}
+	cfg.CriticSettings = RoleModelConfig{Model: "critic-model", Effort: "medium"}
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.RoleModelSettings(true); got != cfg.CriticSettings {
+		t.Fatalf("remote critic settings = %+v", got)
+	}
+}

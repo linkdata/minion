@@ -148,7 +148,7 @@ func TestHTTPStatusRecordsDistinguishFixtureSameProviderRoles(t *testing.T) {
 	job := testJob(command.Comment)
 	job.Main.Model = "main-model"
 	job.Critic = &RoleSettings{Provider: job.Main.Provider, Model: "critic-model"}
-	// Job.Validate intentionally rejects same-provider roles until #145; this isolates record matching.
+	// The roles share a provider but retain distinct call and model identities.
 	tx := &httpTransaction{job: job, recordRoot: root}
 	t.Cleanup(func() {
 		if tx.records != nil {

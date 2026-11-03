@@ -182,6 +182,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
 	preflight := func() bool {
+		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
+			logger.Printf("AI preflight: %v", err)
+			return false
+		}
 		if err := checkWorkRoot(); err != nil {
 			logger.Printf("work root: %v", err)
 			return false
@@ -379,6 +383,10 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		CodexEffort:           cfg.Codex.ReasoningEffort,
 		ClaudeModel:           cfg.Claude.Model,
 		ClaudeEffort:          cfg.Claude.Effort,
+		MainModel:             cfg.RoleModelSettings(false).Model,
+		MainEffort:            cfg.RoleModelSettings(false).Effort,
+		CriticModel:           cfg.RoleModelSettings(true).Model,
+		CriticEffort:          cfg.RoleModelSettings(true).Effort,
 		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
 			Codex:  codexAuth,
@@ -458,28 +466,41 @@ func githubToken(ctx context.Context) (string, error) {
 }
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
-	for _, provider := range []string{cfg.Main, cfg.Adversarial} {
+	requested := [2]config.RoleModelConfig{cfg.MainSettings, cfg.CriticSettings}
+	base := *cfg
+	for i, provider := range []string{cfg.Main, cfg.Adversarial} {
 		role := action.RoleSettings{Provider: provider}
 		var label, effortName string
+		selected := base.RoleModelSettings(i == 1)
 		switch provider {
 		case "codex":
-			if err = codexcli.CheckLogin(ctx, cfg.Codex); err == nil {
+			settings := cfg.Codex
+			settings.Model, settings.ReasoningEffort = selected.Model, selected.Effort
+			if err = codexcli.CheckLogin(ctx, settings); err == nil {
 				if err = codexcli.ValidateInstructionBoundary(ctx); err == nil {
-					cfg.Codex, err = codexcli.Validate(ctx, cfg.Codex)
+					settings, err = codexcli.Validate(ctx, settings)
 				}
 			}
 			if err != nil {
 				//lint:ignore ST1005 Codex is a proper noun.
 				return fmt.Errorf("Codex: %w", err) //nolint:staticcheck // -- Codex is a proper noun.
 			}
-			role.Model, role.Effort = cfg.Codex.Model, cfg.Codex.ReasoningEffort
+			role.Model, role.Effort = settings.Model, settings.ReasoningEffort
+			if requested[i] == (config.RoleModelConfig{}) {
+				cfg.Codex.Model, cfg.Codex.ReasoningEffort = role.Model, role.Effort
+			}
 			label, effortName = "Codex", "reasoning_effort"
 		case "claude":
-			if cfg.Claude, err = claudecli.Validate(ctx, cfg.Claude); err != nil {
+			settings := cfg.Claude
+			settings.Model, settings.Effort = selected.Model, selected.Effort
+			if settings, err = claudecli.Validate(ctx, settings); err != nil {
 				//lint:ignore ST1005 Claude is a proper noun.
 				return fmt.Errorf("Claude: %w", err) //nolint:staticcheck // -- Claude is a proper noun.
 			}
-			role.Model, role.Effort = cfg.Claude.Model, cfg.Claude.Effort
+			role.Model, role.Effort = settings.Model, settings.Effort
+			if requested[i] == (config.RoleModelConfig{}) {
+				cfg.Claude.Model, cfg.Claude.Effort = role.Model, role.Effort
+			}
 			label, effortName = "Claude", "effort"
 		case "":
 			continue
@@ -489,7 +510,12 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 		if err := role.Validate(); err != nil {
 			return fmt.Errorf("%s settings: %w", provider, err)
 		}
-		logger.Printf("%s settings: model=%s %s=%s", label, role.Model, effortName, role.Effort)
+		if i == 0 {
+			cfg.MainSettings = config.RoleModelConfig{Model: role.Model, Effort: role.Effort}
+		} else {
+			cfg.CriticSettings = config.RoleModelConfig{Model: role.Model, Effort: role.Effort}
+		}
+		logger.Printf("%s %s settings: model=%s %s=%s", []string{"main", "critic"}[i], label, role.Model, effortName, role.Effort)
 	}
 	logger.Printf("AI roles: main=%s adversarial=%s inactivity_timeout_minutes=%d max_runtime_minutes=%d publication_grace_seconds=%d", cfg.Main, cfg.Adversarial, cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes, cfg.PublicationGraceSeconds)
 	if cfg.Adversarial != "" {
