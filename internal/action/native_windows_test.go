@@ -17,10 +17,17 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/wintest"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
-	if os.Getenv("MINION_WINDOWS_MODEL_HELPER") == "1" {
+	if helper := os.Getenv("MINION_WINDOWS_MODEL_HELPER"); helper != "" {
+		if helper == string(command.Fix) {
+			if err := os.WriteFile("source.txt", []byte("fixed\n"), 0600); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
 		fmt.Print("native model answer")
 		os.Exit(0)
 	}
@@ -32,34 +39,45 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := testJob(command.Comment)
-	calls := 0
-	runner := Runner{WorkRoot: t.TempDir(), runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
-		calls++
-		data, err := os.ReadFile(filepath.Join(request.dir, "source.txt"))
-		if err != nil || string(data) != "source\n" {
-			t.Fatalf("materialized source=%q error=%v", data, err)
-		}
-		check := exec.CommandContext(ctx, git, "-C", request.dir, "rev-parse", "HEAD")
-		commit, err := check.Output()
-		if err != nil || strings.TrimSpace(string(commit)) != job.Source.Head {
-			t.Fatalf("materialized Git head=%q error=%v", commit, err)
-		}
-		cmd := exec.CommandContext(ctx, binary, "-test.run=^TestNativeWindowsActionMaterializesGitAndRunsCommand$")
-		cmd.Dir = request.dir
-		cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER=1")
-		var output bytes.Buffer
-		cmd.Stdout = &output
-		if err := executil.Run(cmd); err != nil {
-			return aicli.Result{}, err
-		}
-		return aicli.Result{Answer: output.String(), UsageComplete: true}, nil
-	}}
-	result, err := runner.Run(t.Context(), job)
-	if err != nil || calls != 1 || strings.TrimSpace(result.Answer) != "native model answer" {
-		t.Fatalf("native action result=%q calls=%d error=%v", result.Answer, calls, err)
+	for _, action := range []command.Action{command.Comment, command.Fix} {
+		t.Run(string(action), func(t *testing.T) {
+			job := testJob(action)
+			calls := 0
+			workRoot := t.TempDir()
+			runner := Runner{WorkRoot: workRoot, runModel: func(ctx context.Context, request modelRun) (aicli.Result, error) {
+				calls++
+				data, err := os.ReadFile(filepath.Join(request.dir, "source.txt"))
+				if err != nil || string(data) != "source\n" {
+					t.Fatalf("materialized source=%q error=%v", data, err)
+				}
+				check := exec.CommandContext(ctx, git, "-C", request.dir, "rev-parse", "HEAD")
+				commit, err := check.Output()
+				if err != nil || strings.TrimSpace(string(commit)) != job.Source.Head {
+					t.Fatalf("materialized Git head=%q error=%v", commit, err)
+				}
+				cmd := exec.CommandContext(ctx, binary, "-test.run=^TestNativeWindowsActionMaterializesGitAndRunsCommand$")
+				cmd.Dir = request.dir
+				cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER="+string(action))
+				var output bytes.Buffer
+				cmd.Stdout = &output
+				if err := executil.Run(cmd); err != nil {
+					return aicli.Result{}, err
+				}
+				return aicli.Result{Answer: output.String(), UsageComplete: true}, nil
+			}}
+			result, err := runner.Run(t.Context(), job)
+			if err != nil || calls != 1 || len(result.Calls) != 1 || strings.TrimSpace(result.Answer) != "native model answer" || result.Identity != job.Identity || result.SourceRef != job.Source.Head {
+				t.Fatalf("native action result=%+v calls=%d error=%v", result, calls, err)
+			}
+			if action == command.Comment && len(result.Changes) != 0 {
+				t.Fatalf("native comment changes=%+v", result.Changes)
+			}
+			if action == command.Fix && (len(result.Changes) != 1 || result.Changes[0].Path != "source.txt" || result.Changes[0].Mode != workspace.Regular || string(result.Changes[0].Data) != "fixed\n") {
+				t.Fatalf("native fix changes=%+v", result.Changes)
+			}
+			assertEmptyDir(t, workRoot)
+		})
 	}
-	assertEmptyDir(t, runner.WorkRoot)
 }
 
 func TestNativeWindowsRunnerCleansJunctionAfterModelFailure(t *testing.T) {
