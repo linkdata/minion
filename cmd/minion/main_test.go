@@ -476,7 +476,7 @@ func TestRunChecksGitBeforeProvidersAndGitHub(t *testing.T) {
 }
 
 func TestCheckRejectsUnverifiedSameProviderPairBeforeWorkerStartup(t *testing.T) {
-	cfg := config.Config{BotLogin: "fixture", Main: "codex", Adversarial: "codex",
+	cfg := config.Config{BotLogin: "fixture", Main: "claude", Adversarial: "claude",
 		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}

@@ -29,7 +29,8 @@ func TestRemoteAttachRejectsRoleSettingsDriftBeforeListening(t *testing.T) {
 	if _, _, err := e.AttachRemoteWorker(cfg, tls.Certificate{}); err == nil || !strings.Contains(err.Error(), "critic model settings differ") {
 		t.Fatalf("remote role drift reached listener: %v", err)
 	}
-	cfg.Adversarial, e.Adversarial = "codex", "codex"
+	cfg.Main, e.Main = "claude", "claude"
+	cfg.Adversarial, e.Adversarial = "claude", "claude"
 	if _, _, err := e.AttachRemoteWorker(cfg, tls.Certificate{}); err == nil || !strings.Contains(err.Error(), nativeRolePairUnverified) {
 		t.Fatalf("unverified native pair reached remote listener: %v", err)
 	}

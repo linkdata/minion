@@ -1099,8 +1099,9 @@ func TestRunHTTPKnownNoWorkOutcomeReleasesParentCapacity(t *testing.T) {
 	}
 }
 
-func TestRunHTTPNativeSameProviderPairReportsKnownNoWorkOutcome(t *testing.T) {
+func TestRunHTTPNativeClaudePairReportsKnownNoWorkOutcome(t *testing.T) {
 	job := testJob(command.Comment)
+	job.Main.Provider = "claude"
 	job.Critic = &RoleSettings{Provider: job.Main.Provider}
 	job.CriticMaxRounds = 1
 	var callbacks atomic.Int32

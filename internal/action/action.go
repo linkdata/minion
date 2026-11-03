@@ -310,9 +310,9 @@ func (e *Orchestrator) mainProvider() string { return cmp.Or(e.Main, "codex") }
 
 const nativeRolePairUnverified = "same-provider native role pairing is not verified"
 
-// CheckNativeRolePair gates real CLI combinations until #146 verifies them.
+// CheckNativeRolePair keeps unverified native CLI combinations gated.
 func CheckNativeRolePair(main, critic string) error {
-	if critic != "" && main == critic {
+	if critic != "" && main == critic && main != "codex" {
 		return errors.New(nativeRolePairUnverified)
 	}
 	return nil
