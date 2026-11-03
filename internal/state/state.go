@@ -352,31 +352,8 @@ func Open(path string, initialCursor time.Time) (*Store, error) {
 	if err != nil {
 		return nil, errors.Join(err, store.Close())
 	}
-	if store.Data.Cursor.IsZero() {
-		return nil, errors.Join(fmt.Errorf("state cursor is missing"), store.Close())
-	}
-	if store.Data.PublicationScanCursor != "" && !workspace.ValidIdentitySegment(store.Data.PublicationScanCursor) {
-		return nil, errors.Join(fmt.Errorf("invalid publication scan cursor"), store.Close())
-	}
-	if store.Data.Accepted != nil {
-		if err := store.Data.Accepted.Validate(); err != nil {
-			return nil, errors.Join(fmt.Errorf("invalid accepted action: %w", err), store.Close())
-		}
-	}
-	for jobID, failure := range store.Data.JobFailures {
-		if err := failure.Validate(); err != nil {
-			return nil, errors.Join(fmt.Errorf("invalid job failure %q: %w", jobID, err), store.Close())
-		}
-	}
-	for jobID, decision := range store.Data.TerminalDecisions {
-		if !validTerminalDecision(jobID, decision) {
-			return nil, errors.Join(fmt.Errorf("invalid terminal decision %q", jobID), store.Close())
-		}
-	}
-	for jobID, write := range store.Data.PublicationWrites {
-		if !validPublicationWrite(jobID, write) {
-			return nil, errors.Join(fmt.Errorf("invalid publication write %q", jobID), store.Close())
-		}
+	if err := validateData(store.Data); err != nil {
+		return nil, errors.Join(err, store.Close())
 	}
 	if store.Data.Processed == nil {
 		store.Data.Processed = map[string]time.Time{}

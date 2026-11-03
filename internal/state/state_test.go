@@ -484,6 +484,51 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAfterPostRenameSyncFailure(t *test
 	}
 }
 
+func TestReadSavedDistinguishesAmbiguousTerminalDecisionSaves(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows skips directory sync")
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	accepted := acceptedActionFixture()
+	accepted.OutcomeBinding = strings.Repeat("a", 64)
+	store, err := Open(path, accepted.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.Data.Accepted = &accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	priorCursor := store.Data.Cursor
+	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", accepted.Deadline)
+		return err
+	}); err == nil {
+		t.Fatal("pre-replacement decision save unexpectedly succeeded")
+	}
+	before, err := store.ReadSaved()
+	if err != nil || before.TerminalDecisions[accepted.JobID].AttemptID != "" || before.Accepted == nil || before.Accepted.Terminal {
+		t.Fatalf("pre-replacement decision appeared durable: %+v error=%v", before, err)
+	}
+	store.Data.Cursor = priorCursor
+	store.syncDir = filepath.Join(filepath.Dir(path), "missing-sync")
+	if err := store.WithLock(func() error {
+		_, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", accepted.Deadline.Add(time.Minute))
+		return err
+	}); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-replacement sync failure missing: %v", err)
+	}
+	store.syncDir = ""
+	after, err := store.ReadSaved()
+	if err != nil || after.TerminalDecisions[accepted.JobID].Outcome != "lost" ||
+		after.TerminalDecisions[accepted.JobID].OutcomeBinding != accepted.OutcomeBinding ||
+		after.Accepted == nil || !after.Accepted.Terminal {
+		t.Fatalf("post-replacement decision was not readable: %+v error=%v", after, err)
+	}
+}
+
 func TestStorePersistsAcrossProcessRestart(t *testing.T) {
 	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	const childMarker = "minion-state-restart-child"

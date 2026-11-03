@@ -43,6 +43,7 @@ type Orchestrator struct {
 	attemptID          string
 	usageCheckpoint    *usageCheckpoint
 	lateUsageSave      func(usage.Record) error // Test seam for an ambiguous late receipt save.
+	pruneSelected      func()                   // Test seam after private retention eligibility is selected.
 	assignmentRequired bool
 	remoteSelected     bool
 

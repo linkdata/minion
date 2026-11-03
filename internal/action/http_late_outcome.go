@@ -42,29 +42,29 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 		validDiagnostics(result.Diagnostics) != nil {
 		return errLateOutcomeRejected
 	}
-	var decidedAt time.Time
-	if err := e.Store.WithLock(func() error {
-		decision, exists := e.Store.Data.TerminalDecisions[result.Identity.JobID]
-		if !exists || decision.AttemptID != result.Identity.AttemptID || decision.OutcomeBinding == "" ||
-			decision.OutcomeBinding != httpBindingDigest(binding) ||
-			!time.Now().Before(decision.DecidedAt.Add(privateRecordRetention)) {
-			return errLateOutcomeRejected
-		}
-		confirmed, err := e.Store.DecideTerminalLocked(result.Identity.JobID, result.Identity.AttemptID, decision.Outcome, decision.DecidedAt)
-		decidedAt = confirmed.DecidedAt
-		return err
-	}); err != nil {
-		return err
+	saved, err := e.Store.ReadSaved()
+	if err != nil {
+		return fmt.Errorf("read saved terminal decision: %w", err)
 	}
+	decision, admitted := saved.TerminalDecisions[result.Identity.JobID]
+	digest := httpBindingDigest(binding)
+	if !admitted {
+		if accepted := saved.Accepted; accepted != nil && accepted.JobID == result.Identity.JobID &&
+			accepted.AttemptID == result.Identity.AttemptID && accepted.OutcomeBinding == digest {
+			return errors.New("matching terminal decision is not yet durable")
+		}
+		return errLateOutcomeRejected
+	}
+	if decision.AttemptID != result.Identity.AttemptID || decision.OutcomeBinding == "" ||
+		decision.OutcomeBinding != digest || !time.Now().Before(decision.DecidedAt.Add(privateRecordRetention)) {
+		return errLateOutcomeRejected
+	}
+	decidedAt := decision.DecidedAt
 	return e.Store.WithPrivateRecords(func() error {
 		if !time.Now().Before(decidedAt.Add(privateRecordRetention)) {
 			return errLateOutcomeRejected
 		}
-		var saveUsage func() error
-		if len(result.Calls) != 0 {
-			if e.Usage == nil {
-				return errLateOutcomeRejected
-			}
+		if len(result.Calls) != 0 && e.Usage != nil {
 			record, found, err := e.Usage.Load(result.Identity.AttemptID)
 			if err != nil {
 				return fmt.Errorf("load late action usage: %w", err)
@@ -85,30 +85,26 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 					return fmt.Errorf("%w: %v", errLateOutcomeRejected, err)
 				}
 			}
-			saveUsage = func() error {
-				if e.lateUsageSave != nil {
-					return e.lateUsageSave(record)
-				}
-				return e.Usage.Save(record)
+			var saveErr error
+			if e.lateUsageSave != nil {
+				saveErr = e.lateUsageSave(record)
+			} else {
+				saveErr = e.Usage.Save(record)
 			}
-		}
-		if saveUsage != nil {
-			if err := saveUsage(); err != nil {
-				return fmt.Errorf("save late action usage: %w", err)
+			if saveErr != nil {
+				return fmt.Errorf("save late action usage: %w", saveErr)
 			}
 		}
 		job := Job{Version: ProtocolVersion, Identity: result.Identity, Source: workspace.Snapshot{Head: result.SourceRef}}
 		failure := outcome.Failure.workerErr()
-		err := e.retainWorkerDiagnostics(job, result, failure)
+		err := e.retainWorkerDiagnosticsLocked(job, result, failure)
 		if errors.Is(err, errPrivateRecordConflict) {
 			// The live parent may have added this fixed marker before saving diagnostics.
 			capped := result
 			capped.Diagnostics = slices.Clone(result.Diagnostics)
 			capped = withCaptureLimitDiagnostic(capped)
 			if !slices.Equal(capped.Diagnostics, result.Diagnostics) {
-				if retryErr := e.retainWorkerDiagnostics(job, capped, failure); retryErr == nil {
-					return nil
-				}
+				return e.retainWorkerDiagnosticsLocked(job, capped, failure)
 			}
 		}
 		return err

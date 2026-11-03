@@ -308,8 +308,6 @@ func TestLateRemoteOutcomeConfirmsTerminalDecisionBeforeRetention(t *testing.T) 
 		t.Fatal(err)
 	}
 	f.store.Data.TerminalDecisions[f.job.Identity.JobID] = decision // Simulate a failed pre-replacement decision save.
-	priorCursor := f.store.Data.Cursor
-	f.store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := f.owner.receiveLateOutcome("remote", f.outcome); err == nil {
 		t.Fatal("unconfirmed terminal decision admitted a late receipt")
 	}
@@ -317,9 +315,68 @@ func TestLateRemoteOutcomeConfirmsTerminalDecisionBeforeRetention(t *testing.T) 
 	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("unconfirmed decision retained diagnostics: %v", err)
 	}
-	f.store.Data.Cursor = priorCursor
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID) // Simulate stale memory after a replaced state file.
+	f.store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := f.owner.receiveLateOutcome("remote", f.outcome); err != nil {
-		t.Fatalf("durable decision confirmation failed: %v", err)
+		t.Fatalf("saved decision admission depended on mutable state: %v", err)
+	}
+}
+
+func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	if err := f.finish(errors.New("lost outcome")); err == nil {
+		t.Fatal("final usage status lost action error")
+	}
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(f.statePath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted := *f.owner
+	restarted.Executor, restarted.Store = nil, reopened
+	_, client, origin := lateOutcomeEndpoint(t, &restarted)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("first late receipt after restart status=%d", status)
+	}
+	data, err := os.ReadFile(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
+	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
+		t.Fatalf("post-restart diagnostic missing: %q error=%v", data, err)
+	}
+	record, found, err := restarted.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || record.Status != "failed" || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
+		len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+		t.Fatalf("post-restart usage missing: %+v found=%t err=%v", record, found, err)
+	}
+	if saved, err := reopened.HasAcceptedResult(); err != nil || saved || reopened.Data.Accepted != nil {
+		t.Fatalf("post-restart late answer became publishable: saved=%t accepted=%+v error=%v", saved, reopened.Data.Accepted, err)
+	}
+}
+
+func TestLateRemoteOutcomeRetainsDiagnosticsWithoutUsageStore(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	usageStore := f.owner.Usage
+	before, found, err := usageStore.Load(f.job.Identity.AttemptID)
+	if err != nil || !found {
+		t.Fatalf("load pending usage: found=%t error=%v", found, err)
+	}
+	f.owner.Usage = nil
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("optional usage disabled late diagnostics: status=%d", status)
+	}
+	data, err := os.ReadFile(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
+	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
+		t.Fatalf("late diagnostic missing: %q error=%v", data, err)
+	}
+	after, found, err := usageStore.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || !reflect.DeepEqual(before, after) {
+		t.Fatalf("optional usage changed stored calls: before=%+v after=%+v found=%t error=%v", before, after, found, err)
 	}
 }
 
@@ -485,13 +542,18 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 }
 
 func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
-	f := newLateOutcomeFixture(t, false)
-	stateHeld, release := make(chan struct{}), make(chan struct{})
+	f := newLateOutcomeFixture(t, true)
+	stateHeld, lateEntered, releaseLate := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	f.owner.lateUsageSave = func(record usage.Record) error {
+		close(lateEntered) // The late receipt already holds the private-record lock.
+		<-releaseLate
+		return f.owner.Usage.Save(record)
+	}
 	terminalDone := make(chan error, 1)
 	go func() {
 		terminalDone <- f.store.WithLock(func() error {
 			close(stateHeld)
-			<-release
+			<-lateEntered // Admission must reach the private lock without taking the state lock.
 			f.owner.CompleteTerminalUsage(monitor.Job{ID: f.job.Identity.JobID, AttemptID: f.job.Identity.AttemptID}, "lost", time.Now())
 			return nil
 		})
@@ -499,8 +561,12 @@ func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
 	<-stateHeld
 	lateDone := make(chan error, 1)
 	go func() { lateDone <- f.owner.receiveLateOutcome("remote", f.outcome) }()
-	time.Sleep(20 * time.Millisecond)
-	close(release)
+	select {
+	case <-lateEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("late receipt waited for the held state lock")
+	}
+	close(releaseLate)
 	if err := waitLateError(t, terminalDone); err != nil {
 		t.Fatal(err)
 	}
@@ -537,7 +603,14 @@ func TestLateRemoteReceiptCannotRecreatePrunedDiagnostics(t *testing.T) {
 		t.Fatal(err)
 	}
 	pruneDone := make(chan error, 1)
+	selected := make(chan struct{})
+	f.owner.pruneSelected = func() { close(selected) }
 	go func() { pruneDone <- f.owner.PrunePrivateRecords(t.Context(), f.store, time.Now().UTC()) }()
+	select {
+	case <-selected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prune did not select the expired attempt")
+	}
 	close(release)
 	if err := waitLateError(t, lateDone); err != nil {
 		t.Fatal(err)

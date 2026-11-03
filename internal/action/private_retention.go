@@ -47,6 +47,9 @@ func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Sto
 	}); err != nil || len(eligible) == 0 {
 		return err
 	}
+	if e.pruneSelected != nil {
+		e.pruneSelected()
+	}
 	return store.WithPrivateRecords(func() error {
 		return e.prunePrivateRecords(ctx, eligible)
 	})

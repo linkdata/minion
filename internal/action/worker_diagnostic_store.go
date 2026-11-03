@@ -24,6 +24,16 @@ type retainedWorkerDiagnostics struct {
 
 // retainWorkerDiagnostics saves bounded worker text before its parent attempt can publish.
 func (e *Orchestrator) retainWorkerDiagnostics(job Job, result Result, runErr error) error {
+	if e.Store == nil {
+		return e.retainWorkerDiagnosticsLocked(job, result, runErr)
+	}
+	return e.Store.WithPrivateRecords(func() error {
+		return e.retainWorkerDiagnosticsLocked(job, result, runErr)
+	})
+}
+
+// retainWorkerDiagnosticsLocked runs while the private-record lock is held.
+func (e *Orchestrator) retainWorkerDiagnosticsLocked(job Job, result Result, runErr error) error {
 	var failure *workerFailureError
 	if errors.As(runErr, &failure) && failure != nil {
 		if err := failure.failure.validate(); err != nil {

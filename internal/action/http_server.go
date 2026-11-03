@@ -24,6 +24,7 @@ type pullGenerationContextKey struct{}
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
 	mu             sync.Mutex
+	outcomeRead    sync.Mutex
 	executorID     string
 	workRoot       string
 	credentials    WorkerCredentials
@@ -952,6 +953,10 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	tx := e.transaction()
 	var decodedOutcome *httpOutcome
 	if kind == "outcome" && e.lateOutcome != nil {
+		// Keep at most one decoded full result live through admission and retention.
+		e.outcomeRead.Lock()
+		defer e.outcomeRead.Unlock()
+		tx = e.transaction()
 		var outcome httpOutcome
 		// Decode independently: a closed attempt must not inherit a newer transaction's stop deadline.
 		err := httpServerRead(w, r, httpOutcomeBytes, &outcome)
@@ -961,9 +966,6 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			err = outcome.Failure.validate()
-		}
-		if err == nil {
-			err = httpBindingShape(binding)
 		}
 		if err != nil {
 			httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, outcome.Sequence, err)
