@@ -18,6 +18,7 @@ import (
 )
 
 var errConfirmedCaptureLimit = errors.New("attempt record capture limit confirmed")
+var errLateOutcomeAfterStop = errors.New("HTTP outcome passed the transaction stop deadline")
 
 type pullGenerationContextKey struct{}
 
@@ -654,9 +655,13 @@ func (e *HTTPExecutor) transaction() *httpTransaction {
 	return e.active
 }
 
-func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind string, failedOutcome bool) (bool, error) {
+func (tx *httpTransaction) enter(binding httpBinding, sequence uint64, kind string, failedOutcome, lateEligible bool) (bool, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
+	if kind == "outcome" && lateEligible && tx.delivered && binding == tx.binding &&
+		!tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil) {
+		return false, errLateOutcomeAfterStop // Late admission must not consume the active sequence.
+	}
 	gap := sequence > tx.sequence+1
 	if tx.fenced || !tx.delivered || binding != tx.binding || sequence == 0 || sequence <= tx.sequence || (gap && !failedOutcome) {
 		return false, errors.New("HTTP checkpoint binding, sequence or admission differs")
@@ -1022,11 +1027,12 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	}
 	tx.mutation.Lock()
 	tx.mu.Lock()
-	if tx.fenced || !tx.delivered {
+	stopped := decodedOutcome != nil && tx.delivered && !tx.stopUntil.IsZero() && !time.Now().Before(tx.stopUntil)
+	if tx.fenced || !tx.delivered || stopped {
 		fenced := tx.fenced
 		tx.mu.Unlock()
 		tx.mutation.Unlock()
-		if fenced && decodedOutcome != nil {
+		if decodedOutcome != nil && (fenced || stopped) {
 			e.serveLateOutcome(w, *decodedOutcome)
 			return
 		}
@@ -1215,10 +1221,19 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, sequence, err, tx)
 		return
 	}
-	sequenceGap, err = tx.enter(binding, sequence, kind, failedOutcome)
+	sequenceGap, err = tx.enter(binding, sequence, kind, failedOutcome, decodedOutcome != nil)
 	if err != nil {
 		tx.mutation.Unlock()
 		locked = false
+		if decodedOutcome != nil {
+			tx.mu.Lock()
+			fenced := tx.fenced
+			tx.mu.Unlock()
+			if errors.Is(err, errLateOutcomeAfterStop) || fenced {
+				e.serveLateOutcome(w, *decodedOutcome)
+				return
+			}
+		}
 		httpServerReject(w, kind, http.StatusConflict, binding, sequence, err, tx)
 		return
 	}

@@ -44,6 +44,20 @@ type outcomeReadBarrier struct {
 	first   bool
 }
 
+type outcomeEOFSignal struct {
+	io.ReadCloser
+	decoded chan struct{}
+	once    sync.Once
+}
+
+func (s *outcomeEOFSignal) Read(data []byte) (int, error) {
+	n, err := s.ReadCloser.Read(data)
+	if errors.Is(err, io.EOF) {
+		s.once.Do(func() { close(s.decoded) })
+	}
+	return n, err
+}
+
 func (b *outcomeReadBarrier) Read(data []byte) (int, error) {
 	if len(data) == 0 {
 		return 0, nil
@@ -855,6 +869,88 @@ func TestLateRemoteOutcomeAcrossFencedTransactionHandoff(t *testing.T) {
 	current.tx.mu.Unlock()
 	if sequence != 0 {
 		t.Fatalf("fenced transaction consumed late sequence %d", sequence)
+	}
+}
+
+func TestLateRemoteOutcomeAfterDurableStopBeforeTransactionFence(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID)
+	accepted := acceptedForJob(f.job)
+	accepted.Assigned = true
+	accepted.OutcomeBinding = httpBindingDigest(httpJobBinding(f.job))
+	f.store.Data.Accepted = accepted
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	decoded := make(chan struct{})
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" {
+				r.Body = &outcomeEOFSignal{ReadCloser: r.Body, decoded: decoded}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	current := newHTTPServerTest(t, t.Context(), f.job, runnerExecutionCheckpoints{}, wrap)
+	current.executor.lateOutcome = func(outcome httpOutcome) error { return f.owner.receiveLateOutcome("remote", outcome) }
+	current.pull(t)
+	current.tx.mutation.Lock()
+	releaseMutation := sync.OnceFunc(current.tx.mutation.Unlock)
+	defer releaseMutation()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan httpServerTestExchange, 1)
+	go func() {
+		done <- sendHTTPOutcome(ctx, current.server.Client(), current.server.URL+"/outcome", f.outcome,
+			httpBindingDigest(httpJobBinding(f.job)), "")
+	}()
+	select {
+	case <-decoded:
+	case <-ctx.Done():
+		t.Fatal("current Outcome did not finish decoding before stop")
+	}
+	// Monitor's assigned-stop path saves this decision before Execute has fenced the transaction.
+	if err := f.store.WithLock(func() error {
+		_, err := f.store.DecideTerminalLocked(f.job.Identity.JobID, f.job.Identity.AttemptID, "expired", time.Now().UTC())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current.tx.mu.Lock()
+	current.tx.stopUntil = time.Now().Add(-time.Second)
+	current.tx.mu.Unlock()
+	releaseMutation()
+	select {
+	case got := <-done:
+		if got.err != nil || got.status != http.StatusOK || got.ack.Failure != nil || got.ack.Sequence != f.outcome.Sequence {
+			t.Fatalf("decoded Outcome did not reach durable late receiver: %+v", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("decoded Outcome did not finish after durable stop")
+	}
+	current.tx.mu.Lock()
+	sequence, fenced := current.tx.sequence, current.tx.fenced
+	current.tx.mu.Unlock()
+	if sequence != 0 || fenced {
+		t.Fatalf("late Outcome changed active transaction: sequence=%d fenced=%t", sequence, fenced)
+	}
+	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil ||
+		record.Tokens != f.outcome.Result.Calls[0].Tokens {
+		t.Fatalf("durable stop lost pending usage receipt: %+v found=%t error=%v", record, found, err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
+	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
+		t.Fatalf("durable stop lost late diagnostics: %q error=%v", data, err)
+	}
+}
+
+func TestRemoteOutcomeStopAtSequenceAdmissionLeavesSequenceForLateReceipt(t *testing.T) {
+	tx := &httpTransaction{binding: httpBinding{Version: ProtocolVersion}, delivered: true,
+		stopUntil: time.Now().Add(-time.Second)}
+	gap, err := tx.enter(tx.binding, 3, "outcome", false, true)
+	if gap || !errors.Is(err, errLateOutcomeAfterStop) || tx.sequence != 0 {
+		t.Fatalf("expired remote Outcome consumed active sequence: gap=%t error=%v sequence=%d", gap, err, tx.sequence)
 	}
 }
 
