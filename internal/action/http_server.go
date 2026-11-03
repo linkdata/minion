@@ -953,12 +953,8 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	var decodedOutcome *httpOutcome
 	if kind == "outcome" && e.lateOutcome != nil {
 		var outcome httpOutcome
-		var err error
-		if tx != nil {
-			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
-		} else {
-			err = httpServerRead(w, r, httpOutcomeBytes, &outcome)
-		}
+		// Decode independently: a closed attempt must not inherit a newer transaction's stop deadline.
+		err := httpServerRead(w, r, httpOutcomeBytes, &outcome)
 		binding := httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}
 		if err == nil {
 			err = httpResultShape(outcome.Result)

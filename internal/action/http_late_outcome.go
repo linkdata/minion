@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/linkdata/minion/internal/workspace"
@@ -41,21 +42,24 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 		validDiagnostics(result.Diagnostics) != nil {
 		return errLateOutcomeRejected
 	}
-	return e.Store.WithPrivateRecords(func() error {
-		var decided bool
-		if err := e.Store.WithLock(func() error {
-			decision, exists := e.Store.Data.TerminalDecisions[result.Identity.JobID]
-			decided = exists && decision.AttemptID == result.Identity.AttemptID &&
-				decision.OutcomeBinding != "" && decision.OutcomeBinding == httpBindingDigest(binding) &&
-				time.Now().Before(decision.DecidedAt.Add(privateRecordRetention))
-			return nil
-		}); err != nil {
-			return err
-		}
-		if !decided {
+	var decidedAt time.Time
+	if err := e.Store.WithLock(func() error {
+		decision, exists := e.Store.Data.TerminalDecisions[result.Identity.JobID]
+		if !exists || decision.AttemptID != result.Identity.AttemptID || decision.OutcomeBinding == "" ||
+			decision.OutcomeBinding != httpBindingDigest(binding) ||
+			!time.Now().Before(decision.DecidedAt.Add(privateRecordRetention)) {
 			return errLateOutcomeRejected
 		}
-		var changed bool
+		confirmed, err := e.Store.DecideTerminalLocked(result.Identity.JobID, result.Identity.AttemptID, decision.Outcome, decision.DecidedAt)
+		decidedAt = confirmed.DecidedAt
+		return err
+	}); err != nil {
+		return err
+	}
+	return e.Store.WithPrivateRecords(func() error {
+		if !time.Now().Before(decidedAt.Add(privateRecordRetention)) {
+			return errLateOutcomeRejected
+		}
 		var saveUsage func() error
 		if len(result.Calls) != 0 {
 			if e.Usage == nil {
@@ -65,40 +69,48 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 			if err != nil {
 				return fmt.Errorf("load late action usage: %w", err)
 			}
+			trailingPending := len(record.Calls) == len(result.Calls)+1 && record.Calls[len(record.Calls)-1].FinishedAt == nil
 			if !found || record.JobID != result.Identity.JobID || record.RepositoryID != result.Identity.RepositoryID ||
 				record.RequesterID != result.Identity.RequesterID || record.Number != result.Identity.Number ||
 				record.Repo != result.Identity.Repository || record.ExecutorID != result.Identity.ExecutorID ||
-				record.SourceRef != result.SourceRef || len(record.Calls) != len(result.Calls) {
+				record.SourceRef != result.SourceRef || len(record.Calls) != len(result.Calls) && !trailingPending {
 				return errLateOutcomeRejected
 			}
 			for i, call := range result.Calls {
 				entry := usageCall(i+1, call)
 				finished := time.Now().UTC()
 				entry.FinishedAt = &finished
-				added, err := record.FinishCall(entry)
+				_, err := record.FinishCall(entry)
 				if err != nil {
 					return fmt.Errorf("%w: %v", errLateOutcomeRejected, err)
 				}
-				changed = changed || added
 			}
-			if changed {
-				saveUsage = func() error {
-					if e.lateUsageSave != nil {
-						return e.lateUsageSave(record)
-					}
-					return e.Usage.Save(record)
+			saveUsage = func() error {
+				if e.lateUsageSave != nil {
+					return e.lateUsageSave(record)
 				}
+				return e.Usage.Save(record)
 			}
-		}
-		job := Job{Version: ProtocolVersion, Identity: result.Identity, Source: workspace.Snapshot{Head: result.SourceRef}}
-		if err := e.retainWorkerDiagnostics(job, result, outcome.Failure.workerErr()); err != nil {
-			return err
 		}
 		if saveUsage != nil {
 			if err := saveUsage(); err != nil {
 				return fmt.Errorf("save late action usage: %w", err)
 			}
 		}
-		return nil
+		job := Job{Version: ProtocolVersion, Identity: result.Identity, Source: workspace.Snapshot{Head: result.SourceRef}}
+		failure := outcome.Failure.workerErr()
+		err := e.retainWorkerDiagnostics(job, result, failure)
+		if errors.Is(err, errPrivateRecordConflict) {
+			// The live parent may have added this fixed marker before saving diagnostics.
+			capped := result
+			capped.Diagnostics = slices.Clone(result.Diagnostics)
+			capped = withCaptureLimitDiagnostic(capped)
+			if !slices.Equal(capped.Diagnostics, result.Diagnostics) {
+				if retryErr := e.retainWorkerDiagnostics(job, capped, failure); retryErr == nil {
+					return nil
+				}
+			}
+		}
+		return err
 	})
 }

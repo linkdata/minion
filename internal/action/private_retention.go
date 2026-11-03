@@ -24,12 +24,6 @@ const (
 
 // PrunePrivateRecords removes only records bound to a finished attempt past retention.
 func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Store, now time.Time) error {
-	return store.WithPrivateRecords(func() error {
-		return e.prunePrivateRecords(ctx, store, now)
-	})
-}
-
-func (e *Orchestrator) prunePrivateRecords(ctx context.Context, store *state.Store, now time.Time) error {
 	eligible := make(map[string]bool)
 	if err := store.WithLock(func() error {
 		protected := make(map[string]bool)
@@ -53,6 +47,12 @@ func (e *Orchestrator) prunePrivateRecords(ctx context.Context, store *state.Sto
 	}); err != nil || len(eligible) == 0 {
 		return err
 	}
+	return store.WithPrivateRecords(func() error {
+		return e.prunePrivateRecords(ctx, eligible)
+	})
+}
+
+func (e *Orchestrator) prunePrivateRecords(ctx context.Context, eligible map[string]bool) error {
 	root, err := workspace.CanonicalPath(e.WorkRoot)
 	if err != nil {
 		return err

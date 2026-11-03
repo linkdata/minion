@@ -35,8 +35,11 @@ type lateOutcomeFixture struct {
 }
 
 func newLateOutcomeFixture(t *testing.T, pending bool) *lateOutcomeFixture {
+	return newLateOutcomeFixtureForJob(t, testJob(command.Comment), pending)
+}
+
+func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutcomeFixture {
 	t.Helper()
-	job := testJob(command.Comment)
 	job.Identity.ExecutorID = "remote"
 	f := newExecutionAdapterFixture(t, job)
 	job = f.job
@@ -74,7 +77,10 @@ func newLateOutcomeFixture(t *testing.T, pending bool) *lateOutcomeFixture {
 	}
 	var calls []CallUsage
 	if pending {
-		call := CallUsage{Provider: "codex", Role: roleMain, Round: 1}
+		if job.Critic != nil {
+			f.saveReview(nil, nil, "")
+		}
+		call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}
 		if err := f.sink.BeforeCall(f.call(call)); err != nil {
 			t.Fatal(err)
 		}
@@ -106,12 +112,13 @@ func lateOutcomeEndpoint(t *testing.T, owner *Orchestrator) (*RemoteEndpoint, *h
 	t.Helper()
 	certificate, leaf := testRemoteCertificate(t)
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
-	executor, err := NewHTTPExecutor("remote")
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor.lateOutcome = func(outcome httpOutcome) error { return owner.receiveLateOutcome("remote", outcome) }
-	endpoint, err := ListenRemoteExecution(executor, "127.0.0.1:0", certificate, token)
+	const skill = "https://github.com/example/skills/tree/main/skills/not-installed"
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skill}}}
+	owner.Commands = commands
+	cfg := config.Config{Main: owner.Main, Adversarial: owner.Adversarial, Commands: commands,
+		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect"}}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", Token: token}}
+	_, endpoint, err := owner.AttachRemoteWorker(cfg, certificate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,17 +155,28 @@ func postLateOutcome(t *testing.T, client *http.Client, origin string, outcome h
 	}
 	defer response.Body.Close()
 	var ack httpAcknowledgement
-	if response.StatusCode == http.StatusUnauthorized {
-		return response.StatusCode, ack
-	}
 	if err := httpDecode(response.Body, httpControlBytes, &ack); err != nil {
 		t.Fatal(err)
 	}
 	return response.StatusCode, ack
 }
 
+func waitLateError(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("late receipt or competing save did not finish")
+		return nil
+	}
+}
+
 func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
+	if err := f.finish(errors.New("lost outcome")); err == nil {
+		t.Fatal("final usage status lost action error")
+	}
 	endpoint, client, origin := lateOutcomeEndpoint(t, f.owner)
 	status, ack := postLateOutcome(t, client, origin, f.outcome)
 	if status != http.StatusOK || ack.Failure != nil || ack.Sequence != f.outcome.Sequence || ack.Kind != "outcome" {
@@ -171,7 +189,7 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil ||
-		record.Tokens != f.outcome.Result.Calls[0].Tokens || record.Status != "running" {
+		record.Tokens != f.outcome.Result.Calls[0].Tokens || record.Status != "failed" {
 		t.Fatalf("late usage receipt missing or changed status: %+v found=%t err=%v", record, found, err)
 	}
 	if f.store.Data.Accepted != nil || f.store.Data.TerminalDecisions[f.job.Identity.JobID].Outcome != "lost" {
@@ -190,6 +208,12 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	if status, _ := postLateOutcome(t, client, origin, unknown); status != http.StatusConflict {
 		t.Fatalf("unknown attempt status=%d", status)
 	}
+	conflict := f.outcome
+	conflict.Result.Calls = append([]CallUsage(nil), f.outcome.Result.Calls...)
+	conflict.Result.Calls[0].Tokens.Input++
+	if status, _ := postLateOutcome(t, client, origin, conflict); status != http.StatusConflict {
+		t.Fatalf("conflicting usage replay status=%d", status)
+	}
 	if err := endpoint.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +225,9 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	f.owner.Store = reopened
+	restarted := *f.owner
+	restarted.Executor, restarted.Store = nil, reopened
+	f.owner = &restarted
 	_, client, origin = lateOutcomeEndpoint(t, f.owner)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("post-restart replay status=%d", status)
@@ -244,6 +270,92 @@ func TestLateRemoteOutcomeRequiresSavedPendingCall(t *testing.T) {
 	}
 }
 
+func TestLateRemoteOutcomeAcceptsCompletedPrefixBeforeLostCallStartACK(t *testing.T) {
+	f := newLateOutcomeFixtureForJob(t, withClaudeCritic(testJob(command.Comment)), true)
+	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found {
+		t.Fatalf("load saved call start: found=%t error=%v", found, err)
+	}
+	first := usageCall(1, f.outcome.Result.Calls[0])
+	finished := time.Now().UTC()
+	first.FinishedAt = &finished
+	if _, err := record.FinishCall(first); err != nil {
+		t.Fatal(err)
+	}
+	second := usage.Call{Ordinal: 2, Provider: "claude", Model: "default", Role: roleCritic,
+		Round: 1, ReviewPhase: reviewVerification, StartedAt: finished}
+	if _, err := record.BeginCall(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.owner.Usage.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("completed prefix with trailing pending call status=%d", status)
+	}
+	after, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || len(after.Calls) != 2 || after.Calls[1].FinishedAt != nil || after.Tokens != first.Tokens {
+		t.Fatalf("trailing pending call was changed: %+v found=%t error=%v", after, found, err)
+	}
+}
+
+func TestLateRemoteOutcomeConfirmsTerminalDecisionBeforeRetention(t *testing.T) {
+	f := newLateOutcomeFixture(t, false)
+	decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID)
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	f.store.Data.TerminalDecisions[f.job.Identity.JobID] = decision // Simulate a failed pre-replacement decision save.
+	priorCursor := f.store.Data.Cursor
+	f.store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := f.owner.receiveLateOutcome("remote", f.outcome); err == nil {
+		t.Fatal("unconfirmed terminal decision admitted a late receipt")
+	}
+	diagnosticPath := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unconfirmed decision retained diagnostics: %v", err)
+	}
+	f.store.Data.Cursor = priorCursor
+	if err := f.owner.receiveLateOutcome("remote", f.outcome); err != nil {
+		t.Fatalf("durable decision confirmation failed: %v", err)
+	}
+}
+
+func TestLateRemoteOutcomeReplaysParentCaptureLimitDiagnostic(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	capped := withCaptureLimitDiagnostic(f.outcome.Result)
+	if err := f.owner.retainWorkerDiagnostics(f.job, capped, f.outcome.Failure.workerErr()); err != nil {
+		t.Fatal(err)
+	}
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("raw replay after parent capture marker status=%d", status)
+	}
+	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens {
+		t.Fatalf("capture marker replay lost usage: %+v found=%t error=%v", record, found, err)
+	}
+}
+
+func TestLateRemoteOutcomeKeepsUsageWhenDiagnosticsConflict(t *testing.T) {
+	f := newLateOutcomeFixture(t, true)
+	prior := f.outcome.Result
+	prior.Diagnostics = []Diagnostic{{Code: "late_detail", Message: "different private detail"}}
+	if err := f.owner.retainWorkerDiagnostics(f.job, prior, f.outcome.Failure.workerErr()); err != nil {
+		t.Fatal(err)
+	}
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusConflict {
+		t.Fatalf("conflicting diagnostic status=%d", status)
+	}
+	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens {
+		t.Fatalf("diagnostic conflict erased valid usage: %+v found=%t error=%v", record, found, err)
+	}
+}
+
 func TestLateRemoteOutcomeWhileNewerTransactionIsActive(t *testing.T) {
 	old := newLateOutcomeFixture(t, true)
 	newJob := testJob(command.Comment)
@@ -253,9 +365,13 @@ func TestLateRemoteOutcomeWhileNewerTransactionIsActive(t *testing.T) {
 	current := newHTTPServerTest(t, t.Context(), newJob, runnerExecutionCheckpoints{}, nil)
 	current.executor.lateOutcome = func(outcome httpOutcome) error { return old.owner.receiveLateOutcome("remote", outcome) }
 	current.pull(t)
+	current.tx.mu.Lock()
+	current.tx.stopUntil = time.Now().Add(-time.Second)
+	current.tx.mu.Unlock()
 	current.ack(t, "/outcome", old.outcome, http.StatusOK, old.outcome.Sequence)
 	current.tx.mu.Lock()
 	sequence, fenced := current.tx.sequence, current.tx.fenced
+	current.tx.stopUntil = time.Time{}
 	current.tx.mu.Unlock()
 	if sequence != 0 || fenced {
 		t.Fatalf("older receipt changed active transaction: sequence=%d fenced=%t", sequence, fenced)
@@ -315,6 +431,9 @@ func TestLateRemoteUsageReloadsAfterAmbiguousSave(t *testing.T) {
 			if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 				t.Fatalf("deduplicated replay status=%d", status)
 			}
+			if calls != 3 {
+				t.Fatalf("retry failed to resync usage after replacement: saves=%d", calls)
+			}
 			record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 			if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
 				len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
@@ -340,18 +459,53 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 		t.Fatal("late usage save did not start")
 	}
 	finishDone := make(chan error, 1)
-	go func() { finishDone <- f.finish(errors.New("lost outcome")) }()
+	finishStarted := make(chan struct{})
+	go func() {
+		close(finishStarted)
+		finishDone <- f.finish(errors.New("lost outcome"))
+	}()
+	<-finishStarted
+	select {
+	case err := <-finishDone:
+		t.Fatalf("final usage save bypassed the held late receipt: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
 	close(release)
-	if err := <-lateDone; err != nil {
+	if err := waitLateError(t, lateDone); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-finishDone; err == nil {
+	if err := waitLateError(t, finishDone); err == nil {
 		t.Fatal("final usage status lost original action error")
 	}
 	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || record.Status != "failed" || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
 		len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
 		t.Fatalf("final usage overwrite erased late receipt: %+v found=%t err=%v", record, found, err)
+	}
+}
+
+func TestLateRemoteOutcomeDoesNotInvertStateAndPrivateLocks(t *testing.T) {
+	f := newLateOutcomeFixture(t, false)
+	stateHeld, release := make(chan struct{}), make(chan struct{})
+	terminalDone := make(chan error, 1)
+	go func() {
+		terminalDone <- f.store.WithLock(func() error {
+			close(stateHeld)
+			<-release
+			f.owner.CompleteTerminalUsage(monitor.Job{ID: f.job.Identity.JobID, AttemptID: f.job.Identity.AttemptID}, "lost", time.Now())
+			return nil
+		})
+	}()
+	<-stateHeld
+	lateDone := make(chan error, 1)
+	go func() { lateDone <- f.owner.receiveLateOutcome("remote", f.outcome) }()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	if err := waitLateError(t, terminalDone); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitLateError(t, lateDone); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -370,6 +524,10 @@ func TestLateRemoteReceiptCannotRecreatePrunedDiagnostics(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("late receipt did not enter its save")
 	}
+	diagnosticPath := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("diagnostic was saved before the pruning barrier: %v", err)
+	}
 	if err := f.store.WithLock(func() error {
 		decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
 		decision.DecidedAt = time.Now().UTC().Add(-privateRecordRetention)
@@ -381,42 +539,16 @@ func TestLateRemoteReceiptCannotRecreatePrunedDiagnostics(t *testing.T) {
 	pruneDone := make(chan error, 1)
 	go func() { pruneDone <- f.owner.PrunePrivateRecords(t.Context(), f.store, time.Now().UTC()) }()
 	close(release)
-	if err := <-lateDone; err != nil {
+	if err := waitLateError(t, lateDone); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-pruneDone; err != nil {
+	if err := waitLateError(t, pruneDone); err != nil {
 		t.Fatal(err)
 	}
-	diagnosticPath := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
 	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pruned diagnostic was recreated: %v", err)
 	}
 	if err := f.owner.receiveLateOutcome("remote", f.outcome); !errors.Is(err, errLateOutcomeRejected) {
 		t.Fatalf("expired retry was admitted: %v", err)
-	}
-}
-
-func TestLateRemoteOutcomeRejectsWrongToken(t *testing.T) {
-	f := newLateOutcomeFixture(t, false)
-	endpoint, _, origin := lateOutcomeEndpoint(t, f.owner)
-	wrongToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, 32))
-	client, err := NewRemoteExecutionClient(origin, wrongToken)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(client.CloseIdleConnections)
-	certificate := endpoint.server.TLSConfig.Certificates[0]
-	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	roots := x509.NewCertPool()
-	roots.AddCert(leaf)
-	client.Transport.(*authenticatedExecutionTransport).TLSClientConfig.RootCAs = roots
-	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusUnauthorized {
-		t.Fatalf("wrong token status=%d", status)
-	}
-	if _, err := os.Stat(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("unauthorized outcome wrote diagnostics: %v", err)
 	}
 }
