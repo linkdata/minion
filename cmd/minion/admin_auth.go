@@ -40,6 +40,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := registerAdminDashboard(jw); err != nil {
 		return nil, err
 	}
+	if err := jw.AddTemplateLookuper(adminUsageHTML); err != nil {
+		return nil, err
+	}
 	access := &adminAccess{jaws: jw, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
 	for _, account := range cfg.Administrators {
 		access.accounts[account.Username] = account
@@ -54,8 +57,8 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("POST /admin/logout", access.logout)
 	mux.Handle("GET /{$}", adminDashboardHandler(jw, owner))
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
-	mux.Handle("GET /admin/usage", adminUsageHandler(owner, false))
-	mux.Handle("GET /admin/usage.json", adminUsageHandler(owner, true))
+	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
+	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
 	// body-reading callback, which must not inherit an immediate read deadline.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

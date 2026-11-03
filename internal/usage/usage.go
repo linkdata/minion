@@ -498,6 +498,7 @@ type Summary struct {
 	Day                  string `json:"day,omitempty"`
 	Month                string `json:"month,omitempty"`
 	Service              string `json:"service,omitempty"`
+	RepositoryID         int64  `json:"repository_id,omitempty"`
 	RequesterID          int64  `json:"requester_id,omitempty"`
 	Attempts             int    `json:"attempts"`
 	UsageRecordedActions int    `json:"usage_recorded_actions"`
@@ -582,7 +583,7 @@ func validateQuery(filter Filter, groupBy []string) error {
 	seen := map[string]bool{}
 	for _, group := range groupBy {
 		switch group {
-		case "repo", "user", "action", "day", "month", "service", "requester_id":
+		case "repo", "repository_id", "user", "action", "day", "month", "service", "requester_id":
 		default:
 			return fmt.Errorf("invalid or duplicate usage group %q", group)
 		}
@@ -596,7 +597,7 @@ func validateQuery(filter Filter, groupBy []string) error {
 
 type summaryKey struct {
 	repo, user, action, day, month, service string
-	requesterID                             int64
+	repositoryID, requesterID               int64
 }
 
 func (k summaryKey) value(group string) string {
@@ -708,6 +709,8 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 				switch group {
 				case "repo":
 					key.repo = strings.ToLower(record.Repo)
+				case "repository_id":
+					key.repositoryID = record.RepositoryID
 				case "user":
 					key.user = strings.ToLower(record.User)
 				case "action":
@@ -725,7 +728,7 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 			summary := groups[key]
 			if summary == nil {
 				summary = &Summary{Repo: key.repo, User: key.user, Action: key.action, Day: key.day,
-					Month: key.month, Service: key.service, RequesterID: key.requesterID}
+					Month: key.month, Service: key.service, RepositoryID: key.repositoryID, RequesterID: key.requesterID}
 				groups[key] = summary
 				jobs[key] = map[string]bool{}
 			}
@@ -767,6 +770,12 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		for _, group := range groupBy {
+			if group == "repository_id" {
+				if keys[i].repositoryID != keys[j].repositoryID {
+					return keys[i].repositoryID < keys[j].repositoryID
+				}
+				continue
+			}
 			if group == "requester_id" {
 				if keys[i].requesterID != keys[j].requesterID {
 					return keys[i].requesterID < keys[j].requesterID

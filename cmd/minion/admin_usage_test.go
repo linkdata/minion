@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,13 +32,23 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		page.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
 		!strings.Contains(page.Body.String(), "Unallocated tokens") ||
-		!strings.Contains(page.Body.String(), "Incomplete usage") ||
+		!strings.Contains(page.Body.String(), "Incomplete attempts") ||
 		!strings.Contains(page.Body.String(), "Billed credits: unknown") ||
+		!strings.Contains(page.Body.String(), "Actions without usage files are excluded") ||
+		!strings.Contains(page.Body.String(), "/jaws/") ||
 		!strings.Contains(page.Body.String(), "example-owner/example-repo") ||
 		strings.Contains(page.Body.String(), "example-owner/second-repo") {
 		t.Fatalf("filtered usage page: status=%d body=%s", page.Code, page.Body.String())
 	}
-	exportPath := strings.Replace(path, "/admin/usage?", "/admin/usage.json?", 1)
+	_, href, found := strings.Cut(page.Body.String(), `href="/admin/usage.json?`)
+	if !found {
+		t.Fatalf("filtered export link missing: %s", page.Body.String())
+	}
+	encoded, _, found := strings.Cut(href, `"`)
+	if !found {
+		t.Fatalf("filtered export link is malformed: %s", href)
+	}
+	exportPath := "/admin/usage.json?" + html.UnescapeString(encoded)
 	export := adminResponse(handler, http.MethodGet, exportPath, nil, cookie, "")
 	if export.Code != http.StatusOK || export.Header().Get("Cache-Control") != "no-store" ||
 		export.Header().Get("Content-Type") != "application/json; charset=utf-8" ||
@@ -48,7 +60,7 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := reportJSON(t, "-dir", dir, "-from", "2026-10-09", "-to", "2026-10-10", "-repo", "EXAMPLE-OWNER/EXAMPLE-REPO",
-		"-user", "ALICE", "-service", "unknown", "-group-by", "repo,user,service")
+		"-user", "ALICE", "-service", "unknown", "-group-by", "repo,repository_id,user,requester_id,service")
 	if got.Totals != want.Totals || !reflect.DeepEqual(got.Groups, want.Groups) ||
 		got.Filters != want.Filters || got.ActionCoverage != "unknown" || got.TokenNote != usageTokenNote ||
 		len(got.Attempts) != 1 || got.Attempts[0].SelectedUsage == nil || got.Attempts[0].SelectedUsage.TotalTokens != got.Totals.TotalTokens {
@@ -72,6 +84,55 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	}
 }
 
+func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
+	handler, _, _, owner := dashboardTestServer(t)
+	sourceDir := t.TempDir()
+	saveReportFixture(t, sourceDir)
+	source, found, err := (usage.Store{Dir: sourceDir}).Load("00000000000000000000000000000001")
+	if err != nil || !found {
+		t.Fatalf("load source usage: found=%t err=%v", found, err)
+	}
+	owner.Usage = &usage.Store{Dir: t.TempDir()}
+	for i, identity := range [][2]int64{{17, 7}, {17, 8}, {18, 7}} {
+		record := source
+		record.ID = fmt.Sprintf("%032x", i+5)
+		record.JobID = fmt.Sprintf("reused-name-%d", i)
+		record.RepositoryID, record.RequesterID = identity[0], identity[1]
+		if err := owner.Usage.Save(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cookie := dashboardTestCookie(t, handler)
+	page := adminResponse(handler, http.MethodGet, "/admin/usage", nil, cookie, "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Repository ID") ||
+		!strings.Contains(page.Body.String(), "Requester ID") || !strings.Contains(page.Body.String(), "<td>18</td>") {
+		t.Fatalf("stable identity columns missing: status=%d body=%s", page.Code, page.Body.String())
+	}
+	export := adminResponse(handler, http.MethodGet, "/admin/usage.json", nil, cookie, "")
+	if export.Code != http.StatusOK {
+		t.Fatalf("stable identity export: status=%d body=%s", export.Code, export.Body.String())
+	}
+	var got usageOutput
+	if err := json.Unmarshal(export.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode stable identity export: %v", err)
+	}
+	want := reportJSON(t, "-dir", owner.Usage.Dir, "-group-by", "repo,repository_id,user,requester_id,service")
+	if got.Totals != want.Totals || !reflect.DeepEqual(got.Groups, want.Groups) || len(got.Groups) != 3 {
+		t.Fatalf("stable identity groups differ from CLI: got=%+v want=%+v", got.Groups, want.Groups)
+	}
+	pairs := map[[2]int64]bool{{17, 7}: true, {17, 8}: true, {18, 7}: true}
+	for _, group := range got.Groups {
+		pair := [2]int64{group.RepositoryID, group.RequesterID}
+		if !pairs[pair] || group.Attempts != 1 || group.TotalTokens != source.Tokens.Total() {
+			t.Fatalf("merged or unexpected usage group: %+v", group)
+		}
+		delete(pairs, pair)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf("missing identity groups: %v", pairs)
+	}
+}
+
 func TestAdminUsageRejectsBadFiltersAndDamagedRecords(t *testing.T) {
 	handler, _, _, owner := dashboardTestServer(t)
 	cookie := dashboardTestCookie(t, handler)
@@ -84,7 +145,7 @@ func TestAdminUsageRejectsBadFiltersAndDamagedRecords(t *testing.T) {
 		t.Fatalf("unescaped usage filter: status=%d body=%s", escaped.Code, escaped.Body.String())
 	}
 	for _, query := range []string{
-		"from=2026-10-10&to=2026-10-09", "from=tomorrow", "service=other", "requester_id=0",
+		"from=2026-10-10&to=2026-10-09", "from=tomorrow", "to=0001-01-01", "from=0001-01-01T00:00:00Z", "service=other", "requester_id=0",
 		"repo=a&repo=b", "other=1", "user=%FF", "repo=%00",
 	} {
 		for _, route := range []string{"/admin/usage?", "/admin/usage.json?"} {
@@ -119,8 +180,14 @@ func TestAdminUsageReadsConcurrentAtomicSaves(t *testing.T) {
 		t.Fatalf("load fixture: found=%t err=%v", found, err)
 	}
 	done := make(chan error, 1)
+	writeRound := make(chan struct{})
+	defer close(writeRound)
 	go func() {
 		for i := int64(0); i < 40; i++ {
+			if _, open := <-writeRound; !open {
+				done <- nil
+				return
+			}
 			next := record
 			next.Tokens.Input = 100 + i
 			if err := store.Save(next); err != nil {
@@ -131,10 +198,21 @@ func TestAdminUsageReadsConcurrentAtomicSaves(t *testing.T) {
 		done <- nil
 	}()
 	for i := range 40 {
+		select {
+		case writeRound <- struct{}{}: // The writer cannot finish before the first HTTP and CLI reads.
+		case err := <-done:
+			t.Fatalf("usage writer ended early: %v", err)
+		}
 		for _, route := range []string{"/admin/usage", "/admin/usage.json"} {
 			response := adminResponse(handler, http.MethodGet, route, nil, cookie, "")
 			if response.Code != http.StatusOK {
 				t.Fatalf("concurrent %s status=%d body=%s", route, response.Code, response.Body.String())
+			}
+			if route == "/admin/usage.json" {
+				var report usageOutput
+				if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil || report.Totals.Attempts != 4 {
+					t.Fatalf("concurrent export is partial: report=%+v err=%v", report, err)
+				}
 			}
 		}
 		if i%10 == 0 {

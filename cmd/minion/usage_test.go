@@ -261,6 +261,7 @@ func TestUsageDefaultsToLocalConfig(t *testing.T) {
 func TestUsageRejectsInvalidArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"-from", "yesterday"}, {"-to", "2026-02-30"},
+		{"-to", "0001-01-01"}, {"-from", "0001-01-01T00:00:00Z"},
 		{"-from", "2026-10-09", "-to", "2026-10-09"},
 		{"-from", "2026-10-10", "-to", "2026-10-09"},
 		{"-group-by", "repo,repo"}, {"-group-by", "week"},
