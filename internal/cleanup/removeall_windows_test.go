@@ -2,6 +2,7 @@ package cleanup
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -43,5 +44,75 @@ func TestRemoveAllWindowsKeepsSymlinkTarget(t *testing.T) {
 	}
 	if data, err := os.ReadFile(keep); err != nil || string(data) != "keep" {
 		t.Fatalf("cleanup touched symlink target: %q, %v", data, err)
+	}
+}
+
+func TestRemoveAllWindowsKeepsJunctionTarget(t *testing.T) {
+	parent, outside := t.TempDir(), t.TempDir()
+	job := filepath.Join(parent, "job")
+	if err := os.Mkdir(job, 0700); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", filepath.Join(job, "link"), outside).CombinedOutput(); err != nil {
+		t.Fatalf("create nested junction: %v: %s", err, output)
+	}
+	if err := RemoveAll(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(job); !os.IsNotExist(err) {
+		t.Fatalf("job directory remains: %v", err)
+	}
+	if data, err := os.ReadFile(keep); err != nil || string(data) != "keep" {
+		t.Fatalf("cleanup touched junction target: %q, %v", data, err)
+	}
+}
+
+func TestRemoveAllWindowsReplacedRootKeepsOutside(t *testing.T) {
+	parent, outside := t.TempDir(), t.TempDir()
+	job := filepath.Join(parent, "job")
+	if err := os.Mkdir(job, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(job, "original"), []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(job, filepath.Join(parent, "renamed")); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", job, outside).CombinedOutput(); err != nil {
+		t.Fatalf("replace cleanup root with junction: %v: %s", err, output)
+	}
+	if err := RemoveAll(job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(job); !os.IsNotExist(err) {
+		t.Fatalf("replacement junction remains: %v", err)
+	}
+	if data, err := os.ReadFile(keep); err != nil || string(data) != "keep" {
+		t.Fatalf("cleanup touched replacement target: %q, %v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(parent, "renamed", "original")); err != nil || string(data) != "original" {
+		t.Fatalf("cleanup touched displaced job: %q, %v", data, err)
+	}
+}
+
+func TestRemoveAllWindowsReportsFailure(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(parent, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveAll(filepath.Join(parent, "child")); err == nil {
+		t.Fatal("cleanup failure was suppressed")
+	}
+	if data, err := os.ReadFile(parent); err != nil || string(data) != "untouched" {
+		t.Fatalf("failed cleanup changed parent file: %q, %v", data, err)
 	}
 }
