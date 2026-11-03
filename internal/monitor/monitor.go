@@ -1955,8 +1955,7 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	unregisterPrep := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
 	defer unregisterPrep()
 	failed := func(location string, err error) error {
-		if errors.Is(resumeCtx.Err(), context.Canceled) && ctx.Err() == nil {
-			unregisterPrep() // Wait for the stop save before reading its state.
+		if unregisterPrep() {
 			return m.completeSelected(ctx, store, job, m.now().UTC(), context.Canceled)
 		}
 		if ctx.Err() == nil && !time.Now().Before(job.Deadline) {
@@ -1984,19 +1983,11 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return err
 	}
 	if !valid {
-		m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
-		var stopped bool
-		err := store.WithLock(func() error {
-			stopped = store.Data.Accepted.StopRequest != (state.StopRequest{})
-			if stopped {
-				return nil
-			}
-			return m.discardAccepted(store)
-		})
-		if stopped {
+		if unregisterPrep() {
 			return m.completeSelected(ctx, store, job, m.now().UTC(), context.Canceled)
 		}
-		return err
+		m.logf("discard accepted %s: source or requester is no longer valid", itemLocation(job.Source))
+		return store.WithLock(func() error { return m.discardAccepted(store) })
 	}
 	job.Repository, job.Source = repo, current
 	if err := m.GitHub.ReactEyes(resumeCtx, acceptedForPreparation.SourceNodeID); err != nil {
@@ -2006,6 +1997,9 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return err
 	}
 	if !time.Now().Before(job.Deadline) {
+		if unregisterPrep() {
+			return m.completeSelected(ctx, store, job, m.now().UTC(), context.Canceled)
+		}
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	return m.executeSelected(resumeCtx, store, job, time.Now().UTC())
@@ -2065,8 +2059,17 @@ func (m *Monitor) executeSelectedWithControls(ctx context.Context, store *state.
 
 func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Store, job Job,
 	cachedKey string, cachedItems []github.Item, run func(context.Context, Job) error, finish func(error) error) error {
+	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
+	defer cancel()
+	unregisterSelectedStop := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
+	defer unregisterSelectedStop()
 	if !time.Now().Before(job.Deadline) {
+		unregisterSelectedStop()
 		return finish(context.DeadlineExceeded)
+	}
+	if err := actionCtx.Err(); err != nil {
+		unregisterSelectedStop()
+		return finish(err)
 	}
 	var savedResultAtStart, resultReadyAtStart bool
 	_ = store.WithLock(func() error {
@@ -2090,14 +2093,6 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		for _, configured := range m.Config.Repositories {
 			commandSets[configured.Name] = m.controlCommands(configured)
 		}
-	}
-	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
-	defer cancel()
-	unregisterSelectedStop := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
-	defer unregisterSelectedStop()
-	if err := actionCtx.Err(); err != nil {
-		unregisterSelectedStop()
-		return finish(err)
 	}
 	controlCtx := actionCtx
 	var cancelControls context.CancelFunc

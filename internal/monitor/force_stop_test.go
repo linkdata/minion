@@ -130,6 +130,78 @@ func TestForceStopDuringRecoveryCapacityNeverDispatches(t *testing.T) {
 	}
 }
 
+func TestExpiredSelectedHandoffOrdersStopAndFinish(t *testing.T) {
+	expired := func(t *testing.T) (*Monitor, *state.Store, Job) {
+		t.Helper()
+		m, store, job, _, _ := assignmentValidationFixture(t)
+		job.AcceptedAt = time.Now().UTC().Add(-2 * time.Minute)
+		job.Deadline = job.AcceptedAt.Add(time.Minute)
+		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
+		failure := store.Data.JobFailures[job.ID]
+		failure.AcceptedAt, failure.Deadline = job.AcceptedAt, job.Deadline
+		store.Data.JobFailures[job.ID] = failure
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		return m, store, job
+	}
+	t.Run("release before request", func(t *testing.T) {
+		m, store, job := expired(t)
+		unregisterPrep := store.RegisterSelectedStop(job.ID, job.AttemptID, func() {})
+		defer unregisterPrep()
+		entered, release := make(chan struct{}), make(chan struct{})
+		var releaseOnce sync.Once
+		unblock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer unblock()
+		finished := make(chan error, 1)
+		go func() {
+			finished <- m.runSelectedWithControls(t.Context(), store, job, "", nil,
+				func(context.Context, Job) error { t.Error("expired job dispatched"); return nil },
+				func(err error) error {
+					close(entered)
+					<-release
+					return m.completeSelected(t.Context(), store, job, time.Now().UTC(), err)
+				})
+		}()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("expired finish did not start")
+		}
+		if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); !errors.Is(err, state.ErrStopConflict) {
+			t.Fatalf("first stop after finish began = %v, want conflict", err)
+		}
+		unblock()
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("expired finish did not complete")
+		}
+		if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "expired" || decision.StopRequest != (state.StopRequest{}) {
+			t.Fatalf("late stop changed expired decision: %+v", decision)
+		}
+	})
+	t.Run("request before transfer", func(t *testing.T) {
+		m, store, job := expired(t)
+		unregisterPrep := store.RegisterSelectedStop(job.ID, job.AttemptID, func() {})
+		defer unregisterPrep()
+		if _, err := store.RequestStop(job.ID, job.AttemptID, "operator", time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.runSelectedWithControls(t.Context(), store, job, "", nil,
+			func(context.Context, Job) error { t.Error("stopped expired job dispatched"); return nil },
+			func(err error) error { return m.completeSelected(t.Context(), store, job, time.Now().UTC(), err) }); err != nil {
+			t.Fatal(err)
+		}
+		if decision := store.Data.TerminalDecisions[job.ID]; decision.Outcome != "canceled" || decision.StopRequest.Status != "confirmed" {
+			t.Fatalf("early stop did not resolve: %+v", decision)
+		}
+	})
+}
+
 func TestForceStopDuringRecoveredPublicationCannotConfirmOldWorker(t *testing.T) {
 	store, path, accepted, _, m := storedRecoveryFixture(t)
 	if err := store.Close(); err != nil {

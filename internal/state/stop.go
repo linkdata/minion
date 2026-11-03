@@ -40,8 +40,8 @@ func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, 
 		}
 		remember := func(stop StopRequest) { s.savedStop = savedStopRequest{jobID, attemptID, stop} }
 		if active := s.activeStop; active == nil || active.jobID != jobID || active.attemptID != attemptID {
-			// Preparation and terminal cleanup still use the monitor's private
-			// state path. Confirm the saved request before acknowledging a repeat.
+			// Deferred preparation and terminal cleanup have no live stop slot.
+			// Confirm the saved request before acknowledging a repeat.
 			if accepted := s.Data.Accepted; accepted != nil && accepted.JobID == jobID && accepted.AttemptID == attemptID &&
 				accepted.StopRequest != (StopRequest{}) && cached(accepted.StopRequest) {
 				request = accepted.StopRequest
