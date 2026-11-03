@@ -95,8 +95,9 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	}
 	form.Set("password", "correct-password")
 	response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "")
-	if response.Code != http.StatusSeeOther || response.Header().Get("Cache-Control") != "no-store" {
-		t.Fatalf("valid login: status=%d noStore=%t", response.Code, response.Header().Get("Cache-Control") == "no-store")
+	if response.Code != http.StatusSeeOther || response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Location") != "/" {
+		t.Fatalf("valid login: status=%d noStore=%t location=%q", response.Code,
+			response.Header().Get("Cache-Control") == "no-store", response.Header().Get("Location"))
 	}
 	cookies := response.Result().Cookies()
 	if len(cookies) != 1 {
@@ -301,6 +302,10 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			headers: "Content-Type: text/plain\r\n", want: http.StatusBadRequest},
 		{name: "authenticated JaWS rejection", method: http.MethodPost, path: "/jaws/.ping",
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusMethodNotAllowed},
+		{name: "authenticated dashboard", method: http.MethodGet, path: "/",
+			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
+		{name: "authenticated stylesheet", method: http.MethodGet, path: "/admin/dashboard.css",
+			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
 		{name: "cross-origin logout", method: http.MethodPost, path: "/admin/logout",
 			headers: "Origin: http://other.example\r\nCookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
 		{name: "logout", method: http.MethodPost, path: "/admin/logout",

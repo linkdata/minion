@@ -507,6 +507,9 @@ func TestRemoteWorkerCleanupFailureClosesEndpoint(t *testing.T) {
 	if got.err != nil || len(got.result.Diagnostics) != 1 || got.result.Diagnostics[0].Code != "cleanup_failed" {
 		t.Fatalf("cleanup failure was not retained: %+v", got)
 	}
+	if observed := worker.dashboardObservation(); observed.ready || observed.readiness != "cleanup failed" {
+		t.Fatalf("remote cleanup failure was not visible: %+v", observed)
+	}
 	select {
 	case <-endpoint.Done():
 	default:

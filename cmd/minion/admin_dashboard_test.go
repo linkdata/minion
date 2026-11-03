@@ -56,6 +56,43 @@ func dashboardTestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	return response.Result().Cookies()[0]
 }
 
+func dashboardLiveRequest(t *testing.T, jw *jaws.Jaws, owner *action.Orchestrator, cookie *http.Cookie, filter adminDashboardFilter) *jawstest.TestRequest {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	request.AddCookie(cookie)
+	tr := jawstest.NewTestRequest(jw, request)
+	<-tr.ReadyCh
+	t.Cleanup(func() {
+		tr.Close()
+		for range tr.OutCh {
+		}
+		<-tr.DoneCh
+	})
+	rw := ui.RequestWriter{Request: tr.Request, Writer: tr.Recorder}
+	if err := rw.Template("section", "dashboard-live", &adminDashboardPage{owner: owner, Filter: filter}); err != nil {
+		t.Fatal(err)
+	}
+	return tr
+}
+
+func dashboardReadPatch(t *testing.T, tr *jawstest.TestRequest, want string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case message, ok := <-tr.OutCh:
+			if !ok {
+				t.Fatalf("live channel closed before patch containing %q", want)
+			}
+			if strings.Contains(message.Data, want) {
+				return message.Data
+			}
+		case <-deadline:
+			t.Fatalf("live patch missing %q", want)
+		}
+	}
+}
+
 func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	handler, _, store, _ := dashboardTestServer(t)
 	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
@@ -111,20 +148,8 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	handler, jw, store, owner := dashboardTestServer(t)
 	cookie := dashboardTestCookie(t, handler)
-	request := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
-	request.AddCookie(cookie)
-	tr := jawstest.NewTestRequest(jw, request)
-	<-tr.ReadyCh
-	t.Cleanup(func() {
-		tr.Close()
-		for range tr.OutCh {
-		}
-		<-tr.DoneCh
-	})
-	rw := ui.RequestWriter{Request: tr.Request, Writer: tr.Recorder}
-	if err := rw.Template("section", "dashboard-live", &adminDashboardPage{owner: owner}); err != nil {
-		t.Fatal(err)
-	}
+	tr := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{Repo: "owner/repo"})
+	other := dashboardLiveRequest(t, jw, owner, cookie, adminDashboardFilter{Repo: "other/repo"})
 	if !strings.Contains(tr.BodyString(), "No action is in progress.") {
 		t.Fatalf("initial live region: %s", tr.BodyString())
 	}
@@ -134,28 +159,45 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 		t.Fatal(err)
 	}
 	jw.Dirty(adminDashboardDirty)
-	readPatch := func(want string) string {
-		t.Helper()
-		deadline := time.After(3 * time.Second)
-		for {
-			select {
-			case message := <-tr.OutCh:
-				if strings.Contains(message.Data, want) {
-					return message.Data
-				}
-			case <-deadline:
-				t.Fatalf("live patch missing %q", want)
-			}
-		}
-	}
-	if patch := readPatch("owner/repo"); !strings.Contains(patch, "Current action") {
+	if patch := dashboardReadPatch(t, tr, "owner/repo", 3*time.Second); !strings.Contains(patch, "Current action") {
 		t.Fatalf("live patch omitted action section: %s", patch)
+	}
+	if patch := dashboardReadPatch(t, other, "No current action matches these filters.", 3*time.Second); strings.Contains(patch, "owner/repo") {
+		t.Fatalf("other request received the matching action: %s", patch)
 	}
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
 	jw.Dirty(adminDashboardDirty)
-	if patch := readPatch("Admin session ended"); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
+	if patch := dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
 		t.Fatalf("revoked session received private live state: %s", patch)
+	}
+	if patch := dashboardReadPatch(t, other, "Admin session ended", 3*time.Second); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
+		t.Fatalf("other revoked session received private live state: %s", patch)
+	}
+}
+
+func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	owner := &action.Orchestrator{Store: store}
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0",
+		Administrators: []config.AdminAccount{testAdminAccount()}}, owner, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	cookie := dashboardTestCookie(t, admin.server.Handler)
+	tr := dashboardLiveRequest(t, admin.jaws, owner, cookie, adminDashboardFilter{})
+	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
+	store.Data.AcceptedTotal = 1
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if patch := dashboardReadPatch(t, tr, "owner/repo", 5*time.Second); !strings.Contains(patch, "Current action") {
+		t.Fatalf("ticker patch omitted action section: %s", patch)
 	}
 }
