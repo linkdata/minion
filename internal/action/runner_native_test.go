@@ -29,17 +29,34 @@ func TestRunnerMissingProviderIsNotTerminalAndRecordsIncompleteUsage(t *testing.
 	}
 }
 
-func TestNativeSameProviderPairWaitsForCapabilityVerification(t *testing.T) {
-	for _, provider := range []string{"codex", "claude"} {
-		job := withClaudeCritic(testJob(command.Comment))
-		job.Main.Provider, job.Critic.Provider = provider, provider
-		if err := job.Validate(); err != nil {
-			t.Fatalf("portable %s pair rejected: %v", provider, err)
+func TestNativeRolePairGate(t *testing.T) {
+	for _, test := range []struct {
+		main, critic string
+		blocked      bool
+	}{
+		{main: "codex", critic: "codex"},
+		{main: "claude", critic: "claude", blocked: true},
+		{main: "codex", critic: "claude"},
+		{main: "claude", critic: "codex"},
+		{main: "codex"},
+		{main: "claude"},
+	} {
+		err := CheckNativeRolePair(test.main, test.critic)
+		if (err != nil) != test.blocked || test.blocked && err.Error() != nativeRolePairUnverified {
+			t.Fatalf("pair %q/%q blocked=%t: %v", test.main, test.critic, test.blocked, err)
 		}
-		result, err := (&Runner{WorkRoot: t.TempDir()}).Run(t.Context(), job)
-		if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), nativeRolePairUnverified) || len(result.Calls) != 0 {
-			t.Fatalf("%s native pair reached model work: result=%+v error=%v", provider, result, err)
-		}
+	}
+}
+
+func TestNativeClaudePairWaitsForCapabilityVerification(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Main.Provider = "claude"
+	if err := job.Validate(); err != nil {
+		t.Fatalf("portable Claude pair rejected: %v", err)
+	}
+	result, err := (&Runner{WorkRoot: t.TempDir()}).Run(t.Context(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), nativeRolePairUnverified) || len(result.Calls) != 0 {
+		t.Fatalf("Claude native pair reached model work: result=%+v error=%v", result, err)
 	}
 }
 
