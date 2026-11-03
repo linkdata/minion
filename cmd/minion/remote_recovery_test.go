@@ -14,8 +14,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -525,18 +527,22 @@ func testRemoteLoopContinuesAfterRecoveryWithFreshPull(t *testing.T, service boo
 	defer ticker.Stop()
 	for {
 		data, err := os.ReadFile(statePath)
-		if err != nil {
+		// Windows can briefly deny a read while Save replaces the state file.
+		if err != nil && !(runtime.GOOS == "windows" &&
+			(errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)))) {
 			t.Fatal(err)
 		}
-		var saved struct {
-			Accepted  *state.AcceptedAction `json:"accepted"`
-			Processed map[string]time.Time  `json:"processed"`
-		}
-		if err := json.Unmarshal(data, &saved); err != nil {
-			t.Fatal(err)
-		}
-		if saved.Accepted == nil && !saved.Processed[accepted.JobID].IsZero() {
-			break
+		if err == nil {
+			var saved struct {
+				Accepted  *state.AcceptedAction `json:"accepted"`
+				Processed map[string]time.Time  `json:"processed"`
+			}
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Accepted == nil && !saved.Processed[accepted.JobID].IsZero() {
+				break
+			}
 		}
 		select {
 		case code := <-serviceDone:
