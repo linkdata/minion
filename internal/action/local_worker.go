@@ -157,7 +157,7 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 		// WaitCapacity closes the child and endpoint on failure.
 		return WorkerSelection{}, nil, nil, redactActionError(err, e.Runner.secretValues()...)
 	}
-	e.Executor = w
+	e.setSelectedExecutor(w)
 	e.assignmentRequired = true
 	return selected, w.exited, w.Close, nil
 }

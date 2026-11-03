@@ -678,6 +678,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			jobFailure := store.Data.JobFailures[job.ID]
+			firstAcceptance := jobFailure.AcceptedAt.IsZero()
 			jobFailure.NotificationKey = entry.key
 			if jobFailure.ModelCallStarted {
 				jobFailure.Attempts = maxJobAttempts
@@ -720,6 +721,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := accepted.Validate(); err != nil {
 				return stop(fmt.Errorf("accept %s: %w", itemLocation(item), err))
 			}
+			if firstAcceptance && store.Data.AcceptedTotal == ^uint64(0) {
+				return stop(fmt.Errorf("%w: accepted-action total overflow", ErrAcceptanceState))
+			}
 			// Save this thread's scan failure before Execute can service it.
 			if entryFailed() {
 				if err := deferEntry(); err != nil {
@@ -729,6 +733,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			jobFailure.Attempts++
 			store.Data.JobFailures[job.ID] = jobFailure
 			store.Data.Accepted = accepted
+			if firstAcceptance {
+				store.Data.AcceptedTotal++
+			}
 			for _, unaccepted := range scans[scanIndex:] {
 				if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
 					unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {

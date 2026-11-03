@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync/atomic"
 
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
@@ -16,6 +17,7 @@ import (
 type remoteWorker struct {
 	executor *HTTPExecutor
 	endpoint *RemoteEndpoint
+	unclean  atomic.Bool
 }
 
 // AttachRemoteWorker starts the configured listener. Capacity becomes available
@@ -75,7 +77,8 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	if err != nil {
 		return nil, nil, err
 	}
-	e.Executor = &remoteWorker{executor: executor, endpoint: endpoint}
+	w := &remoteWorker{executor: executor, endpoint: endpoint}
+	e.setSelectedExecutor(w)
 	e.ExecutorID = remote.ExecutorID
 	e.remoteSelected = true
 	e.assignmentRequired = true
@@ -168,6 +171,9 @@ func (w *remoteWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	cleanupFailed := false
 	for _, diagnostic := range result.Diagnostics {
 		cleanupFailed = cleanupFailed || diagnostic.Code == "cleanup_failed"
+	}
+	if cleanupFailed {
+		w.unclean.Store(true)
 	}
 	if closed || unavailable || cleanupFailed {
 		closeErr := w.endpoint.Close()

@@ -35,6 +35,7 @@ type Data struct {
 	PublicationScanCursor string                         `json:"publication_scan_cursor,omitempty"`
 	TerminalDecisions     map[string]TerminalDecision    `json:"terminal_decisions,omitempty"`
 	Accepted              *AcceptedAction                `json:"accepted,omitempty"`
+	AcceptedTotal         uint64                         `json:"accepted_total,omitempty"`
 }
 
 const (

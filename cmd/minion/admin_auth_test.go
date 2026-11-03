@@ -43,7 +43,10 @@ func testAdminHandler(t *testing.T, administrators []config.AdminAccount) (http.
 	}
 	logs := new(bytes.Buffer)
 	jw.Logger = slog.New(slog.NewTextHandler(logs, nil))
-	handler := newAdminHandler(jw, config.AdminConfig{Administrators: administrators})
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: administrators}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	go func() { jw.Serve(); close(done) }()
 	t.Cleanup(func() { jw.Close(); <-done })
@@ -168,7 +171,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile,
 		Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +222,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +274,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +483,10 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{account}})
+		handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{account}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		done := make(chan struct{})
 		go func() { jw.Serve(); close(done) }()
 		defer func() { jw.Close(); <-done }()

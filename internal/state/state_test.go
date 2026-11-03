@@ -67,6 +67,78 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	}
 }
 
+func TestReadSavedIgnoresUncommittedDataAndConcurrentReplacements(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.Data.AcceptedTotal = 1
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.AcceptedTotal = 2
+	if saved, err := store.ReadSaved(); err != nil || saved.AcceptedTotal != 1 {
+		t.Fatalf("uncommitted state leaked into snapshot: total=%d err=%v", saved.AcceptedTotal, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for total := uint64(2); total <= 50; total++ {
+			store.Data.AcceptedTotal = total
+			if err := store.Save(); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for range 50 {
+		saved, err := store.ReadSaved()
+		if err != nil || saved.AcceptedTotal == 0 || saved.AcceptedTotal > 50 {
+			t.Fatalf("torn saved state: total=%d err=%v", saved.AcceptedTotal, err)
+		}
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := store.ReadSaved(); err != nil || saved.AcceptedTotal != 50 {
+		t.Fatalf("final saved total=%d err=%v, want 50", saved.AcceptedTotal, err)
+	}
+}
+
+func TestFailedAcceptanceSaveDoesNotPublishCounter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := Open(path, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.Data.AcceptedTotal = 1
+	accepted := acceptedActionFixture()
+	store.Data.Accepted = &accepted
+	backup := path + ".saved"
+	if err := os.Rename(path, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err == nil {
+		t.Fatal("acceptance save unexpectedly replaced a directory")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, path); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := store.ReadSaved()
+	if err != nil || saved.Accepted != nil || saved.AcceptedTotal != 0 {
+		t.Fatalf("failed save published an acceptance or count: %+v, %v", saved, err)
+	}
+}
+
 func TestTerminalDecisionsPersistAcrossOpen(t *testing.T) {
 	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -750,6 +822,7 @@ func TestSaveReportsPostRenameSyncFailureWithAcceptedRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Data.Accepted = &accepted
+	store.Data.AcceptedTotal = 1
 	store.syncDir = filepath.Join(dir, "missing")
 	if err := store.Save(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Save() = %v; want post-rename sync-directory error", err)
@@ -766,7 +839,7 @@ func TestSaveReportsPostRenameSyncFailureWithAcceptedRecord(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	if !reflect.DeepEqual(reopened.Data.Accepted, &accepted) || !reopened.Data.Accepted.Assigned {
+	if !reflect.DeepEqual(reopened.Data.Accepted, &accepted) || !reopened.Data.Accepted.Assigned || reopened.Data.AcceptedTotal != 1 {
 		t.Fatalf("post-rename error lost accepted assignment: %+v", reopened.Data.Accepted)
 	}
 	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 2 {

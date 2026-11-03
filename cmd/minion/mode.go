@@ -45,7 +45,7 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		adminCtx, cancel := context.WithCancel(ctx)
 		ctx = adminCtx
 		defer cancel()
-		admin, err := startAdminServer(ctx, *watcher.Config.Admin, cancel)
+		admin, err := startAdminServer(ctx, *watcher.Config.Admin, owner, cancel)
 		if err != nil {
 			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
 			return 1

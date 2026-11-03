@@ -138,7 +138,7 @@ func TestSelectedAcceptanceSavedBeforeReactionAndCarriesFixedIdentity(t *testing
 		if err := json.Unmarshal(bytes, &saved); err != nil {
 			t.Fatal(err)
 		}
-		if saved.Accepted == nil || saved.JobFailures[saved.Accepted.JobID].Attempts != 1 {
+		if saved.Accepted == nil || saved.JobFailures[saved.Accepted.JobID].Attempts != 1 || saved.AcceptedTotal != 1 {
 			t.Fatalf("reaction preceded accepted attempt save: %+v", saved)
 		}
 	}
@@ -168,7 +168,7 @@ func TestSelectedAcceptanceSavedBeforeReactionAndCarriesFixedIdentity(t *testing
 	if saved.Accepted == nil || saved.Accepted.AcceptedAt.Before(beforeAccept) || saved.Accepted.AcceptedAt.After(time.Now().UTC()) {
 		t.Fatalf("acceptance time did not use the live clock: %+v", saved.Accepted)
 	}
-	if executed != 1 || store.Data.Accepted != nil || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 {
+	if executed != 1 || store.Data.Accepted != nil || len(store.Data.Processed) != 1 || len(store.Data.JobFailures) != 0 || store.Data.AcceptedTotal != 1 {
 		t.Fatalf("selected completion not cleared: executions=%d state=%+v", executed, store.Data)
 	}
 }
@@ -190,7 +190,7 @@ func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testin
 	if _, err := m.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
 		t.Fatalf("post-reaction cancellation = %v", err)
 	}
-	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.JobFailures[store.Data.Accepted.JobID].Attempts != 1 {
+	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.JobFailures[store.Data.Accepted.JobID].Attempts != 1 || store.Data.AcceptedTotal != 1 {
 		t.Fatalf("crash point lost unassigned acceptance: %+v", store.Data)
 	}
 	original := *store.Data.Accepted
@@ -220,7 +220,7 @@ func TestSelectedRestartAfterReactionResumesOriginalAttemptAndDeadline(t *testin
 		t.Fatal(err)
 	}
 	if executions != 1 || len(gh.reactions) != 2 || len(gh.notificationCalls) != 1 ||
-		len(reopened.Data.Processed) != 1 || reopened.Data.Accepted != nil {
+		len(reopened.Data.Processed) != 1 || reopened.Data.Accepted != nil || reopened.Data.AcceptedTotal != 1 {
 		t.Fatalf("restart discovered or dispatched duplicate work: executions=%d reactions=%v scans=%v state=%+v", executions, gh.reactions, gh.notificationCalls, reopened.Data)
 	}
 }
@@ -281,7 +281,7 @@ func TestSelectedPreparationFailureConsumesAttemptAndReleasesAcceptance(t *testi
 		t.Fatalf("preparation error = %v", err)
 	}
 	failure := store.Data.JobFailures[jobID(item.Key, "review")]
-	if store.Data.Accepted != nil || failure.Attempts != 1 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() || len(store.Data.Processed) != 0 {
+	if store.Data.Accepted != nil || failure.Attempts != 1 || failure.AcceptedAt.IsZero() || failure.Deadline.IsZero() || len(store.Data.Processed) != 0 || store.Data.AcceptedTotal != 1 {
 		t.Fatalf("failed preparation did not consume an attempt and release acceptance: %+v", store.Data)
 	}
 	retryAt := advanceToRetry(at, store)
@@ -293,8 +293,44 @@ func TestSelectedPreparationFailureConsumesAttemptAndReleasesAcceptance(t *testi
 		}
 		return nil
 	})
-	if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.Processed) != 1 {
+	if _, err := m.RunOnce(t.Context(), store); err != nil || len(store.Data.Processed) != 1 || store.Data.AcceptedTotal != 1 {
 		t.Fatalf("preparation retry failed: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedAcceptedTotalSurvivesRetiredUnassignedReservation(t *testing.T) {
+	at := time.Now().UTC().Add(-time.Hour)
+	first := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{first},
+		permission: github.Permission{Permission: "write"}}
+	store := openState(t, at.Add(-time.Minute))
+	preparationErr := errors.New("preparation unavailable")
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { return preparationErr }))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, preparationErr) || store.Data.Accepted != nil || store.Data.AcceptedTotal != 1 {
+		t.Fatalf("first acceptance was not released: err=%v state=%+v", err, store.Data)
+	}
+	failure := store.Data.JobFailures[jobID(first.Key, "review")]
+	failure.AcceptedAt = time.Now().UTC().Add(-15 * time.Minute)
+	failure.Deadline = time.Now().UTC().Add(-time.Minute)
+	store.Data.JobFailures[jobID(first.Key, "review")] = failure
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.retireMissingTerminalFailures(store, notificationKey(gh.notifications[0]), nil, nil, nil, at.Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Data.JobFailures) != 0 || len(store.Data.TerminalDecisions) != 0 || store.Data.AcceptedTotal != 1 {
+		t.Fatalf("retirement discarded accepted count: %+v", store.Data)
+	}
+	second := selectedItem(at.Add(11 * time.Minute))
+	second.Key, second.NodeID = "comment:2", "node:2"
+	second.HTMLURL = "https://github.com/example-owner/example-repo/pull/7#issuecomment-2"
+	gh.items = []github.Item{second}
+	gh.notifications = []github.Notification{testNotification(second.UpdatedAt)}
+	m.Now = func() time.Time { return second.UpdatedAt }
+	m.Handler = selectedHandler(func(Job) error { return nil })
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.AcceptedTotal != 2 {
+		t.Fatalf("distinct acceptance did not increment retained count: err=%v state=%+v", err, store.Data)
 	}
 }
 

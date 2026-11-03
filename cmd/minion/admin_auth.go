@@ -7,13 +7,14 @@ import (
 	"time"
 
 	"github.com/linkdata/jaws"
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 )
 
 const adminSessionKey = "minion.admin.username"
 
 const loginPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Minion admin</title></head><body><main><h1>Minion admin</h1><form method="post" action="/admin/login"><label>Username <input name="username" autocomplete="username" required></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form></main></body></html>`
-const signedInPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Minion admin</title></head><body><main><h1>Signed in</h1><form method="post" action="/admin/logout"><button>Sign out</button></form></main></body></html>`
+const signedInPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Minion admin</title></head><body><main><h1>Signed in</h1><a href="/">Open dashboard</a><form method="post" action="/admin/logout"><button>Sign out</button></form></main></body></html>`
 
 type adminIdentity string
 
@@ -35,7 +36,10 @@ type adminAccess struct {
 	hashSlots chan struct{}
 }
 
-func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig) http.Handler {
+func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator) (http.Handler, error) {
+	if err := registerAdminDashboard(jw); err != nil {
+		return nil, err
+	}
 	access := &adminAccess{jaws: jw, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
 	for _, account := range cfg.Administrators {
 		access.accounts[account.Username] = account
@@ -48,6 +52,8 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig) http.Handler {
 	mux.HandleFunc("GET /admin/login", access.loginPage)
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
+	mux.Handle("GET /{$}", adminDashboardHandler(jw, owner))
+	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
 	// body-reading callback, which must not inherit an immediate read deadline.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +68,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig) http.Handler {
 			return
 		}
 		mux.ServeHTTP(w, r)
-	}), access.allowed))
+	}), access.allowed)), nil
 }
 
 // CrossOriginProtection's legacy Origin fallback compares hosts but not schemes.
@@ -177,7 +183,7 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	delete(a.attempts, username)
 	a.mu.Unlock()
-	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
