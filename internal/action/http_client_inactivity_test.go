@@ -471,13 +471,15 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		renew()
 		time.Sleep(3 * time.Second)
 		err := <-f.done
-		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, errExecutorRuntimeCap) ||
+		if !errors.Is(err, context.DeadlineExceeded) ||
 			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) {
 			t.Fatalf("hard runtime did not cap chatty model: %v", err)
 		}
 		got := f.parent.result(t)
 		var reported *workerFailureError
-		if !errors.As(got.err, &reported) || !reported.failure.Deadline || !reported.failure.RuntimeCap ||
+		// Parent and worker share the hard deadline; either may report it first.
+		if !errors.As(got.err, &reported) || !reported.failure.Deadline ||
+			reported.failure.RuntimeCap != errors.Is(err, errExecutorRuntimeCap) ||
 			reported.failure.Inactivity || len(got.result.Calls) != 1 {
 			t.Fatalf("parent lost hard-runtime outcome: error=%v result=%+v", got.err, got.result)
 		}
