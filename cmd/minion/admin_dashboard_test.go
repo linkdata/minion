@@ -486,7 +486,11 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 
 func TestAdminDashboardAllLiveRegionsRedactAfterLogout(t *testing.T) {
 	handler, jw, store, owner := dashboardTestServer(t)
-	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
+	now := time.Now().UTC()
+	store.Data.Accepted = dashboardTestAccepted(now)
+	store.Data.LastStopJobID = "prior-job"
+	store.Data.TerminalDecisions["prior-job"] = state.TerminalDecision{AttemptID: "prior-attempt", Outcome: "canceled", DecidedAt: now,
+		StopRequest: state.StopRequest{RequestedBy: "private-operator", RequestedAt: now, Status: "confirmed"}}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -517,15 +521,34 @@ func TestAdminDashboardAllLiveRegionsRedactAfterLogout(t *testing.T) {
 		}
 	}
 	if initial := tr.BodyString(); !strings.Contains(initial, "owner/repo") || !strings.Contains(initial, "Selected worker") ||
-		!strings.Contains(initial, "Force stop this attempt") {
+		!strings.Contains(initial, "Force stop this attempt") || !strings.Contains(initial, "private-operator") {
 		t.Fatalf("missing initial private dashboard regions: %s", initial)
 	}
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
 	jw.Dirty(adminDashboardDirty)
-	for range 3 {
-		dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker", "Worker readiness", "Force stop this attempt")
+	ended := 0
+	for range 5 {
+		select {
+		case patch, ok := <-tr.OutCh:
+			if !ok {
+				t.Fatal("live channel closed before all revoked region patches")
+			}
+			for _, private := range []string{"owner/repo", "Selected worker", "Worker readiness", "Force stop this attempt", "private-operator"} {
+				if strings.Contains(patch.Data, private) {
+					t.Fatalf("revoked live patch exposed %q: %s", private, patch.Data)
+				}
+			}
+			if strings.Contains(patch.Data, "Admin session ended") {
+				ended++
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("missing revoked live region patch")
+		}
+	}
+	if ended != 3 {
+		t.Fatalf("revoked dashboard sent %d session-ended patches, want 3", ended)
 	}
 }
 

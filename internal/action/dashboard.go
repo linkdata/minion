@@ -148,7 +148,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if e == nil || e.Store == nil {
 		return DashboardSnapshot{}, errors.New("dashboard state is unavailable")
 	}
-	data, err := readDashboardState(e.Store.ReadSaved, runtime.GOOS == "windows")
+	data, err := readDashboardState(e.Store.ReadSavedDurable, runtime.GOOS == "windows")
 	if err != nil {
 		return DashboardSnapshot{}, err
 	}
