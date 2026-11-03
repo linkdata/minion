@@ -89,6 +89,18 @@ type Orchestrator struct {
 
 var _ monitor.StoredResultPublisher = (*Orchestrator)(nil)
 
+// StopCleanupVerified reports whether the selected worker returned without a
+// quarantined or unclean attempt. Execute has returned before this is called.
+func (e *Orchestrator) StopCleanupVerified() bool {
+	if e == nil || e.Executor == nil {
+		return false
+	}
+	if worker, ok := e.Executor.(interface{ stopCleanupVerified() bool }); ok {
+		return worker.stopCleanupVerified()
+	}
+	return false
+}
+
 // WaitCapacity gates discovery on selected executor readiness.
 func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	ready, ok := e.Executor.(interface{ WaitCapacity(context.Context) error })

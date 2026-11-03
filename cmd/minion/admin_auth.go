@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"sync"
@@ -9,6 +10,8 @@ import (
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 const adminSessionKey = "minion.admin.username"
@@ -55,6 +58,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("GET /admin/login", access.loginPage)
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
+	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
+		access.stop(w, r, owner)
+	})
 	mux.Handle("GET /{$}", adminDashboardHandler(jw, owner))
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
@@ -74,6 +80,43 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		}
 		mux.ServeHTTP(w, r)
 	}), access.allowed)), nil
+}
+
+func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action.Orchestrator) {
+	w.Header().Set("Cache-Control", "no-store")
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	if err := r.ParseForm(); err != nil {
+		closeUnreadAdminBody(w, r)
+		http.Error(w, "Invalid stop request", http.StatusBadRequest)
+		return
+	}
+	jobID, attemptID := r.PostForm.Get("job_id"), r.PostForm.Get("attempt_id")
+	if len(r.PostForm["job_id"]) != 1 || len(r.PostForm["attempt_id"]) != 1 ||
+		!workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(attemptID) {
+		closeUnreadAdminBody(w, r)
+		http.Error(w, "Invalid stop request", http.StatusBadRequest)
+		return
+	}
+	closeUnreadAdminBody(w, r)
+	if owner == nil || owner.Store == nil {
+		http.Error(w, "Orchestrator state unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	requestedBy := a.sessionUsername(a.jaws.GetSession(r))
+	if requestedBy == "" {
+		http.Error(w, "Admin session ended", http.StatusForbidden)
+		return
+	}
+	_, err := owner.Store.RequestStop(jobID, attemptID, requestedBy, time.Now().UTC())
+	if errors.Is(err, state.ErrStopConflict) {
+		http.Error(w, "Selected attempt changed or already ended", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Stop request could not be saved", http.StatusServiceUnavailable)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 // CrossOriginProtection's legacy Origin fallback compares hosts but not schemes.

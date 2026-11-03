@@ -79,6 +79,11 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Executor inactivity</dt><dd>{{.Snapshot.InactivityTimeout}}</dd>
   </dl><p class="hint">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section>
 </div>
+{{if .Snapshot.LastStop}}<section class="panel stop-status" aria-live="polite"><h2>Latest force stop</h2>
+  <p><strong>{{.Snapshot.LastStop.Status}}</strong> · {{.Snapshot.LastStop.JobID}} / attempt {{.Snapshot.LastStop.AttemptID}}</p>
+  <p class="hint">Requested by {{.Snapshot.LastStop.RequestedBy}} at {{utc .Snapshot.LastStop.RequestedAt}}.
+  {{if eq .Snapshot.LastStop.Status "requested"}}Waiting for worker termination to be verified.{{else if eq .Snapshot.LastStop.Status "confirmed"}}Worker attempt termination was verified.{{else}}Worker termination could not be verified; inspect worker readiness before reuse.{{end}}</p>
+</section>{{end}}
 {{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}
 {{define "dashboard-action"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p>Live state is unavailable.</p>{{else}}
@@ -89,7 +94,8 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   </tr></thead><tbody><tr>
     <td>{{.Action.Repository}}</td><td>{{.Action.Requester}}</td><td>{{.Action.Action}}</td>
     <td>{{.Action.Phase}}</td><td>{{utc .Action.AcceptedAt}}</td><td>{{utc .Action.Deadline}}</td>
-  </tr></tbody></table>
+  </tr></tbody></table><p class="hint">Attempt {{.Action.AttemptID}}</p>
+  {{if .Action.Stoppable}}<form class="stop-action" method="post" action="/admin/stop"><input type="hidden" name="job_id" value="{{.Action.JobID}}"><input type="hidden" name="attempt_id" value="{{.Action.AttemptID}}"><button type="submit">Force stop this attempt</button></form>{{end}}
   {{else if .Snapshot.InProgress}}<p>No current action matches these filters.</p>
   {{else}}<p>No action is in progress.</p>{{end}}
 {{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}`

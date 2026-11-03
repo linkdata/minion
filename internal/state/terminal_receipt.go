@@ -66,6 +66,9 @@ func validateData(data Data) error {
 	if data.PublicationScanCursor != "" && !workspace.ValidIdentitySegment(data.PublicationScanCursor) {
 		return errors.New("invalid publication scan cursor")
 	}
+	if data.LastStopJobID != "" && !workspace.ValidIdentitySegment(data.LastStopJobID) {
+		return errors.New("invalid last stop job ID")
+	}
 	if data.Accepted != nil {
 		if err := data.Accepted.Validate(); err != nil {
 			return fmt.Errorf("invalid accepted action: %w", err)

@@ -33,6 +33,9 @@ dl { display: grid; grid-template-columns: minmax(8rem, 1fr) minmax(0, 2fr); gap
 dt { color: #abb9b8; }
 dd { margin: 0; overflow-wrap: anywhere; }
 .actions { overflow-x: auto; }
+.stop-status { margin-bottom: 1rem; }
+.stop-status p { margin: .5rem 0; }
+.stop-action { margin-top: 1rem; }
 table { border-collapse: collapse; min-width: 60rem; width: 100%; text-align: left; }
 th, td { border-bottom: 1px solid #39505b; padding: .7rem .6rem; vertical-align: top; overflow-wrap: anywhere; }
 th { color: #abb9b8; font-size: .78rem; font-weight: 600; }

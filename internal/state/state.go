@@ -34,6 +34,7 @@ type Data struct {
 	PublicationWrites     map[string]PublicationWrite    `json:"publication_writes,omitempty"`
 	PublicationScanCursor string                         `json:"publication_scan_cursor,omitempty"`
 	TerminalDecisions     map[string]TerminalDecision    `json:"terminal_decisions,omitempty"`
+	LastStopJobID         string                         `json:"last_stop_job_id,omitempty"`
 	Accepted              *AcceptedAction                `json:"accepted,omitempty"`
 	AcceptedTotal         uint64                         `json:"accepted_total,omitempty"`
 }
@@ -117,6 +118,31 @@ type TerminalDecision struct {
 	DecidedAt        time.Time         `json:"decided_at"`
 	OutcomeBinding   string            `json:"outcome_binding,omitempty"`
 	UnresolvedAccess AccessDisposition `json:"unresolved_access,omitzero"`
+	StopRequest      StopRequest       `json:"stop_request,omitzero"`
+}
+
+// StopRequest records the first operator request and the observed cleanup result.
+// A terminal decision may precede a worker's return, so its outcome is not proof
+// that termination was confirmed.
+type StopRequest struct {
+	RequestedBy string    `json:"requested_by"`
+	RequestedAt time.Time `json:"requested_at"`
+	Status      string    `json:"status"`
+}
+
+func (r StopRequest) valid() bool {
+	if r == (StopRequest{}) {
+		return true
+	}
+	if !workspace.ValidIdentitySegment(r.RequestedBy) || r.RequestedAt.IsZero() {
+		return false
+	}
+	switch r.Status {
+	case "requested", "confirmed", "unverified":
+		return true
+	default:
+		return false
+	}
 }
 
 // AccessDisposition identifies an accepted request that needs operator action.
@@ -136,7 +162,7 @@ func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 		return false
 	}
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(decision.AttemptID) ||
-		decision.DecidedAt.IsZero() || !validOutcomeBinding(decision.OutcomeBinding) {
+		decision.DecidedAt.IsZero() || !validOutcomeBinding(decision.OutcomeBinding) || !decision.StopRequest.valid() {
 		return false
 	}
 	access := decision.UnresolvedAccess
@@ -150,30 +176,31 @@ func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 
 // AcceptedAction retains the one selected action across process restarts.
 type AcceptedAction struct {
-	JobID           string    `json:"job_id"`
-	AttemptID       string    `json:"attempt_id"`
-	ExecutorID      string    `json:"executor_id"`
-	Repository      string    `json:"repository"`
-	RepositoryID    int64     `json:"repository_id"`
-	OwnerID         int64     `json:"owner_id"`
-	SubjectType     string    `json:"subject_type"`
-	SubjectNumber   int       `json:"subject_number"`
-	SourceKey       string    `json:"source_key"`
-	SourceNodeID    string    `json:"source_node_id"`
-	SourceURL       string    `json:"source_url"`
-	SourceUpdatedAt time.Time `json:"source_updated_at"`
-	Requester       string    `json:"requester"`
-	RequesterID     int64     `json:"requester_id"`
-	CommandName     string    `json:"command_name"`
-	Action          string    `json:"action"`
-	AcceptedAt      time.Time `json:"accepted_at"`
-	Deadline        time.Time `json:"deadline"`
-	RetryAt         time.Time `json:"retry_at,omitzero"`
-	Assigned        bool      `json:"assigned"`
-	OutcomeBinding  string    `json:"outcome_binding,omitempty"`
-	ResultReady     bool      `json:"result_ready,omitempty"`
-	FixedRefusal    string    `json:"fixed_refusal,omitempty"`
-	Terminal        bool      `json:"terminal,omitempty"`
+	JobID           string      `json:"job_id"`
+	AttemptID       string      `json:"attempt_id"`
+	ExecutorID      string      `json:"executor_id"`
+	Repository      string      `json:"repository"`
+	RepositoryID    int64       `json:"repository_id"`
+	OwnerID         int64       `json:"owner_id"`
+	SubjectType     string      `json:"subject_type"`
+	SubjectNumber   int         `json:"subject_number"`
+	SourceKey       string      `json:"source_key"`
+	SourceNodeID    string      `json:"source_node_id"`
+	SourceURL       string      `json:"source_url"`
+	SourceUpdatedAt time.Time   `json:"source_updated_at"`
+	Requester       string      `json:"requester"`
+	RequesterID     int64       `json:"requester_id"`
+	CommandName     string      `json:"command_name"`
+	Action          string      `json:"action"`
+	AcceptedAt      time.Time   `json:"accepted_at"`
+	Deadline        time.Time   `json:"deadline"`
+	RetryAt         time.Time   `json:"retry_at,omitzero"`
+	Assigned        bool        `json:"assigned"`
+	OutcomeBinding  string      `json:"outcome_binding,omitempty"`
+	ResultReady     bool        `json:"result_ready,omitempty"`
+	FixedRefusal    string      `json:"fixed_refusal,omitempty"`
+	Terminal        bool        `json:"terminal,omitempty"`
+	StopRequest     StopRequest `json:"stop_request,omitzero"`
 }
 
 // Validate checks the persisted action identity and absolute runtime window.
@@ -200,6 +227,9 @@ func (a AcceptedAction) Validate() error {
 	}
 	if a.AcceptedAt.IsZero() || !a.Deadline.After(a.AcceptedAt) {
 		return errors.New("accepted action deadline is invalid")
+	}
+	if !a.StopRequest.valid() || a.StopRequest != (StopRequest{}) && !a.Terminal {
+		return errors.New("accepted action stop request is invalid")
 	}
 	return nil
 }
@@ -259,6 +289,7 @@ type Store struct {
 	lock           *os.File
 	mu             sync.Mutex
 	privateRecords sync.Mutex
+	activeStop selectedStopCancel // Guarded by mu.
 	syncDir        string // Test-only extra directory for a post-rename sync failure.
 	Data           Data
 }
@@ -294,7 +325,10 @@ func (s *Store) DecideTerminalLocked(jobID, attemptID, outcome string, at time.T
 	if accepted == nil || accepted.JobID != jobID || accepted.AttemptID != attemptID {
 		return TerminalDecision{}, fmt.Errorf("terminal decision for %q has no matching accepted attempt", jobID)
 	}
-	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), OutcomeBinding: accepted.OutcomeBinding}
+	if accepted.StopRequest != (StopRequest{}) && outcome != "lost" {
+		outcome = "canceled"
+	}
+	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), OutcomeBinding: accepted.OutcomeBinding, StopRequest: accepted.StopRequest}
 	if !validTerminalDecision(jobID, decision) {
 		return TerminalDecision{}, errors.New("invalid terminal decision")
 	}

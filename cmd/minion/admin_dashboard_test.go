@@ -306,6 +306,80 @@ func TestAdminDashboardUnchangedDirtyPatch(t *testing.T) {
 	}
 }
 
+func TestAdminForceStopUsesSessionAndSelectedAttempt(t *testing.T) {
+	handler, _, store, _ := dashboardTestServer(t)
+	accepted := dashboardTestAccepted(time.Now().UTC())
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"job_id": {accepted.JobID}, "attempt_id": {accepted.AttemptID}, "requested_by": {"spoofed"}}
+	cookie := dashboardTestCookie(t, handler)
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		strings.Contains(got.Body.String(), "Force stop this attempt") {
+		t.Fatalf("preparation showed stop control: status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, nil, "https://admin.example"); got.Code != http.StatusForbidden {
+		t.Fatalf("anonymous stop status=%d", got.Code)
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusConflict {
+		t.Fatalf("preparation stop status=%d", got.Code)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancel)
+	defer unregister()
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), `name="attempt_id" value="attempt-1"`) ||
+		!strings.Contains(got.Body.String(), "Force stop this attempt") {
+		t.Fatalf("current action missing exact-attempt stop form: status=%d body=%s", got.Code, got.Body.String())
+	}
+	stale := url.Values{"job_id": {accepted.JobID}, "attempt_id": {"older-attempt"}}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", stale, cookie, "https://admin.example"); got.Code != http.StatusConflict {
+		t.Fatalf("stale attempt stop status=%d", got.Code)
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://other.example"); got.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin stop status=%d", got.Code)
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusSeeOther {
+		t.Fatalf("stop status=%d body=%s", got.Code, got.Body.String())
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("admin stop did not cancel selected run")
+	}
+	saved, err := store.ReadSaved()
+	if err != nil || saved.Accepted == nil || !saved.Accepted.Terminal || saved.Accepted.StopRequest.RequestedBy != "operator" ||
+		saved.Accepted.StopRequest.Status != "requested" {
+		t.Fatalf("stop did not save session requester/fence: state=%+v error=%v", saved, err)
+	}
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), "Waiting for worker termination") ||
+		strings.Contains(got.Body.String(), "Force stop this attempt") {
+		t.Fatalf("requested status/form incorrect: status=%d body=%s", got.Code, got.Body.String())
+	}
+	if err := store.ResolveStop(accepted.JobID, accepted.AttemptID, "confirmed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithLock(func() error {
+		if _, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "canceled", time.Now().UTC()); err != nil {
+			return err
+		}
+		store.Data.Accepted = nil
+		return store.Save()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unregister()
+	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
+		!strings.Contains(got.Body.String(), "Worker attempt termination was verified") ||
+		!strings.Contains(got.Body.String(), "operator") {
+		t.Fatalf("confirmed stop disappeared after accepted cleanup: status=%d body=%s", got.Code, got.Body.String())
+	}
+	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusSeeOther {
+		t.Fatalf("completed repeat status=%d", got.Code)
+	}
+}
+
 func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	handler, jw, store, owner := dashboardTestServer(t)
 	cookie := dashboardTestCookie(t, handler)

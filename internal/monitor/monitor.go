@@ -1848,8 +1848,28 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return fmt.Errorf("%w: accepted action deadline differs from its first acceptance", ErrAcceptanceState)
 	}
 	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
+		if accepted.StopRequest.Status == "requested" {
+			if err := store.ResolveStop(job.ID, job.AttemptID, "unverified"); err != nil {
+				return fmt.Errorf("%w: recover stop request: %w", ErrAcceptanceState, err)
+			}
+			decision = store.Data.TerminalDecisions[job.ID]
+		}
 		if decision.AttemptID != job.AttemptID {
 			return fmt.Errorf("%w: terminal decision belongs to another attempt", ErrAcceptanceState)
+		}
+		return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
+	}
+	if accepted.StopRequest != (state.StopRequest{}) {
+		status, outcome := "confirmed", "canceled"
+		if accepted.Assigned || failure.ModelCallStarted {
+			status, outcome = "unverified", "lost"
+		}
+		if err := store.ResolveStop(job.ID, job.AttemptID, status); err != nil {
+			return fmt.Errorf("%w: recover stop request: %w", ErrAcceptanceState, err)
+		}
+		decision, err := decideAccepted(store, job, outcome, time.Now().UTC())
+		if err != nil {
+			return err
 		}
 		return m.resolveSelectedDecision(ctx, store, job, time.Now().UTC(), failure, decision)
 	}
@@ -2017,6 +2037,15 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 	}
 	actionCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()
+	unregisterSelectedStop := store.RegisterSelectedStop(job.ID, job.AttemptID, cancel)
+	var unregisterOnce sync.Once
+	unregisterStop := func() { unregisterOnce.Do(unregisterSelectedStop) }
+	defer unregisterStop()
+	finishSelected := finish
+	finish = func(err error) error {
+		unregisterStop()
+		return finishSelected(err)
+	}
 	controlCtx := actionCtx
 	var cancelControls context.CancelFunc
 	if job.Command.Action == command.Fix {
@@ -2124,12 +2153,14 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 		result := error(ErrExecutionOutcomeUnknown)
 		defer func() {
 			cancelForSavedResult := selectedResultReady()
+			unregisterStop()
 			done <- result
 			if job.Command.Action == command.Fix || cancelForSavedResult {
 				cancelControls()
 			}
 		}()
 		result = run(actionCtx, job)
+		workerResult := result
 		completionMu.Lock()
 		completedAt := time.Now().UTC()
 		cause := actionCtx.Err()
@@ -2143,6 +2174,15 @@ func (m *Monitor) runSelectedWithControls(ctx context.Context, store *state.Stor
 			} else {
 				terminalReturn = true
 			}
+		}
+		stopStatus := "confirmed"
+		if errors.Is(workerResult, ErrExecutionOutcomeUnknown) {
+			stopStatus = "unverified"
+		} else if cleaner, ok := m.Handler.(interface{ StopCleanupVerified() bool }); ok && !cleaner.StopCleanupVerified() {
+			stopStatus = "unverified"
+		}
+		if err := store.ResolveStop(job.ID, job.AttemptID, stopStatus); err != nil {
+			result = errors.Join(result, fmt.Errorf("%w: resolve stop request: %w", ErrAcceptanceState, err))
 		}
 		completionMu.Unlock()
 		if m.afterSelectedRunReturn != nil {
@@ -2656,11 +2696,34 @@ func (m *Monitor) processTerminalItems(ctx context.Context, store *state.Store, 
 }
 
 func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job Job, at time.Time, err error) error {
+	if accepted := store.Data.Accepted; accepted != nil && accepted.JobID == job.ID &&
+		accepted.AttemptID == job.AttemptID && accepted.StopRequest.Status == "requested" {
+		status := "unverified"
+		if !accepted.Assigned && !store.Data.JobFailures[job.ID].ModelCallStarted {
+			status = "confirmed"
+		}
+		if resolveErr := store.ResolveStop(job.ID, job.AttemptID, status); resolveErr != nil {
+			return fmt.Errorf("%w: resolve unobserved stop: %w", ErrAcceptanceState, resolveErr)
+		}
+	}
 	if errors.Is(err, ErrAcceptanceState) {
 		accepted := store.Data.Accepted
 		if accepted != nil && AssignmentMatchesAccepted(job, *accepted) {
 			failure, exists := store.Data.JobFailures[job.ID]
 			decision, decided := store.Data.TerminalDecisions[job.ID]
+			if exists && !decided && accepted.StopRequest != (state.StopRequest{}) && failure.Attempts > 0 &&
+				failure.AcceptedAt.Equal(job.AcceptedAt) && failure.Deadline.Equal(job.Deadline) {
+				outcome := "canceled"
+				if errors.Is(err, ErrExecutionOutcomeUnknown) {
+					outcome = "lost"
+				}
+				var decideErr error
+				decision, decideErr = decideAccepted(store, job, outcome, time.Now().UTC())
+				if decideErr != nil {
+					return errors.Join(err, decideErr)
+				}
+				decided = true
+			}
 			if exists && decided && decision.AttemptID == job.AttemptID && failure.Attempts > 0 &&
 				failure.AcceptedAt.Equal(job.AcceptedAt) && failure.Deadline.Equal(job.Deadline) {
 				return errors.Join(err, m.resolveSelectedDecision(ctx, store, job, at, failure, decision))
@@ -2685,6 +2748,17 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
 		if decision.AttemptID != job.AttemptID {
 			return fmt.Errorf("%w: terminal decision belongs to another attempt", ErrAcceptanceState)
+		}
+		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
+	}
+	if accepted.StopRequest != (state.StopRequest{}) {
+		outcome := "canceled"
+		if errors.Is(err, ErrExecutionOutcomeUnknown) {
+			outcome = "lost"
+		}
+		decision, decideErr := decideAccepted(store, job, outcome, time.Now().UTC())
+		if decideErr != nil {
+			return decideErr
 		}
 		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
@@ -2932,7 +3006,7 @@ func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *st
 	}); err != nil {
 		return err
 	}
-	replied := issuedWrite
+	replied := issuedWrite || accepted != nil && accepted.StopRequest != (state.StopRequest{})
 	var unresolvedReason string
 	if !replied && replyCtx.Err() != nil {
 		m.logf("skip failure reply to %s: %v", itemLocation(job.Source), replyCtx.Err())

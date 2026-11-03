@@ -68,6 +68,10 @@ func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
 		case reflect.Bool:
 			value.SetBool(!value.Bool())
 		case reflect.Struct:
+			if value.Type() == reflect.TypeOf(state.StopRequest{}) {
+				value.Set(reflect.ValueOf(state.StopRequest{RequestedBy: "operator", RequestedAt: time.Now().UTC(), Status: "requested"}))
+				break
+			}
 			if value.Type() != reflect.TypeOf(time.Time{}) {
 				t.Fatalf("unhandled accepted-action field %s: %s", field.Name, value.Type())
 			}
@@ -75,7 +79,7 @@ func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
 		default:
 			t.Fatalf("unhandled accepted-action field %s", field.Name)
 		}
-		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "ResultReady" || field.Name == "FixedRefusal" || field.Name == "Terminal"
+		want := field.Name == "RetryAt" || field.Name == "Assigned" || field.Name == "ResultReady" || field.Name == "FixedRefusal" || field.Name == "Terminal" || field.Name == "StopRequest"
 		if got := record.MatchesAccepted(changed); got != want {
 			t.Errorf("changed %s matched=%t, want %t", field.Name, got, want)
 		}
