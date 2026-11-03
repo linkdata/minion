@@ -56,7 +56,7 @@ func TestDashboardSnapshotBindsStatusAndUsesCommittedState(t *testing.T) {
 	if snapshot.TrackedAccepted != 4 || snapshot.InProgress != 1 || snapshot.Action == nil || snapshot.Action.Phase != "publishing" ||
 		snapshot.Action.Remaining != 10*time.Minute || snapshot.Worker.Readiness != "ready" ||
 		snapshot.Worker.State != "ready" || snapshot.Worker.Phase != "cleanup" ||
-		!snapshot.Worker.LastContact.Equal(at.Add(-2*time.Second)) || !snapshot.Worker.LastProgress.Equal(at.Add(-9*time.Second)) ||
+		!snapshot.Worker.LastContact.Equal(at.Add(-2*time.Second)) || snapshot.Worker.ReportedProgressAge != 7*time.Second ||
 		snapshot.MaxRuntime != time.Hour || snapshot.InactivityTimeout != 3*time.Minute {
 		t.Fatalf("wrong dashboard snapshot: %+v", snapshot)
 	}
@@ -92,7 +92,7 @@ func TestDashboardSnapshotBindsStatusAndUsesCommittedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stale.Worker.Readiness != "ready" || !stale.Worker.LastContact.IsZero() || !stale.Worker.LastProgress.IsZero() ||
+	if stale.Worker.Readiness != "ready" || !stale.Worker.LastContact.IsZero() || stale.Worker.ReportedProgressAge != 0 ||
 		stale.Worker.State != "not observed" || stale.Action == nil || stale.Action.Phase != "assigned" {
 		t.Fatalf("old attempt Status leaked into new action: %+v", stale)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -97,6 +98,42 @@ func dashboardReadPatch(t *testing.T, tr *jawstest.TestRequest, want string, tim
 			}
 		case <-deadline:
 			t.Fatalf("live patch missing %q", want)
+		}
+	}
+}
+
+func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
+	pages, err := parseAdminDashboard()
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 3, 12, 0, 2, 0, time.UTC)
+	var page struct {
+		Auth struct{ IsAdmin bool }
+		Dot  struct{ View adminDashboardView }
+	}
+	page.Auth.IsAdmin = true
+	page.Dot.View = dashboardView(action.DashboardSnapshot{Worker: action.DashboardWorker{
+		Kind: "remote", Readiness: "busy", State: "working", Phase: "review", Round: 2, ReviewPhase: "critic",
+		LastContact: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC), ReportedProgressAge: 7 * time.Second,
+	}}, adminDashboardFilter{}, at)
+	if page.Dot.View.ContactAge != 2*time.Second || page.Dot.View.ProgressAge != 9*time.Second {
+		t.Fatalf("progress age did not include parent elapsed time: %+v", page.Dot.View)
+	}
+	var body bytes.Buffer
+	if err := pages.ExecuteTemplate(&body, "dashboard-live", page); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<dt>Location</dt><dd>remote</dd>",
+		"<dt>Readiness</dt><dd>busy</dd>",
+		"<dt>Reported state</dt><dd>working</dd>",
+		"<dt>Phase</dt><dd>review / round 2 / critic</dd>",
+		"<dt>Last worker status received</dt><dd>2026-11-03T12:00:00Z (2s ago)</dd>",
+		"<dt>Execution progress age</dt><dd>At least 9s ago (worker reported 7s at last status)</dd>",
+	} {
+		if !strings.Contains(body.String(), want) {
+			t.Fatalf("worker telemetry missing %q: %s", want, body.String())
 		}
 	}
 }

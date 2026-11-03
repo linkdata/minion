@@ -32,7 +32,7 @@ type DashboardWorker struct {
 	Phase, ReviewPhase     string
 	Round                  int
 	LastContact            time.Time
-	LastProgress           time.Time
+	ReportedProgressAge    time.Duration
 }
 
 type dashboardWorkerSource interface{ dashboardObservation() workerObservation }
@@ -215,7 +215,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	snapshot.Worker.Round = status.Round
 	snapshot.Worker.ReviewPhase = status.ReviewPhase
 	snapshot.Worker.LastContact = observation.statusAt
-	snapshot.Worker.LastProgress = observation.statusAt.Add(-status.ProgressAge)
+	snapshot.Worker.ReportedProgressAge = status.ProgressAge
 	if !accepted.ResultReady && !accepted.Terminal && !retryPending && status.Phase != "" {
 		action.Phase = status.Phase
 	}

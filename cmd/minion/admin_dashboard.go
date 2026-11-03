@@ -68,7 +68,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Reported state</dt><dd>{{.Snapshot.Worker.State}}</dd>
     <dt>Phase</dt><dd>{{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}Not observed{{end}}</dd>
     <dt>Last worker status received</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastContact}} ({{.ContactAge}} ago){{end}}</dd>
-    <dt>Last execution progress</dt><dd>{{if .Snapshot.Worker.LastProgress.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastProgress}} ({{.ProgressAge}} ago, worker-reported estimate){{end}}</dd>
+    <dt>Execution progress age</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}At least {{.ProgressAge}} ago (worker reported {{.Snapshot.Worker.ReportedProgressAge}} at last status){{end}}</dd>
   </dl></section>
   <section class="panel"><h2>Configured limits</h2><dl>
     <dt>Hard action runtime</dt><dd>{{.Snapshot.MaxRuntime}}</dd>
@@ -144,24 +144,30 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	if err != nil {
 		return adminDashboardView{Unavailable: true}
 	}
+	return dashboardView(snapshot, page.Filter, now)
+}
+
+func dashboardView(snapshot action.DashboardSnapshot, filter adminDashboardFilter, now time.Time) adminDashboardView {
 	view := adminDashboardView{Snapshot: snapshot}
-	if page.Filter.matches(snapshot.Action) {
+	if filter.matches(snapshot.Action) {
 		view.Action = snapshot.Action
 	}
 	if !snapshot.Worker.LastContact.IsZero() {
 		view.ContactAge = max(0, now.Sub(snapshot.Worker.LastContact)).Truncate(time.Second)
-	}
-	if !snapshot.Worker.LastProgress.IsZero() {
-		view.ProgressAge = max(0, now.Sub(snapshot.Worker.LastProgress)).Truncate(time.Second)
+		view.ProgressAge = (snapshot.Worker.ReportedProgressAge + max(0, now.Sub(snapshot.Worker.LastContact))).Truncate(time.Second)
 	}
 	return view
 }
 
-func registerAdminDashboard(jw *jaws.Jaws) error {
-	pages, err := template.New("dashboard").Funcs(template.FuncMap{
+func parseAdminDashboard() (*template.Template, error) {
+	return template.New("dashboard").Funcs(template.FuncMap{
 		"utc":          func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
 		"wholeSeconds": func(d time.Duration) string { return d.Round(time.Second).String() },
 	}).Parse(adminDashboardHTML)
+}
+
+func registerAdminDashboard(jw *jaws.Jaws) error {
+	pages, err := parseAdminDashboard()
 	if err != nil {
 		return fmt.Errorf("parse admin dashboard: %w", err)
 	}
