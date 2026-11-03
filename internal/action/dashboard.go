@@ -3,6 +3,7 @@ package action
 import (
 	"cmp"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
@@ -20,7 +21,6 @@ type DashboardSnapshot struct {
 }
 
 type DashboardAction struct {
-	JobID, AttemptID              string
 	Repository, Requester, Action string
 	AcceptedAt, Deadline          time.Time
 	Remaining                     time.Duration
@@ -29,7 +29,6 @@ type DashboardAction struct {
 
 type DashboardWorker struct {
 	Kind, Readiness, State string
-	Ready                  bool
 	Phase, ReviewPhase     string
 	Round                  int
 	LastContact            time.Time
@@ -51,7 +50,6 @@ func (e *Orchestrator) setSelectedExecutor(worker Executor) {
 
 type workerObservation struct {
 	kind, readiness string
-	ready           bool
 	status          Status
 	statusAt        time.Time
 	active          bool
@@ -99,7 +97,7 @@ func (w *localWorker) dashboardObservation() workerObservation {
 	case observation.closed || observation.unavailable || reuse == workerRetired:
 		observation.readiness = "unreachable"
 	case reuse == workerReusable && observation.heldPull:
-		observation.readiness, observation.ready = "ready", true
+		observation.readiness = "ready"
 	case observation.active || reuse == workerRunning:
 		observation.readiness = "busy"
 	default:
@@ -127,7 +125,7 @@ func (w *remoteWorker) dashboardObservation() workerObservation {
 	case observation.active:
 		observation.readiness = "busy"
 	case observation.heldPull:
-		observation.readiness, observation.ready = "ready", true
+		observation.readiness = "ready"
 	default:
 		observation.readiness = "waiting for worker"
 	}
@@ -158,7 +156,6 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 		observation = worker.dashboardObservation()
 		snapshot.Worker.Kind = observation.kind
 		snapshot.Worker.Readiness = observation.readiness
-		snapshot.Worker.Ready = observation.ready
 	}
 	accepted := data.Accepted
 	if accepted == nil {
@@ -169,8 +166,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if remaining < 0 {
 		remaining = 0
 	}
-	action := &DashboardAction{JobID: accepted.JobID, AttemptID: accepted.AttemptID,
-		Repository: accepted.Repository, Requester: accepted.Requester, Action: accepted.Action,
+	action := &DashboardAction{Repository: accepted.Repository, Requester: accepted.Requester, Action: accepted.Action,
 		AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline, Remaining: remaining,
 		Phase: "preparing"}
 	if accepted.Assigned {
@@ -190,7 +186,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if observation.statusAt.IsZero() || status.Identity.JobID != accepted.JobID ||
 		status.Identity.AttemptID != accepted.AttemptID || status.Identity.ExecutorID != accepted.ExecutorID ||
 		status.Identity.Repository != accepted.Repository || status.Identity.RepositoryID != accepted.RepositoryID ||
-		status.Identity.OwnerID != accepted.OwnerID || status.Identity.Requester != accepted.Requester ||
+		status.Identity.OwnerID != accepted.OwnerID || !strings.EqualFold(status.Identity.Requester, accepted.Requester) ||
 		status.Identity.RequesterID != accepted.RequesterID || status.Identity.SubjectType != accepted.SubjectType ||
 		status.Identity.Number != accepted.SubjectNumber {
 		return snapshot, nil

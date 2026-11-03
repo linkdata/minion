@@ -67,7 +67,7 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	}
 }
 
-func TestReadSavedIgnoresUncommittedDataAndConcurrentReplacements(t *testing.T) {
+func TestReadSavedIgnoresUncommittedDataAndBestEffortReplacements(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := Open(path, time.Now().UTC())
 	if err != nil {
@@ -82,9 +82,16 @@ func TestReadSavedIgnoresUncommittedDataAndConcurrentReplacements(t *testing.T) 
 	if saved, err := store.ReadSaved(); err != nil || saved.AcceptedTotal != 1 {
 		t.Fatalf("uncommitted state leaked into snapshot: total=%d err=%v", saved.AcceptedTotal, err)
 	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if saved, err := store.ReadSaved(); err != nil || saved.AcceptedTotal != 2 {
+		t.Fatalf("saved total=%d err=%v, want 2", saved.AcceptedTotal, err)
+	}
+	// Exercise concurrent replacement and reads without claiming a timed overlap.
 	done := make(chan error, 1)
 	go func() {
-		for total := uint64(2); total <= 50; total++ {
+		for total := uint64(3); total <= 50; total++ {
 			store.Data.AcceptedTotal = total
 			if err := store.Save(); err != nil {
 				done <- err
@@ -95,7 +102,7 @@ func TestReadSavedIgnoresUncommittedDataAndConcurrentReplacements(t *testing.T) 
 	}()
 	for range 50 {
 		saved, err := store.ReadSaved()
-		if err != nil || saved.AcceptedTotal == 0 || saved.AcceptedTotal > 50 {
+		if err != nil || saved.AcceptedTotal < 2 || saved.AcceptedTotal > 50 {
 			t.Fatalf("torn saved state: total=%d err=%v", saved.AcceptedTotal, err)
 		}
 	}

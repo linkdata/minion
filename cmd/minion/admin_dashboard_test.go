@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/jaws/jawstest"
 	"github.com/linkdata/jaws/lib/ui"
@@ -75,7 +78,7 @@ func dashboardLiveRequest(t *testing.T, jw *jaws.Jaws, owner *action.Orchestrato
 	return tr
 }
 
-func dashboardReadPatch(t *testing.T, tr *jawstest.TestRequest, want string, timeout time.Duration) string {
+func dashboardReadPatch(t *testing.T, tr *jawstest.TestRequest, want string, timeout time.Duration, forbidden ...string) string {
 	t.Helper()
 	deadline := time.After(timeout)
 	for {
@@ -83,6 +86,11 @@ func dashboardReadPatch(t *testing.T, tr *jawstest.TestRequest, want string, tim
 		case message, ok := <-tr.OutCh:
 			if !ok {
 				t.Fatalf("live channel closed before patch containing %q", want)
+			}
+			for _, text := range forbidden {
+				if strings.Contains(message.Data, text) {
+					t.Fatalf("live patch exposed %q: %s", text, message.Data)
+				}
 			}
 			if strings.Contains(message.Data, want) {
 				return message.Data
@@ -110,7 +118,8 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	matching := adminResponse(handler, http.MethodGet, "/?repo=OWNER&requester=writ&action=comment", nil, cookie, "")
 	if matching.Code != http.StatusOK || matching.Header().Get("Cache-Control") != "no-store" ||
 		matching.Header().Get("Content-Security-Policy") == "" || !strings.Contains(matching.Body.String(), "<td>owner/repo</td>") ||
-		!strings.Contains(matching.Body.String(), "Tracked accepted actions") || !strings.Contains(matching.Body.String(), "7m0s") ||
+		!strings.Contains(matching.Body.String(), `<p class="metric">3</p>`) ||
+		!strings.Contains(matching.Body.String(), `<p class="metric">1</p>`) || !strings.Contains(matching.Body.String(), "7m0s") ||
 		!strings.Contains(matching.Body.String(), "1m0s") {
 		t.Fatalf("matching dashboard: status=%d body=%s", matching.Code, matching.Body.String())
 	}
@@ -162,17 +171,17 @@ func TestAdminDashboardLiveUpdatesStopAfterLogout(t *testing.T) {
 	if patch := dashboardReadPatch(t, tr, "owner/repo", 3*time.Second); !strings.Contains(patch, "Current action") {
 		t.Fatalf("live patch omitted action section: %s", patch)
 	}
-	if patch := dashboardReadPatch(t, other, "No current action matches these filters.", 3*time.Second); strings.Contains(patch, "owner/repo") {
+	if patch := dashboardReadPatch(t, other, "No current action matches these filters.", 3*time.Second, "owner/repo"); strings.Contains(patch, "owner/repo") {
 		t.Fatalf("other request received the matching action: %s", patch)
 	}
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
 	jw.Dirty(adminDashboardDirty)
-	if patch := dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
+	if patch := dashboardReadPatch(t, tr, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker"); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
 		t.Fatalf("revoked session received private live state: %s", patch)
 	}
-	if patch := dashboardReadPatch(t, other, "Admin session ended", 3*time.Second); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
+	if patch := dashboardReadPatch(t, other, "Admin session ended", 3*time.Second, "owner/repo", "Selected worker"); strings.Contains(patch, "owner/repo") || strings.Contains(patch, "Selected worker") {
 		t.Fatalf("other revoked session received private live state: %s", patch)
 	}
 }
@@ -190,14 +199,71 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = admin.Close() })
-	cookie := dashboardTestCookie(t, admin.server.Handler)
-	tr := dashboardLiveRequest(t, admin.jaws, owner, cookie, adminDashboardFilter{})
+	baseURL := "http://" + admin.listener.Addr().String()
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	login, err := client.PostForm(baseURL+"/admin/login", url.Values{"username": {"operator"}, "password": {"correct-password"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	login.Body.Close()
+	if login.StatusCode != http.StatusSeeOther || len(login.Cookies()) != 1 {
+		t.Fatalf("network login: status=%d cookies=%d", login.StatusCode, len(login.Cookies()))
+	}
+	cookie := login.Cookies()[0]
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, baseURL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(cookie)
+	page, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, readErr := io.ReadAll(io.LimitReader(page.Body, 1<<20))
+	closeErr := page.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read dashboard: read=%v close=%v", readErr, closeErr)
+	}
+	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "No action is in progress.") {
+		t.Fatalf("network dashboard: status=%d body=%s", page.StatusCode, pageBody)
+	}
+	_, afterKey, found := strings.Cut(string(pageBody), `<meta name="jawsKey" content="`)
+	if !found {
+		t.Fatal("dashboard omitted JaWS connection key")
+	}
+	key, _, found := strings.Cut(afterKey, `"`)
+	if !found || key == "" {
+		t.Fatal("dashboard JaWS connection key is empty")
+	}
+	wsContext, cancel := context.WithTimeout(t.Context(), 6*time.Second)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Cookie", cookie.Name+"="+cookie.Value)
+	header.Set("Origin", baseURL)
+	conn, upgrade, err := websocket.Dial(wsContext, "ws://"+admin.listener.Addr().String()+"/jaws/"+key,
+		&websocket.DialOptions{HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("authenticated dashboard WebSocket: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	if upgrade == nil || upgrade.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("dashboard WebSocket upgrade: %+v", upgrade)
+	}
 	store.Data.Accepted = dashboardTestAccepted(time.Now().UTC())
 	store.Data.AcceptedTotal = 1
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if patch := dashboardReadPatch(t, tr, "owner/repo", 5*time.Second); !strings.Contains(patch, "Current action") {
-		t.Fatalf("ticker patch omitted action section: %s", patch)
+	for {
+		_, patch, err := conn.Read(wsContext)
+		if err != nil {
+			t.Fatalf("ticker did not patch authenticated WebSocket: %v", err)
+		}
+		if strings.Contains(string(patch), "owner/repo") {
+			if !strings.Contains(string(patch), "Current action") {
+				t.Fatalf("ticker patch omitted action section: %s", patch)
+			}
+			break
+		}
 	}
 }

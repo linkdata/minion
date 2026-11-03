@@ -54,11 +54,18 @@ func TestDashboardSnapshotBindsStatusAndUsesCommittedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.TrackedAccepted != 4 || snapshot.InProgress != 1 || snapshot.Action == nil || snapshot.Action.Phase != "publishing" ||
-		snapshot.Action.Remaining != 10*time.Minute || !snapshot.Worker.Ready || snapshot.Worker.Readiness != "ready" ||
+		snapshot.Action.Remaining != 10*time.Minute || snapshot.Worker.Readiness != "ready" ||
 		snapshot.Worker.State != "ready" || snapshot.Worker.Phase != "cleanup" ||
 		!snapshot.Worker.LastContact.Equal(at.Add(-2*time.Second)) || !snapshot.Worker.LastProgress.Equal(at.Add(-9*time.Second)) ||
 		snapshot.MaxRuntime != time.Hour || snapshot.InactivityTimeout != 3*time.Minute {
 		t.Fatalf("wrong dashboard snapshot: %+v", snapshot)
+	}
+	store.Data.Accepted.Requester = "WRITER"
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if caseChanged, err := owner.DashboardSnapshot(at); err != nil || caseChanged.Worker.LastContact.IsZero() || caseChanged.Worker.Phase != "cleanup" {
+		t.Fatalf("case-only requester change hid matching Status: %+v, %v", caseChanged, err)
 	}
 	store.Data.Accepted.Requester = "other-requester"
 	if err := store.Save(); err != nil {
@@ -85,7 +92,7 @@ func TestDashboardSnapshotBindsStatusAndUsesCommittedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stale.Worker.Ready != true || !stale.Worker.LastContact.IsZero() || !stale.Worker.LastProgress.IsZero() ||
+	if stale.Worker.Readiness != "ready" || !stale.Worker.LastContact.IsZero() || !stale.Worker.LastProgress.IsZero() ||
 		stale.Worker.State != "not observed" || stale.Action == nil || stale.Action.Phase != "assigned" {
 		t.Fatalf("old attempt Status leaked into new action: %+v", stale)
 	}
@@ -121,44 +128,44 @@ func TestDashboardWorkerReadinessRequiresFreshPullAndCleanup(t *testing.T) {
 	executor.pull, executor.pullDone = true, make(chan struct{})
 	local := &localWorker{executor: executor, endpoint: &LocalEndpoint{serveDone: make(chan struct{})}, exited: make(chan struct{})}
 	local.reuse.Store(workerReusable)
-	if observed := local.dashboardObservation(); !observed.ready || observed.readiness != "ready" {
+	if observed := local.dashboardObservation(); observed.readiness != "ready" {
 		t.Fatalf("fresh local pull is not ready: %+v", observed)
 	}
 	local.reuse.Store(workerNeedsPull)
-	if observed := local.dashboardObservation(); observed.ready {
+	if observed := local.dashboardObservation(); observed.readiness == "ready" {
 		t.Fatalf("local cleanup without reuse proof became ready: %+v", observed)
 	}
 	local.reuse.Store(workerReusable)
 	executor.pullStale = true
-	if observed := local.dashboardObservation(); observed.ready {
+	if observed := local.dashboardObservation(); observed.readiness == "ready" {
 		t.Fatalf("stale local pull became ready: %+v", observed)
 	}
 	executor.pullStale = false
 	local.unclean.Store(true)
-	if observed := local.dashboardObservation(); observed.ready || observed.readiness != "cleanup failed" {
+	if observed := local.dashboardObservation(); observed.readiness != "cleanup failed" {
 		t.Fatalf("unclean local worker: %+v", observed)
 	}
 	local.unclean.Store(false)
 	close(local.exited)
-	if observed := local.dashboardObservation(); observed.ready || observed.readiness != "unreachable" {
+	if observed := local.dashboardObservation(); observed.readiness != "unreachable" {
 		t.Fatalf("exited local worker: %+v", observed)
 	}
 	remote := &remoteWorker{executor: executor, endpoint: &RemoteEndpoint{serveDone: make(chan struct{})}}
-	if observed := remote.dashboardObservation(); !observed.ready || observed.readiness != "ready" {
+	if observed := remote.dashboardObservation(); observed.readiness != "ready" {
 		t.Fatalf("fresh remote pull is not ready: %+v", observed)
 	}
 	executor.pullStale = true
-	if observed := remote.dashboardObservation(); observed.ready {
+	if observed := remote.dashboardObservation(); observed.readiness == "ready" {
 		t.Fatalf("stale remote pull became ready: %+v", observed)
 	}
 	executor.pullStale = false
 	remote.unclean.Store(true)
-	if observed := remote.dashboardObservation(); observed.ready || observed.readiness != "cleanup failed" {
+	if observed := remote.dashboardObservation(); observed.readiness != "cleanup failed" {
 		t.Fatalf("unclean remote worker: %+v", observed)
 	}
 	remote.unclean.Store(false)
 	close(remote.endpoint.serveDone)
-	if observed := remote.dashboardObservation(); observed.ready || observed.readiness != "unreachable" {
+	if observed := remote.dashboardObservation(); observed.readiness != "unreachable" {
 		t.Fatalf("closed remote endpoint: %+v", observed)
 	}
 }

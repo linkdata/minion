@@ -6,8 +6,7 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; }
-button, input, select { font: inherit; }
-button, input, select { min-height: 2.5rem; }
+button, input, select { font: inherit; min-height: 2.5rem; }
 button { cursor: pointer; background: #d9ab5e; color: #172027; border: 1px solid #d9ab5e; padding: .35rem .85rem; font-weight: 700; }
 button:hover { background: #e8c88f; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #e8c88f; outline-offset: 2px; }

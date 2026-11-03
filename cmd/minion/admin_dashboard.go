@@ -67,13 +67,13 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Readiness</dt><dd>{{.Snapshot.Worker.Readiness}}</dd>
     <dt>Reported state</dt><dd>{{.Snapshot.Worker.State}}</dd>
     <dt>Phase</dt><dd>{{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}Not observed{{end}}</dd>
-    <dt>Last heartbeat received</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastContact}} ({{.ContactAge}} ago){{end}}</dd>
+    <dt>Last worker status received</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastContact}} ({{.ContactAge}} ago){{end}}</dd>
     <dt>Last execution progress</dt><dd>{{if .Snapshot.Worker.LastProgress.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastProgress}} ({{.ProgressAge}} ago, worker-reported estimate){{end}}</dd>
   </dl></section>
   <section class="panel"><h2>Configured limits</h2><dl>
     <dt>Hard action runtime</dt><dd>{{.Snapshot.MaxRuntime}}</dd>
     <dt>Executor inactivity</dt><dd>{{.Snapshot.InactivityTimeout}}</dd>
-  </dl><p class="hint">A heartbeat records contact; it does not reset the inactivity limit or prove readiness.</p></section>
+  </dl><p class="hint">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section>
 </div>
 <section class="panel actions"><h2>Current action</h2>
   {{if .Action}}<table><thead><tr>
@@ -83,8 +83,8 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   </tr></thead><tbody><tr>
     <td>{{.Action.Repository}}</td><td>{{.Action.Requester}}</td><td>{{.Action.Action}}</td>
     <td>{{.Action.Phase}}</td><td>{{utc .Action.AcceptedAt}}</td><td>{{utc .Action.Deadline}}</td>
-    <td class="number">{{.Action.Remaining}}</td>
-  </tr></tbody></table><p class="hint">Attempt {{.Action.AttemptID}}</p>
+    <td class="number">{{wholeSeconds .Action.Remaining}}</td>
+  </tr></tbody></table>
   {{else if .Snapshot.InProgress}}<p>No current action matches these filters.</p>
   {{else}}<p>No action is in progress.</p>{{end}}
 </section>
@@ -156,7 +156,10 @@ func (page *adminDashboardPage) View() adminDashboardView {
 }
 
 func registerAdminDashboard(jw *jaws.Jaws) error {
-	pages, err := template.New("dashboard").Funcs(template.FuncMap{"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) }}).Parse(adminDashboardHTML)
+	pages, err := template.New("dashboard").Funcs(template.FuncMap{
+		"utc":          func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
+		"wholeSeconds": func(d time.Duration) string { return d.Round(time.Second).String() },
+	}).Parse(adminDashboardHTML)
 	if err != nil {
 		return fmt.Errorf("parse admin dashboard: %w", err)
 	}
