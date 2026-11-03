@@ -524,7 +524,7 @@ func TestRunHTTPHardRuntimeCapsChattyModel(t *testing.T) {
 		select {
 		case err = <-f.done:
 		case <-time.After(2 * time.Second):
-			t.Fatal("hard deadline did not stop the model")
+			t.Fatal("worker did not return after the hard deadline")
 		}
 		if !errors.Is(err, context.DeadlineExceeded) ||
 			!errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) ||
@@ -580,7 +580,7 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 		select {
 		case err = <-f.done:
 		case <-time.After(2 * time.Second):
-			t.Fatal("worker cap did not stop the model before the parent deadline")
+			t.Fatal("worker did not return after its runtime cap")
 		}
 		if !errors.Is(err, errExecutorRuntimeCap) || !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, errExecutorInactivity) ||
 			errors.Is(err, monitor.ErrExecutionOutcomeUnknown) || errors.Is(err, monitor.ErrRequestTransport) {
