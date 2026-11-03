@@ -502,7 +502,7 @@ func TestRunHTTPWorkerRuntimeCapPrecedesParentForChattyModel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		job := testJob(command.Comment)
 		job.RuntimeBudget = 30 * time.Second
-		job.InactivityTimeout = 20 * time.Second
+		job.InactivityTimeout = 12 * time.Second
 		progress := make(chan func(), 1)
 		f := newHTTPInactivityFixture(t, job, false, func(ctx context.Context, request modelRun) (aicli.Result, error) {
 			progress <- request.onProgress
