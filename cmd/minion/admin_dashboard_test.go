@@ -73,7 +73,7 @@ func dashboardLiveRequest(t *testing.T, jw *jaws.Jaws, owner *action.Orchestrato
 		<-tr.DoneCh
 	})
 	rw := ui.RequestWriter{Request: tr.Request, Writer: tr.Recorder}
-	if err := rw.Template("section", "dashboard-live", &adminDashboardPage{owner: owner, Filter: filter}); err != nil {
+	if err := rw.Template("section", "dashboard-action", &adminDashboardPage{owner: owner, Filter: filter}); err != nil {
 		t.Fatal(err)
 	}
 	return tr
@@ -115,7 +115,7 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	page.Dot.View = adminDashboardView{Snapshot: action.DashboardSnapshot{Worker: action.DashboardWorker{
 		Kind: "remote", Readiness: "busy", State: "busy", Phase: "critic", Round: 2, ReviewPhase: "verification",
 		LastContact: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC), ReportedProgressAge: 7 * time.Second,
-	}}, ContactAge: 2 * time.Second}
+	}}}
 	var body bytes.Buffer
 	if err := pages.ExecuteTemplate(&body, "dashboard-live", page); err != nil {
 		t.Fatal(err)
@@ -125,12 +125,47 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 		"<dt>Readiness</dt><dd>busy</dd>",
 		"<dt>Reported state</dt><dd>busy</dd>",
 		"<dt>Phase</dt><dd>critic / round 2 / verification</dd>",
-		"<dt>Last worker status received</dt><dd>2026-11-03T12:00:00Z (2s ago)</dd>",
+		"<dt>Last worker status received</dt><dd>2026-11-03T12:00:00Z</dd>",
 		"<dt>Worker-reported progress age at last status</dt><dd>7s</dd>",
 	} {
 		if !strings.Contains(body.String(), want) {
 			t.Fatalf("worker telemetry missing %q: %s", want, body.String())
 		}
+	}
+	var status bytes.Buffer
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil {
+		t.Fatal(err)
+	}
+	if status.String() != "Worker busy. Worker phase critic." {
+		t.Fatalf("live status summary: %q", status.String())
+	}
+	page.Dot.View.Action = &action.DashboardAction{Repository: "owner/repo", Requester: "writer", Action: "review",
+		Phase: "critic", AcceptedAt: time.Date(2026, 11, 3, 11, 0, 0, 0, time.UTC), Deadline: time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)}
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		status.String() != "Worker busy. Worker phase critic. Action phase critic." {
+		t.Fatalf("action phase did not change live status summary: %q, %v", status.String(), err)
+	}
+	var actionBefore bytes.Buffer
+	if err := pages.ExecuteTemplate(&actionBefore, "dashboard-action", page); err != nil {
+		t.Fatal(err)
+	}
+	page.Dot.View.Snapshot.Worker.LastContact = page.Dot.View.Snapshot.Worker.LastContact.Add(time.Second)
+	page.Dot.View.Snapshot.Worker.ReportedProgressAge = 13 * time.Second
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
+		status.String() != "Worker busy. Worker phase critic. Action phase critic." {
+		t.Fatalf("heartbeat changed live status summary: %q, %v", status.String(), err)
+	}
+	var actionAfter bytes.Buffer
+	if err := pages.ExecuteTemplate(&actionAfter, "dashboard-action", page); err != nil ||
+		actionBefore.String() != actionAfter.String() || !strings.Contains(actionAfter.String(), "owner/repo") {
+		t.Fatalf("worker heartbeat changed action HTML: %q, %q, %v", actionBefore.String(), actionAfter.String(), err)
+	}
+	page.Auth.IsAdmin = false
+	status.Reset()
+	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil || status.String() != "Admin session ended." {
+		t.Fatalf("revoked live status: %q, %v", status.String(), err)
 	}
 }
 
@@ -153,6 +188,7 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	matching := adminResponse(handler, http.MethodGet, "/?repo=OWNER&requester=writ&action=comment", nil, cookie, "")
 	if matching.Code != http.StatusOK || matching.Header().Get("Cache-Control") != "no-store" ||
 		matching.Header().Get("Content-Security-Policy") == "" || !strings.Contains(matching.Body.String(), "<td>owner/repo</td>") ||
+		!strings.Contains(matching.Body.String(), "role=status aria-live=polite class=visually-hidden") ||
 		!strings.Contains(matching.Body.String(), acceptedMetric) || !strings.Contains(matching.Body.String(), inProgressMetric) ||
 		!strings.Contains(matching.Body.String(), "<dt>Hard action runtime</dt><dd>7m0s</dd>") ||
 		!strings.Contains(matching.Body.String(), "<dt>Executor inactivity</dt><dd>1m0s</dd>") {
@@ -213,6 +249,17 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	}
 	if denied := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("logged-out dashboard status=%d, want 403", denied.Code)
+	}
+}
+
+func TestAdminDashboardUnchangedDirtyPatch(t *testing.T) {
+	handler, jw, _, owner := dashboardTestServer(t)
+	tr := dashboardLiveRequest(t, jw, owner, dashboardTestCookie(t, handler), adminDashboardFilter{})
+	jw.Dirty(adminDashboardDirty)
+	first := dashboardReadPatch(t, tr, "No action is in progress.", 3*time.Second)
+	jw.Dirty(adminDashboardDirty)
+	if second := dashboardReadPatch(t, tr, "No action is in progress.", 3*time.Second); second != first {
+		t.Fatalf("unchanged dashboard sent different HTML: first=%s second=%s", first, second)
 	}
 }
 

@@ -37,6 +37,7 @@ th, td { border-bottom: 1px solid #39505b; padding: .7rem .6rem; vertical-align:
 th { color: #abb9b8; font-size: .78rem; font-weight: 600; }
 .number { text-align: right; font-variant-numeric: tabular-nums; }
 .hint { margin-bottom: 0; font-size: .82rem; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 50rem) {
   .metrics, .panels { grid-template-columns: 1fr; }
   dl { grid-template-columns: 1fr; gap: .2rem; }

@@ -3,10 +3,13 @@ package action
 import (
 	"cmp"
 	"errors"
+	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/state"
 )
 
 // DashboardSnapshot exposes only the current action and worker observations.
@@ -23,7 +26,6 @@ type DashboardSnapshot struct {
 type DashboardAction struct {
 	Repository, Requester, Action string
 	AcceptedAt, Deadline          time.Time
-	Remaining                     time.Duration
 	Phase                         string
 }
 
@@ -138,7 +140,7 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 	if e == nil || e.Store == nil {
 		return DashboardSnapshot{}, errors.New("dashboard state is unavailable")
 	}
-	data, err := e.Store.ReadSaved()
+	data, err := readDashboardState(e.Store.ReadSaved, runtime.GOOS == "windows")
 	if err != nil {
 		return DashboardSnapshot{}, err
 	}
@@ -173,12 +175,8 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 		}
 	}
 	snapshot.InProgress = 1
-	remaining := accepted.Deadline.Sub(now)
-	if remaining < 0 {
-		remaining = 0
-	}
 	action := &DashboardAction{Repository: accepted.Repository, Requester: accepted.Requester, Action: accepted.Action,
-		AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline, Remaining: remaining,
+		AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
 		Phase: "preparing"}
 	if accepted.Assigned {
 		action.Phase = "assigned"
@@ -220,4 +218,17 @@ func (e *Orchestrator) DashboardSnapshot(now time.Time) (DashboardSnapshot, erro
 		action.Phase = status.Phase
 	}
 	return snapshot, nil
+}
+
+// A Windows replacement can briefly deny opening state.json. Keep the retry
+// specific to dashboard reads; durable ACK reads retain their fail-fast behavior.
+func readDashboardState(read func() (state.Data, error), windows bool) (state.Data, error) {
+	for attempt := 0; ; attempt++ {
+		data, err := read()
+		if err == nil || !windows || attempt == 2 ||
+			!(errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33))) {
+			return data, err
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }

@@ -35,7 +35,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   <main>
     <div class="heading"><div>
       <p class="eyebrow">ORCHESTRATOR</p><h1>Live actions</h1>
-      <p>Worker and action state updates every two seconds while this page is connected.</p>
+      <p>Worker and action state is checked every two seconds while this page is connected.</p>
     </div></div>
     <form class="filters" method="get" action="/">
       <label>Repository<input name="repo" value="{{.Dot.Filter.Repo}}" maxlength="201" placeholder="owner/repo"></label>
@@ -49,10 +49,13 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
       </select></label>
       <button type="submit">Apply filters</button>
     </form>
+    {{$.Template "p" "dashboard-status" .Dot "role=status aria-live=polite class=visually-hidden"}}
     {{$.Template "section" "dashboard-live" .Dot}}
+    {{$.Template "section" "dashboard-action" .Dot "class=\"panel actions\""}}
   </main>{{$.TailHTML}}
 </body>
 </html>{{end}}
+{{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker {{.Snapshot.Worker.Readiness}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{else}}not observed{{end}}.{{if .Action}} Action phase {{.Action.Phase}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
 {{define "dashboard-live"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p role="alert">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="metrics">
@@ -67,7 +70,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Readiness</dt><dd>{{.Snapshot.Worker.Readiness}}</dd>
     <dt>Reported state</dt><dd>{{.Snapshot.Worker.State}}</dd>
     <dt>Phase</dt><dd>{{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}Not observed{{end}}</dd>
-    <dt>Last worker status received</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastContact}} ({{.ContactAge}} ago){{end}}</dd>
+    <dt>Last worker status received</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}{{utc .Snapshot.Worker.LastContact}}{{end}}</dd>
     <dt>Worker-reported progress age at last status</dt><dd>{{if .Snapshot.Worker.LastContact.IsZero}}Not observed{{else}}{{.Snapshot.Worker.ReportedProgressAge}}{{end}}</dd>
   </dl></section>
   <section class="panel"><h2>Configured limits</h2><dl>
@@ -75,19 +78,19 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Executor inactivity</dt><dd>{{.Snapshot.InactivityTimeout}}</dd>
   </dl><p class="hint">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section>
 </div>
-<section class="panel actions"><h2>Current action</h2>
+{{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}
+{{define "dashboard-action"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
+{{if .Unavailable}}<p>Live state is unavailable.</p>{{else}}
+<h2>Current action</h2>
   {{if .Action}}<table><thead><tr>
     <th scope="col">Repository</th><th scope="col">Requester</th><th scope="col">Action</th>
     <th scope="col">Phase</th><th scope="col">Accepted</th><th scope="col">Original deadline</th>
-    <th scope="col">Remaining</th>
   </tr></thead><tbody><tr>
     <td>{{.Action.Repository}}</td><td>{{.Action.Requester}}</td><td>{{.Action.Action}}</td>
     <td>{{.Action.Phase}}</td><td>{{utc .Action.AcceptedAt}}</td><td>{{utc .Action.Deadline}}</td>
-    <td class="number">{{wholeSeconds .Action.Remaining}}</td>
   </tr></tbody></table>
   {{else if .Snapshot.InProgress}}<p>No current action matches these filters.</p>
   {{else}}<p>No action is in progress.</p>{{end}}
-</section>
 {{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}`
 
 type adminDashboardFilter struct{ Repo, Requester, Action string }
@@ -133,7 +136,6 @@ func (*adminDashboardPage) JawsGetTag() any { return adminDashboardDirty }
 type adminDashboardView struct {
 	Snapshot    action.DashboardSnapshot
 	Action      *action.DashboardAction
-	ContactAge  time.Duration
 	Unavailable bool
 }
 
@@ -147,16 +149,12 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	if page.Filter.matches(snapshot.Action) {
 		view.Action = snapshot.Action
 	}
-	if !snapshot.Worker.LastContact.IsZero() {
-		view.ContactAge = max(0, now.Sub(snapshot.Worker.LastContact)).Truncate(time.Second)
-	}
 	return view
 }
 
 func parseAdminDashboard() (*template.Template, error) {
 	return template.New("dashboard").Funcs(template.FuncMap{
-		"utc":          func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-		"wholeSeconds": func(d time.Duration) string { return d.Round(time.Second).String() },
+		"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
 	}).Parse(adminDashboardHTML)
 }
 

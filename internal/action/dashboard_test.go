@@ -1,7 +1,10 @@
 package action
 
 import (
+	"errors"
+	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,6 +29,38 @@ func dashboardAccepted(job Job, at time.Time) *state.AcceptedAction {
 		SubjectType: id.SubjectType, SubjectNumber: id.Number, SourceKey: "source", SourceNodeID: "source-node",
 		Requester: id.Requester, RequesterID: id.RequesterID, CommandName: job.Command, Action: string(job.Action),
 		AcceptedAt: at, Deadline: at.Add(10 * time.Minute), Assigned: true, ResultReady: true}
+}
+
+func TestReadDashboardStateRetriesOnlyWindowsSharing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		windows   bool
+		readError error
+		failFor   int
+		wantCalls int
+		wantSaved bool
+	}{
+		{name: "sharing", windows: true, readError: syscall.Errno(32), failFor: 1, wantCalls: 2, wantSaved: true},
+		{name: "lock", windows: true, readError: syscall.Errno(33), failFor: 1, wantCalls: 2, wantSaved: true},
+		{name: "persistent sharing", windows: true, readError: syscall.Errno(32), failFor: 4, wantCalls: 3},
+		{name: "other error", windows: true, readError: os.ErrPermission, failFor: 1, wantCalls: 1},
+		{name: "non-Windows sharing", readError: syscall.Errno(32), failFor: 1, wantCalls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			data, err := readDashboardState(func() (state.Data, error) {
+				calls++
+				if calls <= tc.failFor {
+					return state.Data{}, &os.PathError{Op: "open", Path: "state.json", Err: tc.readError}
+				}
+				return state.Data{AcceptedTotal: 9}, nil
+			}, tc.windows)
+			if calls != tc.wantCalls || tc.wantSaved && (err != nil || data.AcceptedTotal != 9) ||
+				!tc.wantSaved && !errors.Is(err, tc.readError) {
+				t.Fatalf("dashboard state read: calls=%d data=%+v err=%v", calls, data, err)
+			}
+		})
+	}
 }
 
 func TestDashboardSnapshotBindsStatusAndUsesCommittedState(t *testing.T) {
@@ -54,7 +89,7 @@ func TestDashboardSnapshotBindsStatusAndUsesCommittedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if snapshot.TrackedAccepted != 4 || snapshot.InProgress != 1 || snapshot.Action == nil || snapshot.Action.Phase != "publishing" ||
-		snapshot.Action.Remaining != 10*time.Minute || snapshot.Worker.Readiness != "ready" ||
+		snapshot.Worker.Readiness != "ready" ||
 		snapshot.Worker.State != "ready" || snapshot.Worker.Phase != "cleanup" ||
 		!snapshot.Worker.LastContact.Equal(at.Add(-2*time.Second)) || snapshot.Worker.ReportedProgressAge != 7*time.Second ||
 		snapshot.MaxRuntime != time.Hour || snapshot.InactivityTimeout != 3*time.Minute {
@@ -131,6 +166,10 @@ func TestDashboardWorkerReadinessRequiresFreshPullAndCleanup(t *testing.T) {
 	if observed := local.dashboardObservation(); observed.readiness != "ready" {
 		t.Fatalf("fresh local pull is not ready: %+v", observed)
 	}
+	local.reuse.Store(workerRunning)
+	if observed := local.dashboardObservation(); observed.readiness != "busy" {
+		t.Fatalf("running local worker is not busy: %+v", observed)
+	}
 	local.reuse.Store(workerNeedsPull)
 	if observed := local.dashboardObservation(); observed.readiness == "ready" {
 		t.Fatalf("local cleanup without reuse proof became ready: %+v", observed)
@@ -154,6 +193,11 @@ func TestDashboardWorkerReadinessRequiresFreshPullAndCleanup(t *testing.T) {
 	if observed := remote.dashboardObservation(); observed.readiness != "ready" {
 		t.Fatalf("fresh remote pull is not ready: %+v", observed)
 	}
+	executor.active = &httpTransaction{}
+	if observed := remote.dashboardObservation(); observed.readiness != "busy" {
+		t.Fatalf("active remote worker is not busy: %+v", observed)
+	}
+	executor.active = nil
 	executor.pullStale = true
 	if observed := remote.dashboardObservation(); observed.readiness == "ready" {
 		t.Fatalf("stale remote pull became ready: %+v", observed)
