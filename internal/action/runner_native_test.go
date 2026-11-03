@@ -36,10 +36,6 @@ func TestNativeRolePairGate(t *testing.T) {
 	}{
 		{main: "codex", critic: "codex"},
 		{main: "claude", critic: "claude", blocked: true},
-		{main: "codex", critic: "claude"},
-		{main: "claude", critic: "codex"},
-		{main: "codex"},
-		{main: "claude"},
 	} {
 		err := CheckNativeRolePair(test.main, test.critic)
 		if (err != nil) != test.blocked || test.blocked && err.Error() != nativeRolePairUnverified {

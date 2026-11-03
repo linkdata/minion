@@ -228,7 +228,7 @@ Stop Minion before editing its configuration. Install skills and run `-check` af
 
 ### Main model and adversarial critic
 
-`main` selects `"codex"` (the default) or `"claude"`. `adversarial` is optional; omit it or use `""` to disable the critic. Codex can serve both roles; a Claude main and Claude critic pair remains gated until #146 verifies its CLI capabilities. `-check` reports that gate before starting a worker. The `codex` object accepts `model`, `reasoning_effort`, and `api_key`; `claude` accepts `model`, `effort`, and `api_key`. Optional `main_settings` and `critic_settings` objects each accept `model` and `effort` and override that provider's defaults for one role. Local mode resolves omitted settings from the provider's defaults. Remote mode requires an explicit effective model and effort for each role. This example uses a local worker:
+`main` selects `"codex"` (the default) or `"claude"`. `adversarial` is optional; omit it or use `""` to disable the critic. Codex can serve both roles; a Claude main and Claude critic pair remains gated until its CLI capabilities are verified. `-check` reports that gate before starting a worker. The `codex` object accepts `model`, `reasoning_effort`, and `api_key`; `claude` accepts `model`, `effort`, and `api_key`. Optional `main_settings` and `critic_settings` objects each accept `model` and `effort` and override that provider's defaults for one role. Local mode resolves omitted settings from the provider's defaults. Remote mode requires an explicit effective model and effort for each role. This example uses a local worker:
 
 ```json
 {
