@@ -106,6 +106,9 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	e.usageCheckpoint = checkpoint
 	finish := func(actionErr error) error {
 		saveFinal := func() error {
+			if e.finalUsageEntered != nil {
+				e.finalUsageEntered()
+			}
 			latest, found, err := e.Usage.Load(record.ID)
 			if err != nil {
 				return fmt.Errorf("load final action usage %s: %w", record.ID, err)

@@ -375,6 +375,51 @@ func TestLateRemoteOutcomeConfirmsTerminalDecisionBeforeRetention(t *testing.T) 
 	}
 }
 
+func TestLateRemoteOutcomeRetriesUntilTerminalDecisionIsSaved(t *testing.T) {
+	f := newLateOutcomeFixture(t, false)
+	accepted := acceptedForJob(f.job)
+	accepted.Assigned = true
+	accepted.OutcomeBinding = httpBindingDigest(httpJobBinding(f.job))
+	f.store.Data.Accepted = accepted
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID)
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	priorCursor := f.store.Data.Cursor
+	f.store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if err := f.store.WithLock(func() error {
+		_, err := f.store.DecideTerminalLocked(f.job.Identity.JobID, f.job.Identity.AttemptID, "lost", time.Now())
+		return err
+	}); err == nil {
+		t.Fatal("pre-replacement terminal decision save unexpectedly succeeded")
+	}
+	f.store.Data.Cursor = priorCursor
+	_, client, origin := lateOutcomeEndpoint(t, f.owner)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusInternalServerError {
+		t.Fatalf("unconfirmed saved assignment was not retryable: status=%d", status)
+	}
+	diagnosticPath := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unconfirmed decision retained diagnostics: %v", err)
+	}
+	if err := f.store.WithLock(func() error {
+		_, err := f.store.DecideTerminalLocked(f.job.Identity.JobID, f.job.Identity.AttemptID, "lost", time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.store.Data.Accepted = nil
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("late retry after terminal decision save status=%d", status)
+	}
+	if data, err := os.ReadFile(diagnosticPath); err != nil || !bytes.Contains(data, []byte("private late detail")) {
+		t.Fatalf("durable terminal retry lost diagnostics: %q error=%v", data, err)
+	}
+}
+
 func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
 	if err := f.finish(errors.New("lost outcome")); err == nil {
@@ -665,11 +710,20 @@ func TestLateRemoteUsageReloadsAfterAmbiguousSave(t *testing.T) {
 
 func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
-	entered, release := make(chan struct{}), make(chan struct{})
+	entered, release, lateSaved := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	f.owner.lateUsageSave = func(record usage.Record) error {
 		close(entered)
 		<-release
-		return f.owner.Usage.Save(record)
+		err := f.owner.Usage.Save(record)
+		close(lateSaved)
+		return err
 	}
 	lateDone := make(chan error, 1)
 	go func() { lateDone <- f.owner.receiveLateOutcome("remote", f.outcome) }()
@@ -679,8 +733,17 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 		t.Fatal("late usage save did not start")
 	}
 	finishDone := make(chan error, 1)
-	finishWaiting := make(chan struct{})
+	finishWaiting, finishEntered := make(chan struct{}), make(chan struct{})
+	orderingViolation := make(chan struct{}, 1)
 	f.owner.finalUsageWaiting = func() { close(finishWaiting) }
+	f.owner.finalUsageEntered = func() {
+		select {
+		case <-lateSaved:
+		default:
+			orderingViolation <- struct{}{}
+		}
+		close(finishEntered)
+	}
 	go func() {
 		finishDone <- f.finish(errors.New("lost outcome"))
 	}()
@@ -690,9 +753,9 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 		t.Fatal("final usage did not reach the private-record lock")
 	}
 	select {
-	case err := <-finishDone:
-		t.Fatalf("final usage save bypassed the held late receipt: %v", err)
-	case <-time.After(10 * time.Millisecond):
+	case <-finishEntered:
+		t.Fatal("final usage entered its save before late usage finished")
+	case <-time.After(50 * time.Millisecond):
 	}
 	close(release)
 	if err := waitLateError(t, lateDone); err != nil {
@@ -700,6 +763,16 @@ func TestLateRemoteUsageSurvivesFinalStatusSaveOverlap(t *testing.T) {
 	}
 	if err := waitLateError(t, finishDone); err == nil {
 		t.Fatal("final usage status lost original action error")
+	}
+	select {
+	case <-finishEntered:
+	default:
+		t.Fatal("final usage never entered its save")
+	}
+	select {
+	case <-orderingViolation:
+		t.Fatal("final usage save preceded the late usage receipt")
+	default:
 	}
 	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || record.Status != "failed" || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
