@@ -425,8 +425,13 @@ func TestFixIndexDisablesAttributesAndOperatorConfiguration(t *testing.T) {
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("repository filter ran: %v", err)
 	}
-	index.binary = filepath.Join(fakeOnPath(t, "git-environment", "#!/bin/sh\nexec env\n"), "git-environment")
-	environment, err := index.run(t.Context(), 8<<10, nil, "environment-probe")
+	if runtime.GOOS == "windows" {
+		index.binary = filepath.Join(t.TempDir(), "minion-git-environment-probe.exe")
+		testsupport.LinkTestExecutable(t, index.binary)
+	} else {
+		index.binary = filepath.Join(fakeOnPath(t, "git-environment", "#!/bin/sh\nexec env\n"), "git-environment")
+	}
+	environment, err := index.run(t.Context(), 256<<10, nil, "environment-probe")
 	if err != nil {
 		t.Fatal(err)
 	}
