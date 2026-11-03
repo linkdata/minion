@@ -140,7 +140,7 @@ func TestWalkRefusesDirectoryReplacedAfterListing(t *testing.T) {
 		return nil
 	})
 	if !replaced || visitedOutside || !errors.Is(err, syscall.ELOOP) && !errors.Is(err, syscall.ENOTDIR) {
-		t.Fatalf("listed directory followed replacement symlink: replaced=%v visited=%v error=%v", replaced, visitedOutside, err)
+		t.Fatalf("directory replacement check failed: replaced=%v visitedOutside=%v error=%v", replaced, visitedOutside, err)
 	}
 }
 
