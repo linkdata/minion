@@ -177,7 +177,7 @@ func parseUsageTime(value string) (time.Time, error) {
 			return parsed.UTC(), nil
 		}
 	}
-	return time.Time{}, fmt.Errorf("%q must be YYYY-MM-DD or RFC3339", value)
+	return time.Time{}, fmt.Errorf("%q must be a nonzero YYYY-MM-DD or RFC3339 time", value)
 }
 
 func writeUsageTable(stdout io.Writer, output usageOutput, details bool) error {

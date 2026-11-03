@@ -31,8 +31,9 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	page := adminResponse(handler, http.MethodGet, path, nil, cookie, "")
 	if page.Code != http.StatusOK || page.Header().Get("Cache-Control") != "no-store" ||
 		page.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
+		!strings.Contains(page.Body.String(), `role="region" aria-labelledby="usage-groups-heading" tabindex="0"`) ||
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
-		!strings.Contains(page.Body.String(), "Unallocated tokens") ||
+		!strings.Contains(page.Body.String(), `<th scope="col">Unallocated tokens</th>`) ||
 		!strings.Contains(page.Body.String(), "Incomplete attempts") ||
 		!strings.Contains(page.Body.String(), "Billed credits: unknown") ||
 		!strings.Contains(page.Body.String(), "Actions without usage files are excluded") ||
@@ -240,6 +241,11 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 		!strings.Contains(page.Body.String(), "Repository ID filters exclude older usage records") {
 		t.Fatalf("repository ID page filter: status=%d body=%s", page.Code, page.Body.String())
 	}
+	page = adminResponse(handler, http.MethodGet, "/admin/usage?requester_id=8", nil, cookie, "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="requester_id" value="8"`) ||
+		!strings.Contains(page.Body.String(), "<td>8</td>") || strings.Contains(page.Body.String(), "<td>7</td>") {
+		t.Fatalf("requester ID page filter: status=%d body=%s", page.Code, page.Body.String())
+	}
 	for _, test := range []struct {
 		query string
 		want  int
@@ -247,6 +253,8 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 		{"repository_id=17", 3},
 		{"repo=example-owner%2Fexample-repo&repository_id=17", 2},
 		{"repo=example-owner%2Fexample-repo", 3},
+		{"requester_id=7", 3},
+		{"requester_id=8", 1},
 	} {
 		export := adminResponse(handler, http.MethodGet, "/admin/usage.json?"+test.query, nil, cookie, "")
 		var selected usageOutput

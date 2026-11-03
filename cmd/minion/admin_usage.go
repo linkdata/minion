@@ -56,12 +56,12 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
       <article><h2>Unallocated tokens</h2><p class="metric">{{.Report.Totals.UnallocatedTokens.Total}}</p></article>
       <article><h2>Incomplete attempts</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
     </div>
-    <section class="panel actions"><h2>Usage by repository, requester, and service</h2>
+    <section class="panel actions" role="region" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading">Usage by repository, requester, and service</h2>
       {{if .Report.Groups}}<table><thead><tr>
         <th scope="col">Repository</th><th scope="col">Repository ID</th>
         <th scope="col">Requester</th><th scope="col">Requester ID</th><th scope="col">Service</th>
         <th scope="col">Attempts</th><th scope="col">Total tokens</th>
-        <th scope="col">Unallocated</th><th scope="col">Incomplete attempts</th>
+        <th scope="col">Unallocated tokens</th><th scope="col">Incomplete attempts</th>
       </tr></thead><tbody>{{range .Report.Groups}}<tr>
         <td>{{.Repo}}</td><td>{{if .RepositoryID}}{{.RepositoryID}}{{else}}Unknown{{end}}</td>
         <td>{{.User}}</td><td>{{if .RequesterID}}{{.RequesterID}}{{else}}Unknown{{end}}</td><td>{{.Service}}</td>
