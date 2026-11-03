@@ -958,7 +958,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	if kind == "outcome" && e.lateOutcome != nil {
 		// An optional binding hint keeps a slow old upload off the current lane.
 		// Both lanes remain bounded; the decoded body still decides admission.
-		current := tx != nil && r.Header.Get(httpOutcomeBindingHeader) == httpBindingDigest(tx.binding)
+		matchingHint := tx != nil && r.Header.Get(httpOutcomeBindingHeader) == httpBindingDigest(tx.binding)
+		current := matchingHint
+		if current {
+			tx.mu.Lock()
+			current = !tx.fenced && (tx.stopUntil.IsZero() || time.Now().Before(tx.stopUntil))
+			tx.mu.Unlock()
+		}
 		readLane := &e.lateOutcomeRead
 		if current {
 			readLane = &tx.outcomeRead
@@ -990,7 +996,7 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 			httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, outcome.Sequence, err)
 			return
 		}
-		if tx == nil || binding != tx.binding {
+		if tx == nil || binding != tx.binding || matchingHint && !current {
 			e.serveLateOutcome(w, outcome)
 			return
 		}

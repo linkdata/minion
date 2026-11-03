@@ -697,13 +697,84 @@ func TestLateRemoteOutcomeWhileNewerTransactionIsActive(t *testing.T) {
 
 func TestLateRemoteOutcomeAcrossFencedTransactionHandoff(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
-	current := newHTTPServerTest(t, t.Context(), f.job, runnerExecutionCheckpoints{}, nil)
+	decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID)
+	accepted := acceptedForJob(f.job)
+	accepted.Assigned = true
+	accepted.OutcomeBinding = httpBindingDigest(httpJobBinding(f.job))
+	f.store.Data.Accepted = accepted
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	readStarts := make(chan chan struct{}, 2)
+	released := make(chan struct{})
+	close(released)
+	wrap := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/outcome" {
+				r.Body = &outcomeReadBarrier{ReadCloser: r.Body, entered: <-readStarts, release: released}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	current := newHTTPServerTest(t, t.Context(), f.job, runnerExecutionCheckpoints{}, wrap)
 	current.executor.lateOutcome = func(outcome httpOutcome) error { return f.owner.receiveLateOutcome("remote", outcome) }
 	current.pull(t)
 	current.tx.mu.Lock()
 	current.tx.fenced = true
+	current.tx.stopUntil = time.Now().Add(-time.Second)
 	current.tx.mu.Unlock()
-	current.ack(t, "/outcome", f.outcome, http.StatusOK, f.outcome.Sequence)
+	send := func() httpServerTestExchange {
+		data, err := json.Marshal(f.outcome)
+		if err != nil {
+			return httpServerTestExchange{err: err}
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		reader, writer := io.Pipe()
+		entered := make(chan struct{})
+		readStarts <- entered
+		written := make(chan struct{})
+		go func() {
+			defer close(written)
+			defer writer.Close()
+			if _, err := writer.Write(data[:1]); err != nil {
+				return
+			}
+			select {
+			case <-entered:
+			case <-ctx.Done():
+				return
+			}
+			_, _ = writer.Write(data[1:])
+		}()
+		defer func() { _ = reader.Close(); cancel(); <-written }()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, current.server.URL+"/outcome", reader)
+		if err != nil {
+			return httpServerTestExchange{err: err}
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set(httpOutcomeBindingHeader, httpBindingDigest(httpJobBinding(f.job)))
+		response, err := current.server.Client().Do(request)
+		if err != nil {
+			return httpServerTestExchange{err: err}
+		}
+		defer response.Body.Close()
+		got := httpServerTestExchange{status: response.StatusCode}
+		got.err = httpDecode(response.Body, httpControlBytes, &got.ack)
+		return got
+	}
+	if got := send(); got.err != nil || got.status != http.StatusInternalServerError || got.ack.Failure == nil {
+		t.Fatalf("fenced hinted outcome before terminal save was not retryable: %+v", got)
+	}
+	f.store.Data.TerminalDecisions[f.job.Identity.JobID] = decision
+	f.store.Data.Accepted = nil
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	got := send()
+	if got.err != nil || got.status != http.StatusOK || got.ack.Failure != nil || got.ack.Sequence != f.outcome.Sequence {
+		t.Fatalf("fenced hinted outcome did not reach late receiver: %+v", got)
+	}
 	current.tx.mu.Lock()
 	sequence := current.tx.sequence
 	current.tx.mu.Unlock()
