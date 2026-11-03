@@ -194,10 +194,14 @@ func TestRunnerReviewExportsFrozenSourceDespiteLiveChanges(t *testing.T) {
 }
 
 func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
-	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired"} {
+	for _, scenario := range []string{"approved", "mutated during critic", "mutated during validation", "empty architecture repaired", "codex critic"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := withClaudeCritic(auditRunnerJob(t))
+			if scenario == "codex critic" {
+				job.Critic.Provider = "codex"
+			}
 			var source, reports string
+			var auditSkill string
 			var rawMetadata []byte
 			criticCalls := 0
 			var armedReports, changed string
@@ -211,6 +215,18 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			runner := Runner{WorkRoot: root}
 			runner.runModel = func(_ context.Context, request modelRun) (aicli.Result, error) {
 				if request.role == "main" {
+					if scenario == "codex critic" {
+						for _, skill := range request.skills {
+							if filepath.Base(filepath.Dir(skill)) == "security-audit" {
+								auditSkill = skill
+							}
+						}
+						if request.provider != "codex" || auditSkill == "" ||
+							!strings.Contains(request.prompt, "Run the installed security-audit skill at "+strconv.Quote(auditSkill)) ||
+							!strings.Contains(request.prompt, "Source is read-only. Do not execute repository code, builds, tests, or fixtures") {
+							t.Fatalf("Codex main lost audit skill or source-only instructions: skills=%q prompt=%q", request.skills, request.prompt)
+						}
+					}
 					if armedReports != "" {
 						if err := os.WriteFile(armedReports, []byte(request.outputDir), 0600); err != nil {
 							t.Fatal(err)
@@ -233,6 +249,9 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 					return aicli.Result{Answer: proposalJSON("main response is not the published report", "")}, nil
 				}
 				criticCalls++
+				if scenario == "codex critic" && (request.provider != "codex" || slices.Contains(request.skills, auditSkill)) {
+					t.Fatalf("Codex critic inherited main audit skill: provider=%q skills=%q", request.provider, request.skills)
+				}
 				var frozenReports string
 				for _, dir := range request.readOnlyDirs {
 					if strings.HasPrefix(filepath.Base(dir), reviewReportsDirPrefix+job.Identity.AttemptID+"+") {
@@ -271,6 +290,11 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			}
 			if err != nil || result.Answer != "" || criticCalls != wantCritics {
 				t.Fatalf("approved audit result=%+v critics=%d error=%v", result, criticCalls, err)
+			}
+			if scenario == "codex critic" {
+				if err := result.Validate(job); err != nil {
+					t.Fatalf("Codex audit result failed validation: %v", err)
+				}
 			}
 			if changed != "" {
 				if _, err := os.Stat(changed); err != nil {
