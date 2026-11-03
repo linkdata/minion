@@ -419,13 +419,13 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 		t.Fatalf("username beyond config limit: status=%d, want 400", response.Code)
 	}
 	for _, tc := range []struct{ name, password string }{
-		{name: "reserved", password: strings.Repeat("&", 4096)},
-		{name: "non-ASCII", password: strings.Repeat("é", 2048)},
+		{name: "reserved", password: strings.Repeat("&", 64)},
+		{name: "non-ASCII", password: strings.Repeat("😀", 64)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			form := url.Values{"username": {"operator"}, "password": {tc.password}}
-			if got := len(form.Encode()); len(tc.password) != 4096 || got <= 8<<10 || got >= 16<<10 {
-				t.Fatalf("escaped valid password: bytes=%d form bytes=%d, want 4096 and 8193..16383", len(tc.password), got)
+			if got := len(form.Encode()); got <= len(tc.password) || got >= 2<<10 {
+				t.Fatalf("escaped valid password: password bytes=%d form bytes=%d", len(tc.password), got)
 			}
 			escapedHandler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccountWithPassword(tc.password)})
 			if response := adminResponse(escapedHandler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
@@ -433,17 +433,23 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 			}
 		})
 	}
+	for _, password := range []string{strings.Repeat("a", 65), strings.Repeat("😀", 65), string([]byte{0xff})} {
+		if response := adminResponse(handler, http.MethodPost, "/admin/login",
+			url.Values{"username": {"operator"}, "password": {password}}, nil, ""); response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid password: bytes=%d status=%d, want 400", len(password), response.Code)
+		}
+	}
 	form := url.Values{"username": {"unknown"}, "password": {"wrong"}, "padding": {""}}
-	form.Set("padding", strings.Repeat("x", (16<<10)-len(form.Encode())))
-	if got := len(form.Encode()); got != 16<<10 {
-		t.Fatalf("fixture body length=%d, want 16384", got)
+	form.Set("padding", strings.Repeat("x", (2<<10)-len(form.Encode())))
+	if got := len(form.Encode()); got != 2<<10 {
+		t.Fatalf("fixture body length=%d, want 2048", got)
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusUnauthorized {
-		t.Fatalf("16384-byte login: status=%d, want 401", response.Code)
+		t.Fatalf("2048-byte login: status=%d, want 401", response.Code)
 	}
 	form.Set("padding", form.Get("padding")+"x")
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusBadRequest {
-		t.Fatalf("16385-byte login: status=%d, want 400", response.Code)
+		t.Fatalf("2049-byte login: status=%d, want 400", response.Code)
 	}
 }
 

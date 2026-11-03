@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -25,12 +26,20 @@ type adminPasswordHash struct {
 
 // VerifyPassword checks a configured Argon2id password hash.
 func (a AdminAccount) VerifyPassword(password string) bool {
+	if !ValidAdminPassword(password) {
+		return false
+	}
 	hash, ok := parseAdminPasswordHash(a.PasswordHash)
 	if !ok {
 		return false
 	}
 	actual := argon2.IDKey([]byte(password), hash.salt, hash.time, hash.memory, hash.threads, uint32(len(hash.tag)))
 	return subtle.ConstantTimeCompare(actual, hash.tag) == 1
+}
+
+// ValidAdminPassword reports whether a password meets the admin sign-in limit.
+func ValidAdminPassword(password string) bool {
+	return password != "" && utf8.ValidString(password) && utf8.RuneCountInString(password) <= 64
 }
 
 func parseAdminPasswordHash(value string) (hash adminPasswordHash, ok bool) {

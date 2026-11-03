@@ -40,6 +40,21 @@ func TestAdminPasswordHash(t *testing.T) {
 	}
 }
 
+func TestAdminPasswordLengthAndUTF8(t *testing.T) {
+	for _, password := range []string{strings.Repeat("a", 64), strings.Repeat("😀", 64)} {
+		account := AdminAccount{PasswordHash: testAdminPasswordHash(password)}
+		if !account.VerifyPassword(password) {
+			t.Fatalf("rejected valid %d-byte password", len(password))
+		}
+	}
+	for _, password := range []string{"", strings.Repeat("a", 65), strings.Repeat("😀", 65), string([]byte{0xff})} {
+		account := AdminAccount{PasswordHash: testAdminPasswordHash(password)}
+		if account.VerifyPassword(password) {
+			t.Fatalf("verified invalid %d-byte password", len(password))
+		}
+	}
+}
+
 func TestAdminAccountsValidation(t *testing.T) {
 	hash := testAdminPasswordHash("secret password")
 	for _, test := range []struct {

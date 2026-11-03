@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
+	"encoding/base64"
 	"flag"
 	"os"
 	"path/filepath"
@@ -14,7 +14,7 @@ import (
 )
 
 func TestHashAdminPasswordMatchesVerifier(t *testing.T) {
-	password := []byte("correct horse battery staple")
+	password := "correct horse battery staple"
 	first, err := hashAdminPassword(password)
 	if err != nil {
 		t.Fatal(err)
@@ -24,19 +24,30 @@ func TestHashAdminPasswordMatchesVerifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	account := config.AdminAccount{PasswordHash: first}
-	if !account.VerifyPassword(string(password)) || account.VerifyPassword("wrong password") {
+	if !account.VerifyPassword(password) || account.VerifyPassword("wrong password") {
 		t.Fatal("generated hash failed the admin password verifier")
 	}
-	if strings.Split(first, "$")[4] == strings.Split(second, "$")[4] {
+	parts := strings.Split(first, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" || parts[3] != "m=19456,t=2,p=1" {
+		t.Fatalf("unexpected Argon2id PHC parameters: %q", first)
+	}
+	salt, saltErr := base64.RawStdEncoding.DecodeString(parts[4])
+	tag, tagErr := base64.RawStdEncoding.DecodeString(parts[5])
+	if saltErr != nil || tagErr != nil || len(salt) != 16 || len(tag) != 32 {
+		t.Fatalf("unexpected Argon2id salt or tag: salt=%d tag=%d errors=%v, %v", len(salt), len(tag), saltErr, tagErr)
+	}
+	if parts[4] == strings.Split(second, "$")[4] {
 		t.Fatal("generated hashes reused a salt")
 	}
-	for _, invalid := range [][]byte{nil, bytes.Repeat([]byte("a"), 4097), {0xff}} {
+	for _, invalid := range []string{"", strings.Repeat("a", 65), strings.Repeat("界", 65), string([]byte{0xff})} {
 		if hash, err := hashAdminPassword(invalid); err == nil || hash != "" {
 			t.Fatalf("accepted invalid password length or UTF-8: hash=%q error=%v", hash, err)
 		}
 	}
-	if _, err := hashAdminPassword(bytes.Repeat([]byte("a"), 4096)); err != nil {
-		t.Fatalf("rejected maximum password size: %v", err)
+	for _, valid := range []string{strings.Repeat("a", 64), strings.Repeat("界", 64)} {
+		if _, err := hashAdminPassword(valid); err != nil {
+			t.Fatalf("rejected 64-character password: %v", err)
+		}
 	}
 }
 

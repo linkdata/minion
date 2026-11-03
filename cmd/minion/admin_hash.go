@@ -5,9 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
-	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/config"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/term"
 )
@@ -18,32 +19,49 @@ func runHashMode() int {
 		fmt.Fprintln(os.Stderr, "-mode=hash requires an interactive terminal")
 		return 2
 	}
-	fmt.Fprint(os.Stderr, "Admin password: ")
-	password, err := term.ReadPassword(fd)
-	fmt.Fprintln(os.Stderr)
+	password, err := readAdminPassword(fd)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "read admin password:", err)
+		fmt.Fprintln(os.Stderr, "\nread admin password:", err)
 		return 1
 	}
-	defer clear(password)
 	hash, err := hashAdminPassword(password)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	fmt.Fprintln(os.Stdout, hash)
+	if _, err := fmt.Fprintln(os.Stdout, hash); err != nil {
+		fmt.Fprintln(os.Stderr, "write admin password hash:", err)
+		return 1
+	}
 	return 0
 }
 
-func hashAdminPassword(password []byte) (string, error) {
-	if len(password) < 1 || len(password) > 4096 || !utf8.Valid(password) {
-		return "", errors.New("admin password must be 1 to 4096 UTF-8 bytes")
+func readAdminPassword(fd int) (password string, err error) {
+	state, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if restoreErr := term.Restore(fd, state); restoreErr != nil && err == nil {
+			err = fmt.Errorf("restore terminal: %w", restoreErr)
+		}
+	}()
+	console := term.NewTerminal(struct {
+		io.Reader
+		io.Writer
+	}{os.Stdin, os.Stderr}, "")
+	return console.ReadPassword("Admin password: ")
+}
+
+func hashAdminPassword(password string) (string, error) {
+	if !config.ValidAdminPassword(password) {
+		return "", errors.New("admin password must be 1 to 64 Unicode characters")
 	}
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generate admin password salt: %w", err)
 	}
-	tag := argon2.IDKey(password, salt, 2, 19456, 1, 32)
+	tag := argon2.IDKey([]byte(password), salt, 2, 19456, 1, 32)
 	return fmt.Sprintf("$argon2id$v=19$m=19456,t=2,p=1$%s$%s",
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(tag)), nil
 }
