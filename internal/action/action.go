@@ -42,6 +42,7 @@ var modelLineBreaks = strings.NewReplacer(
 type Orchestrator struct {
 	attemptID          string
 	usageCheckpoint    *usageCheckpoint
+	lateUsageSave      func(usage.Record) error // Test seam for an ambiguous late receipt save.
 	assignmentRequired bool
 	remoteSelected     bool
 

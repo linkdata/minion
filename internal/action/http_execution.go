@@ -1,6 +1,9 @@
 package action
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -17,6 +20,12 @@ type httpBinding struct {
 
 func httpJobBinding(job Job) httpBinding {
 	return httpBinding{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}
+}
+
+func httpBindingDigest(binding httpBinding) string {
+	data, _ := json.Marshal(binding) // httpBinding contains only JSON scalar fields.
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 type httpPull struct {

@@ -105,13 +105,44 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 	}
 	e.usageCheckpoint = checkpoint
 	finish := func(actionErr error) error {
-		finished := time.Now().UTC()
-		record.FinishedAt = &finished
-		record.Status = "succeeded"
-		if actionErr != nil {
-			record.Status = "failed"
+		saveFinal := func() error {
+			latest, found, err := e.Usage.Load(record.ID)
+			if err != nil {
+				return fmt.Errorf("load final action usage %s: %w", record.ID, err)
+			}
+			if !found || latest.JobID != record.JobID {
+				return fmt.Errorf("final action usage %s belongs to another attempt", record.ID)
+			}
+			for _, call := range record.Calls {
+				if call.FinishedAt == nil {
+					continue
+				}
+				if _, err := latest.FinishCall(call); err != nil {
+					return fmt.Errorf("reconcile final action usage %s: %w", record.ID, err)
+				}
+			}
+			*record = latest
+			finished := time.Now().UTC()
+			if finished.Before(record.StartedAt) {
+				finished = record.StartedAt
+			}
+			if record.FinishedAt != nil && finished.Before(*record.FinishedAt) {
+				finished = *record.FinishedAt
+			}
+			record.FinishedAt = &finished
+			record.Status = "succeeded"
+			if actionErr != nil {
+				record.Status = "failed"
+			}
+			return checkpoint.save()
 		}
-		if err := checkpoint.save(); err != nil {
+		var err error
+		if e.Store != nil {
+			err = e.Store.WithPrivateRecords(saveFinal)
+		} else {
+			err = saveFinal()
+		}
+		if err != nil {
 			if actionErr == nil {
 				e.logf("final action usage checkpoint failed: %q", err)
 				return nil
@@ -125,6 +156,17 @@ func (e *Orchestrator) trackUsage(job monitor.Job) (func(error) error, error) {
 
 // CompleteTerminalUsage reconciles an existing attempt before terminal state is removed.
 func (e *Orchestrator) CompleteTerminalUsage(job monitor.Job, outcome string, at time.Time) {
+	if e.Store != nil {
+		_ = e.Store.WithPrivateRecords(func() error {
+			e.completeTerminalUsage(job, outcome, at)
+			return nil
+		})
+		return
+	}
+	e.completeTerminalUsage(job, outcome, at)
+}
+
+func (e *Orchestrator) completeTerminalUsage(job monitor.Job, outcome string, at time.Time) {
 	if e.Usage == nil || job.AttemptID == "" {
 		return
 	}

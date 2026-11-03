@@ -39,6 +39,7 @@ type HTTPExecutor struct {
 	outcomeGrace   time.Duration
 	status         Status
 	statusAt       time.Time
+	lateOutcome    func(httpOutcome) error
 }
 
 type httpTransaction struct {
@@ -949,6 +950,35 @@ func (tx *httpTransaction) stopRequiredDelivery(err error) {
 func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	kind := strings.TrimPrefix(r.URL.Path, "/")
 	tx := e.transaction()
+	var decodedOutcome *httpOutcome
+	if kind == "outcome" && e.lateOutcome != nil {
+		var outcome httpOutcome
+		var err error
+		if tx != nil {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+		} else {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome)
+		}
+		binding := httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}
+		if err == nil {
+			err = httpResultShape(outcome.Result)
+		}
+		if err == nil {
+			err = outcome.Failure.validate()
+		}
+		if err == nil {
+			err = httpBindingShape(binding)
+		}
+		if err != nil {
+			httpServerReject(w, kind, httpInputStatus(err), httpBinding{}, outcome.Sequence, err)
+			return
+		}
+		if tx == nil || binding != tx.binding {
+			e.serveLateOutcome(w, outcome)
+			return
+		}
+		decodedOutcome = &outcome
+	}
 	if tx == nil {
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has no mutation slot"))
 		return
@@ -956,8 +986,13 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 	tx.mutation.Lock()
 	tx.mu.Lock()
 	if tx.fenced || !tx.delivered {
+		fenced := tx.fenced
 		tx.mu.Unlock()
 		tx.mutation.Unlock()
+		if fenced && decodedOutcome != nil {
+			e.serveLateOutcome(w, *decodedOutcome)
+			return
+		}
 		httpServerReject(w, kind, http.StatusConflict, httpBinding{}, 0, errors.New("HTTP execution has closed callback admission"))
 		return
 	}
@@ -1014,7 +1049,11 @@ func (e *HTTPExecutor) serveMutation(w http.ResponseWriter, r *http.Request) {
 		apply = func() error { return tx.sink.Review(review.Checkpoint) }
 	case "outcome":
 		var outcome httpOutcome
-		err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+		if decodedOutcome != nil {
+			outcome = *decodedOutcome
+		} else {
+			err = httpServerRead(w, r, httpOutcomeBytes, &outcome, tx)
+		}
 		binding, sequence = httpBinding{outcome.Result.Version, outcome.Result.Identity, outcome.Result.SourceRef}, outcome.Sequence
 		if err == nil {
 			err = httpResultShape(outcome.Result)

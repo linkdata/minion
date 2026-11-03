@@ -274,9 +274,13 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	f.owner.Store = store
+	f.owner.Store, f.owner.remoteSelected = store, true
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatal(err)
+	}
+	binding := httpBindingDigest(httpJobBinding(f.job))
+	if store.Data.Accepted.OutcomeBinding != binding {
+		t.Fatal("remote assignment did not save its outcome binding")
 	}
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatalf("same assignment after re-pull: %v", err)
@@ -289,8 +293,8 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 		t.Fatal(err)
 	}
 	f.owner.Store = store
-	if !store.Data.Accepted.Assigned {
-		t.Fatal("worker assignment was not durable before delivery")
+	if !store.Data.Accepted.Assigned || store.Data.Accepted.OutcomeBinding != binding {
+		t.Fatal("worker assignment binding was not durable before delivery")
 	}
 	if err := f.sink.AssignmentNotDelivered(); err != nil {
 		t.Fatal(err)
@@ -303,7 +307,7 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if store.Data.Accepted == nil || store.Data.Accepted.Assigned {
+	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.Accepted.OutcomeBinding != "" {
 		t.Fatalf("known undelivered assignment remained reserved: %+v", store.Data.Accepted)
 	}
 }
@@ -407,16 +411,17 @@ func TestExecutionFailedAssignmentReleaseKeepsDurableAssignment(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	f.owner.Store = store
+	f.owner.Store, f.owner.remoteSelected = store, true
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatal(err)
 	}
+	binding := httpBindingDigest(httpJobBinding(f.job))
 	originalCursor := store.Data.Cursor
 	store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 	if err := f.sink.AssignmentNotDelivered(); !errors.Is(err, monitor.ErrAcceptanceState) || !f.sink.assigned {
 		t.Fatalf("failed release lost assignment uncertainty: assigned=%t error=%v", f.sink.assigned, err)
 	}
-	if !store.Data.Accepted.Assigned {
+	if !store.Data.Accepted.Assigned || store.Data.Accepted.OutcomeBinding != binding {
 		t.Fatal("failed release left an undurable unassigned marker for the next state save")
 	}
 	store.Data.Cursor = originalCursor
@@ -431,7 +436,7 @@ func TestExecutionFailedAssignmentReleaseKeepsDurableAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Assigned {
+	if reopened.Data.Accepted == nil || !reopened.Data.Accepted.Assigned || reopened.Data.Accepted.OutcomeBinding != binding {
 		t.Fatalf("failed release changed durable assignment: %+v", reopened.Data.Accepted)
 	}
 }

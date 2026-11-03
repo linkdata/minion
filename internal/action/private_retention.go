@@ -24,6 +24,12 @@ const (
 
 // PrunePrivateRecords removes only records bound to a finished attempt past retention.
 func (e *Orchestrator) PrunePrivateRecords(ctx context.Context, store *state.Store, now time.Time) error {
+	return store.WithPrivateRecords(func() error {
+		return e.prunePrivateRecords(ctx, store, now)
+	})
+}
+
+func (e *Orchestrator) prunePrivateRecords(ctx context.Context, store *state.Store, now time.Time) error {
 	eligible := make(map[string]bool)
 	if err := store.WithLock(func() error {
 		protected := make(map[string]bool)

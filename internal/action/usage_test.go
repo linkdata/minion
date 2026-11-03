@@ -451,6 +451,36 @@ func TestUsageCheckpointKeepsReturnedReceiptAfterSaveError(t *testing.T) {
 	}
 }
 
+func TestFinalUsageReloadKeepsReturnedReceiptAfterPreReplacementError(t *testing.T) {
+	store := &usage.Store{Dir: t.TempDir()}
+	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "codex"})
+	finish, err := tracked.trackUsage(usageJob())
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := tracked.usageCheckpoint
+	checkpoint.record.ExecutorID, checkpoint.record.SourceRef = "local", strings.Repeat("a", 40)
+	call := CallUsage{Provider: "codex", Role: roleMain, Round: 1}
+	if err := checkpoint.beforeCall(1, call); err != nil {
+		t.Fatal(err)
+	}
+	call.Tokens, call.UsageCoverage, call.Complete = usage.Tokens{Input: 11}, usage.Coverage{Scope: "invocation"}, true
+	persist := checkpoint.save
+	checkpoint.save = func() error { return errors.New("receipt save failed before replacement") }
+	if err := checkpoint.afterCall(1, call); err == nil {
+		t.Fatal("returned receipt save error was hidden")
+	}
+	checkpoint.save = persist
+	if err := finish(errors.New("attempt failed")); err == nil {
+		t.Fatal("finalization hid the attempt error")
+	}
+	record, found, err := store.Load(tracked.attemptID)
+	if err != nil || !found || record.Status != "failed" || record.Tokens != call.Tokens ||
+		len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+		t.Fatalf("final reload dropped returned receipt: %+v found=%t error=%v", record, found, err)
+	}
+}
+
 func TestUsageDefaultsUnspecifiedModelLabels(t *testing.T) {
 	store := &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	tracked := attemptFixture(&Orchestrator{Usage: store, Main: "claude", Adversarial: "codex"})

@@ -2,6 +2,7 @@ package state
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +115,7 @@ type TerminalDecision struct {
 	AttemptID        string            `json:"attempt_id"`
 	Outcome          string            `json:"outcome"`
 	DecidedAt        time.Time         `json:"decided_at"`
+	OutcomeBinding   string            `json:"outcome_binding,omitempty"`
 	UnresolvedAccess AccessDisposition `json:"unresolved_access,omitzero"`
 }
 
@@ -134,7 +136,7 @@ func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 		return false
 	}
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(decision.AttemptID) ||
-		decision.DecidedAt.IsZero() {
+		decision.DecidedAt.IsZero() || !validOutcomeBinding(decision.OutcomeBinding) {
 		return false
 	}
 	access := decision.UnresolvedAccess
@@ -168,6 +170,7 @@ type AcceptedAction struct {
 	Deadline        time.Time `json:"deadline"`
 	RetryAt         time.Time `json:"retry_at,omitzero"`
 	Assigned        bool      `json:"assigned"`
+	OutcomeBinding  string    `json:"outcome_binding,omitempty"`
 	ResultReady     bool      `json:"result_ready,omitempty"`
 	FixedRefusal    string    `json:"fixed_refusal,omitempty"`
 	Terminal        bool      `json:"terminal,omitempty"`
@@ -175,6 +178,9 @@ type AcceptedAction struct {
 
 // Validate checks the persisted action identity and absolute runtime window.
 func (a AcceptedAction) Validate() error {
+	if !validOutcomeBinding(a.OutcomeBinding) || a.OutcomeBinding != "" && !a.Assigned {
+		return errors.New("accepted action outcome binding is invalid")
+	}
 	for _, value := range []string{a.JobID, a.AttemptID, a.ExecutorID, strings.TrimSuffix(a.Requester, "[bot]"), a.CommandName} {
 		if !workspace.ValidIdentitySegment(value) {
 			return errors.New("accepted action identity is missing or invalid")
@@ -196,6 +202,14 @@ func (a AcceptedAction) Validate() error {
 		return errors.New("accepted action deadline is invalid")
 	}
 	return nil
+}
+
+func validOutcomeBinding(value string) bool {
+	if value == "" {
+		return true
+	}
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
 }
 
 // PendingFix retains the commit and its publication caveat before a push.
@@ -241,17 +255,25 @@ func (f JobFailure) Validate() error {
 }
 
 type Store struct {
-	path    string
-	lock    *os.File
-	mu      sync.Mutex
-	syncDir string // Test-only extra directory for a post-rename sync failure.
-	Data    Data
+	path           string
+	lock           *os.File
+	mu             sync.Mutex
+	privateRecords sync.Mutex
+	syncDir        string // Test-only extra directory for a post-rename sync failure.
+	Data           Data
 }
 
 // WithLock serializes in-process access to Data and saves while an action runs beside controls.
 func (s *Store) WithLock(fn func() error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return fn()
+}
+
+// WithPrivateRecords serializes late receipt admission with private retention pruning.
+func (s *Store) WithPrivateRecords(fn func() error) error {
+	s.privateRecords.Lock()
+	defer s.privateRecords.Unlock()
 	return fn()
 }
 
@@ -268,13 +290,13 @@ func (s *Store) DecideTerminalLocked(jobID, attemptID, outcome string, at time.T
 		}
 		return decision, nil
 	}
-	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC()}
-	if !validTerminalDecision(jobID, decision) {
-		return TerminalDecision{}, errors.New("invalid terminal decision")
-	}
 	accepted := s.Data.Accepted
 	if accepted == nil || accepted.JobID != jobID || accepted.AttemptID != attemptID {
 		return TerminalDecision{}, fmt.Errorf("terminal decision for %q has no matching accepted attempt", jobID)
+	}
+	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), OutcomeBinding: accepted.OutcomeBinding}
+	if !validTerminalDecision(jobID, decision) {
+		return TerminalDecision{}, errors.New("invalid terminal decision")
 	}
 	if s.Data.TerminalDecisions == nil {
 		s.Data.TerminalDecisions = map[string]TerminalDecision{}
