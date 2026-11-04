@@ -82,6 +82,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := jw.AddTemplateLookuper(adminLoginHTML); err != nil {
 		return nil, err
 	}
+	if err := jw.AddTemplateLookuper(adminNoticeHTML); err != nil {
+		return nil, err
+	}
 	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2), rotatedCookies: make(map[[32]byte]time.Time)}
 	for _, account := range cfg.Administrators {
 		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
@@ -143,7 +146,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		jw.ServeHTTP(w, r)
 	})
 	crossOrigin := http.NewCrossOriginProtection()
-	return jw.SecureHeadersMiddleware(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return jw.SecureHeadersMiddleware(access.browserErrors(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if crossSchemeAdminOrigin(r) || crossOrigin.Check(r) != nil {
 			closeUnreadAdminBody(w, r)
 			w.WriteHeader(http.StatusForbidden)
@@ -153,7 +156,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	}), func(r *http.Request) bool {
 		return (len(access.accounts) != 0 || oauth != nil) && validJaWSCookie(r, jw.CookieName) &&
 			(access.allowed(r) || oauth.allowed(r))
-	})), nil
+	}))), nil
 }
 
 func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action.Orchestrator) {
