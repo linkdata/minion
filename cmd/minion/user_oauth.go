@@ -19,6 +19,7 @@ import (
 var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Minion account</title>{{$.HeadHTML}}</head>
 <body><main>
+{{if .Dot.Error}}<p role="alert">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
 <h1>Signed in with {{.Dot.Provider}}</h1>
 {{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button>Link GitHub account</button></form>{{end}}
@@ -31,8 +32,14 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 {{end}}
 </main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
 
+var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Minion request failed</title>{{$.HeadHTML}}</head>
+<body><main><h1>Request failed</h1><p role="alert">Request could not be completed. Try again.</p>
+<a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
+
 type userLoginView struct {
 	SignedIn       bool
+	Error          bool
 	Provider       string
 	GitHub, GitLab bool
 }
@@ -59,12 +66,13 @@ func (p *oauthProvider) identity(claims map[string]any) (id userIdentity, ok boo
 }
 
 type oauthAccess struct {
-	jaws        *jaws.Jaws
-	links       *userLinks
-	mux         *http.ServeMux
-	providers   []*oauthProvider
-	admissionMu sync.Mutex
-	linkMu      sync.Mutex
+	jaws         *jaws.Jaws
+	links        *userLinks
+	mux          *http.ServeMux
+	providers    []*oauthProvider
+	admissionMu  sync.Mutex
+	guestErrorMu sync.Mutex
+	linkMu       sync.Mutex
 }
 
 // Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
@@ -97,24 +105,28 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if err := jw.AddTemplateLookuper(userLoginHTML); err != nil {
 		return nil, err
 	}
+	if err := jw.AddTemplateLookuper(userErrorHTML); err != nil {
+		return nil, err
+	}
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		closeUnreadAdminBody(w, r)
 		a.admissionMu.Lock()
 		defer a.admissionMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
-			http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
+			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
-		page.ServeHTTP(w, r)
+		page.ServeHTTP(&oauthErrorWriter{ResponseWriter: w}, r)
 	}))
 	a.mux.HandleFunc("HEAD /auth/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	})
-	a.mux.HandleFunc("POST /auth/logout", a.logout)
+	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(a.logout)))
 	if c := cfg.GitHubOAuth; c != nil {
 		if err := a.addProvider("github", "https://github.com", "github.com", &jawsauth.Config{
 			Namespace: "github", RedirectURL: c.RedirectURL, Issuer: "https://github.com",
@@ -153,14 +165,14 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 					if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
 						w.Header().Set("Cache-Control", "no-store")
 						w.Header().Set("Retry-After", "60")
-						http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
+						w.WriteHeader(http.StatusServiceUnavailable)
 						return
 					}
 					r.Header.Set("Referer", "/auth/login")
 					login.ServeHTTP(w, r)
 				})
 			}
-			a.mux.Handle("GET "+path, plainOAuthErrors(handler))
+			a.mux.Handle("GET "+path, a.oauthErrors(handler))
 		}
 	})
 	if err != nil {
@@ -184,9 +196,9 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 		}
 		return 0, nil
 	}
-	a.mux.Handle("POST /auth/link/"+name, plainOAuthErrors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	a.mux.Handle("POST /auth/link/"+name, a.oauthErrors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if current, source := a.currentUser(a.jaws.GetSession(r)); current == "" || source == p {
-			http.Error(w, "Sign in before linking accounts", http.StatusForbidden)
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		r.Header.Set("Referer", "/auth/login")
@@ -231,10 +243,10 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	account, provider := a.currentUser(sess)
 	if account == "" && len(sess.Requests()) >= maxGuestLoginRequests {
 		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "Too many sign-in pages", http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
-	view := userLoginView{SignedIn: account != ""}
+	view := userLoginView{SignedIn: account != "", Error: r.URL.Query().Get("error") == "request"}
 	if provider != nil {
 		view.Provider = provider.name
 	}
@@ -257,7 +269,7 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
 	defer a.linkMu.Unlock()
 	sess := a.jaws.GetSession(r)
 	if account, _ := a.currentUser(sess); account == "" {
-		http.Error(w, "Sign in before signing out", http.StatusForbidden)
+		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	for _, p := range a.providers {
@@ -269,19 +281,24 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
 
 type oauthErrorWriter struct {
 	http.ResponseWriter
-	failed bool
+	oauth   *oauthAccess
+	request *http.Request
+	failed  bool
 }
 
 func (w *oauthErrorWriter) WriteHeader(status int) {
 	w.Header().Del("Strict-Transport-Security")
 	if status >= 400 {
 		w.failed = true
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if w.oauth != nil {
+			w.oauth.browserError(w.ResponseWriter, w.request, status)
+			return
+		}
+		w.Header().Del("Content-Type")
+		w.Header().Del("Content-Length")
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	w.ResponseWriter.WriteHeader(status)
-	if w.failed {
-		_, _ = w.ResponseWriter.Write([]byte(http.StatusText(status) + "\n"))
-	}
 }
 
 func (w *oauthErrorWriter) Write(body []byte) (int, error) {
@@ -291,9 +308,44 @@ func (w *oauthErrorWriter) Write(body []byte) (int, error) {
 	return w.ResponseWriter.Write(body)
 }
 
-func plainOAuthErrors(handler http.Handler) http.Handler {
+func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, status int) {
+	closeUnreadAdminBody(w, r)
+	w.Header().Del("Strict-Transport-Security")
+	w.Header().Del("Content-Type")
+	w.Header().Del("Content-Length")
+	w.Header().Set("Cache-Control", "no-store")
+	if a == nil || a.jaws == nil {
+		w.WriteHeader(status)
+		return
+	}
+	sess := a.jaws.GetSession(r)
+	if sess == nil {
+		if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Location", "/auth/login?error=request")
+		w.WriteHeader(http.StatusSeeOther)
+		return
+	}
+	// shortcut: repeated guest errors become status-only to reserve one sign-in page slot; revisit if clients need error history.
+	if account, _ := a.currentUser(sess); account == "" {
+		a.guestErrorMu.Lock()
+		defer a.guestErrorMu.Unlock()
+		if len(sess.Requests()) >= maxGuestLoginRequests-1 {
+			w.WriteHeader(status)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	ui.Handler(a.jaws, "user error", nil).ServeHTTP(w, r)
+}
+
+func (a *oauthAccess) oauthErrors(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		handler.ServeHTTP(&oauthErrorWriter{ResponseWriter: w}, r)
+		handler.ServeHTTP(&oauthErrorWriter{ResponseWriter: w, oauth: a, request: r}, r)
 	})
 }

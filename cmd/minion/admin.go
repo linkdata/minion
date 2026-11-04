@@ -129,7 +129,7 @@ func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handle
 			closeUnreadAdminBody(w, r)
 			controller := http.NewResponseController(w)
 			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

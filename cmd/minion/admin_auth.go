@@ -149,7 +149,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	return jw.SecureHeadersMiddleware(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if crossSchemeAdminOrigin(r) || crossOrigin.Check(r) != nil {
 			closeUnreadAdminBody(w, r)
-			http.Error(w, "Forbidden", http.StatusForbidden)
+			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		mux.ServeHTTP(w, r)
