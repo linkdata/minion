@@ -83,8 +83,8 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if c := cfg.GitHubOAuth; c != nil {
 		a.providers["github"] = oauthProvider{name: "github", host: "github.com",
 			authorizeURL: "https://github.com/login/oauth/authorize", tokenURL: "https://github.com/login/oauth/access_token",
-			profileURL: "https://api.github.com/user", scope: "read:user",
-			clientID: c.ClientID, clientSecret: c.ClientSecret, redirectURL: c.RedirectURL}
+			profileURL: "https://api.github.com/user",
+			clientID:   c.ClientID, clientSecret: c.ClientSecret, redirectURL: c.RedirectURL}
 	}
 	if c := cfg.GitLabOAuth; c != nil {
 		base := c.BaseURL
@@ -246,8 +246,11 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	challenge := sha256.Sum256([]byte(pending.verifier))
 	query := url.Values{"client_id": {provider.clientID}, "redirect_uri": {provider.redirectURL},
-		"response_type": {"code"}, "scope": {provider.scope}, "state": {state},
+		"response_type": {"code"}, "state": {state},
 		"code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
+	if provider.scope != "" {
+		query.Set("scope", provider.scope)
+	}
 	http.SetCookie(w, &http.Cookie{Name: stateCookieName(r), Value: state, Path: "/",
 		MaxAge: int(oauthStateLifetime.Seconds()), HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode})
 	destination := provider.authorizeURL + "?" + query.Encode()

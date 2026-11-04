@@ -28,7 +28,7 @@ func (a *AdminConfig) validateOAuth() error {
 		redirect, err := url.Parse(client.RedirectURL)
 		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != "/auth/callback" ||
 			redirect.RawQuery != "" || redirect.Fragment != "" || redirect.RawPath != "" {
-			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP /auth/callback URL", entry.name)
+			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP /auth/callback URL with an ASCII host and no IPv6 zone", entry.name)
 		}
 		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
 			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
@@ -45,7 +45,7 @@ func (a *AdminConfig) validateOAuth() error {
 		base, err := url.Parse(client.BaseURL)
 		if err != nil || !validOAuthOrigin(base, false) || base.Path != "" && base.Path != "/" ||
 			base.RawQuery != "" || base.Fragment != "" || base.RawPath != "" {
-			return errors.New("admin.gitlab_oauth base_url must be an HTTPS origin")
+			return errors.New("admin.gitlab_oauth base_url must be an HTTPS origin with an ASCII host and no IPv6 zone")
 		}
 		host := strings.ToLower(base.Host)
 		if rawPort := base.Port(); rawPort != "" {
@@ -61,7 +61,11 @@ func (a *AdminConfig) validateOAuth() error {
 }
 
 func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
-	if u == nil || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
+	if u == nil || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil || u.Opaque != "" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -76,6 +80,6 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if u.Scheme != "http" || !allowLoopbackHTTP {
 		return false
 	}
-	addr, err := netip.ParseAddr(u.Hostname())
+	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.Unmap().IsLoopback()
 }

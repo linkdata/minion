@@ -91,12 +91,13 @@ func oauthStart(t *testing.T, handler http.Handler, method, path string, session
 		t.Fatal(err)
 	}
 	query := location.Query()
-	wantAuthorize, wantScope := "https://github.com/login/oauth/authorize", "read:user"
+	wantAuthorize, wantScope := "https://github.com/login/oauth/authorize", ""
 	if strings.HasSuffix(path, "gitlab") {
 		wantAuthorize, wantScope = "https://gitlab.example/oauth/authorize", "read_user"
 	}
+	_, hasScope := query["scope"]
 	if location.Scheme+"://"+location.Host+location.Path != wantAuthorize || query.Get("state") != stateCookie.Value ||
-		query.Get("client_id") == "" || query.Get("scope") != wantScope || query.Get("response_type") != "code" ||
+		query.Get("client_id") == "" || hasScope != (wantScope != "") || query.Get("scope") != wantScope || query.Get("response_type") != "code" ||
 		query.Get("code_challenge_method") != "S256" || query.Get("code_challenge") == "" ||
 		query.Get("redirect_uri") != "https://admin.example/auth/callback" {
 		t.Fatalf("OAuth authorization URL %q or parameters %v", target, query)
@@ -717,7 +718,7 @@ func TestOAuthLoopbackStateCookie(t *testing.T) {
 
 func TestOAuthLinkHandoffForGitLabHosts(t *testing.T) {
 	for _, base := range []string{
-		"https://gitlab.example:8443", "https://127.0.0.1:8443", "https://[::1]:8443", "https://bücher.example",
+		"https://gitlab.example:8443", "https://127.0.0.1:8443", "https://[::1]:8443", "https://xn--bcher-kva.example",
 	} {
 		t.Run(base, func(t *testing.T) {
 			jw, err := jaws.New()
