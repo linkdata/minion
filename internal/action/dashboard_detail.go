@@ -184,14 +184,18 @@ func (d *DashboardDetail) readRecords(workRoot string, accepted *state.AcceptedA
 		d.RecordsNotice = notice
 		return
 	}
-	remaining, count, complete, stopped, limited, invalid, captureLimited := detailTextLimit, 0, false, false, false, false, false
+	remaining, count, complete, stopped, limited, invalid, incomplete, captureLimited := detailTextLimit, 0, false, false, false, false, false, false
 	for len(data) > 0 {
 		if complete {
 			invalid = true
 			break
 		}
 		end := bytes.IndexByte(data, '\n')
-		if end < 0 || count >= detailLineLimit {
+		if end < 0 {
+			incomplete = true
+			break
+		}
+		if count >= detailLineLimit {
 			limited = true
 			break
 		}
@@ -248,6 +252,8 @@ func (d *DashboardDetail) readRecords(workRoot string, accepted *state.AcceptedA
 		}
 	}
 	switch {
+	case incomplete:
+		d.RecordsNotice = "Saved record ends with an incomplete line; only an earlier received prefix is shown"
 	case invalid:
 		d.RecordsNotice = "Saved record is invalid; only an earlier received prefix is shown"
 	case captureLimited && limited:

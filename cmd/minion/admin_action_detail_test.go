@@ -369,6 +369,31 @@ func TestAdminActionDetailMissingPartialAndLegacyEvidence(t *testing.T) {
 	}
 }
 
+func TestAdminActionDetailLabelsUnterminatedRecordTail(t *testing.T) {
+	handler, root, cookie := detailTestActive(t)
+	detailTestRecords(t, root, "received prefix", false)
+	path := filepath.Join(root, "attempt-records", "attempt-1.jsonl")
+	prior, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tail, err := json.Marshal(map[string]any{"identity": detailTestIdentity(), "source_ref": detailTestSource,
+		"sequence": 2, "kind": "discussion", "text": "UNTERMINATED TAIL"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(prior, tail...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
+	body := view.Body.String()
+	if view.Code != http.StatusOK || !strings.Contains(body, "received prefix") ||
+		!strings.Contains(body, "Saved record ends with an incomplete line; only an earlier received prefix is shown") ||
+		strings.Contains(body, "UNTERMINATED TAIL") || strings.Contains(body, "display is truncated") {
+		t.Fatalf("unterminated tail was mislabeled or exposed: status=%d body=%s", view.Code, body)
+	}
+}
+
 func TestAdminActionDetailPreservesEarlierVerdictAndLabelsCaptureStop(t *testing.T) {
 	firstFull := detailTestCall(false, true, false, true)
 	for _, tc := range []struct {
