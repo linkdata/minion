@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,23 @@ import (
 // The linked or copied test binary redirects production Git URLs to local bare fixtures.
 func TestMain(m *testing.M) {
 	if realGit := os.Getenv("MINION_WINDOWS_GIT_PROXY"); realGit != "" {
+		if log := os.Getenv("MINION_WINDOWS_GIT_PUSH_LOG"); log != "" {
+			for _, arg := range os.Args[1:] {
+				if arg != "push" {
+					continue
+				}
+				file, err := os.OpenFile(log, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err == nil {
+					_, writeErr := fmt.Fprintln(file, "push")
+					err = errors.Join(writeErr, file.Close())
+				}
+				if err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					os.Exit(2)
+				}
+				break
+			}
+		}
 		args := append([]string{"-c", "protocol.https.allow=never", "-c", "protocol.http.allow=never", "-c", "protocol.ssh.allow=never", "-c", "include.path=" + filepath.ToSlash(os.Getenv("MINION_WINDOWS_GIT_CONFIG"))}, os.Args[1:]...)
 		cmd := exec.Command(realGit, args...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
@@ -44,7 +62,26 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
+func TestWindowsFixPublication(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		changes   []workspace.Change
+		published bool
+	}{
+		{"supported", []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}, true},
+		{"hostile", []workspace.Change{
+			{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")},
+			{Path: "NUL", Mode: workspace.Regular, Data: []byte("unreviewed\n")},
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testWindowsFixPublication(t, test.changes, test.published)
+		})
+	}
+}
+
+func testWindowsFixPublication(t *testing.T, changes []workspace.Change, published bool) {
+	t.Helper()
 	realGit, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		t.Fatal(err)
@@ -78,11 +115,14 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 
 	proxyDir := t.TempDir()
 	testsupport.LinkTestExecutable(t, filepath.Join(proxyDir, "git.exe"))
+	pushLog := filepath.Join(t.TempDir(), "push-calls")
 	t.Setenv("PATH", proxyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("MINION_WINDOWS_GIT_PROXY", realGit)
 	t.Setenv("MINION_WINDOWS_GIT_CONFIG", configFile)
+	t.Setenv("MINION_WINDOWS_GIT_PUSH_LOG", pushLog)
 
 	var comment string
+	var commentPosts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/o/r":
@@ -93,6 +133,7 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/graphql":
 			_, _ = fmt.Fprint(w, `{"data":{"node":{"title":"Issue","bodyText":"Details","lastEditedAt":null}}}`)
 		case captureComment(t, w, r, &comment):
+			commentPosts.Add(1)
 		default:
 			t.Errorf("unexpected GitHub fixture request: %s %s", r.Method, r.URL.Path)
 			http.NotFound(w, r)
@@ -140,9 +181,28 @@ func TestWindowsFixPublicationCommitsPushesAndReplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	prepared := &preparedAction{job: Job{Version: ProtocolVersion, Action: command.Fix, Source: workspace.Snapshot{Head: base}}, request: request, issueNodeID: "issue-node", checkout: checkout, repository: repo, fork: fork, branch: branch}
-	result := Result{Changes: []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("after\n")}}}
-	if err := orchestrator.publishFix(t.Context(), prepared, result, publication{answer: "Fixed."}); err != nil {
+	result := Result{Changes: changes}
+	err = orchestrator.publishFix(t.Context(), prepared, result, publication{answer: "Fixed."})
+	if !published {
+		if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsafe or duplicate") {
+			t.Fatalf("hostile publication was not refused before push: %v", err)
+		}
+		if refs := git("--git-dir="+forkRemote, "for-each-ref", "--format=%(refname)", "refs/heads"); strings.Contains(refs, "refs/heads/"+branch) || git("--git-dir="+forkRemote, "rev-parse", "refs/heads/main") != base {
+			t.Fatalf("hostile publication changed fork refs: %q", refs)
+		}
+		if data, err := os.ReadFile(pushLog); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("hostile publication attempted Git push: log=%q error=%v", data, err)
+		}
+		if len(store.Data.PendingFixes) != 0 || len(store.Data.PublicationWrites) != 0 || comment != "" || commentPosts.Load() != 0 {
+			t.Fatalf("hostile publication saved push or attempted reply: pushes=%v writes=%v reply=%q posts=%d", store.Data.PendingFixes, store.Data.PublicationWrites, comment, commentPosts.Load())
+		}
+		return
+	}
+	if err != nil {
 		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(pushLog); err != nil || strings.Count(string(data), "push\n") != 1 || commentPosts.Load() != 1 {
+		t.Fatalf("supported publication did not attempt one push and reply: pushes=%q error=%v posts=%d", data, err, commentPosts.Load())
 	}
 	wantSHA := git("--git-dir="+forkRemote, "rev-parse", "refs/heads/"+branch)
 	if pending := store.Data.PendingFixes[request.ID]; pending.SHA != wantSHA || wantSHA == base {

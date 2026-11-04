@@ -92,32 +92,20 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 		mutate func(*Job)
 		want   string
 	}{
-		{"source materialization", command.Comment, sourceFailure, "materialize source"},
+		{"source preparation rejection", command.Comment, sourceFailure, "materialize source"},
 		{"repository materialization", command.Comment, func(job *Job) { job.Source.Files[0].Data = []byte("forged\n") }, "materialize repository"},
-		{"context materialization", command.Review, contextFailure, "materialize context"},
+		{"context preparation rejection", command.Review, contextFailure, "materialize context"},
 		{"missing audit task skill", command.SecurityAudit, func(job *Job) { job.Main.Skills = []string{skills.BuiltinAntiPromptInjection} }, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(test.action)
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
-			if runtime.GOOS == "windows" && (test.name == "source materialization" || test.name == "context materialization") {
-				probe := filepath.Join(runner.WorkRoot, "case-probe")
-				if err := os.WriteFile(probe, nil, 0600); err != nil {
-					t.Fatal(err)
-				}
-				_, caseErr := os.Stat(filepath.Join(runner.WorkRoot, "CASE-PROBE"))
-				if err := os.Remove(probe); err != nil {
-					t.Fatal(err)
-				}
-				if errors.Is(caseErr, os.ErrNotExist) {
-					t.Skip("case alias fixture requires a case-insensitive work root")
-				}
-				if caseErr != nil {
-					t.Fatal(caseErr)
-				}
+			want := test.want
+			if runtime.GOOS == "windows" && (test.name == "source preparation rejection" || test.name == "context preparation rejection") {
+				want = "duplicate source path"
 			}
-			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), test.want) || len(result.Calls) != 0 {
+			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
 				t.Fatalf("preparation result=%+v error=%v", result, err)
 			}
 		})

@@ -174,7 +174,7 @@ func ValidateSnapshot(s Snapshot) error {
 			}
 			paths = append(paths, name)
 		}
-		if err := validatePaths(paths, false); err != nil {
+		if err := validatePaths(paths, runtime.GOOS == "windows"); err != nil {
 			return err
 		}
 	}
@@ -184,7 +184,7 @@ func ValidateSnapshot(s Snapshot) error {
 			paths = append(paths, file.Path)
 		}
 		paths = append(paths, s.Omitted...)
-		if err := validatePaths(paths, false); err != nil {
+		if err := validatePaths(paths, runtime.GOOS == "windows"); err != nil {
 			return err
 		}
 	}
@@ -224,7 +224,7 @@ func validateFiles(files []File) error {
 		}
 		total += len(file.Data)
 	}
-	return validatePaths(paths, false)
+	return validatePaths(paths, runtime.GOOS == "windows")
 }
 
 func validatePaths(paths []string, folded bool) error {
@@ -260,6 +260,11 @@ func validatePaths(paths []string, folded bool) error {
 		}
 	}
 	return nil
+}
+
+// ValidateSourceLayout checks bounded Git tree paths after entry syntax, modes and sizes are verified.
+func ValidateSourceLayout(paths []string, folded bool) error {
+	return validatePaths(paths, folded)
 }
 
 // ValidateFixPaths checks a validated snapshot's stricter writable layout, including omissions.

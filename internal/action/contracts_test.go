@@ -433,10 +433,10 @@ func TestFixJobRejectsUnsupportedLayoutBeforeExecution(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			job := testJob(command.Fix)
 			job.Source.Files, job.Source.Omitted = test.files, test.omitted
-			if err := workspace.ValidateSnapshot(job.Source); (err != nil) != (runtime.GOOS == "windows" && test.name == "backslash") {
+			if err := workspace.ValidateSnapshot(job.Source); (err != nil) != (runtime.GOOS == "windows") {
 				t.Fatalf("unexpected source fixture admission: %v", err)
 			}
-			if runtime.GOOS == "windows" && test.name == "backslash" {
+			if runtime.GOOS == "windows" {
 				runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 				if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) {
 					t.Fatalf("unsafe source reached execution: %v", err)

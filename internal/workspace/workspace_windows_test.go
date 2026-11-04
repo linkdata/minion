@@ -151,6 +151,58 @@ func TestWindowsSourcePaths(t *testing.T) {
 	}
 }
 
+func TestWindowsSnapshotRejectsCaseAliasesBeforeMaterialize(t *testing.T) {
+	for _, test := range []struct {
+		name, reason string
+		paths        [2]string
+	}{
+		{name: "files", reason: "duplicate source path", paths: [2]string{"Readme", "README"}},
+		{name: "directories", reason: "source directory spelling collision", paths: [2]string{"Docs/a", "docs/b"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			files := []File{
+				{Path: test.paths[0], Mode: Regular, Data: []byte("first")},
+				{Path: test.paths[1], Mode: Regular, Data: []byte("second")},
+			}
+			if err := ValidateSnapshot(Snapshot{Head: strings.Repeat("a", 40), Files: files}); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("case alias passed snapshot preflight: %v", err)
+			}
+			root := privateRoot(t)
+			if err := Materialize(root, files); err == nil || !strings.Contains(err.Error(), test.reason) {
+				t.Fatalf("case alias reached materialization: %v", err)
+			}
+			if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+				t.Fatalf("case alias wrote source before rejection: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestWindowsSnapshotFoldsCurrentOmissionsOnly(t *testing.T) {
+	for _, test := range []struct {
+		name, file, omission string
+	}{
+		{"file", "Link", "link"},
+		{"directory", "Docs/a", "docs/b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := Snapshot{Head: strings.Repeat("a", 40), Files: []File{{Path: test.file, Mode: Regular}}, Omitted: []string{test.omission}}
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatal("default snapshot accepted current case alias")
+			}
+			snapshot.Base, snapshot.MergeBase = strings.Repeat("b", 40), strings.Repeat("b", 40)
+			snapshot.HeadOmitted = []string{test.omission}
+			if err := ValidateSnapshot(snapshot); err == nil {
+				t.Fatal("comparison snapshot accepted current case alias")
+			}
+			snapshot.HeadOmitted = nil // The omission belongs only to the base revision.
+			if err := ValidateSnapshot(snapshot); err != nil {
+				t.Fatalf("base-only case alias rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestWindowsOpenPathRejectsLink(t *testing.T) {
 	root := t.TempDir()
 	name := filepath.Join(root, "source")

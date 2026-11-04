@@ -27,6 +27,15 @@ const maxBatchHeaderBytes = 128
 
 // sourceTree validates bounded local metadata before materialization.
 func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, error) {
+	return c.sourceTreeWithFold(ctx, ref, runtime.GOOS == "windows")
+}
+
+// A comparison base is inspected through Git objects; only selected base files are materialized.
+func (c *Checkout) comparisonBaseTree(ctx context.Context, ref string) ([]sourceEntry, error) {
+	return c.sourceTreeWithFold(ctx, ref, false)
+}
+
+func (c *Checkout) sourceTreeWithFold(ctx context.Context, ref string, folded bool) ([]sourceEntry, error) {
 	if entries, ok := c.sourceTrees[ref]; ok {
 		return entries, nil
 	}
@@ -40,18 +49,25 @@ func (c *Checkout) sourceTree(ctx context.Context, ref string) ([]sourceEntry, e
 	if truncated {
 		return nil, fmt.Errorf("%w: source tree listing exceeds %d bytes", ErrCheckoutTooLarge, maxSourceTreeListBytes)
 	}
-	entries, err := parseSourceEntries(ref, output)
+	entries, err := parseSourceEntriesWithFold(ref, output, folded)
 	if err != nil {
 		return nil, err
 	}
-	if c.sourceTrees == nil {
-		c.sourceTrees = make(map[string][]sourceEntry)
+	// An exact-only Windows base cannot satisfy a later folded head preflight.
+	if folded || runtime.GOOS != "windows" {
+		if c.sourceTrees == nil {
+			c.sourceTrees = make(map[string][]sourceEntry)
+		}
+		c.sourceTrees[ref] = entries
 	}
-	c.sourceTrees[ref] = entries
 	return entries, nil
 }
 
 func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
+	return parseSourceEntriesWithFold(ref, output, runtime.GOOS == "windows")
+}
+
+func parseSourceEntriesWithFold(ref string, output []byte, folded bool) ([]sourceEntry, error) {
 	lines, err := splitNUL(output)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid Git tree listing: %w", ErrUnsupportedSource, err)
@@ -60,7 +76,7 @@ func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
 		return nil, fmt.Errorf("%w: more than %d metadata entries", ErrCheckoutTooLarge, workspace.MaxEntries)
 	}
 	var entries []sourceEntry
-	var validation []workspace.File
+	var paths []string
 	seen := make(map[string]bool, len(lines))
 	var total int64
 	for _, line := range lines {
@@ -102,10 +118,6 @@ func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
 			return nil, fmt.Errorf("%w: more than %d paths", ErrCheckoutTooLarge, workspace.MaxFiles)
 		}
 		source := sourceEntry{file: workspace.File{Path: path, Mode: uint32(mode)}, sha: fields[2], omitted: fields[1] == "commit" || fields[0] == "120000"}
-		file := source.file
-		if source.omitted {
-			file.Mode = workspace.Regular
-		}
 		// A gitlink has no blob; all blob sizes, including symlinks, count.
 		if fields[1] == "blob" {
 			source.size, err = strconv.ParseInt(fields[3], 10, 64)
@@ -117,10 +129,10 @@ func parseSourceEntries(ref string, output []byte) ([]sourceEntry, error) {
 			}
 			total += source.size
 		}
-		validation = append(validation, file)
+		paths = append(paths, path)
 		entries = append(entries, source)
 	}
-	if err := workspace.ValidateSnapshot(workspace.Snapshot{Head: ref, Files: validation}); err != nil {
+	if err := workspace.ValidateSourceLayout(paths, folded); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 	}
 	return entries, nil
@@ -208,7 +220,7 @@ func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int6
 			}
 			return s, err
 		}
-		if baseEntries, err = c.sourceTree(ctx, s.MergeBase); err != nil {
+		if baseEntries, err = c.comparisonBaseTree(ctx, s.MergeBase); err != nil {
 			return s, err
 		}
 		paths, _, err := c.boundedGit(ctx, nil, maxPathListBytes, false, "diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", "--no-renames", s.MergeBase, s.Head, "--")
@@ -231,6 +243,7 @@ func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int6
 	headFiles := 0
 	var total int64
 	allEntries := slices.Clone(entries)
+	var basePaths []string
 	for _, entry := range entries {
 		if entry.omitted {
 			s.HeadOmitted = append(s.HeadOmitted, entry.file.Path)
@@ -244,7 +257,13 @@ func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int6
 			allEntries = append(allEntries, entry)
 			if !entry.omitted {
 				total += entry.size
+				basePaths = append(basePaths, entry.file.Path)
 			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if err := workspace.ValidateSourceLayout(basePaths, true); err != nil {
+			return s, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 		}
 	}
 	// Bound regular-file transfer before reading contents or rendering a diff. Omitted
