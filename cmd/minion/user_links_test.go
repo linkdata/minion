@@ -15,6 +15,7 @@ func TestUserIdentityKeyPreservesProviderSubject(t *testing.T) {
 	for _, id := range []userIdentity{
 		{Provider: "github", Host: "github.com", Subject: "9007199254740993"},
 		{Provider: "gitlab", Host: "gitlab.example:8443", Subject: "team/user:42"},
+		{Provider: "gitlab", Host: "[::1]:8443", Subject: "team/user:42"},
 	} {
 		if key := id.key(); !validUserKey(key) {
 			t.Fatalf("valid subject rejected: %q", key)

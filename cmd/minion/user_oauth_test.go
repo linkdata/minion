@@ -54,6 +54,24 @@ func TestGitHubProfileSubjectUsesExactNumericID(t *testing.T) {
 	}
 }
 
+func TestOAuthProviderBindsIssuerAndOpaqueSubject(t *testing.T) {
+	p := &oauthProvider{name: "gitlab", issuer: "https://gitlab.example", host: "gitlab.example"}
+	for _, tc := range []struct {
+		claims map[string]any
+		want   bool
+	}{
+		{map[string]any{"iss": "https://gitlab.example", "sub": "team/user:42"}, true},
+		{map[string]any{"iss": "https://other.example", "sub": "team/user:42"}, false},
+		{map[string]any{"iss": "https://gitlab.example", "sub": ""}, false},
+		{map[string]any{"iss": "https://gitlab.example", "sub": "team\nuser"}, false},
+	} {
+		id, ok := p.identity(tc.claims)
+		if ok != tc.want || ok && id.key() != "gitlab:gitlab.example:team%2Fuser%3A42" {
+			t.Fatalf("claims %v: identity=%v accepted=%t", tc.claims, id, ok)
+		}
+	}
+}
+
 func testOAuthAdminHandler(t *testing.T, cfg config.AdminConfig, client *http.Client) (http.Handler, *jaws.Jaws, *oauthAccess) {
 	t.Helper()
 	jw, err := jaws.New()
@@ -306,6 +324,7 @@ func testGitLabIssuer(t *testing.T) (*httptest.Server, *atomic.Value) {
 			}
 			header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"test"}`))
 			claims, _ := json.Marshal(map[string]any{"iss": issuer.URL, "aud": "app", "sub": "team:42/member",
+				"preferred_username": "same", "email": "same@example.com",
 				"nonce": nonce.Load().(string), "exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix()})
 			payload := base64.RawURLEncoding.EncodeToString(claims)
 			input := header + "." + payload
@@ -334,7 +353,7 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 		case "https://github.com/login/oauth/access_token":
 			return oauthJSON(http.StatusOK, `{"access_token":"github-token","token_type":"Bearer","expires_in":3600}`), nil
 		case "https://api.github.com/user":
-			return oauthJSON(http.StatusOK, `{"id":42}`), nil
+			return oauthJSON(http.StatusOK, `{"id":42,"login":"same","email":"same@example.com"}`), nil
 		default:
 			if r.URL.Host != strings.TrimPrefix(issuer.URL, "https://") {
 				return nil, fmt.Errorf("unexpected provider request %s", r.URL)
@@ -374,6 +393,10 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 		t.Fatalf("replayed callback: status=%d cookies=%v", replay.Code, replay.Result().Cookies())
 	}
 	signed := login.Result().Cookies()[0]
+	gitlabKey := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "team:42/member"}).key()
+	if account := auth.links.account(gitlabKey); account == "github:github.com:42" {
+		t.Fatal("matching provider labels linked accounts without dual proof")
+	}
 	if denied := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, signed, "https://other.example"); denied.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin account link: status=%d", denied.Code)
 	}
@@ -388,7 +411,6 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 	if linked.Code != http.StatusFound || len(linked.Result().Cookies()) != 0 || linked.Header().Get("Location") != "/auth/login" {
 		t.Fatalf("GitLab link callback: status=%d cookies=%v location=%q body=%q", linked.Code, linked.Result().Cookies(), linked.Header().Get("Location"), linked.Body.String())
 	}
-	gitlabKey := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "team:42/member"}).key()
 	if account := auth.links.account(gitlabKey); account != "github:github.com:42" {
 		t.Fatalf("linked account = %q", account)
 	}
