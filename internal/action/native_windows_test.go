@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/wintest"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -71,6 +72,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 					t.Fatalf("materialized source=%q error=%v", data, err)
 				}
 				check := exec.CommandContext(ctx, git, "-C", request.dir, "rev-parse", "HEAD")
+				check.Env = testsupport.GitEnvironment(t.TempDir())
 				commit, err := check.Output()
 				if err != nil || strings.TrimSpace(string(commit)) != job.Source.Head {
 					t.Fatalf("materialized Git head=%q error=%v", commit, err)
