@@ -102,6 +102,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 			case <-serveCtx.Done():
 				return
 			case <-ticker.C:
+				oauth.pruneExpired(time.Now())
 				jw.Dirty(adminDashboardDirty)
 			}
 		}

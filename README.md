@@ -143,7 +143,7 @@ JaWS keeps sessions in memory, so they end on restart or after one minute withou
 
 An empty `listen` uses `127.0.0.1:8377`. The admin server runs only with `-loop`. Anything other than a literal loopback IP address in `listen` requires both `tls_cert_file` and `tls_key_file`; relative file paths resolve against the config directory. The certificate must be trusted by the browser and cover the address used. `-check` verifies configured admin TLS files without binding the listener; `-loop` verifies them before binding. One-pass polling neither loads unused admin TLS files nor starts the listener. An admin listener failure stops `-loop` with exit status 1. The admin listener is separate from the worker HTTPS endpoint and does not use its token.
 
-To enable user sign-in, register a [GitHub OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app) or a [GitLab OAuth application](https://docs.gitlab.com/integration/oauth_provider/), then add its credentials under `admin`. Register the exact `/auth/callback` URL used by the browser. For example, with a trusted certificate covering `minion.example`:
+To enable user sign-in, register a [GitHub OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app) or a [GitLab OAuth application](https://docs.gitlab.com/integration/oauth_provider/), then add its credentials under `admin`. Select GitLab's `read_user` scope when registering its application. Register the exact `/auth/callback` URL used by the browser. For example, with a trusted certificate covering `minion.example`:
 
 ```json
 "admin": {

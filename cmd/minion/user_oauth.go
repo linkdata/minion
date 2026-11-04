@@ -141,10 +141,10 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	key, _ := sess.Get(userSessionKey).(string)
 	if a.links.account(key) != "" {
 		label, _ := sess.Get(userLabelKey).(string)
-		_, _ = fmt.Fprintf(w, "<h1>Signed in as %s</h1>", html.EscapeString(label))
+		_, _ = fmt.Fprintf(w, "<h1>Signed in as %s</h1><p>Current identity: %s</p>", html.EscapeString(label), html.EscapeString(key))
 		for _, name := range []string{"github", "gitlab"} {
-			if _, ok := a.providers[name]; ok {
-				_, _ = fmt.Fprintf(w, `<form method="post" action="/auth/link/%s"><button>Link %s account</button></form>`, name, name)
+			if provider, ok := a.providers[name]; ok {
+				_, _ = fmt.Fprintf(w, `<form method="post" action="/auth/link/%s"><button>Link %s account on %s</button></form>`, name, name, html.EscapeString(provider.host))
 			}
 		}
 		_, _ = io.WriteString(w, `<form method="post" action="/auth/logout"><button>Sign out</button></form>`)
@@ -159,12 +159,23 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, "</main></body></html>")
 }
 
-func randomOAuthValue() (string, error) {
+func randomOAuthValue() string {
 	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
+	rand.Read(raw[:])
+	return base64.RawURLEncoding.EncodeToString(raw[:])
+}
+
+func (a *oauthAccess) pruneExpired(now time.Time) {
+	if a == nil {
+		return
 	}
-	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for key, pending := range a.pending {
+		if !now.Before(pending.expires) {
+			delete(a.pending, key)
+		}
+	}
 }
 
 func stateCookieName(r *http.Request) string {
@@ -210,14 +221,8 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	state, err := randomOAuthValue()
-	if err == nil {
-		pending.verifier, err = randomOAuthValue()
-	}
-	if err != nil {
-		http.Error(w, "Sign-in unavailable", http.StatusServiceUnavailable)
-		return
-	}
+	state := randomOAuthValue()
+	pending.verifier = randomOAuthValue()
 	previous, unique := stateCookieValue(r)
 	if !unique {
 		http.Error(w, "Invalid sign-in state", http.StatusBadRequest)
@@ -245,7 +250,14 @@ func (a *oauthAccess) start(w http.ResponseWriter, r *http.Request) {
 		"code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"}}
 	http.SetCookie(w, &http.Cookie{Name: stateCookieName(r), Value: state, Path: "/",
 		MaxAge: int(oauthStateLifetime.Seconds()), HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteLaxMode})
-	http.Redirect(w, r, provider.authorizeURL+"?"+query.Encode(), http.StatusSeeOther)
+	destination := provider.authorizeURL + "?" + query.Encode()
+	if link {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		escaped := html.EscapeString(destination)
+		_, _ = fmt.Fprintf(w, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=%s"><title>Continue linking</title></head><body><main><a href="%s">Continue to %s</a></main></body></html>`, escaped, escaped, name)
+		return
+	}
+	http.Redirect(w, r, destination, http.StatusSeeOther)
 }
 
 func (p oauthProvider) matchesRequest(r *http.Request) bool {
