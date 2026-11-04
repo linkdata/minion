@@ -53,7 +53,7 @@ func dashboardTestAccepted(at time.Time) *state.AcceptedAction {
 func dashboardTestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, nil, "")
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, adminGuestCookie(t, handler), "")
 	if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
 		t.Fatalf("admin login: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
 	}
@@ -273,8 +273,8 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if denied := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("anonymous dashboard status=%d, want 403", denied.Code)
 	}
-	if denied := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, nil, ""); denied.Code != http.StatusForbidden {
-		t.Fatalf("anonymous dashboard CSS status=%d, want 403", denied.Code)
+	if asset := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, nil, ""); asset.Code != http.StatusOK {
+		t.Fatalf("public dashboard CSS status=%d, want 200", asset.Code)
 	}
 	cookie := dashboardTestCookie(t, handler)
 	acceptedMetric := `<h2>Tracked accepted actions</h2><p class="metric">3</p>`
@@ -567,10 +567,7 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 	t.Cleanup(func() { _ = admin.Close() })
 	baseURL := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	login, err := client.PostForm(baseURL+"/admin/login", url.Values{"username": {"operator"}, "password": {"correct-password"}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	login, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	login.Body.Close()
 	if login.StatusCode != http.StatusSeeOther || len(login.Cookies()) != 1 {
 		t.Fatalf("network login: status=%d cookies=%d", login.StatusCode, len(login.Cookies()))
@@ -597,14 +594,7 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 		if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "No action is in progress.") {
 			t.Fatalf("network dashboard %s: status=%d body=%s", path, page.StatusCode, pageBody)
 		}
-		_, afterKey, found := strings.Cut(string(pageBody), `<meta name="jawsKey" content="`)
-		if !found {
-			t.Fatal("dashboard omitted JaWS connection key")
-		}
-		key, _, found := strings.Cut(afterKey, `"`)
-		if !found || key == "" {
-			t.Fatal("dashboard JaWS connection key is empty")
-		}
+		key := adminJaWSKey(t, string(pageBody))
 		header := http.Header{}
 		header.Set("Cookie", cookie.Name+"="+cookie.Value)
 		header.Set("Origin", baseURL)
