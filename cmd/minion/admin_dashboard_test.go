@@ -33,7 +33,7 @@ func dashboardTestServer(t *testing.T) (http.Handler, *jaws.Jaws, *state.Store, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, owner)
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, owner, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +560,7 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	owner := &action.Orchestrator{Store: store}
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0",
-		Administrators: []config.AdminAccount{testAdminAccount()}}, owner, nil)
+		Administrators: []config.AdminAccount{testAdminAccount()}}, owner, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

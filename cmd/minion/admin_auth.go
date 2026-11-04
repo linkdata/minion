@@ -67,7 +67,7 @@ type adminAccess struct {
 	rotatedCookies     map[[32]byte]time.Time
 }
 
-func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator) (http.Handler, error) {
+func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess) (http.Handler, error) {
 	jw.MaxSessions = maxAdminSessions
 	if err := registerAdminDashboard(jw); err != nil {
 		return nil, err
@@ -91,7 +91,15 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			access.dummy = account
 		}
 	}
-	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
+	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth {
+		if username := access.sessionUsername(rq.Session()); username != "" {
+			return adminIdentity(username)
+		}
+		if account, _ := oauth.currentUser(rq.Session()); account != "" {
+			return oauthUserIdentity{}
+		}
+		return adminIdentity("")
+	}
 	mux := http.NewServeMux()
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
@@ -129,6 +137,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
+	oauth.routes(mux)
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
 	// body-reading callback, which must not inherit an immediate read deadline.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +152,10 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			return
 		}
 		mux.ServeHTTP(w, r)
-	}), access.allowed)), nil
+	}), func(r *http.Request) bool {
+		return (len(access.accounts) != 0 || oauth != nil) && validJaWSCookie(r, jw.CookieName) &&
+			(access.allowed(r) || oauth.allowed(r))
+	})), nil
 }
 
 func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action.Orchestrator) {
@@ -207,10 +219,7 @@ func (a *adminAccess) sessionUsername(sess *jaws.Session) string {
 	return ""
 }
 
-func (a *adminAccess) allowed(r *http.Request) bool {
-	if len(a.accounts) == 0 {
-		return false
-	}
+func validJaWSCookie(r *http.Request, name string) bool {
 	seen := false
 	cookies := r.Cookies()
 	// Go drops all cookies when a header has too many parts; JaWS still reads it.
@@ -218,17 +227,22 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		return false
 	}
 	for _, cookie := range cookies {
-		if cookie.Name == a.jaws.CookieName {
+		if cookie.Name == name {
 			if seen {
 				return false
 			}
 			seen = true
 		}
 	}
-	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
+	return true
+}
+
+func (a *adminAccess) allowed(r *http.Request) bool {
+	if len(a.accounts) != 0 && r.URL.Path == "/admin/login" &&
+		(r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
 		return true
 	}
-	if r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
+	if len(a.accounts) != 0 && r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
 		return true
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {

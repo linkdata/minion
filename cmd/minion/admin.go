@@ -30,7 +30,7 @@ type adminServer struct {
 	serveErr  error // read only after serveDone closes
 }
 
-func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, onFailure func()) (*adminServer, error) {
+func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func()) (*adminServer, error) {
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
 	if cfg.TLSCertFile != "" {
@@ -68,7 +68,13 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
 	jw.Logger = slog.Default()
-	handler, err := newAdminHandler(jw, cfg, owner)
+	oauth, err := newOAuthAccess(jw, cfg, statePath, nil)
+	if err != nil {
+		jw.Close()
+		_ = listener.Close()
+		return nil, err
+	}
+	handler, err := newAdminHandler(jw, cfg, owner, oauth)
 	if err != nil {
 		jw.Close()
 		_ = listener.Close()
