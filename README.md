@@ -114,7 +114,7 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-The bundled [config.json](config.json) includes an optional `admin` block with no accounts. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you add an administrator with a password hash. Remove the block to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+The bundled [config.json](config.json) includes an optional `admin` block with no accounts. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you add an administrator with a password hash. Restart Minion after adding the account. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
@@ -131,7 +131,7 @@ Generate the Argon2id PHC hash with Minion on Linux, macOS, or Windows. It promp
 
 In Windows PowerShell, run `.\bin\minion.exe -mode=hash`.
 
-Do not put the password in the command line; the hash command rejects positional arguments. Admin passwords must contain 1 to 64 Unicode characters.
+Do not put the password in the command line; the hash command rejects positional arguments. Admin passwords must contain 1 to 64 Unicode code points.
 
 Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; success opens `/`, whose form sends `POST /admin/logout` to revoke the session. The live dashboard shows the current action from preparation through publication, worker readiness and phase, the last received worker status and the worker-reported time since execution progress at that status. It checks for changes every two seconds while connected. Repository, requester and action filters apply only to the current action and live in the URL, not the session. The tracked accepted-action total begins when this counter is introduced; older accepted actions are not backfilled from incomplete usage records or terminal decisions. A worker status alone does not prove readiness or reset the configured inactivity limit.
 

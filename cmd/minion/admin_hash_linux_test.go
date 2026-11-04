@@ -3,10 +3,13 @@
 package main
 
 import (
+	"context"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,34 +24,17 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 		failStdout                       bool
 	}{
 		{name: "Unicode Backspace", input: "é\x7fa\r", password: "a"},
-		{name: "too many characters", input: strings.Repeat("a", 65) + "\r", wantCode: 2, errorText: "1 to 64 Unicode characters"},
-		{name: "canonical boundary", input: strings.Repeat("a", 4097) + "\r", wantCode: 2, errorText: "1 to 64 Unicode characters"},
+		{name: "replacement character", input: "a�b\r", password: "a�b"},
+		{name: "corrected overflow", input: strings.Repeat("a", 65) + "\x7f\r", password: strings.Repeat("a", 64)},
+		{name: "too many characters", input: strings.Repeat("a", 65) + "\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
+		{name: "canonical boundary", input: strings.Repeat("a", 4097) + "\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
+		{name: "malformed UTF-8", input: "\xff\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
 		{name: "Ctrl-C", input: "\x03", wantCode: 1, errorText: "read admin password"},
 		{name: "stdout failure", input: "password\r", wantCode: 1, errorText: "write admin password hash", failStdout: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer master.Close()
-			fd := int(master.Fd())
-			n, err := unix.IoctlGetInt(fd, unix.TIOCGPTN)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
-				t.Fatal(err)
-			}
-			slave, err := os.OpenFile("/dev/pts/"+strconv.Itoa(n), os.O_RDWR, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer slave.Close()
-			before, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
-			if err != nil {
-				t.Fatal(err)
-			}
+			master, slave, before := newHashPTY(t)
+			var err error
 			stdout, err := os.CreateTemp(t.TempDir(), "hash-output")
 			if err != nil {
 				t.Fatal(err)
@@ -66,17 +52,7 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 			defer func() { os.Stdin, os.Stdout, os.Stderr = oldIn, oldOut, oldErr }()
 			done := make(chan int, 1)
 			go func() { done <- runHashMode() }()
-			prompt := make([]byte, len("Admin password: "))
-			promptRead := make(chan error, 1)
-			go func() { _, err := io.ReadFull(master, prompt); promptRead <- err }()
-			select {
-			case err := <-promptRead:
-				if err != nil || string(prompt) != "Admin password: " {
-					t.Fatalf("prompt=%q error=%v", prompt, err)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("hash prompt timed out")
-			}
+			readHashPrompt(t, master)
 			if _, err := master.Write([]byte(test.input)); err != nil {
 				t.Fatal(err)
 			}
@@ -109,5 +85,103 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 				t.Fatalf("terminal output=%q, want %q", terminalOutput, test.errorText)
 			}
 		})
+	}
+}
+
+func newHashPTY(t *testing.T) (master, slave *os.File, before *unix.Termios) {
+	t.Helper()
+	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { master.Close() })
+	fd := int(master.Fd())
+	n, err := unix.IoctlGetInt(fd, unix.TIOCGPTN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.IoctlSetPointerInt(fd, unix.TIOCSPTLCK, 0); err != nil {
+		t.Fatal(err)
+	}
+	slave, err = os.OpenFile("/dev/pts/"+strconv.Itoa(n), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { slave.Close() })
+	before, err = unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return master, slave, before
+}
+
+func readHashPrompt(t *testing.T, master *os.File) {
+	t.Helper()
+	prompt := make([]byte, len("Admin password: "))
+	promptRead := make(chan error, 1)
+	go func() { _, err := io.ReadFull(master, prompt); promptRead <- err }()
+	select {
+	case err := <-promptRead:
+		if err != nil || string(prompt) != "Admin password: " {
+			t.Fatalf("prompt=%q error=%v", prompt, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("hash prompt timed out")
+	}
+}
+
+func TestHashModeRejectsRedirectedStderr(t *testing.T) {
+	_, slave, before := newHashPTY(t)
+	errorLog, err := os.CreateTemp(t.TempDir(), "hash-errors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errorLog.Close()
+	oldIn, oldErr := os.Stdin, os.Stderr
+	os.Stdin, os.Stderr = slave, errorLog
+	defer func() { os.Stdin, os.Stderr = oldIn, oldErr }()
+	if code := runHashMode(); code != 2 {
+		t.Fatalf("redirected stderr returned %d, want 2", code)
+	}
+	after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
+	if err != nil || after.Lflag != before.Lflag {
+		t.Fatalf("terminal changed with redirected stderr: error=%v", err)
+	}
+	output, err := os.ReadFile(errorLog.Name())
+	if err != nil || !strings.Contains(string(output), "terminal on stderr") {
+		t.Fatalf("redirected stderr output=%q error=%v", output, err)
+	}
+}
+
+func TestHashModeRestoresTerminalOnSignal(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			master, slave, before := newHashPTY(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestHashModeSignalHelper$")
+			child.Env = append(os.Environ(), "MINION_HASH_SIGNAL_HELPER=1")
+			child.Stdin, child.Stderr, child.Stdout = slave, slave, io.Discard
+			if err := child.Start(); err != nil {
+				t.Fatal(err)
+			}
+			readHashPrompt(t, master)
+			if err := child.Process.Signal(sig); err != nil {
+				t.Fatal(err)
+			}
+			if err := child.Wait(); err == nil || ctx.Err() != nil {
+				t.Fatalf("signal exit=%v context=%v", err, ctx.Err())
+			}
+			after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
+			if err != nil || after.Lflag != before.Lflag {
+				t.Fatalf("terminal state not restored after %v: before=%#x after=%#x error=%v", sig, before.Lflag, after.Lflag, err)
+			}
+		})
+	}
+}
+
+func TestHashModeSignalHelper(t *testing.T) {
+	if os.Getenv("MINION_HASH_SIGNAL_HELPER") == "1" {
+		os.Exit(runHashMode())
 	}
 }

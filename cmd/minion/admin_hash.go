@@ -1,17 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
+	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/config"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/term"
 )
+
+var errInvalidAdminPassword = errors.New("admin password must contain 1 to 64 Unicode code points")
 
 func runHashMode() int {
 	fd := int(os.Stdin.Fd())
@@ -19,9 +25,18 @@ func runHashMode() int {
 		fmt.Fprintln(os.Stderr, "-mode=hash requires an interactive terminal")
 		return 2
 	}
+	if !term.IsTerminal(int(os.Stderr.Fd())) {
+		fmt.Fprintln(os.Stderr, "-mode=hash requires a terminal on stderr for the prompt")
+		return 2
+	}
 	password, err := readAdminPassword(fd)
+	fmt.Fprintln(os.Stderr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "\nread admin password:", err)
+		if errors.Is(err, errInvalidAdminPassword) {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		fmt.Fprintln(os.Stderr, "read admin password:", err)
 		return 1
 	}
 	hash, err := hashAdminPassword(password)
@@ -37,25 +52,77 @@ func runHashMode() int {
 }
 
 func readAdminPassword(fd int) (password string, err error) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
 	state, err := term.MakeRaw(fd)
 	if err != nil {
 		return "", err
 	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-signals:
+			select {
+			case <-done:
+				return
+			default:
+			}
+			term.Restore(fd, state)
+			os.Exit(1)
+		case <-done:
+		}
+	}()
 	defer func() {
 		if restoreErr := term.Restore(fd, state); restoreErr != nil && err == nil {
 			err = fmt.Errorf("restore terminal: %w", restoreErr)
 		}
+		close(done)
 	}()
-	console := term.NewTerminal(struct {
-		io.Reader
-		io.Writer
-	}{os.Stdin, os.Stderr}, "")
-	return console.ReadPassword("Admin password: ")
+	if _, err := fmt.Fprint(os.Stderr, "Admin password: "); err != nil {
+		return "", err
+	}
+	// x/term.NewTerminal.ReadPassword stalls on a valid U+FFFD rune.
+	reader := bufio.NewReader(os.Stdin)
+	runes := make([]rune, 0, 64)
+	count := 0
+	for {
+		r, size, err := reader.ReadRune()
+		if err != nil {
+			return "", err
+		}
+		if r == utf8.RuneError && size == 1 {
+			return "", errInvalidAdminPassword
+		}
+		switch r {
+		case '\r', '\n':
+			if count > 64 {
+				return "", errInvalidAdminPassword
+			}
+			return string(runes), nil
+		case '\x03', '\x04':
+			return "", io.EOF
+		case '\b', '\x7f':
+			if count > 0 {
+				count--
+				if count < len(runes) {
+					runes = runes[:len(runes)-1]
+				}
+			}
+		case '\x1b':
+			return "", errors.New("unsupported terminal control key")
+		default:
+			count++
+			if len(runes) < 64 {
+				runes = append(runes, r)
+			}
+		}
+	}
 }
 
 func hashAdminPassword(password string) (string, error) {
 	if !config.ValidAdminPassword(password) {
-		return "", errors.New("admin password must be 1 to 64 Unicode characters")
+		return "", errInvalidAdminPassword
 	}
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
