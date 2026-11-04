@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	_ "embed"
 	"errors"
 	"html/template"
 	"net/http"
@@ -33,7 +34,10 @@ var adminLoginHTML = template.Must(template.New("admin login").Parse(`<!doctype 
 <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
 <button>Sign in</button></form>
 {{end}}
-</main>{{$.TailHTML}}</body></html>`))
+</main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
+
+//go:embed admin_login.js
+var adminLoginJS []byte
 
 const (
 	maxAdminSessions      = 512
@@ -103,6 +107,14 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	})
+	mux.HandleFunc("GET /admin/login.js", func(w http.ResponseWriter, r *http.Request) {
+		closeUnreadAdminBody(w, r)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(adminLoginJS)
+		}
 	})
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
@@ -217,7 +229,7 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		// JaWS fingerprints its bundled CSS and JavaScript asset paths.
-		if r.URL.Path == "/admin/dashboard.css" || r.URL.Path == "/jaws/.ping" ||
+		if r.URL.Path == "/admin/dashboard.css" || r.URL.Path == "/admin/login.js" || r.URL.Path == "/jaws/.ping" ||
 			strings.HasPrefix(r.URL.Path, "/jaws/.jaws.") &&
 				(strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css")) {
 			return true
@@ -367,14 +379,12 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
+	a.sessionAdmissionMu.Lock()
 	sess := a.jaws.GetSession(r)
-	if sess == nil {
-		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
-		return
+	if sess != nil {
+		sess.Clear()
+		sess.Close()
 	}
-	sess.Clear()
-	if cookie := sess.Close(); cookie != nil {
-		http.SetCookie(w, cookie)
-	}
+	a.sessionAdmissionMu.Unlock()
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
