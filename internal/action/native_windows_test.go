@@ -32,8 +32,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 		}
 		if helper == string(command.Fix) {
 			if err := os.WriteFile("source.txt", []byte("fixed\n"), 0600); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
+				t.Fatal(err)
 			}
 		}
 		fmt.Print("native model answer")
