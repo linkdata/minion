@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -51,6 +52,21 @@ func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("opening FIFO blocked waiting for a writer")
+	}
+}
+
+func TestReadRegularKeepsEmptyAndExactLimitFiles(t *testing.T) {
+	for _, contents := range []string{"", "x", "bounded contents"} {
+		t.Run(strconv.Itoa(len(contents)), func(t *testing.T) {
+			name := filepath.Join(t.TempDir(), "source")
+			if err := os.WriteFile(name, []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			data, err := ReadRegular(name, int64(len(contents)))
+			if err != nil || string(data) != contents {
+				t.Fatalf("exact-limit contents=%q error=%v", data, err)
+			}
+		})
 	}
 }
 
