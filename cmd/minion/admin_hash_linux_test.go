@@ -19,9 +19,9 @@ import (
 
 func TestHashModeInteractiveTerminal(t *testing.T) {
 	for _, test := range []struct {
-		name, input, password, errorText string
-		wantCode                         int
-		failStdout                       bool
+		name, input, delayed, hidden, password, errorText string
+		wantCode                                          int
+		failStdout                                        bool
 	}{
 		{name: "Unicode Backspace", input: "é\x7fa\r", password: "a"},
 		{name: "replacement character", input: "a�b\r", password: "a�b"},
@@ -29,6 +29,8 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 		{name: "too many characters", input: strings.Repeat("a", 65) + "\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
 		{name: "canonical boundary", input: strings.Repeat("a", 4097) + "\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
 		{name: "malformed UTF-8", input: "\xff\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
+		{name: "malformed delayed paste", input: "\xff", delayed: "delayed-secret\r", hidden: "delayed-secret", wantCode: 2, errorText: "valid UTF-8"},
+		{name: "Escape delayed paste", input: "\x1b", delayed: "delayed-secret\r", hidden: "delayed-secret", wantCode: 1, errorText: "unsupported terminal control key"},
 		{name: "Ctrl-C", input: "\x03", wantCode: 1, errorText: "read admin password"},
 		{name: "stdout failure", input: "password\r", wantCode: 1, errorText: "write admin password hash", failStdout: true},
 	} {
@@ -56,6 +58,16 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 			if _, err := master.Write([]byte(test.input)); err != nil {
 				t.Fatal(err)
 			}
+			if test.delayed != "" {
+				select {
+				case code := <-done:
+					t.Fatalf("hash returned before the pasted line ended: code=%d", code)
+				case <-time.After(50 * time.Millisecond):
+				}
+				if _, err := master.Write([]byte(test.delayed)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			select {
 			case code := <-done:
 				if code != test.wantCode {
@@ -65,13 +77,16 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 				t.Fatal("hash command timed out")
 			}
 			after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
-			if err != nil || after.Lflag != before.Lflag {
-				t.Fatalf("terminal state not restored: before=%#x after=%#x error=%v", before.Lflag, after.Lflag, err)
+			if err != nil || *after != *before {
+				t.Fatalf("terminal state not restored: before=%+v after=%+v error=%v", before, after, err)
 			}
 			if err := slave.Close(); err != nil {
 				t.Fatal(err)
 			}
 			terminalOutput, _ := io.ReadAll(master)
+			if test.hidden != "" && strings.Contains(string(terminalOutput), test.hidden) {
+				t.Fatalf("password input echoed after error: %q", terminalOutput)
+			}
 			if test.password != "" {
 				if strings.TrimSpace(string(terminalOutput)) != "" {
 					t.Fatalf("password appeared on terminal: %q", terminalOutput)
@@ -81,8 +96,16 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 					!(config.AdminAccount{PasswordHash: strings.TrimSpace(string(hash))}).VerifyPassword(test.password) {
 					t.Fatalf("stdout is not the expected password hash: output=%q error=%v", hash, err)
 				}
-			} else if !strings.Contains(string(terminalOutput), test.errorText) {
-				t.Fatalf("terminal output=%q, want %q", terminalOutput, test.errorText)
+			} else {
+				if !strings.Contains(string(terminalOutput), test.errorText) {
+					t.Fatalf("terminal output=%q, want %q", terminalOutput, test.errorText)
+				}
+				if !test.failStdout {
+					printed, err := os.ReadFile(stdout.Name())
+					if err != nil || len(printed) != 0 {
+						t.Fatalf("failure printed hash: output=%q error=%v", printed, err)
+					}
+				}
 			}
 		})
 	}
@@ -144,7 +167,7 @@ func TestHashModeRejectsRedirectedStderr(t *testing.T) {
 		t.Fatalf("redirected stderr returned %d, want 2", code)
 	}
 	after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
-	if err != nil || after.Lflag != before.Lflag {
+	if err != nil || *after != *before {
 		t.Fatalf("terminal changed with redirected stderr: error=%v", err)
 	}
 	output, err := os.ReadFile(errorLog.Name())
@@ -173,8 +196,8 @@ func TestHashModeRestoresTerminalOnSignal(t *testing.T) {
 				t.Fatalf("signal exit=%v context=%v", err, ctx.Err())
 			}
 			after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)
-			if err != nil || after.Lflag != before.Lflag {
-				t.Fatalf("terminal state not restored after %v: before=%#x after=%#x error=%v", sig, before.Lflag, after.Lflag, err)
+			if err != nil || *after != *before {
+				t.Fatalf("terminal state not restored after %v: before=%+v after=%+v error=%v", sig, before, after, err)
 			}
 		})
 	}

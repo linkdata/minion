@@ -17,7 +17,7 @@ import (
 	"golang.org/x/term"
 )
 
-var errInvalidAdminPassword = errors.New("admin password must contain 1 to 64 Unicode code points")
+var errInvalidAdminPassword = errors.New("admin password must contain 1 to 64 Unicode code points in valid UTF-8")
 
 func runHashMode() int {
 	fd := int(os.Stdin.Fd())
@@ -86,16 +86,21 @@ func readAdminPassword(fd int) (password string, err error) {
 	reader := bufio.NewReader(os.Stdin)
 	runes := make([]rune, 0, 64)
 	count := 0
+	var inputErr error
 	for {
 		r, size, err := reader.ReadRune()
 		if err != nil {
 			return "", err
 		}
 		if r == utf8.RuneError && size == 1 {
-			return "", errInvalidAdminPassword
+			inputErr = errInvalidAdminPassword
+			continue
 		}
 		switch r {
 		case '\r', '\n':
+			if inputErr != nil {
+				return "", inputErr
+			}
 			if count > 64 {
 				return "", errInvalidAdminPassword
 			}
@@ -110,7 +115,7 @@ func readAdminPassword(fd int) (password string, err error) {
 				}
 			}
 		case '\x1b':
-			return "", errors.New("unsupported terminal control key")
+			inputErr = errors.New("unsupported terminal control key")
 		default:
 			count++
 			if len(runes) < 64 {
