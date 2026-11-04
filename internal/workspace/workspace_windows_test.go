@@ -3,11 +3,12 @@ package workspace
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func TestCanonicalPathResolvesNestedJunctionsWindows(t *testing.T) {
@@ -28,8 +29,8 @@ func TestCanonicalPathResolvesNestedJunctionsWindows(t *testing.T) {
 		{current, release},
 		{visible, filepath.Join(current, "bin")},
 	} {
-		if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link.path, link.target).CombinedOutput(); err != nil {
-			t.Fatalf("create junction %q -> %q: %v: %s", link.path, link.target, err, output)
+		if err := wintest.CreateJunction(link.path, link.target); err != nil {
+			t.Fatal(err)
 		}
 	}
 	for _, test := range []struct{ path, want string }{
@@ -185,8 +186,8 @@ func TestWindowsOpenPathRejectsJunction(t *testing.T) {
 		t.Fatal(err)
 	}
 	junction := filepath.Join(root, "junction")
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", junction, target).CombinedOutput(); err != nil {
-		t.Fatalf("create junction: %v: %s", err, output)
+	if err := wintest.CreateJunction(junction, target); err != nil {
+		t.Fatal(err)
 	}
 	for _, test := range []struct {
 		name      string
