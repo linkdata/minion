@@ -44,12 +44,6 @@ type userLoginView struct {
 	GitHub, GitLab bool
 }
 
-type oauthUserIdentity struct{}
-
-func (oauthUserIdentity) Data() map[string]any { return nil }
-func (oauthUserIdentity) Email() string        { return "" }
-func (oauthUserIdentity) IsAdmin() bool        { return false }
-
 type oauthProvider struct {
 	name, issuer, host string
 	server             *jawsauth.Server

@@ -68,7 +68,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
 	jw.Logger = slog.Default()
-	oauth, err := newOAuthAccess(jw, cfg, statePath, nil)
+	oauth, err := newOAuthAccess(jw, cfg, statePath, &http.Client{Timeout: 15 * time.Second})
 	if err != nil {
 		jw.Close()
 		_ = listener.Close()

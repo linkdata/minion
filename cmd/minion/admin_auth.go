@@ -96,9 +96,6 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		if username := access.sessionUsername(rq.Session()); username != "" {
 			return adminIdentity(username)
 		}
-		if account, _ := oauth.currentUser(rq.Session()); account != "" {
-			return oauthUserIdentity{}
-		}
 		return adminIdentity("")
 	}
 	mux := http.NewServeMux()
