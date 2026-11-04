@@ -29,6 +29,12 @@ func runHashMode() int {
 		fmt.Fprintln(os.Stderr, "-mode=hash requires a terminal on stderr for the prompt")
 		return 2
 	}
+	stdinInfo, stdinErr := os.Stdin.Stat()
+	stderrInfo, stderrErr := os.Stderr.Stat()
+	if stdinErr != nil || stderrErr != nil || !os.SameFile(stdinInfo, stderrInfo) {
+		fmt.Fprintln(os.Stderr, "-mode=hash requires stdin and stderr to use the same terminal")
+		return 2
+	}
 	password, err := readAdminPassword(fd)
 	fmt.Fprintln(os.Stderr)
 	if err != nil {

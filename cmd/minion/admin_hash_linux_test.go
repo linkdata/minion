@@ -177,6 +177,38 @@ func TestHashModeRejectsRedirectedStderr(t *testing.T) {
 	}
 }
 
+func TestHashModeRejectsDifferentTerminals(t *testing.T) {
+	_, input, before := newHashPTY(t)
+	promptMaster, prompt, _ := newHashPTY(t)
+	stdout, err := os.CreateTemp(t.TempDir(), "hash-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdout.Close()
+	oldIn, oldOut, oldErr := os.Stdin, os.Stdout, os.Stderr
+	os.Stdin, os.Stdout, os.Stderr = input, stdout, prompt
+	code := runHashMode()
+	os.Stdin, os.Stdout, os.Stderr = oldIn, oldOut, oldErr
+	if code != 2 {
+		t.Fatalf("different terminals returned %d, want 2", code)
+	}
+	after, err := unix.IoctlGetTermios(int(input.Fd()), unix.TCGETS)
+	if err != nil || *after != *before {
+		t.Fatalf("input terminal changed: before=%+v after=%+v error=%v", before, after, err)
+	}
+	if err := prompt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	message, _ := io.ReadAll(promptMaster)
+	if !strings.Contains(string(message), "same terminal") || strings.Contains(string(message), "Admin password:") {
+		t.Fatalf("prompt terminal output=%q", message)
+	}
+	hash, err := os.ReadFile(stdout.Name())
+	if err != nil || len(hash) != 0 {
+		t.Fatalf("different terminals printed hash: output=%q error=%v", hash, err)
+	}
+}
+
 func TestHashModeRestoresTerminalOnSignal(t *testing.T) {
 	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
 		t.Run(sig.String(), func(t *testing.T) {
