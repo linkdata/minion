@@ -226,12 +226,13 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	if provider != nil {
 		view.Provider = provider.name
 	}
+	canLink := account == "" || !a.links.hasAlias(account)
 	for _, p := range a.providers {
 		switch p.name {
 		case "github":
-			view.GitHub = provider != p
+			view.GitHub = provider != p && canLink
 		case "gitlab":
-			view.GitLab = provider != p
+			view.GitLab = provider != p && canLink
 		}
 	}
 	ui.Handler(a.jaws, "user login", view).ServeHTTP(w, r)

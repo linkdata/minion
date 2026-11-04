@@ -21,7 +21,7 @@ import (
 
 const maxUserLinksBytes = 8 << 20
 
-var errUserLinkConflict = errors.New("identity already linked to another account")
+var errUserLinkConflict = errors.New("account link conflicts with an existing identity")
 
 // userIdentity uses the provider's immutable subject.
 type userIdentity struct {
@@ -102,6 +102,7 @@ func openUserLinks(path string) (*userLinks, error) {
 	if decoder.Decode(&trailing) != io.EOF || saved.Version != 1 || saved.Links == nil {
 		return nil, errors.New("invalid user links format")
 	}
+	seenRoots := make(map[string]bool)
 	for alias, root := range saved.Links {
 		if !validUserKey(alias) || !validUserKey(root) || alias == root {
 			return nil, errors.New("invalid user links identity")
@@ -109,6 +110,11 @@ func openUserLinks(path string) (*userLinks, error) {
 		if _, chained := saved.Links[root]; chained {
 			return nil, errors.New("user links contain a chain")
 		}
+		provider, _, _ := strings.Cut(alias, ":")
+		if seenRoots[root] || strings.HasPrefix(root, provider+":") {
+			return nil, errors.New("user links contain duplicate providers")
+		}
+		seenRoots[root] = true
 	}
 	links.links = saved.Links
 	return links, nil
@@ -126,7 +132,18 @@ func (s *userLinks) account(key string) string {
 	return key
 }
 
-// link joins two proven accounts, retaining every prior alias of each account.
+func (s *userLinks) hasAlias(account string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, root := range s.links {
+		if root == account {
+			return true
+		}
+	}
+	return false
+}
+
+// link attaches a proved identity to the current account.
 func (s *userLinks) link(current, proved string) error {
 	if !validUserKey(current) || !validUserKey(proved) {
 		return errors.New("invalid user identity")
@@ -149,8 +166,12 @@ func (s *userLinks) link(current, proved string) error {
 	if second != proved {
 		return errUserLinkConflict
 	}
+	provider, _, _ := strings.Cut(proved, ":")
+	if strings.HasPrefix(first, provider+":") {
+		return errUserLinkConflict
+	}
 	for _, root := range s.links {
-		if root == second {
+		if root == second || root == first {
 			return errUserLinkConflict
 		}
 	}

@@ -660,6 +660,9 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 	if account := auth.links.account(gitlabKey); account == "github:github.com:42" {
 		t.Fatal("matching provider labels linked accounts without dual proof")
 	}
+	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, signed, ""); !strings.Contains(page.Body.String(), "Link GitLab account") {
+		t.Fatalf("unlinked account cannot link GitLab: %q", page.Body.String())
+	}
 	if denied := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, signed, "https://other.example"); denied.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin account link: status=%d", denied.Code)
 	}
@@ -685,6 +688,9 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 	if account, _ := auth.currentUser(jw.GetSession(requestWithCookie(signed))); account != "github:github.com:42" {
 		t.Fatalf("current account after link = %q", account)
 	}
+	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, signed, ""); strings.Contains(page.Body.String(), "Link GitLab account") {
+		t.Fatalf("linked GitHub sign-in offered another GitLab identity: %q", page.Body.String())
+	}
 
 	// A later GitLab sign-in must resolve through the persisted account link.
 	start = adminResponse(handler, http.MethodGet, "/auth/gitlab/login", nil, signed, "")
@@ -699,5 +705,8 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 	}
 	if account, _ := auth.currentUser(jw.GetSession(requestWithCookie(login.Result().Cookies()[0]))); account != "github:github.com:42" {
 		t.Fatalf("GitLab account after sign-in = %q", account)
+	}
+	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, login.Result().Cookies()[0], ""); strings.Contains(page.Body.String(), "Link GitHub account") {
+		t.Fatalf("linked GitLab sign-in offered another GitHub identity: %q", page.Body.String())
 	}
 }
