@@ -11,7 +11,7 @@ import (
 )
 
 func TestUserLinksMergeExistingGroupsAndHostIdentity(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json.user-links.json")
+	path := filepath.Join(t.TempDir(), "state.json.link")
 	store, err := openUserLinks(path)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestUserLinksMergeExistingGroupsAndHostIdentity(t *testing.T) {
 }
 
 func TestUserLinksRejectCorruptFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.json.user-links.json")
+	path := filepath.Join(t.TempDir(), "state.json.link")
 	if err := os.WriteFile(path, []byte(`{"version":1,"links":{"github:github.com:7":"gitlab:gitlab.example:7","gitlab:gitlab.example:7":"github:github.com:7"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

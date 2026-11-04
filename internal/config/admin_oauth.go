@@ -27,7 +27,7 @@ func (a *AdminConfig) validateOAuth() error {
 		}
 		redirect, err := url.Parse(client.RedirectURL)
 		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != "/auth/callback" ||
-			redirect.RawQuery != "" || redirect.Fragment != "" || redirect.RawPath != "" {
+			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
 			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP /auth/callback URL with an ASCII host and no IPv6 zone", entry.name)
 		}
 		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
@@ -44,7 +44,7 @@ func (a *AdminConfig) validateOAuth() error {
 		}
 		base, err := url.Parse(client.BaseURL)
 		if err != nil || !validOAuthOrigin(base, false) || base.Path != "" && base.Path != "/" ||
-			base.RawQuery != "" || base.Fragment != "" || base.RawPath != "" {
+			strings.ContainsAny(client.BaseURL, "?#") || base.RawPath != "" {
 			return errors.New("admin.gitlab_oauth base_url must be an HTTPS origin with an ASCII host and no IPv6 zone")
 		}
 		host := strings.ToLower(base.Host)

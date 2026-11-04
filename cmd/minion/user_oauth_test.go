@@ -435,14 +435,14 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	if response := oauthRequest(handler, http.MethodGet, "/auth/login", "", glSession); strings.Contains(response.Body.String(), "Signed in as") {
 		t.Fatal("shared JaWS logout left the user session live")
 	}
-	reopened, err := openUserLinks(statePath + ".user-links.json")
+	reopened, err := openUserLinks(statePath + ".link")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reopened.account(ghKey) != reopened.account(glKey) {
 		t.Fatalf("link did not survive restart: error=%v gh=%q gl=%q", err, reopened.account(ghKey), reopened.account(glKey))
 	}
-	data, err := os.ReadFile(statePath + ".user-links.json")
+	data, err := os.ReadFile(statePath + ".link")
 	if err != nil || strings.Contains(string(data), "synthetic-") || strings.Contains(string(data), "-secret") {
 		t.Fatalf("persisted provider credential: read_error=%v", err)
 	}
@@ -534,6 +534,25 @@ func TestOAuthPrunesExpiredPendingWithoutRequest(t *testing.T) {
 	}
 	if _, exists := a.pending["live"]; !exists {
 		t.Fatal("live sign-in state was pruned")
+	}
+}
+
+func TestOAuthLinksSidecarFitsLongStateFilename(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), strings.Repeat("s", 240))
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{}}
+	a, err := newOAuthAccess(nil, cfg, statePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.links.link("github:github.com:1", "github:github.com:2"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := newOAuthAccess(nil, cfg, statePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.links.account("github:github.com:2"); got != "github:github.com:1" {
+		t.Fatalf("long-name sidecar did not preserve link: %q", got)
 	}
 }
 

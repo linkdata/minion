@@ -68,7 +68,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if statePath == "" {
 		return nil, errors.New("OAuth sign-in requires a state path")
 	}
-	links, err := openUserLinks(statePath + ".user-links.json")
+	links, err := openUserLinks(statePath + ".link")
 	if err != nil {
 		return nil, fmt.Errorf("open user links: %w", err)
 	}
