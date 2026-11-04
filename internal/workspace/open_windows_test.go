@@ -159,9 +159,7 @@ func TestWindowsApplyRefusesHardlinkedTargetBeforeTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 	name := filepath.Join(root, "file")
-	if err := os.Link(outside, name); err != nil {
-		t.Skipf("Windows hard links unavailable: %v", err)
-	}
+	wintest.RequireHardLink(t, outside, name)
 	change := []Change{{Path: "file", Mode: Regular, Data: []byte("updated")}}
 	if err := Apply(root, change); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
 		t.Fatalf("hardlinked target was accepted: %v", err)
@@ -295,9 +293,7 @@ func TestWindowsReadStabilityRejectsChangedMetadata(t *testing.T) {
 	})
 	t.Run("hard link count", func(t *testing.T) {
 		alias := filepath.Join(filepath.Dir(name), "alias")
-		if err := os.Link(name, alias); err != nil {
-			t.Skipf("Windows hard links unavailable: %v", err)
-		}
+		wintest.RequireHardLink(t, name, alias)
 		defer os.Remove(alias)
 		if err := checkReadStability(before, before, int(before.Size()), file, true); err == nil || !strings.Contains(err.Error(), "hard links changed") {
 			t.Fatalf("new hard link was not detected: %v", err)

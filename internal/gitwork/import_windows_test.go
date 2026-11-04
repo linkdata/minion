@@ -28,9 +28,7 @@ func TestWindowsImportAnchorsOrdinaryAndHostileTargets(t *testing.T) {
 		fixture := newFixture(t)
 		name := filepath.Join(fixture.checkout.path, "README.md")
 		alias := filepath.Join(t.TempDir(), "outside")
-		if err := os.Link(name, alias); err != nil {
-			t.Skipf("Windows hard links unavailable: %v", err)
-		}
+		wintest.RequireHardLink(t, name, alias)
 		change := []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}
 		if err := fixture.checkout.Import(t.Context(), fixture.base, change); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
 			t.Fatalf("hardlinked import accepted: %v", err)
