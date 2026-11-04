@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -50,7 +51,7 @@ func (e *Orchestrator) DashboardActionDetail(attemptID string, now time.Time) (D
 	if !workspace.ValidIdentitySegment(attemptID) {
 		return DashboardDetail{}, false, errors.New("invalid attempt ID")
 	}
-	data, err := e.Store.ReadSaved()
+	data, err := readDashboardState(e.Store.ReadSavedDurable, runtime.GOOS == "windows")
 	if err != nil {
 		return DashboardDetail{}, false, err
 	}
