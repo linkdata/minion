@@ -84,7 +84,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 				cmd.Stdout = &output
 				cmd.Stderr = os.Stderr
 				if err := executil.Run(cmd); err != nil {
-					return aicli.Result{}, err
+					return aicli.Result{}, fmt.Errorf("native model helper: %w; stdout: %q", err, output.String())
 				}
 				return aicli.Result{Answer: output.String(), UsageComplete: true}, nil
 			}}
