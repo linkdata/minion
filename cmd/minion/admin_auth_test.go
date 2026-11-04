@@ -243,6 +243,23 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	}
 }
 
+func TestAdminDuplicateCookieOverflowRejected(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	login := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, adminGuestCookie(t, handler), "")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("login: status=%d cookies=%v", login.Code, login.Result().Cookies())
+	}
+	cookie := login.Result().Cookies()[0]
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	request.Header.Set("Cookie", jw.CookieName+"="+cookie.Value+strings.Repeat("; filler=x", 3001)+"; "+jw.CookieName+"="+cookie.Value)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("oversized duplicate session cookie bypassed guard: status=%d", response.Code)
+	}
+}
+
 func TestAdminGuestLoginWebSocket(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	server := httptest.NewServer(handler)
@@ -381,7 +398,7 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 	}
 }
 
-func TestAdminLoginRequiresLivePageSession(t *testing.T) {
+func TestAdminLoginRequiresLiveSession(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusConflict || len(response.Result().Cookies()) != 0 {

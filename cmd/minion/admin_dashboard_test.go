@@ -594,14 +594,7 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 		if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "No action is in progress.") {
 			t.Fatalf("network dashboard %s: status=%d body=%s", path, page.StatusCode, pageBody)
 		}
-		_, afterKey, found := strings.Cut(string(pageBody), `<meta name="jawsKey" content="`)
-		if !found {
-			t.Fatal("dashboard omitted JaWS connection key")
-		}
-		key, _, found := strings.Cut(afterKey, `"`)
-		if !found || key == "" {
-			t.Fatal("dashboard JaWS connection key is empty")
-		}
+		key := adminJaWSKey(t, string(pageBody))
 		header := http.Header{}
 		header.Set("Cookie", cookie.Name+"="+cookie.Value)
 		header.Set("Origin", baseURL)

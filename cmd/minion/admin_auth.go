@@ -196,7 +196,12 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		return false
 	}
 	seen := false
-	for _, cookie := range r.Cookies() {
+	cookies := r.Cookies()
+	// Go drops all cookies when a header has too many parts; JaWS still reads it.
+	if len(r.Header.Values("Cookie")) != 0 && len(cookies) == 0 {
+		return false
+	}
+	for _, cookie := range cookies {
 		if cookie.Name == a.jaws.CookieName {
 			if seen {
 				return false
@@ -331,7 +336,7 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	previous := a.jaws.GetSession(r)
 	if previous == nil {
 		a.sessionAdmissionMu.Unlock()
-		http.Error(w, "Sign-in page expired; reload and try again", http.StatusConflict)
+		http.Error(w, "Sign-in session unavailable; load the login page and try again", http.StatusConflict)
 		return
 	}
 	previousCookie := previous.CookieValue()
