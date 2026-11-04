@@ -47,11 +47,15 @@ func TestOAuthPreferencesUseJaWSAndBoundSavedChoice(t *testing.T) {
 	}
 	account := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
 	form := url.Values{"main": {preferenceChoiceValue(choice)}, "identity": {preferenceFormIdentity(account)}}
-	if saved := adminResponse(handler, http.MethodPost, "/auth/preferences", form, signed, "https://admin.example"); saved.Code != http.StatusSeeOther {
-		t.Fatalf("save: status=%d body=%q", saved.Code, saved.Body.String())
+	if saved := adminResponse(handler, http.MethodPost, "/auth/preferences", form, signed, "https://admin.example"); saved.Code != http.StatusSeeOther || saved.Header().Get("Location") != "/auth/preferences" {
+		t.Fatalf("save: status=%d location=%q body=%q", saved.Code, saved.Header().Get("Location"), saved.Body.String())
 	}
 	if got, err := auth.links.preferencesForGitHubID(42); err != nil || got.Main != choice {
 		t.Fatalf("saved preference: %+v, %v", got, err)
+	}
+	forged := adminResponse(handler, http.MethodGet, "/auth/preferences?saved=1", nil, signed, "")
+	if forged.Code != http.StatusOK || strings.Contains(forged.Body.String(), "Preferences saved for future actions") {
+		t.Fatalf("query flag falsely claims a save: status=%d body=%q", forged.Code, forged.Body.String())
 	}
 	form.Set("identity", "stale account")
 	if stale := adminResponse(handler, http.MethodPost, "/auth/preferences", form, signed, "https://admin.example"); stale.Code != http.StatusConflict {

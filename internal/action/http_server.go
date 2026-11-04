@@ -134,7 +134,7 @@ func (e *HTTPExecutor) SetWorkRoot(workRoot string) error {
 	return nil
 }
 
-// SetWorkerCredentials configures assignment-only credentials before the worker pulls.
+// SetWorkerCredentials configures credentials shared during worker preflight and assignment.
 func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error {
 	if e == nil {
 		return errors.New("HTTP executor is missing")

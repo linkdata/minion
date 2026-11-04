@@ -16,7 +16,6 @@ import (
 var userPreferencesHTML = template.Must(template.New("user preferences").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Model preferences</title>{{$.HeadHTML}}</head>
 <body><main><h1>Model preferences</h1>
-{{if .Dot.Saved}}<p role="status">Preferences saved for future actions.</p>{{end}}
 {{range .Dot.Notices}}<p role="status">{{.}}</p>{{end}}
 {{if .Dot.Fields}}
 <p>Choose administrator-approved settings for future actions.</p>
@@ -49,7 +48,6 @@ type userPreferencesView struct {
 	Identity string
 	Fields   []userPreferenceField
 	Notices  []string
-	Saved    bool
 }
 
 func preferenceChoiceValue(choice config.RoleModelConfig) string {
@@ -100,7 +98,7 @@ func (a *oauthAccess) preferencePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Preferences unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	view := userPreferencesView{Identity: preferenceFormIdentity(account), Saved: r.URL.Query().Has("saved")}
+	view := userPreferencesView{Identity: preferenceFormIdentity(account)}
 	for _, role := range []struct {
 		name, label string
 		choices     []config.RoleModelConfig
@@ -193,5 +191,5 @@ func (a *oauthAccess) savePreferences(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Preferences unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	http.Redirect(w, r, "/auth/preferences?saved=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/auth/preferences", http.StatusSeeOther)
 }
