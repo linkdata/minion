@@ -53,7 +53,7 @@ func dashboardTestAccepted(at time.Time) *state.AcceptedAction {
 func dashboardTestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, nil, "")
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, adminGuestCookie(t, handler), "")
 	if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
 		t.Fatalf("admin login: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
 	}
@@ -567,10 +567,7 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 	t.Cleanup(func() { _ = admin.Close() })
 	baseURL := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	login, err := client.PostForm(baseURL+"/admin/login", url.Values{"username": {"operator"}, "password": {"correct-password"}})
-	if err != nil {
-		t.Fatal(err)
-	}
+	login, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	login.Body.Close()
 	if login.StatusCode != http.StatusSeeOther || len(login.Cookies()) != 1 {
 		t.Fatalf("network login: status=%d cookies=%d", login.StatusCode, len(login.Cookies()))
