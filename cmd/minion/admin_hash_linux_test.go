@@ -31,7 +31,8 @@ func TestHashModeInteractiveTerminal(t *testing.T) {
 		{name: "malformed UTF-8", input: "\xff\r", wantCode: 2, errorText: "1 to 64 Unicode code points"},
 		{name: "malformed delayed paste", input: "\xff", delayed: "delayed-secret\r", hidden: "delayed-secret", wantCode: 2, errorText: "valid UTF-8"},
 		{name: "Escape delayed paste", input: "\x1b", delayed: "delayed-secret\r", hidden: "delayed-secret", wantCode: 1, errorText: "unsupported terminal control key"},
-		{name: "Ctrl-C", input: "\x03", wantCode: 1, errorText: "read admin password"},
+		{name: "Ctrl-C delayed paste", input: "\x03", delayed: "delayed-secret\r", hidden: "delayed-secret", wantCode: 1, errorText: "read admin password"},
+		{name: "Ctrl-D delayed paste", input: "\x04", delayed: "delayed-secret\r", hidden: "delayed-secret", wantCode: 1, errorText: "read admin password"},
 		{name: "stdout failure", input: "password\r", wantCode: 1, errorText: "write admin password hash", failStdout: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

@@ -86,6 +86,7 @@ func readAdminPassword(fd int) (password string, err error) {
 	reader := bufio.NewReader(os.Stdin)
 	runes := make([]rune, 0, 64)
 	count := 0
+	cancelled := false
 	var inputErr error
 	for {
 		r, size, err := reader.ReadRune()
@@ -98,6 +99,9 @@ func readAdminPassword(fd int) (password string, err error) {
 		}
 		switch r {
 		case '\r', '\n':
+			if cancelled {
+				return "", io.EOF
+			}
 			if inputErr != nil {
 				return "", inputErr
 			}
@@ -106,7 +110,10 @@ func readAdminPassword(fd int) (password string, err error) {
 			}
 			return string(runes), nil
 		case '\x03', '\x04':
-			return "", io.EOF
+			if !cancelled {
+				cancelled = true
+				fmt.Fprint(os.Stderr, "\r\nPress Enter to cancel: ")
+			}
 		case '\b', '\x7f':
 			if count > 0 {
 				count--
@@ -130,9 +137,7 @@ func hashAdminPassword(password string) (string, error) {
 		return "", errInvalidAdminPassword
 	}
 	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("generate admin password salt: %w", err)
-	}
+	rand.Read(salt)
 	tag := argon2.IDKey([]byte(password), salt, 2, 19456, 1, 32)
 	return fmt.Sprintf("$argon2id$v=19$m=19456,t=2,p=1$%s$%s",
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(tag)), nil
