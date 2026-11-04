@@ -191,7 +191,7 @@ func (a *adminAccess) reserveAttempt(username string) bool {
 
 func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	// A 64-character password can expand to 768 URL-encoded bytes.
+	// A 64-code-point password can expand to 768 URL-encoded bytes.
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<10)
 	if err := r.ParseForm(); err != nil {
 		closeUnreadAdminBody(w, r)

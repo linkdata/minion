@@ -28,7 +28,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
-		t.Fatalf("checked-in configuration has operational settings: %+v", cfg)
+		t.Fatalf("checked-in configuration differs from expected sample: %+v", cfg)
 	}
 }
 
