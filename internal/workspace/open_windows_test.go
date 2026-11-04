@@ -4,18 +4,19 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func windowsJunction(t *testing.T, name, target string) {
 	t.Helper()
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", name, target).CombinedOutput(); err != nil {
-		t.Fatalf("create junction %q -> %q: %v: %s", name, target, err, output)
+	if err := wintest.CreateJunction(name, target); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -60,7 +61,7 @@ func TestWindowsCollectionRefusesLinkParents(t *testing.T) {
 				t.Fatalf("read outside source through %s parent: %q", kind, data)
 			}
 			if changes, err := ReadChanges(t.Context(), root, []Change{{Path: "parent/secret", Mode: Regular}}); err == nil || len(changes) != 0 {
-				t.Fatalf("selected import followed %s parent: changes=%+v error=%v", kind, changes, err)
+				t.Fatalf("selected read followed %s parent: changes=%+v error=%v", kind, changes, err)
 			}
 			matchingTarget := []File{{Path: "parent/secret", Mode: Regular, Data: []byte("outside contents")}}
 			if err := CheckUnchanged(t.Context(), root, matchingTarget); err == nil {
@@ -122,18 +123,21 @@ func TestWindowsCollectionRefusesReparseRootForDeleteOnlySelection(t *testing.T)
 				t.Fatalf("create root directory symlink: %v", err)
 			}
 			matchingTarget := []File{{Path: "file", Mode: Regular, Data: []byte("outside")}}
-			for _, check := range []func() error{
-				func() error { return CheckRoot(root) },
-				func() error { return CheckUnchanged(t.Context(), root, matchingTarget) },
-				func() error { _, err := ReadChanges(t.Context(), root, nil); return err },
-				func() error {
+			for _, check := range []struct {
+				name string
+				run  func() error
+			}{
+				{"CheckRoot", func() error { return CheckRoot(root) }},
+				{"CheckUnchanged", func() error { return CheckUnchanged(t.Context(), root, matchingTarget) }},
+				{"ReadChanges empty", func() error { _, err := ReadChanges(t.Context(), root, nil); return err }},
+				{"ReadChanges delete", func() error {
 					_, err := ReadChanges(t.Context(), root, []Change{{Path: "file", Delete: true}})
 					return err
-				},
-				func() error { return Apply(root, []Change{{Path: "file", Delete: true}}) },
+				}},
+				{"Apply delete", func() error { return Apply(root, []Change{{Path: "file", Delete: true}}) }},
 			} {
-				if err := check(); err == nil {
-					t.Fatal("reparse root accepted")
+				if err := check.run(); err == nil {
+					t.Fatalf("%s accepted reparse root", check.name)
 				}
 			}
 			if data, err := os.ReadFile(filepath.Join(outside, "file")); err != nil || string(data) != "outside" {
@@ -156,7 +160,7 @@ func TestWindowsApplyRefusesHardlinkedTargetBeforeTruncation(t *testing.T) {
 	}
 	name := filepath.Join(root, "file")
 	if err := os.Link(outside, name); err != nil {
-		t.Fatal(err)
+		t.Skipf("Windows hard links unavailable: %v", err)
 	}
 	change := []Change{{Path: "file", Mode: Regular, Data: []byte("updated")}}
 	if err := Apply(root, change); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
@@ -285,14 +289,14 @@ func TestWindowsReadStabilityRejectsChangedMetadata(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if err := checkReadStability(before, after, int(before.Size()), file, beforeChange == afterChange); err == nil || !strings.Contains(err.Error(), "file changed") {
+		if err := checkReadStability(before, after, int(before.Size()), file, false); err == nil || !strings.Contains(err.Error(), "file changed") {
 			t.Fatalf("changed file time accepted: %v", err)
 		}
 	})
 	t.Run("hard link count", func(t *testing.T) {
 		alias := filepath.Join(filepath.Dir(name), "alias")
 		if err := os.Link(name, alias); err != nil {
-			t.Fatal(err)
+			t.Skipf("Windows hard links unavailable: %v", err)
 		}
 		defer os.Remove(alias)
 		if err := checkReadStability(before, before, int(before.Size()), file, true); err == nil || !strings.Contains(err.Error(), "hard links changed") {

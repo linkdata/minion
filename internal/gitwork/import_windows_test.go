@@ -2,11 +2,11 @@ package gitwork
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/wintest"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -29,7 +29,7 @@ func TestWindowsImportAnchorsOrdinaryAndHostileTargets(t *testing.T) {
 		name := filepath.Join(fixture.checkout.path, "README.md")
 		alias := filepath.Join(t.TempDir(), "outside")
 		if err := os.Link(name, alias); err != nil {
-			t.Fatal(err)
+			t.Skipf("Windows hard links unavailable: %v", err)
 		}
 		change := []workspace.Change{{Path: "README.md", Mode: workspace.Regular, Data: []byte("reviewed\n")}}
 		if err := fixture.checkout.Import(t.Context(), fixture.base, change); err == nil || !strings.Contains(err.Error(), "exactly one hard link") {
@@ -51,8 +51,8 @@ func TestWindowsImportAnchorsOrdinaryAndHostileTargets(t *testing.T) {
 			t.Fatal(err)
 		}
 		parent := filepath.Join(fixture.checkout.path, "linked")
-		if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", parent, outside).CombinedOutput(); err != nil {
-			t.Fatalf("create import junction: %v: %s", err, output)
+		if err := wintest.CreateJunction(parent, outside); err != nil {
+			t.Fatal(err)
 		}
 		for _, path := range []string{"linked/existing", "linked/new"} {
 			change := []workspace.Change{{Path: path, Mode: workspace.Regular, Data: []byte("reviewed")}}

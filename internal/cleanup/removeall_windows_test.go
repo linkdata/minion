@@ -2,9 +2,10 @@ package cleanup
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func TestRemoveAllWindowsRemovesJobTree(t *testing.T) {
@@ -57,8 +58,8 @@ func TestRemoveAllWindowsKeepsJunctionTarget(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", filepath.Join(job, "link"), outside).CombinedOutput(); err != nil {
-		t.Fatalf("create nested junction: %v: %s", err, output)
+	if err := wintest.CreateJunction(filepath.Join(job, "link"), outside); err != nil {
+		t.Fatal(err)
 	}
 	if err := RemoveAll(job); err != nil {
 		t.Fatal(err)
@@ -87,8 +88,8 @@ func TestRemoveAllWindowsReplacedRootKeepsOutside(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", job, outside).CombinedOutput(); err != nil {
-		t.Fatalf("replace cleanup root with junction: %v: %s", err, output)
+	if err := wintest.CreateJunction(job, outside); err != nil {
+		t.Fatal(err)
 	}
 	if err := RemoveAll(job); err != nil {
 		t.Fatal(err)

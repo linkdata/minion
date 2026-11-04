@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
@@ -58,9 +59,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 	if err != nil || calls != 1 || strings.TrimSpace(result.Answer) != "native model answer" {
 		t.Fatalf("native action result=%q calls=%d error=%v", result.Answer, calls, err)
 	}
-	if entries, err := os.ReadDir(runner.WorkRoot); err != nil || len(entries) != 0 {
-		t.Fatalf("completed native action left workspaces: %v, %v", entries, err)
-	}
+	assertEmptyDir(t, runner.WorkRoot)
 }
 
 func TestNativeWindowsRunnerCleansJunctionAfterModelFailure(t *testing.T) {
@@ -72,17 +71,15 @@ func TestNativeWindowsRunnerCleansJunctionAfterModelFailure(t *testing.T) {
 	}
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		link := filepath.Join(request.dir, "linked")
-		if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
-			return aicli.Result{}, fmt.Errorf("create model junction: %w: %s", err, output)
+		if err := wintest.CreateJunction(link, outside); err != nil {
+			return aicli.Result{}, err
 		}
 		return aicli.Result{}, errors.New("fixture model failure")
 	}}
 	if result, err := runner.Run(t.Context(), job); err == nil || !strings.Contains(err.Error(), "fixture model failure") {
 		t.Fatalf("hostile model failure result=%+v error=%v", result, err)
 	}
-	if entries, err := os.ReadDir(runner.WorkRoot); err != nil || len(entries) != 0 {
-		t.Fatalf("rejected native action left workspaces: %v, %v", entries, err)
-	}
+	assertEmptyDir(t, runner.WorkRoot)
 	if data, err := os.ReadFile(keep); err != nil || string(data) != "keep" {
 		t.Fatalf("cleanup touched junction target: %q, %v", data, err)
 	}
