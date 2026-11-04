@@ -58,6 +58,7 @@ type loginWindow struct {
 
 type adminAccess struct {
 	jaws               *jaws.Jaws
+	oauth              *oauthAccess
 	accounts           map[string]config.AdminAccount
 	dummy              config.AdminAccount
 	mu                 sync.Mutex
@@ -81,7 +82,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := jw.AddTemplateLookuper(adminLoginHTML); err != nil {
 		return nil, err
 	}
-	access := &adminAccess{jaws: jw, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2), rotatedCookies: make(map[[32]byte]time.Time)}
+	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2), rotatedCookies: make(map[[32]byte]time.Time)}
 	for _, account := range cfg.Administrators {
 		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
 			continue
@@ -363,6 +364,10 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.sessionAdmissionMu.Lock()
+	if a.oauth != nil {
+		a.oauth.linkMu.Lock()
+		defer a.oauth.linkMu.Unlock()
+	}
 	previous := a.jaws.GetSession(r)
 	if previous == nil {
 		a.sessionAdmissionMu.Unlock()
@@ -398,6 +403,10 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	a.sessionAdmissionMu.Lock()
+	if a.oauth != nil {
+		a.oauth.linkMu.Lock()
+		defer a.oauth.linkMu.Unlock()
+	}
 	sess := a.jaws.GetSession(r)
 	if sess != nil {
 		sess.Clear()

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/jaws/lib/ui"
@@ -58,11 +59,16 @@ func (p *oauthProvider) identity(claims map[string]any) (id userIdentity, ok boo
 }
 
 type oauthAccess struct {
-	jaws      *jaws.Jaws
-	links     *userLinks
-	mux       *http.ServeMux
-	providers []*oauthProvider
+	jaws        *jaws.Jaws
+	links       *userLinks
+	mux         *http.ServeMux
+	providers   []*oauthProvider
+	admissionMu sync.Mutex
+	linkMu      sync.Mutex
 }
+
+// Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
+const maxOAuthAdmissionSessions = maxAdminSessions - 32
 
 func githubProfileSubject(claims map[string]any) (string, error) {
 	raw, ok := claims["id"].(json.Number)
@@ -131,6 +137,14 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 			if strings.HasSuffix(path, "/login") {
 				login := handler
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					a.admissionMu.Lock()
+					defer a.admissionMu.Unlock()
+					if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
+						w.Header().Set("Cache-Control", "no-store")
+						w.Header().Set("Retry-After", "60")
+						http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
+						return
+					}
 					r.Header.Set("Referer", "/auth/login")
 					login.ServeHTTP(w, r)
 				})
@@ -143,6 +157,8 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 	}
 	p.server = srv
 	srv.LinkEvent = func(sess *jaws.Session, _ *http.Request, claims map[string]any) (int, error) {
+		a.linkMu.Lock()
+		defer a.linkMu.Unlock()
 		current, source := a.currentUser(sess)
 		proved, ok := p.identity(claims)
 		if current == "" || source == p || !ok {
@@ -224,6 +240,8 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
+	a.linkMu.Lock()
+	defer a.linkMu.Unlock()
 	sess := a.jaws.GetSession(r)
 	if account, _ := a.currentUser(sess); account == "" {
 		http.Error(w, "Sign in before signing out", http.StatusForbidden)

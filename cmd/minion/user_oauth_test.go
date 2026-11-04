@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -200,6 +201,266 @@ func requestWithCookie(cookie *http.Cookie) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)
 	r.AddCookie(cookie)
 	return r
+}
+
+func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	for jw.SessionCount() < maxOAuthAdmissionSessions-17 {
+		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
+		if response.Code != http.StatusFound || len(response.Result().Cookies()) != 1 {
+			t.Fatalf("OAuth start before limit: status=%d cookies=%v", response.Code, response.Result().Cookies())
+		}
+	}
+	guests := make([]*http.Cookie, 16)
+	for i := range guests {
+		response := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+		if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
+			t.Fatalf("guest page %d: status=%d cookies=%v", i, response.Code, response.Result().Cookies())
+		}
+		guests[i] = response.Result().Cookies()[0]
+	}
+	if got := jw.SessionCount(); got != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("sessions before concurrent starts=%d", got)
+	}
+
+	responses := make([]*httptest.ResponseRecorder, 64)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := range responses {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			var cookie *http.Cookie
+			if i%2 != 0 {
+				cookie = guests[(i/2)%len(guests)]
+			}
+			responses[i] = adminResponse(handler, http.MethodGet, "/auth/github/login", nil, cookie, "")
+		}()
+	}
+	close(start)
+	workers.Wait()
+	cookieFreeStarts := 0
+	for i, response := range responses {
+		if response.Code != http.StatusFound && response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent start %d: status=%d", i, response.Code)
+		}
+		if i%2 == 0 && response.Code == http.StatusFound {
+			cookieFreeStarts++
+		}
+	}
+	if cookieFreeStarts != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
+		t.Fatalf("cookie-free starts=%d sessions=%d", cookieFreeStarts, jw.SessionCount())
+	}
+	for _, cookie := range []*http.Cookie{nil, guests[0]} {
+		if response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, cookie, ""); response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("OAuth start at reserve: status=%d cookies=%v", response.Code, response.Result().Cookies())
+		}
+	}
+	admin := adminGuestCookie(t, handler)
+	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
+		"username": {"operator"}, "password": {"correct-password"},
+	}, admin, "")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login after OAuth saturation: status=%d cookies=%v", login.Code, login.Result().Cookies())
+	}
+	if dashboard := adminResponse(handler, http.MethodGet, "/", nil, login.Result().Cookies()[0], ""); dashboard.Code != http.StatusOK {
+		t.Fatalf("admin dashboard after OAuth saturation: status=%d", dashboard.Code)
+	}
+}
+
+func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
+	issuer, nonce := testGitLabIssuer(t)
+	transport := issuer.Client().Transport
+	var blockToken atomic.Bool
+	tokenEntered := make(chan struct{})
+	tokenRelease := make(chan struct{})
+	releaseToken := sync.OnceFunc(func() { close(tokenRelease) })
+	defer releaseToken()
+	client := &http.Client{Transport: oauthRoundTrip(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case "https://github.com/login/oauth/access_token":
+			return oauthJSON(http.StatusOK, `{"access_token":"proof","token_type":"Bearer","expires_in":3600}`), nil
+		case "https://api.github.com/user":
+			return oauthJSON(http.StatusOK, `{"id":42}`), nil
+		default:
+			if r.URL.String() == issuer.URL+"/token" && blockToken.Load() {
+				close(tokenEntered)
+				<-tokenRelease
+			}
+			return transport.RoundTrip(r)
+		}
+	})}
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+		GitLabOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/gitlab/callback", BaseURL: issuer.URL},
+	}
+	handler, jw, auth := testOAuthAdminHandler(t, cfg, client)
+	signIn := func() (*http.Cookie, *jaws.Session) {
+		start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
+		location, err := url.Parse(start.Header().Get("Location"))
+		if err != nil || start.Code != http.StatusFound || len(start.Result().Cookies()) != 1 {
+			t.Fatalf("GitHub start: status=%d cookies=%v error=%v", start.Code, start.Result().Cookies(), err)
+		}
+		callback := adminResponse(handler, http.MethodGet, "/auth/github/callback?code=proof&state="+url.QueryEscape(location.Query().Get("state")), nil, start.Result().Cookies()[0], "")
+		if callback.Code != http.StatusFound || len(callback.Result().Cookies()) != 1 {
+			t.Fatalf("GitHub login: status=%d cookies=%v", callback.Code, callback.Result().Cookies())
+		}
+		cookie := callback.Result().Cookies()[0]
+		sess := jw.GetSession(requestWithCookie(cookie))
+		if sess == nil {
+			t.Fatal("missing signed-in session")
+		}
+		return cookie, sess
+	}
+	cookie, sess := signIn()
+	linkEvent := auth.providers[1].server.LinkEvent
+	proof := map[string]any{"iss": issuer.URL, "sub": "member:42"}
+	key := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "member:42"}).key()
+
+	auth.linkMu.Lock()
+	linked := make(chan int, 1)
+	linkStarted := make(chan struct{})
+	go func() {
+		close(linkStarted)
+		status, _ := linkEvent(sess, requestWithCookie(cookie), proof)
+		linked <- status
+	}()
+	<-linkStarted
+	select {
+	case status := <-linked:
+		auth.linkMu.Unlock()
+		t.Fatalf("link bypassed persistence lock: status=%d", status)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if account := auth.links.account(key); account != key {
+		auth.linkMu.Unlock()
+		t.Fatalf("link persisted before lock released: %q", account)
+	}
+	auth.linkMu.Unlock()
+	select {
+	case status := <-linked:
+		if status != 0 || auth.links.account(key) != "github:github.com:42" {
+			t.Fatalf("link after lock released: status=%d account=%q", status, auth.links.account(key))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("link did not finish after lock released")
+	}
+
+	staleKey := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "member:43"}).key()
+	for _, path := range []string{"/auth/logout", "/admin/logout"} {
+		t.Run(path, func(t *testing.T) {
+			if path == "/admin/logout" {
+				cookie, sess = signIn()
+			}
+			auth.linkMu.Lock()
+			loggedOut := make(chan *httptest.ResponseRecorder, 1)
+			logoutStarted := make(chan struct{})
+			go func() {
+				close(logoutStarted)
+				loggedOut <- adminResponse(handler, http.MethodPost, path, nil, cookie, "https://admin.example")
+			}()
+			<-logoutStarted
+			select {
+			case response := <-loggedOut:
+				auth.linkMu.Unlock()
+				t.Fatalf("logout bypassed persistence lock: status=%d", response.Code)
+			case <-time.After(50 * time.Millisecond):
+			}
+			if jw.GetSession(requestWithCookie(cookie)) == nil {
+				auth.linkMu.Unlock()
+				t.Fatal("logout closed session before lock released")
+			}
+			auth.linkMu.Unlock()
+			select {
+			case response := <-loggedOut:
+				if response.Code != http.StatusSeeOther || jw.GetSession(requestWithCookie(cookie)) != nil {
+					t.Fatalf("logout after link: status=%d sessionAlive=%t", response.Code, jw.GetSession(requestWithCookie(cookie)) != nil)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("logout did not finish after lock released")
+			}
+			if status, _ := linkEvent(sess, requestWithCookie(cookie), map[string]any{"iss": issuer.URL, "sub": "member:43"}); status != http.StatusForbidden || auth.links.account(staleKey) != staleKey {
+				t.Fatalf("stale link after logout: status=%d account=%q", status, auth.links.account(staleKey))
+			}
+		})
+	}
+	cookie, sess = signIn()
+	auth.linkMu.Lock()
+	rotationStarted := make(chan struct{})
+	rotatedResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		close(rotationStarted)
+		rotatedResult <- adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
+			"username": {"operator"}, "password": {"correct-password"},
+		}, cookie, "")
+	}()
+	<-rotationStarted
+	select {
+	case response := <-rotatedResult:
+		auth.linkMu.Unlock()
+		t.Fatalf("admin login bypassed persistence lock: status=%d", response.Code)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if jw.GetSession(requestWithCookie(cookie)) == nil {
+		auth.linkMu.Unlock()
+		t.Fatal("admin login closed OAuth session before lock released")
+	}
+	auth.linkMu.Unlock()
+	var rotated *httptest.ResponseRecorder
+	select {
+	case rotated = <-rotatedResult:
+	case <-time.After(time.Second):
+		t.Fatal("admin login did not finish after lock released")
+	}
+	if rotated.Code != http.StatusSeeOther || len(rotated.Result().Cookies()) != 1 {
+		t.Fatalf("admin login rotation: status=%d cookies=%v", rotated.Code, rotated.Result().Cookies())
+	}
+	if status, _ := linkEvent(sess, requestWithCookie(cookie), map[string]any{"iss": issuer.URL, "sub": "member:43"}); status != http.StatusForbidden || auth.links.account(staleKey) != staleKey {
+		t.Fatalf("stale link after admin login: status=%d account=%q", status, auth.links.account(staleKey))
+	}
+
+	cookie, _ = signIn()
+	link := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, cookie, "https://admin.example")
+	linkURL, err := url.Parse(link.Header().Get("Location"))
+	if err != nil || link.Code != http.StatusFound || linkURL.Query().Get("state") == "" || linkURL.Query().Get("nonce") == "" {
+		t.Fatalf("GitLab link start: status=%d location=%q error=%v", link.Code, link.Header().Get("Location"), err)
+	}
+	nonce.Store(linkURL.Query().Get("nonce"))
+	blockToken.Store(true)
+	lateCallback := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		lateCallback <- adminResponse(handler, http.MethodGet, "/auth/gitlab/callback?code=proof&state="+url.QueryEscape(linkURL.Query().Get("state")), nil, cookie, "")
+	}()
+	select {
+	case <-tokenEntered:
+	case <-time.After(time.Second):
+		t.Fatal("GitLab callback did not reach provider")
+	}
+	if logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
+		t.Fatalf("logout before callback: status=%d", logout.Code)
+	}
+	releaseToken()
+	select {
+	case response := <-lateCallback:
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("callback after logout: status=%d", response.Code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback did not finish after provider resumed")
+	}
+	lateKey := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "team:42/member"}).key()
+	if saved, err := openUserLinks(auth.links.path); err != nil || saved.account(lateKey) != lateKey {
+		t.Fatalf("late callback persisted link: saved=%v error=%v", saved, err)
+	}
 }
 
 func TestGitHubOAuthFlowAndAuthExpiry(t *testing.T) {
