@@ -17,7 +17,7 @@ import (
 )
 
 var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Minion account</title>{{$.HeadHTML}}</head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion account</title>{{$.HeadHTML}}</head>
 <body><main>
 {{if .Dot.Error}}<p role="alert">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
@@ -314,10 +314,6 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	w.Header().Del("Content-Type")
 	w.Header().Del("Content-Length")
 	w.Header().Set("Cache-Control", "no-store")
-	if a == nil || a.jaws == nil {
-		w.WriteHeader(status)
-		return
-	}
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
 		if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {

@@ -161,7 +161,8 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	}
 	guestErrorPage := adminResponse(handler, http.MethodGet, wrong.Header().Get("Location"), nil, guest, "")
 	if guestErrorPage.Code != http.StatusOK || !strings.Contains(guestErrorPage.Body.String(), `name="jawsKey"`) ||
-		!strings.Contains(guestErrorPage.Body.String(), `role="alert"`) || strings.Contains(guestErrorPage.Body.String(), "wrong") {
+		!strings.Contains(guestErrorPage.Body.String(), `role="alert"`) ||
+		!strings.Contains(guestErrorPage.Body.String(), `<meta name="viewport"`) || strings.Contains(guestErrorPage.Body.String(), "wrong") {
 		t.Fatalf("failed OAuth JaWS page: status=%d body=%q", guestErrorPage.Code, guestErrorPage.Body.String())
 	}
 	missingSession := adminResponse(handler, http.MethodGet, "/auth/github/callback?state=wrong", nil, nil, "")
@@ -170,7 +171,8 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	}
 	errorPage := adminResponse(handler, http.MethodGet, missingSession.Header().Get("Location"), nil, nil, "")
 	if errorPage.Code != http.StatusOK || !strings.Contains(errorPage.Body.String(), `name="jawsKey"`) ||
-		!strings.Contains(errorPage.Body.String(), `role="alert"`) {
+		!strings.Contains(errorPage.Body.String(), `role="alert"`) ||
+		!strings.Contains(errorPage.Body.String(), `<meta name="viewport"`) {
 		t.Fatalf("OAuth fallback JaWS page: status=%d body=%q", errorPage.Code, errorPage.Body.String())
 	}
 	callback := adminResponse(handler, http.MethodGet, "/auth/github/callback?code=proof&state="+url.QueryEscape(location.Query().Get("state")), nil, guest, "")
