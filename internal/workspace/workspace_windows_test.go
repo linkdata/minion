@@ -3,11 +3,12 @@ package workspace
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func TestCanonicalPathResolvesNestedJunctionsWindows(t *testing.T) {
@@ -28,9 +29,7 @@ func TestCanonicalPathResolvesNestedJunctionsWindows(t *testing.T) {
 		{current, release},
 		{visible, filepath.Join(current, "bin")},
 	} {
-		if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link.path, link.target).CombinedOutput(); err != nil {
-			t.Fatalf("create junction %q -> %q: %v: %s", link.path, link.target, err, output)
-		}
+		windowsJunction(t, link.path, link.target)
 	}
 	for _, test := range []struct{ path, want string }{
 		{filepath.Join(visible, "codex.exe"), file},
@@ -185,9 +184,7 @@ func TestWindowsOpenPathRejectsJunction(t *testing.T) {
 		t.Fatal(err)
 	}
 	junction := filepath.Join(root, "junction")
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", junction, target).CombinedOutput(); err != nil {
-		t.Fatalf("create junction: %v: %s", err, output)
-	}
+	windowsJunction(t, junction, target)
 	for _, test := range []struct {
 		name      string
 		path      string
@@ -229,9 +226,7 @@ func TestWindowsReadRejectsHardLink(t *testing.T) {
 	if err := os.WriteFile(name, []byte("content"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Link(name, filepath.Join(root, "alias")); err != nil {
-		t.Skipf("Windows hard links unavailable: %v", err)
-	}
+	wintest.RequireHardLink(t, name, filepath.Join(root, "alias"))
 	if _, err := ReadRegular(name, MaxBytes); err == nil {
 		t.Fatal("read file with multiple hard links")
 	}

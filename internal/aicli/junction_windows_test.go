@@ -3,13 +3,14 @@
 package aicli
 
 import (
-	"os/exec"
 	"testing"
+
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func makeJunctionWindows(t *testing.T, link, target string) {
 	t.Helper()
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
-		t.Fatalf("create junction %q -> %q: %v: %s", link, target, err, output)
+	if err := wintest.CreateJunction(link, target); err != nil {
+		t.Fatal(err)
 	}
 }

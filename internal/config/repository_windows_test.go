@@ -4,10 +4,11 @@ package config
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/linkdata/minion/internal/wintest"
 )
 
 func TestAddRepositoryThroughJunctionWindows(t *testing.T) {
@@ -17,8 +18,8 @@ func TestAddRepositoryThroughJunctionWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 	alias := filepath.Join(t.TempDir(), "config-home")
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", alias, physical).CombinedOutput(); err != nil {
-		t.Fatalf("create config junction: %v: %s", err, output)
+	if err := wintest.CreateJunction(alias, physical); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := AddRepository(filepath.Join(alias, "config.json"), Repository{Name: "owner/second", ID: 3, OwnerID: 2, Actions: []string{"review"}}); err != nil {
 		t.Fatal(err)

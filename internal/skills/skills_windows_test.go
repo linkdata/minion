@@ -4,18 +4,18 @@ package skills
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/linkdata/minion/internal/wintest"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestUserHomeResolvesJunctionWindows(t *testing.T) {
 	physical := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "home")
-	if output, err := exec.Command("cmd.exe", "/c", "mklink", "/J", alias, physical).CombinedOutput(); err != nil {
-		t.Fatalf("create home junction: %v: %s", err, output)
+	if err := wintest.CreateJunction(alias, physical); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("USERPROFILE", alias)
 	want, err := workspace.CanonicalPath(physical)
