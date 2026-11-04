@@ -40,6 +40,8 @@ func TestGitHubProfileSubjectUsesExactNumericID(t *testing.T) {
 		want  string
 	}{
 		{json.Number("9007199254740993"), "9007199254740993"},
+		{json.Number("9223372036854775807"), "9223372036854775807"},
+		{json.Number("9223372036854775808"), ""},
 		{json.Number("0"), ""},
 		{json.Number("01"), ""},
 		{json.Number("1e3"), ""},

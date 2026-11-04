@@ -69,8 +69,8 @@ func githubProfileSubject(claims map[string]any) (string, error) {
 	if !ok {
 		return "", jawsauth.ErrOAuth2InvalidProfile
 	}
-	id, err := strconv.ParseUint(string(raw), 10, 64)
-	if err != nil || id == 0 || strconv.FormatUint(id, 10) != string(raw) {
+	id, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != string(raw) {
 		return "", jawsauth.ErrOAuth2InvalidProfile
 	}
 	return string(raw), nil

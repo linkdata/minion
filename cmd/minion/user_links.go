@@ -49,8 +49,8 @@ func validUserKey(key string) bool {
 		return false
 	}
 	if provider == "github" {
-		id, err := strconv.ParseUint(subject, 10, 64)
-		return host == "github.com" && err == nil && id > 0 && strconv.FormatUint(id, 10) == subject
+		id, err := strconv.ParseInt(subject, 10, 64)
+		return host == "github.com" && err == nil && id > 0 && strconv.FormatInt(id, 10) == subject
 	}
 	u, err := url.Parse("https://" + host)
 	return err == nil && u.Host == host && u.Path == "" && u.User == nil && u.Hostname() != "" &&

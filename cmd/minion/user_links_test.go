@@ -14,6 +14,7 @@ import (
 func TestUserIdentityKeyPreservesProviderSubject(t *testing.T) {
 	for _, id := range []userIdentity{
 		{Provider: "github", Host: "github.com", Subject: "9007199254740993"},
+		{Provider: "github", Host: "github.com", Subject: "9223372036854775807"},
 		{Provider: "gitlab", Host: "gitlab.example:8443", Subject: "team/user:42"},
 		{Provider: "gitlab", Host: "[::1]:8443", Subject: "team/user:42"},
 	} {
@@ -23,6 +24,7 @@ func TestUserIdentityKeyPreservesProviderSubject(t *testing.T) {
 	}
 	for _, key := range []string{
 		"github:github.com:0", "github:github.com:01", "github:github.com:1.0",
+		"github:github.com:9223372036854775808",
 		"github:other.example:42", "gitlab:gitlab.example:%00", "gitlab:gitlab.example:%FF",
 		"gitlab:gitlab.example:" + strings.Repeat("a", 256),
 	} {
