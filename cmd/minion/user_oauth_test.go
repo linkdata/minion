@@ -421,6 +421,7 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	case response := <-callbackDone:
 		t.Fatalf("link callback stopped before provider profile: status=%d", response.Code)
 	case <-time.After(5 * time.Second):
+		close(resumeProfile)
 		t.Fatal("link callback did not reach provider profile")
 	}
 	logout := oauthRequest(handler, http.MethodPost, "/auth/logout", "https://admin.example", ghSession)
