@@ -115,6 +115,38 @@ func TestOAuthRedirectMatchesBrowserDefaultPort(t *testing.T) {
 	}
 }
 
+func TestOAuthGitLabPortSpellingKeepsLinksAcrossRestart(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jw.Close()
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	githubKey := (userIdentity{Provider: "github", Host: "github.com", ID: 9}).key()
+	for i, port := range []string{":08443", ":8443"} {
+		cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{
+			TLSCertFile: "cert.pem", TLSKeyFile: "key.pem",
+			GitLabOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret",
+				RedirectURL: "https://admin.example/auth/callback", BaseURL: "https://gitlab.example" + port}},
+			Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+		if err := cfg.Validate(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		oauth, err := newOAuthAccess(jw, *cfg.Admin, statePath, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gitlabKey := (userIdentity{Provider: "gitlab", Host: oauth.providers["gitlab"].host, ID: 7}).key()
+		if i == 0 {
+			if err := oauth.links.link(githubKey, gitlabKey); err != nil {
+				t.Fatal(err)
+			}
+		} else if oauth.links.account(gitlabKey) != githubKey {
+			t.Fatalf("restarted link for %q did not survive port spelling change", gitlabKey)
+		}
+	}
+}
+
 func TestOAuthCallbackReleasesPerIPBudget(t *testing.T) {
 	jw, err := jaws.New()
 	if err != nil {
@@ -173,6 +205,8 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 	challenges := make(map[string]string)
 	redeemed := make(map[string]bool)
 	providerCalls := 0
+	profileStarted := make(chan struct{})
+	resumeProfile := make(chan struct{})
 	client := &http.Client{Transport: oauthTransportFunc(func(r *http.Request) (*http.Response, error) {
 		providerCalls++
 		switch r.URL.String() {
@@ -209,6 +243,8 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 			case "Bearer synthetic-gl1", "Bearer synthetic-glLink":
 				return oauthTestResponse(`{"id":42,"username":"same-name","email":"same@example.test"}`), nil
 			case "Bearer synthetic-gl2":
+				close(profileStarted)
+				<-resumeProfile
 				return oauthTestResponse(`{"id":84,"username":"another-name"}`), nil
 			}
 		}
@@ -376,11 +412,29 @@ func TestOAuthSignInLinkAndRevocation(t *testing.T) {
 
 	lateState, lateQuery := oauthStart(t, handler, http.MethodPost, "/auth/link/gitlab", ghSession)
 	challenges["gl2"] = lateQuery.Get("code_challenge")
+	callbackDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		callbackDone <- oauthRequest(handler, http.MethodGet, "/auth/callback?state="+lateState.Value+"&code=gl2", "", ghSession, lateState)
+	}()
+	select {
+	case <-profileStarted:
+	case response := <-callbackDone:
+		t.Fatalf("link callback stopped before provider profile: status=%d", response.Code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("link callback did not reach provider profile")
+	}
 	logout := oauthRequest(handler, http.MethodPost, "/auth/logout", "https://admin.example", ghSession)
+	close(resumeProfile)
 	if logout.Code != http.StatusSeeOther {
 		t.Fatalf("user logout status=%d", logout.Code)
 	}
-	if response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+lateState.Value+"&code=gl2", "", ghSession, lateState); response.Code != http.StatusForbidden ||
+	var response *httptest.ResponseRecorder
+	select {
+	case response = <-callbackDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("link callback did not finish after provider response")
+	}
+	if response.Code != http.StatusForbidden ||
 		oauth.links.account((userIdentity{Provider: "gitlab", Host: "gitlab.example", ID: 84}).key()) == oauth.links.account(glKey) {
 		t.Fatalf("revoked first proof linked account: status=%d", response.Code)
 	}
@@ -422,6 +476,39 @@ func TestOAuthPendingStateBound(t *testing.T) {
 	oauth.mu.Unlock()
 	if response := oauthRequest(handler, http.MethodGet, "/auth/github", ""); response.Code != http.StatusSeeOther {
 		t.Fatalf("expired pending state did not release capacity: status=%d", response.Code)
+	}
+}
+
+func TestOAuthExpiredCallbackDoesNotExchange(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jw.Close()
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/callback"}}
+	providerCalled := false
+	client := &http.Client{Transport: oauthTransportFunc(func(*http.Request) (*http.Response, error) {
+		providerCalled = true
+		return oauthTestResponse(`{}`), nil
+	})}
+	oauth, err := newOAuthAccess(jw, cfg, filepath.Join(t.TempDir(), "state.json"), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, cfg, nil, oauth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ := oauthStart(t, handler, http.MethodGet, "/auth/github", nil)
+	oauth.mu.Lock()
+	pending := oauth.pending[state.Value]
+	pending.expires = time.Now().Add(-time.Second)
+	oauth.pending[state.Value] = pending
+	oauth.mu.Unlock()
+	response := oauthRequest(handler, http.MethodGet, "/auth/callback?state="+state.Value+"&code=expired", "", state)
+	if response.Code != http.StatusBadRequest || providerCalled {
+		t.Fatalf("expired callback: status=%d provider_called=%t", response.Code, providerCalled)
 	}
 }
 

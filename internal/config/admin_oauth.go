@@ -30,6 +30,9 @@ func (a *AdminConfig) validateOAuth() error {
 			redirect.RawQuery != "" || redirect.Fragment != "" || redirect.RawPath != "" {
 			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP /auth/callback URL", entry.name)
 		}
+		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
+			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
+		}
 		if entry.name == "github_oauth" {
 			if client.BaseURL != "" {
 				return errors.New("admin.github_oauth base_url is fixed to https://github.com")
@@ -45,8 +48,12 @@ func (a *AdminConfig) validateOAuth() error {
 			return errors.New("admin.gitlab_oauth base_url must be an HTTPS origin")
 		}
 		host := strings.ToLower(base.Host)
-		if port, _ := strconv.Atoi(base.Port()); port == 443 {
-			host = strings.TrimSuffix(host, ":"+base.Port())
+		if rawPort := base.Port(); rawPort != "" {
+			port, _ := strconv.Atoi(rawPort)
+			host = strings.TrimSuffix(host, ":"+rawPort)
+			if port != 443 {
+				host += ":" + strconv.Itoa(port)
+			}
 		}
 		client.BaseURL = "https://" + host
 	}
@@ -54,7 +61,7 @@ func (a *AdminConfig) validateOAuth() error {
 }
 
 func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
-	if u == nil || u.Host == "" || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
+	if u == nil || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil || u.Opaque != "" || u.Hostname() == "" {
 		return false
 	}
 	if port := u.Port(); port != "" {
