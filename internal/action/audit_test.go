@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -259,25 +258,35 @@ func TestAuditNodePermissionFlag(t *testing.T) {
 }
 
 func TestValidateAuditOutput(t *testing.T) {
-	if _, err := exec.LookPath("node"); err != nil {
+	if _, err := aicli.AbsoluteExecutable("node"); err != nil {
 		t.Skip("audit validators require node")
 	}
 	t.Setenv("GH_TOKEN", "validator-must-not-see-this")
 	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("must stay denied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	readPath, err := json.Marshal(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
 	skillDir := filepath.Join(t.TempDir(), "security-audit")
 	if err := os.Mkdir(skillDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
-		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(`
+	probe := fmt.Sprintf(`
 if (process.env.GH_TOKEN) process.exit(10);
 const fs = require('fs');
-try { fs.readFileSync('/etc/passwd'); process.exit(11); }
+try { fs.readFileSync(%s); process.exit(11); }
 catch (error) { if (error.code !== 'ERR_ACCESS_DENIED') throw error; }
-try { require('child_process').execFileSync('/bin/true'); process.exit(12); }
+try { require('child_process').execFileSync(process.execPath, ['--version']); process.exit(12); }
 catch (error) { if (error.code !== 'ERR_ACCESS_DENIED') throw error; }
 JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-`), 0600); err != nil {
+`, readPath)
+	validatorScripts := []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"}
+	for _, name := range validatorScripts {
+		if err := os.WriteFile(filepath.Join(skillDir, name), []byte(probe), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -338,6 +347,16 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 		}
 	}
 	validate("")
+	for _, name := range validatorScripts {
+		script := filepath.Join(skillDir, name)
+		if err := os.WriteFile(script, []byte("process.exit(17)\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		validate("audit " + name + " failed")
+		if err := os.WriteFile(script, []byte(probe), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.Remove(filepath.Join(root, "run-metadata.json")); err != nil {
 		t.Fatal(err)
 	}

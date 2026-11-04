@@ -79,6 +79,10 @@ jobs:
       - name: Show Git version
         run: git --version
 
+      - name: Show Node version on Windows
+        if: runner.os == 'Windows'
+        run: node.exe --version
+
       - name: Vet
         run: go vet ./...
 

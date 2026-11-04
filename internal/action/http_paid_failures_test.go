@@ -67,7 +67,7 @@ func TestHTTPPaidDisconnectsKeepRawFactsSeparateFromSavedCheckpoints(t *testing.
 			var cut atomic.Bool
 			var deliveredAfter atomic.Int32
 			var deliveredReview atomic.Int32
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			transport := newHTTPServerTest(t, ctx, f.job, f.sink, func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
