@@ -114,53 +114,24 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-To enable admin sign-in, add an administrator with a password hash to the optional `admin` block. There is no default account; with no `administrators`, every route, including login, returns HTTP 403. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+The bundled [config.json](config.json) includes an optional `admin` block with an `admin` account whose `password_hash` is the inert `PASTE_GENERATED_HASH_HERE` placeholder. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you replace the placeholder with a generated hash and restart Minion. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
   "listen": "127.0.0.1:8377",
-  "administrators": [{"username": "operator", "password_hash": "PASTE_GENERATED_ARGON2ID_PHC_HASH"}]
+  "administrators": [{"username": "admin", "password_hash": "PASTE_GENERATED_HASH_HERE"}]
 }
 ```
 
-Generate the Argon2id PHC hash without putting the password in shell history or process arguments. This example uses a temporary Python environment and prompts for the password without echo:
+Generate the Argon2id PHC hash with Minion on Linux, macOS, or Windows. It prompts once without echo and needs no config or GitHub access:
 
 ```sh
-admin_hash_env=$(mktemp -d)
-python3 -m venv "$admin_hash_env"
-"$admin_hash_env/bin/python" -m pip install argon2-cffi
-"$admin_hash_env/bin/python" - <<'PY'
-import getpass
-from argon2 import PasswordHasher
-
-password = getpass.getpass("Admin password: ")
-if not 1 <= len(password.encode("utf-8")) <= 4096:
-    raise SystemExit("Admin password must be 1 to 4096 UTF-8 bytes")
-print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
-                     hash_len=32, salt_len=16).hash(password))
-PY
-rm -r "$admin_hash_env"
+./bin/minion -mode=hash
 ```
 
-On native Windows, use PowerShell with Python installed:
+In Windows PowerShell, run `.\bin\minion.exe -mode=hash`.
 
-```powershell
-$adminHashEnv = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
-py -3 -m venv $adminHashEnv
-& "$adminHashEnv\Scripts\python.exe" -m pip install argon2-cffi
-$hashScript = @'
-import getpass
-from argon2 import PasswordHasher
-
-password = getpass.getpass("Admin password: ")
-if not 1 <= len(password.encode("utf-8")) <= 4096:
-    raise SystemExit("Admin password must be 1 to 4096 UTF-8 bytes")
-print(PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1,
-                     hash_len=32, salt_len=16).hash(password))
-'@
-& "$adminHashEnv\Scripts\python.exe" -c $hashScript
-Remove-Item -Recurse -Force $adminHashEnv
-```
+Do not put the password in the command line; the hash command rejects positional arguments. Admin passwords must contain 1 to 64 Unicode code points.
 
 Paste the complete output into `password_hash` and keep the config file private. Sign in at `/admin/login`; success opens `/`, whose form sends `POST /admin/logout` to revoke the session. The live dashboard shows the current action from preparation through publication, worker readiness and phase, the last received worker status and the worker-reported time since execution progress at that status. It checks for changes every two seconds while connected. Repository, requester and action filters apply only to the current action and live in the URL, not the session. The tracked accepted-action total begins when this counter is introduced; older accepted actions are not backfilled from incomplete usage records or terminal decisions. A worker status alone does not prove readiness or reset the configured inactivity limit.
 

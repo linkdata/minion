@@ -48,6 +48,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	}
 	access := &adminAccess{jaws: jw, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
 	for _, account := range cfg.Administrators {
+		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
+			continue
+		}
 		access.accounts[account.Username] = account
 		if access.dummy.Username == "" {
 			access.dummy = account
@@ -188,15 +191,15 @@ func (a *adminAccess) reserveAttempt(username string) bool {
 
 func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	// A 4096-byte password can triple when URL-encoded, plus the form field names.
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	// A 64-code-point password can expand to 768 URL-encoded bytes.
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<10)
 	if err := r.ParseForm(); err != nil {
 		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
 	username, password := r.PostForm.Get("username"), r.PostForm.Get("password")
-	if username == "" || password == "" || len(username) > 100 || len(password) > 4096 ||
+	if username == "" || !config.ValidAdminPassword(password) || len(username) > 100 ||
 		len(r.PostForm["username"]) != 1 || len(r.PostForm["password"]) != 1 {
 		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)

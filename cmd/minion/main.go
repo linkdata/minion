@@ -45,17 +45,34 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 
 func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
-	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, or remote-execute")
+	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, remote-execute, or hash")
 	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
 	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
 	if flag.NArg() != 0 {
-		logger.Printf("unexpected positional arguments; use flags")
+		if *mode == "hash" {
+			logger.Print("-mode=hash prompts for a password; do not pass it as an argument")
+		} else {
+			logger.Print("unexpected positional arguments; use flags")
+		}
 		return 2
 	}
 	switch *mode {
+	case "hash":
+		incompatible := false
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "loop", "check", "install-skills":
+				incompatible = true
+			}
+		})
+		if incompatible {
+			logger.Print("-mode=hash cannot be combined with -loop, -check, or -install-skills")
+			return 2
+		}
+		return runHashMode()
 	case "orchestrate":
 	case "execute":
 		incompatible := false
@@ -84,7 +101,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		return runRemoteExecuteMode(*configPath, logger)
 	default:
-		logger.Printf("unsupported mode %q; use orchestrate, execute, or remote-execute", *mode)
+		logger.Printf("unsupported mode %q; use orchestrate, execute, remote-execute, or hash", *mode)
 		return 2
 	}
 	loadedPath, err := filepath.Abs(*configPath)
