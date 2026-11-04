@@ -148,6 +148,7 @@ func selectedServiceTestConfig(t *testing.T) config.Config {
 	t.Helper()
 	return config.Config{
 		WorkRoot: t.TempDir(), Main: "codex", BotLogin: "bot",
+		MainSettings: frozenTestCodex,
 		Commands: map[string]config.CommandMapping{
 			"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
 			"review":  {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}},
@@ -167,7 +168,7 @@ func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Minute)
 	source := github.Item{Key: "comment:1", NodeID: "source-node", HTMLURL: "https://github.com/owner/repo/pull/7#issuecomment-1",
 		UpdatedAt: at, Body: "@bot comment", Author: github.User{Login: "writer", ID: 7}}
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
 		Repository: repo.Name, RepositoryID: repo.ID, OwnerID: repo.OwnerID,
 		SubjectType: "PullRequest", SubjectNumber: 7,
@@ -176,7 +177,7 @@ func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 		AcceptedAt: at, Deadline: at.Add(time.Hour), Assigned: true,
 	}
 	store := serviceStore(t, state.Data{Accepted: &accepted, JobFailures: map[string]state.JobFailure{
-		accepted.JobID: {Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline},
+		accepted.JobID: frozenFailureForTest(accepted),
 	}})
 	watcher := &monitor.Monitor{Config: cfg, GitHub: &terminalRecoveryGitHub{item: source}}
 	owner := newOrchestrator(cfg, nil, store, nil, nil)
@@ -184,7 +185,8 @@ func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	watcher.Config.Repositories = nil // Invitation registration may replace the slice during recovery.
 	job := monitor.Job{Repository: *repo, SubjectType: accepted.SubjectType, Number: accepted.SubjectNumber,
 		Source: source, Command: command.Command{Name: "comment", Action: command.Comment},
-		ID: accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: at, Deadline: accepted.Deadline}
+		ID: accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: at, Deadline: accepted.Deadline,
+		MainSettings: accepted.MainSettings}
 	if err := owner.ValidatePublication(t.Context(), job, true); err != nil {
 		t.Fatalf("publication lost the repository from its bound snapshot: %v", err)
 	}
@@ -261,7 +263,7 @@ func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T)
 		t.Fatalf("fixture command skill must be absent: installed=%t error=%v", installed, err)
 	}
 	at := time.Now().UTC().Add(-time.Minute)
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "PullRequest", SubjectNumber: 7,
@@ -279,7 +281,7 @@ func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T)
 		t.Fatal(err)
 	}
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +323,7 @@ func TestOrchestrateModeAttachesAfterExpiredAcceptanceRecovery(t *testing.T) {
 			cfg.Repositories[0].AllowedActors = []string{"writer"}
 			cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 			at := time.Now().UTC().Add(-time.Minute)
-			accepted := state.AcceptedAction{
+			accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 				JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
 				Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 				SubjectType: "PullRequest", SubjectNumber: 7,
@@ -335,7 +337,7 @@ func TestOrchestrateModeAttachesAfterExpiredAcceptanceRecovery(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 			if terminalRecoveryPending(store) {
 				t.Fatal("acceptance was already terminal before startup preflight")
 			}
@@ -390,7 +392,7 @@ func TestMonitorLoopRechecksPendingPushAtSubsecondWake(t *testing.T) {
 				if tc.postHandler {
 					retryAt = time.Time{}
 				}
-				accepted := state.AcceptedAction{
+				accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 					JobID: jobID, AttemptID: strings.Repeat("b", 32), ExecutorID: action.LocalExecutorID,
 					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 					SubjectType: "Issue", SubjectNumber: 7,
@@ -413,7 +415,7 @@ func TestMonitorLoopRechecksPendingPushAtSubsecondWake(t *testing.T) {
 				}
 				store := serviceStore(t, state.Data{
 					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
-						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+						jobID: frozenFailureForTest(accepted),
 					},
 					Processed:         map[string]time.Time{},
 					TerminalDecisions: map[string]state.TerminalDecision{},
@@ -487,7 +489,7 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 					writeDeadline = now.Add(tc.writeDeadline)
 				}
 				marker := "<!-- linkdataminion:" + jobID + " -->"
-				accepted := state.AcceptedAction{
+				accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 					JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
 					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 					SubjectType: "Issue", SubjectNumber: 7,
@@ -509,7 +511,7 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 				}
 				store := serviceStore(t, state.Data{
 					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
-						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+						jobID: frozenFailureForTest(accepted),
 					},
 					Processed:         map[string]time.Time{},
 					TerminalDecisions: map[string]state.TerminalDecision{},
@@ -529,7 +531,7 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 					},
 					Command: accepted.CommandName, Action: command.Comment,
 					Source:            workspace.Snapshot{Head: strings.Repeat("c", 40), Repository: []byte("saved source bundle")},
-					Main:              action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}},
+					Main:              action.RoleSettings{Provider: "codex", Model: accepted.MainSettings.Model, Effort: accepted.MainSettings.Effort, Skills: []string{skills.BuiltinAntiPromptInjection}},
 					RuntimeBudget:     time.Minute,
 					InactivityTimeout: config.DefaultInactivityTimeout,
 				}
@@ -537,7 +539,7 @@ func TestMonitorLoopRechecksPendingTaskReplyAtSubsecondWake(t *testing.T) {
 					Accepted: accepted, Job: job,
 					Result: action.Result{
 						Version: action.ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
-						Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Complete: true}},
+						Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Model: accepted.MainSettings.Model, Effort: accepted.MainSettings.Effort, Complete: true}},
 					},
 				}
 				if err := record.Validate(); err != nil {
@@ -590,7 +592,7 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 				}
 				jobID := strings.Repeat("a", 64)
 				attemptID := strings.Repeat("b", 32)
-				accepted := state.AcceptedAction{
+				accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 					JobID: jobID, AttemptID: attemptID, ExecutorID: action.LocalExecutorID,
 					Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 					SubjectType: "Issue", SubjectNumber: 7,
@@ -621,7 +623,7 @@ func TestMonitorLoopRetriesSavedReplyAtSubsecondWake(t *testing.T) {
 				}
 				store := serviceStore(t, state.Data{
 					Accepted: &accepted, JobFailures: map[string]state.JobFailure{
-						jobID: {Attempts: 1, AcceptedAt: now, Deadline: deadline},
+						jobID: frozenFailureForTest(accepted),
 					},
 					Processed:         map[string]time.Time{},
 					TerminalDecisions: map[string]state.TerminalDecision{},

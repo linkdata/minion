@@ -118,7 +118,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
 	}
 	if withAccepted {
-		store.Data.Accepted = &state.AcceptedAction{
+		store.Data.Accepted = &state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 			JobID: "other-job", AttemptID: "other-attempt", ExecutorID: "local",
 			Repository: "o/r", RepositoryID: 1, OwnerID: 2, SubjectType: "Issue", SubjectNumber: 8,
 			SourceKey: "comment:2", SourceNodeID: "node:2", Requester: "writer", RequesterID: 7,

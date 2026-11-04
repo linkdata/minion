@@ -4,10 +4,12 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func TestOrchestratorWorkerSelectionEnabledInstalledSubset(t *testing.T) {
@@ -93,6 +95,185 @@ func TestWorkerSelectionFreezesDistinctSameProviderRoles(t *testing.T) {
 	job.Critic.Model = "main-model"
 	if err := runner.selection.matches(job); err == nil || !strings.Contains(err.Error(), "critic role differs") {
 		t.Fatalf("critic model drift accepted: %v", err)
+	}
+}
+
+func TestWorkerSelectionAllowsOnlyApprovedRolePairs(t *testing.T) {
+	commandSkills := []string{skills.BuiltinAntiPromptInjection}
+	alwaysOn := []string{testReviewSkillURL}
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: commandSkills}}
+	choices := &config.UserModelChoices{
+		Main:   []config.RoleModelConfig{{Model: "approved-main", Effort: "low"}},
+		Critic: []config.RoleModelConfig{{Model: "approved-critic", Effort: "medium"}},
+	}
+	cfg := config.Config{Main: "codex", Adversarial: "claude", Commands: commands,
+		Codex:        config.CodexConfig{Model: "default-main", ReasoningEffort: "medium"},
+		Claude:       config.ClaudeConfig{Model: "default-critic", Effort: "low"},
+		Admin:        &config.AdminConfig{UserModelChoices: choices},
+		Repositories: []config.Repository{{Actions: []string{"inspect"}}}}
+	e := Orchestrator{Main: cfg.Main, Adversarial: cfg.Adversarial, Commands: commands,
+		CodexModel: cfg.Codex.Model, CodexEffort: cfg.Codex.ReasoningEffort,
+		ClaudeModel: cfg.Claude.Model, ClaudeEffort: cfg.Claude.Effort,
+		MainModel: cfg.Codex.Model, MainEffort: cfg.Codex.ReasoningEffort,
+		CriticModel: cfg.Claude.Model, CriticEffort: cfg.Claude.Effort,
+		AlwaysOnSkills: alwaysOn}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewSelectedRunner(Runner{}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Command = "inspect"
+	job.Main = selected.Main
+	job.Main.Skills = commandSkills
+	job.Critic = selected.Critic
+	job.Main.Model, job.Main.Effort = choices.Main[0].Model, choices.Main[0].Effort
+	job.Critic.Model, job.Critic.Effort = choices.Critic[0].Model, choices.Critic[0].Effort
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.selection.matches(job); err != nil {
+		t.Fatalf("approved pair rejected: %v", err)
+	}
+	choices.Main[0].Model = "changed-after-selection"
+	if err := runner.selection.matches(job); err != nil {
+		t.Fatalf("policy pointer mutation changed frozen worker selection: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*Job)
+	}{
+		{"higher effort", func(j *Job) { j.Main.Effort = "high" }},
+		{"unapproved model", func(j *Job) { j.Critic.Model = "other-critic" }},
+		{"main provider", func(j *Job) { j.Main.Provider = "claude" }},
+		{"required skill", func(j *Job) { j.Main.Skills = []string{testAuditSkillURL} }},
+		{"always-on skill", func(j *Job) { j.Critic.AlwaysOnSkills = []string{testAuditSkillURL} }},
+		{"command", func(j *Job) { j.Command = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := job
+			critic := *job.Critic
+			changed.Critic = &critic
+			tc.edit(&changed)
+			err := runner.selection.matches(changed)
+			if err == nil {
+				t.Fatal("selection accepted broadened assignment")
+			}
+		})
+	}
+	// A previously accepted action keeps its frozen pair if the operator removes it before restart.
+	oldPair := job.Main
+	at := time.Now().UTC()
+	store := openState(t, at.Add(-time.Minute))
+	accepted := dashboardAccepted(job, at)
+	accepted.MainSettings = config.RoleModelConfig{Model: oldPair.Model, Effort: oldPair.Effort}
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Admin.UserModelChoices.Main = nil
+	e.Store = store
+	restarted, err := e.WorkerSelection(cfg)
+	if err != nil || slices.Contains(restarted.MainChoices, accepted.MainSettings) || !slices.Contains(restarted.RetainedMainChoices, accepted.MainSettings) {
+		t.Fatalf("removed active pair was not retained only for recovery: %+v, %v", restarted, err)
+	}
+}
+
+func TestWorkerSelectionRetainsWithdrawnClaudePair(t *testing.T) {
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	cfg := config.Config{Main: "codex", Adversarial: "claude", Commands: commands,
+		Codex:        config.CodexConfig{Model: "main", ReasoningEffort: "high"},
+		Claude:       config.ClaudeConfig{Model: "new-critic", Effort: "high"},
+		Repositories: []config.Repository{{Actions: []string{"inspect"}}}}
+	store := openState(t, time.Now().UTC())
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Command = "inspect"
+	accepted := dashboardAccepted(job, time.Now().UTC())
+	accepted.CriticSettings = config.RoleModelConfig{Model: "old-critic", Effort: "low"}
+	store.Data.Accepted = accepted
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	e := Orchestrator{Main: cfg.Main, Adversarial: cfg.Adversarial, Commands: commands, Store: store,
+		CodexModel: cfg.Codex.Model, CodexEffort: cfg.Codex.ReasoningEffort,
+		ClaudeModel: cfg.Claude.Model, ClaudeEffort: cfg.Claude.Effort,
+		MainModel: cfg.Codex.Model, MainEffort: cfg.Codex.ReasoningEffort,
+		CriticModel: cfg.Claude.Model, CriticEffort: cfg.Claude.Effort}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil || !slices.Contains(selected.RetainedCriticChoices, accepted.CriticSettings) {
+		t.Fatalf("pending Claude pair lost after policy change: %+v, %v", selected.RetainedCriticChoices, err)
+	}
+	runner, err := NewSelectedRunner(Runner{}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.Main = selected.Main
+	job.Main.Skills = commands["inspect"].Skills
+	critic := *selected.Critic
+	critic.Model, critic.Effort = accepted.CriticSettings.Model, accepted.CriticSettings.Effort
+	job.Critic = &critic
+	if err := runner.selection.matches(job); err != nil {
+		t.Fatalf("frozen Claude pair assignment rejected: %v", err)
+	}
+}
+
+func TestWorkerSelectionRetainsFrozenPreparationRetryPair(t *testing.T) {
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	cfg := config.Config{Main: "codex", Commands: commands, Codex: config.CodexConfig{Model: "new-main", ReasoningEffort: "high"},
+		Repositories: []config.Repository{{Actions: []string{"inspect"}}}}
+	at := time.Now().UTC()
+	store := openState(t, at)
+	oldPair := config.RoleModelConfig{Model: "approved-before-restart", Effort: "low"}
+	store.Data.JobFailures["pending"] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: at.Add(time.Hour),
+		MainProvider: "codex", MainSettings: oldPair}
+	e := Orchestrator{Main: "codex", Commands: commands, Store: store,
+		CodexModel: cfg.Codex.Model, CodexEffort: cfg.Codex.ReasoningEffort,
+		MainModel: cfg.Codex.Model, MainEffort: cfg.Codex.ReasoningEffort}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil || !slices.Contains(selected.RetainedMainChoices, oldPair) {
+		t.Fatalf("pending retry pair was lost after policy removal: %+v, %v", selected, err)
+	}
+	job := testJob(command.Comment)
+	job.Command = "inspect"
+	job.Main = selected.Main
+	job.Main.Skills = commands["inspect"].Skills
+	job.Main.Model, job.Main.Effort = oldPair.Model, oldPair.Effort
+	if err := selected.matches(job); err != nil {
+		t.Fatalf("frozen retry pair was rejected: %v", err)
+	}
+	job.Main.Effort = "high"
+	if err := selected.matches(job); err == nil {
+		t.Fatal("unapproved higher effort reached selected worker")
+	}
+}
+
+func TestWorkerSelectionSkipsStartedFailureButRetainsActiveAcceptedPair(t *testing.T) {
+	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	cfg := config.Config{Main: "codex", Commands: commands, Codex: config.CodexConfig{Model: "new-main", ReasoningEffort: "high"},
+		Repositories: []config.Repository{{Actions: []string{"inspect"}}}}
+	at := time.Now().UTC()
+	store := openState(t, at)
+	job := testJob(command.Comment)
+	oldPair := config.RoleModelConfig{Model: "old-main", Effort: "low"}
+	store.Data.JobFailures[job.Identity.JobID] = state.JobFailure{Attempts: 1, ModelCallStarted: true,
+		AcceptedAt: at, Deadline: at.Add(time.Hour), MainProvider: "codex", MainSettings: oldPair}
+	e := Orchestrator{Main: "codex", Commands: commands, Store: store,
+		CodexModel: cfg.Codex.Model, CodexEffort: cfg.Codex.ReasoningEffort,
+		MainModel: cfg.Codex.Model, MainEffort: cfg.Codex.ReasoningEffort}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil || slices.Contains(selected.RetainedMainChoices, oldPair) {
+		t.Fatalf("started failure retained an unusable choice: %+v, %v", selected.RetainedMainChoices, err)
+	}
+	accepted := dashboardAccepted(job, at)
+	accepted.ResultReady = false
+	accepted.MainProvider, accepted.MainSettings = "codex", oldPair
+	store.Data.Accepted = accepted
+	selected, err = e.WorkerSelection(cfg)
+	if err != nil || !slices.Contains(selected.RetainedMainChoices, oldPair) {
+		t.Fatalf("active accepted choice was lost: %+v, %v", selected.RetainedMainChoices, err)
 	}
 }
 
@@ -213,7 +394,7 @@ func TestNewSelectedRunnerFreezesStartupSelection(t *testing.T) {
 	}
 }
 
-func TestNewSelectedRunnerRequiresResolvedModelAndCodexEffort(t *testing.T) {
+func TestNewSelectedRunnerRequiresResolvedModelAndEffort(t *testing.T) {
 	commands := map[string]config.CommandMapping{
 		"review": {Action: string(command.Review), Skills: []string{testReviewSkillURL}},
 	}
@@ -224,8 +405,9 @@ func TestNewSelectedRunnerRequiresResolvedModelAndCodexEffort(t *testing.T) {
 	}{
 		{name: "main model", main: RoleSettings{Provider: "codex", Effort: "high"}},
 		{name: "main Codex effort", main: RoleSettings{Provider: "codex", Model: "main"}},
+		{name: "main Claude effort", main: RoleSettings{Provider: "claude", Model: "main"}},
 		{name: "critic model", main: RoleSettings{Provider: "codex", Model: "main", Effort: "high"}, critic: &RoleSettings{Provider: "claude"}},
-		{name: "critic Codex effort", main: RoleSettings{Provider: "claude", Model: "main"}, critic: &RoleSettings{Provider: "codex", Model: "critic"}},
+		{name: "critic Codex effort", main: RoleSettings{Provider: "claude", Model: "main", Effort: "high"}, critic: &RoleSettings{Provider: "codex", Model: "critic"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := NewSelectedRunner(Runner{}, WorkerSelection{Commands: commands, Main: tc.main, Critic: tc.critic}); err == nil {
@@ -235,8 +417,8 @@ func TestNewSelectedRunnerRequiresResolvedModelAndCodexEffort(t *testing.T) {
 	}
 	if _, err := NewSelectedRunner(Runner{}, WorkerSelection{
 		Commands: commands,
-		Main:     RoleSettings{Provider: "claude", Model: "main"},
+		Main:     RoleSettings{Provider: "claude", Model: "main", Effort: "high"},
 	}); err != nil {
-		t.Fatalf("Claude's optional default effort was rejected: %v", err)
+		t.Fatalf("resolved Claude effort was rejected: %v", err)
 	}
 }

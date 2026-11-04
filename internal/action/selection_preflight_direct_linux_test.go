@@ -330,3 +330,139 @@ case "$1" in
 esac
 exit 99
 `
+
+func TestOfferedCodexChoicesProbeSharedPrerequisitesOnce(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} {
+		t.Setenv(key, "")
+	}
+	logPath := filepath.Join(t.TempDir(), "probes")
+	script := strings.Replace(preflightCodexCLI, "#!/bin/sh\n", "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> "+shellQuote(logPath)+"\n", 1)
+	script = strings.Replace(script, `"supportedReasoningEfforts":[{"reasoningEffort":"high"}]`,
+		`"supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"medium"}]`, 1)
+	fakeOnPath(t, "codex", script)
+	roles := []RoleSettings{{Provider: "codex", Model: "main-1", Effort: "high"}, {Provider: "codex", Model: "main-1", Effort: "medium"}}
+	if message, err := checkOfferedRolesCLI(t.Context(), &Runner{}, roles); err != nil {
+		t.Fatalf("offered roles: %s: %v", message, err)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil || strings.Count(string(data), "login status\n") != 1 ||
+		strings.Count(string(data), "debug prompt-input\n") != 3 || strings.Count(string(data), "app-server ") < 2 {
+		t.Fatalf("provider and pair probes = %q, error=%v", data, err)
+	}
+}
+
+func TestSelectedLocalPreflightRejectsUnsupportedOfferedPair(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	logPath := filepath.Join(t.TempDir(), "codex-calls")
+	script := strings.Replace(preflightCodexCLI, "#!/bin/sh\n", "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> "+shellQuote(logPath)+"\n", 1)
+	fakeOnPath(t, "codex", script)
+	for _, selectedRole := range []string{"main", "critic"} {
+		t.Run(selectedRole, func(t *testing.T) {
+			selected := WorkerSelection{Commands: map[string]config.CommandMapping{
+				"comment": {Action: string(command.Comment), Skills: []string{testReviewSkillURL}},
+			}, Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+			alternate := []config.RoleModelConfig{{Model: "main-1", Effort: "medium"}}
+			if selectedRole == "main" {
+				selected.MainChoices = alternate
+			} else {
+				selected.Critic = &RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}
+				selected.CriticChoices = alternate
+			}
+			runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requirePreflightMessage(t, runner.PreflightSelection(t.Context()), preflightCodexInvocationUnsupported)
+		})
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil || strings.Count(string(calls), "login status\n") != 2 {
+		t.Fatalf("offered alternates were not checked before pull: calls=%q err=%v", calls, err)
+	}
+}
+
+func TestSelectedLocalPreflightSkipsWithdrawnFrozenPair(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	fakeOnPath(t, "codex", preflightCodexCLI)
+	selected := WorkerSelection{Commands: map[string]config.CommandMapping{
+		"comment": {Action: string(command.Comment), Skills: []string{testReviewSkillURL}},
+	}, Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
+		RetainedMainChoices: []config.RoleModelConfig{{Model: "main-1", Effort: "medium"}}}
+	runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.PreflightSelection(t.Context()); err != nil {
+		t.Fatalf("withdrawn frozen pair blocked startup: %v", err)
+	}
+	job := testJob(command.Comment)
+	job.Main.Model, job.Main.Effort, job.Main.Skills = "main-1", "medium", []string{testReviewSkillURL}
+	if _, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), preflightCodexInvocationUnsupported) {
+		t.Fatalf("unsupported frozen pair did not fail terminally: %v", err)
+	}
+}
+
+func TestRunHTTPExcludesSelectedCLIFromInactivity(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	script := strings.Replace(preflightCodexCLI, "'login status') exit 0 ;;", "'login status') /bin/sleep 3; exit 0 ;;", 1)
+	fakeOnPath(t, "codex", script)
+	selected := WorkerSelection{Commands: map[string]config.CommandMapping{
+		"comment": {Action: string(command.Comment), Skills: []string{testReviewSkillURL}},
+	}, Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
+		MainChoices: []config.RoleModelConfig{{Model: "main-1", Effort: "medium"}}}
+	runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir()}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(command.Comment)
+	job.Main.Model, job.Main.Effort, job.Main.Skills = "main-1", "medium", []string{testReviewSkillURL}
+	job.InactivityTimeout = 2 * time.Second
+	parent := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil)
+	client := parent.server.Client()
+	client.Timeout = 10 * time.Second
+	err = RunHTTP(t.Context(), client, parent.server.URL, job.Identity.ExecutorID, runner)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), preflightCodexInvocationUnsupported) ||
+		errors.Is(err, errExecutorInactivity) {
+		t.Fatalf("HTTP selected CLI check consumed model inactivity: %v", err)
+	}
+}
+
+func TestSelectedRunnerSupportedAlternateReachesModelCall(t *testing.T) {
+	installActionTestSkills(t, testReviewSkillURL)
+	logPath := filepath.Join(t.TempDir(), "codex-calls")
+	script := strings.Replace(preflightCodexCLI, "#!/bin/sh\n", "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> "+shellQuote(logPath)+"\n", 1)
+	script = strings.Replace(script, `"supportedReasoningEfforts":[{"reasoningEffort":"high"}]`,
+		`"supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"medium"}]`, 1)
+	fakeOnPath(t, "codex", script)
+	selected := WorkerSelection{Commands: map[string]config.CommandMapping{
+		"comment": {Action: string(command.Comment), Skills: []string{testReviewSkillURL}},
+	}, Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
+		MainChoices: []config.RoleModelConfig{{Model: "main-1", Effort: "medium"}}}
+	modelCalls := 0
+	runner, err := NewSelectedRunner(Runner{WorkRoot: t.TempDir(), remote: true,
+		runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
+			modelCalls++
+			if request.model != "main-1" || request.effort != "medium" {
+				t.Fatalf("model received wrong approved pair: %s/%s", request.model, request.effort)
+			}
+			return aicli.Result{Answer: proposalJSON("Approved alternate ran.", "")}, nil
+		}}, selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.PreflightSelection(t.Context()); err != nil {
+		t.Fatalf("supported offered alternate failed before pull: %v", err)
+	}
+	job := testJob(command.Comment)
+	job.Main.Model, job.Main.Effort, job.Main.Skills = "main-1", "medium", []string{testReviewSkillURL}
+	result, err := runner.Run(t.Context(), job)
+	if err != nil || modelCalls != 1 || result.Answer == "" {
+		t.Fatalf("supported alternate did not reach model: result=%+v calls=%d err=%v", result, modelCalls, err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(calls), "app-server") {
+		t.Fatalf("selected alternate skipped CLI validation: calls=%q err=%v", calls, err)
+	}
+}

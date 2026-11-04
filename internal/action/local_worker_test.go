@@ -131,6 +131,7 @@ func TestLocalWorkerCanceledHTTPSPullCannotSupplyCapacity(t *testing.T) {
 
 func TestLocalWorkerReleasesSavedUndeliveredAssignment(t *testing.T) {
 	job := testJob(command.Comment)
+	resolveAcceptedFixtureRoles(&job)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, time.Now())
 	if err != nil {

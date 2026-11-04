@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
@@ -48,7 +49,9 @@ func TestPrunePrivateRecordsAfterTerminalDecision(t *testing.T) {
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7, SourceKey: "source", SourceNodeID: "node",
 		Requester: "writer", RequesterID: 3, CommandName: "review", Action: "review",
-		AcceptedAt: cutoff.Add(-time.Minute), Deadline: cutoff.Add(time.Minute), ResultReady: true, Terminal: true,
+		MainProvider: "codex",
+		MainSettings: config.RoleModelConfig{Model: "test-main", Effort: "medium"},
+		AcceptedAt:   cutoff.Add(-time.Minute), Deadline: cutoff.Add(time.Minute), ResultReady: true, Terminal: true,
 	}
 	if err := store.Data.Accepted.Validate(); err != nil {
 		t.Fatal(err)

@@ -80,7 +80,8 @@ func TestExecutionBeforeCallOverlapsSelectedInvitationSave(t *testing.T) {
 		notification := github.Notification{ID: "thread-1", Repository: github.Repository{FullName: "o/r"},
 			Subject: github.Subject{Type: "PullRequest", URL: "https://api.github.com/repos/o/r/pulls/7"}, UpdatedAt: item.UpdatedAt}
 		cfg := config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60, MaxRuntimeMinutes: 7,
-			Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
+			MainSettings: config.RoleModelConfig{Model: "test-main", Effort: "medium"},
+			Commands:     map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{testReviewSkillURL}}},
 			Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"review"},
 				AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}}
 		releaseSaves := make(chan struct{})

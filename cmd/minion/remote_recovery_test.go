@@ -76,7 +76,7 @@ func TestRemoteStartupRecoversWithoutWorkerPull(t *testing.T) {
 				Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
 			}
 			now := time.Now().UTC()
-			accepted := state.AcceptedAction{
+			accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 				JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "remote",
 				Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 				SubjectType: "Issue", SubjectNumber: 7,
@@ -93,12 +93,10 @@ func TestRemoteStartupRecoversWithoutWorkerPull(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			store.Data = state.Data{
-				Cursor:   now.Add(-2 * time.Minute),
-				Accepted: &accepted,
-				JobFailures: map[string]state.JobFailure{accepted.JobID: {
-					Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-				}},
-				Processed: map[string]time.Time{}, TerminalDecisions: map[string]state.TerminalDecision{},
+				Cursor:      now.Add(-2 * time.Minute),
+				Accepted:    &accepted,
+				JobFailures: map[string]state.JobFailure{accepted.JobID: frozenFailureForTest(accepted)},
+				Processed:   map[string]time.Time{}, TerminalDecisions: map[string]state.TerminalDecision{},
 				PublicationWrites: map[string]state.PublicationWrite{},
 				NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour),
 			}
@@ -275,6 +273,7 @@ func TestRemoteStartupClearsOrphanResultBeforeReadiness(t *testing.T) {
 				roots.AddCert(leaf)
 				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}}
 				t.Cleanup(client.CloseIdleConnections)
+				fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token)
 				finished := make(chan pullResult, 1)
 				pulled = finished
 				go func() {
@@ -333,7 +332,7 @@ func TestOrchestrateRemoteRestartFinishesFixedRefusalBeforeWorkerAttach(t *testi
 		Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
 	}
 	now := time.Now().UTC()
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "remote",
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7,
@@ -344,10 +343,8 @@ func TestOrchestrateRemoteRestartFinishesFixedRefusalBeforeWorkerAttach(t *testi
 	}
 	store := serviceStore(t, state.Data{
 		Cursor: now.Add(-2 * time.Minute), Accepted: &accepted,
-		JobFailures: map[string]state.JobFailure{accepted.JobID: {
-			Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-		}},
-		Processed: map[string]time.Time{}, TerminalDecisions: map[string]state.TerminalDecision{},
+		JobFailures: map[string]state.JobFailure{accepted.JobID: frozenFailureForTest(accepted)},
+		Processed:   map[string]time.Time{}, TerminalDecisions: map[string]state.TerminalDecision{},
 		PublicationWrites: map[string]state.PublicationWrite{},
 		NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour),
 	})
@@ -427,7 +424,7 @@ func testRemoteLoopContinuesAfterRecoveryWithFreshPull(t *testing.T, service boo
 		Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
 	}
 	now := time.Now().UTC()
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "remote",
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7,
@@ -443,7 +440,7 @@ func testRemoteLoopContinuesAfterRecoveryWithFreshPull(t *testing.T, service boo
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	store.Data.NextInviteCheckAt = now.Add(time.Hour)
 	store.Data.NextPollAt = now.Add(-time.Second)
 	if err := store.Save(); err != nil {
@@ -470,6 +467,7 @@ func testRemoteLoopContinuesAfterRecoveryWithFreshPull(t *testing.T, service boo
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}}
 	t.Cleanup(client.CloseIdleConnections)
 	url := "https://" + endpoint.Addr().String()
+	fetchRemotePreflight(t, t.Context(), client, endpoint, cfg.RemoteExecutor.Token)
 	pullBody := fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)
 	post := func(ctx context.Context, path, token, body string) (*http.Response, error) {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url+path, strings.NewReader(body))

@@ -282,9 +282,9 @@ func TestRunOnceServicesTerminalControlBeforeAcceptedRetryOrFuturePoll(t *testin
 					accepted := selectedAcceptance(t, now)
 					accepted.RetryAt = now.Add(5 * time.Minute)
 					store.Data.Accepted = &accepted
-					store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+					store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 						Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-					}
+					})
 					store.Data.NextInviteCheckAt = now.Add(-time.Second)
 				}
 				if err := store.Save(); err != nil {

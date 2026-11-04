@@ -56,7 +56,17 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 				code = 1
 			}
 		}()
+		if admin.preferences != nil && watcher.Config.Admin.UserModelChoices != nil {
+			watcher.UserPreferences = admin.preferences.preferencesForGitHubID
+		}
 		logger.Printf("admin dashboard listening on %s", admin.listener.Addr())
+	} else if watcher.Config.Admin != nil && watcher.Config.Admin.UserModelChoices != nil {
+		links, err := openUserLinks(watcher.Config.StatePath + ".link")
+		if err != nil {
+			logger.Printf("user preferences: %s", monitor.InertLogText(err.Error()))
+			return 1
+		}
+		watcher.UserPreferences = links.preferencesForGitHubID
 	}
 	if watcher.Config.RemoteExecutor != nil {
 		endpoint, err := attachSelectedRemoteWorker(owner, watcher)

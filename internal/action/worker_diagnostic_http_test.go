@@ -402,6 +402,7 @@ func TestHTTPWorkerFailureThroughOrchestratorAndMonitor(t *testing.T) {
 		notification: github.Notification{Repository: github.Repository{FullName: "o/r"}, Subject: github.Subject{Type: "Issue", URL: "https://api.github.com/repos/o/r/issues/7"}, UpdatedAt: now},
 	}}
 	m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
+		MainSettings: config.RoleModelConfig{Model: "test-main", Effort: "medium"},
 		Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: gh, Handler: owner, BotID: 8, Logger: parentLogger, Now: func() time.Time { return clock },
@@ -711,6 +712,7 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 	workRoot, usageDir := t.TempDir(), filepath.Join(t.TempDir(), "usage")
 	var journal bytes.Buffer
 	e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", Adversarial: "claude",
+		MainModel: "test-main", MainEffort: "medium", CriticModel: "test-critic", CriticEffort: "low",
 		Logger:   log.New(&journal, "", 0),
 		Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}
@@ -767,7 +769,7 @@ func TestHTTPQuotedRoundTwoRefutationStopsOrchestratorPublication(t *testing.T) 
 	e.assignmentRequired = true
 	e.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	e.ValidatePublication = permitSelectedPublication
-	reserveActionRequest(t, e.Store, &request, false)
+	reserveActionRequest(t, e.Store, &request, false, e.Main, e.Adversarial)
 	err := e.Execute(t.Context(), request)
 	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "publication contains private review evidence") || writes.Load() != 0 ||
 		strings.Contains(err.Error(), private) || strings.Contains(journal.String(), private) {

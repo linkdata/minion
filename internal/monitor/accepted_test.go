@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -67,7 +68,44 @@ func selectedAcceptance(t *testing.T, at time.Time) state.AcceptedAction {
 		SubjectType: "PullRequest", SubjectNumber: 7,
 		SourceKey: "comment:1", SourceNodeID: "node:1", SourceURL: selectedItem(at).HTMLURL, SourceUpdatedAt: at,
 		Requester: "writer", RequesterID: 7, CommandName: "review", Action: "review",
+		MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "test-model", Effort: "medium"},
 		AcceptedAt: at, Deadline: at.Add(7 * time.Minute),
+	}
+}
+
+func failureForAccepted(accepted state.AcceptedAction, failure state.JobFailure) state.JobFailure {
+	failure.AcceptedAt, failure.Deadline = accepted.AcceptedAt, accepted.Deadline
+	failure.MainProvider, failure.CriticProvider = accepted.MainProvider, accepted.CriticProvider
+	failure.MainSettings, failure.CriticSettings = accepted.MainSettings, accepted.CriticSettings
+	return failure
+}
+
+func TestAcceptedRecoveryRejectsMissingFrozenFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		withTiming bool
+	}{
+		{"timing", false},
+		{"provider", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			accepted := selectedAcceptance(t, at)
+			store := openState(t, at.Add(-time.Minute))
+			store.Data.Accepted = &accepted
+			failure := state.JobFailure{Attempts: 1}
+			if test.withTiming {
+				failure.AcceptedAt, failure.Deadline = accepted.AcceptedAt, accepted.Deadline
+			}
+			store.Data.JobFailures[accepted.JobID] = failure
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			m := selectedMonitor(t, at, nil, nil)
+			if err := m.recoverAccepted(t.Context(), store); !errors.Is(err, ErrAcceptanceState) || store.Data.Accepted == nil {
+				t.Fatalf("missing %s was repaired or discarded: error=%v state=%+v", test.name, err, store.Data)
+			}
+		})
 	}
 }
 
@@ -76,6 +114,150 @@ func selectedMonitor(t *testing.T, at time.Time, gh GitHub, handler ActionHandle
 	cfg := testConfig(t)
 	cfg.MaxRuntimeMinutes = 7
 	return &Monitor{Config: cfg, GitHub: gh, BotID: 8, Handler: handler, Now: func() time.Time { return at }, SelectedExecutorID: "local"}
+}
+
+func TestSelectedUnassignedRecoveryFailsWhenFrozenProviderIsUnavailable(t *testing.T) {
+	at := time.Now().UTC()
+	item := selectedItem(at)
+	reactionErr := errors.New("reaction unavailable")
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
+	store := openState(t, at.Add(-time.Minute))
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("unavailable frozen provider dispatched")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) || store.Data.Accepted == nil {
+		t.Fatalf("reaction failure did not retain acceptance: err=%v state=%+v", err, store.Data)
+	}
+	accepted := *store.Data.Accepted
+	store.Data.Accepted.RetryAt = at.Add(-time.Second)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	m.Config.Main = "claude"
+	gh.reactionErr = nil
+	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+		store.Data.Processed[accepted.JobID].IsZero() || store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" ||
+		len(gh.comments) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("unrunnable frozen acceptance did not fail: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
+	}
+}
+
+func TestSelectedPreparationRetryFailsWhenFrozenProviderIsUnavailable(t *testing.T) {
+	at := time.Now().UTC()
+	item := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	store := openState(t, at.Add(-time.Minute))
+	preparationErr := errors.New("preparation unavailable")
+	var executions int
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		executions++
+		return preparationErr
+	}))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, preparationErr) || store.Data.Accepted != nil {
+		t.Fatalf("preparation failure did not release acceptance: err=%v state=%+v", err, store.Data)
+	}
+	id := jobID(item.Key, "review")
+	if failure := store.Data.JobFailures[id]; failure.MainProvider != "codex" || failure.Attempts != 1 {
+		t.Fatalf("preparation failure lost frozen provider: %+v", failure)
+	}
+	m.Config.Main = "claude"
+	retryAt := advanceToRetry(at, store).Add(2 * time.Second)
+	m.Now = func() time.Time { return retryAt }
+	m.Handler = selectedHandler(func(Job) error {
+		t.Fatal("unavailable frozen provider retried preparation")
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Processed[id].IsZero() ||
+		store.Data.Accepted != nil || len(store.Data.JobFailures) != 0 || executions != 1 || len(gh.comments) != 1 {
+		t.Fatalf("unrunnable preparation retry did not fail: err=%v state=%+v executions=%d comments=%v notifications=%v threads=%d current=%d", err, store.Data, executions, gh.comments, gh.notificationCalls, gh.threadCalls, gh.currentChecks)
+	}
+}
+
+func TestAcceptedPreferencesRevalidatedAndFrozenAcrossRestart(t *testing.T) {
+	approved := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
+	approvedCritic := config.RoleModelConfig{Model: "approved-critic", Effort: "low"}
+	tooHigh := config.RoleModelConfig{Model: "approved-main", Effort: "high"}
+	for _, tc := range []struct {
+		name            string
+		defaultAt       config.RoleModelConfig
+		preferred       config.RoleModelConfig
+		want            config.RoleModelConfig
+		criticPreferred config.RoleModelConfig
+	}{
+		{name: "approved", defaultAt: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}, preferred: approved, want: approved},
+		{name: "unapproved higher effort", defaultAt: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}, preferred: tooHigh,
+			want: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}},
+		{name: "resolved trusted default", defaultAt: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}, want: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}},
+		{name: "approved critic", defaultAt: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}, want: config.RoleModelConfig{Model: "operator-main", Effort: "medium"}, criticPreferred: approvedCritic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			path := filepath.Join(t.TempDir(), "state.json")
+			store := openStateAt(t, path, at.Add(-time.Minute))
+			reactionErr := errors.New("hold accepted action")
+			item := selectedItem(at)
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+				permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+				t.Fatal("action ran before reaction")
+				return nil
+			}))
+			m.Config.Codex.Model, m.Config.Codex.ReasoningEffort = tc.defaultAt.Model, tc.defaultAt.Effort
+			m.Config.Admin = &config.AdminConfig{UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{approved}}}
+			if tc.criticPreferred != (config.RoleModelConfig{}) {
+				m.Config.Adversarial = "claude"
+				m.Config.Claude.Model, m.Config.Claude.Effort = "operator-critic", "medium"
+				m.Config.Admin.UserModelChoices.Critic = []config.RoleModelConfig{approvedCritic}
+			}
+			m.UserPreferences = func(id int64) (config.UserModelPreferences, error) {
+				if id != 7 {
+					t.Fatalf("preference lookup used unproven requester ID %d", id)
+				}
+				return config.UserModelPreferences{Main: tc.preferred, Critic: tc.criticPreferred}, nil
+			}
+			if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) || store.Data.Accepted == nil ||
+				store.Data.Accepted.MainSettings != tc.want || store.Data.Accepted.CriticSettings != tc.criticPreferred ||
+				store.Data.Accepted.MainProvider != "codex" || store.Data.Accepted.CriticProvider != m.Config.Adversarial {
+				t.Fatalf("acceptance did not revalidate preference: err=%v accepted=%+v", err, store.Data.Accepted)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := openStateAt(t, path, at.Add(-time.Minute))
+			if reopened.Data.Accepted == nil || reopened.Data.Accepted.MainSettings != tc.want ||
+				reopened.Data.Accepted.CriticSettings != tc.criticPreferred ||
+				reopened.Data.Accepted.MainProvider != "codex" || reopened.Data.Accepted.CriticProvider != m.Config.Adversarial {
+				t.Fatalf("accepted setting changed on disk: %+v", reopened.Data.Accepted)
+			}
+			reopened.Data.Accepted.RetryAt = at.Add(-time.Second)
+			if err := reopened.Save(); err != nil {
+				t.Fatal(err)
+			}
+			m.Config.Admin.UserModelChoices.Main = nil
+			m.Config.Admin.UserModelChoices.Critic = nil
+			m.Config.Codex.Model, m.Config.Codex.ReasoningEffort = "new-default", "high"
+			m.Config.Claude.Model, m.Config.Claude.Effort = "new-critic", "high"
+			m.UserPreferences = func(int64) (config.UserModelPreferences, error) {
+				t.Fatal("recovery re-read mutable user preferences")
+				return config.UserModelPreferences{}, nil
+			}
+			gh.reactionErr = nil
+			m.Handler = selectedHandler(func(job Job) error {
+				if job.MainSettings != tc.want || job.CriticSettings != tc.criticPreferred || job.Repository.Name != "example-owner/example-repo" ||
+					job.Command.Name != "review" || job.Source.Author.ID != 7 {
+					t.Fatalf("recovered job changed frozen settings or security boundary: %+v", job)
+				}
+				return nil
+			})
+			if _, err := m.RunOnce(t.Context(), reopened); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }
 
 func TestSelectedFixRestartPreservesUnknownSourceTimestamp(t *testing.T) {
@@ -298,6 +480,58 @@ func TestSelectedPreparationFailureConsumesAttemptAndReleasesAcceptance(t *testi
 	}
 }
 
+func TestSelectedPreparationRetryKeepsAcceptedPreferencesAcrossRestart(t *testing.T) {
+	at := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	item := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	choice := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
+	firstErr := errors.New("preparation unavailable")
+	var firstAttempt string
+	m := selectedMonitor(t, at, gh, selectedHandler(func(job Job) error {
+		firstAttempt = job.AttemptID
+		if job.MainSettings != choice {
+			t.Fatalf("first acceptance missed selected pair: %+v", job.MainSettings)
+		}
+		return firstErr
+	}))
+	m.Config.Codex.Model, m.Config.Codex.ReasoningEffort = "original-default", "medium"
+	m.Config.Admin = &config.AdminConfig{UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}}}
+	m.UserPreferences = func(int64) (config.UserModelPreferences, error) {
+		return config.UserModelPreferences{Main: choice}, nil
+	}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, firstErr) {
+		t.Fatalf("first preparation error: %v", err)
+	}
+	failure := store.Data.JobFailures[jobID(item.Key, "review")]
+	if store.Data.Accepted != nil || failure.MainSettings != choice || failure.MainProvider != "codex" {
+		t.Fatalf("failed preparation lost frozen pair: %+v", failure)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at.Add(-time.Minute))
+	m.Now = func() time.Time { return advanceToRetry(at, reopened) }
+	m.Config.Admin.UserModelChoices.Main = nil
+	m.Config.Codex.Model, m.Config.Codex.ReasoningEffort = "changed-default", "high"
+	m.UserPreferences = func(int64) (config.UserModelPreferences, error) {
+		t.Fatal("retry read mutable preferences")
+		return config.UserModelPreferences{}, nil
+	}
+	m.Handler = selectedHandler(func(job Job) error {
+		if job.AttemptID == firstAttempt || job.MainSettings != choice || !job.AcceptedAt.Equal(failure.AcceptedAt) ||
+			!job.Deadline.Equal(failure.Deadline) || job.ID != jobID(item.Key, "review") {
+			t.Fatalf("retry changed accepted action: %+v", job)
+		}
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), reopened); err != nil || reopened.Data.AcceptedTotal != 1 || len(reopened.Data.Processed) != 1 {
+		t.Fatalf("frozen preparation retry: err=%v state=%+v", err, reopened.Data)
+	}
+}
+
 func TestSelectedAcceptedTotalSurvivesRetiredUnassignedReservation(t *testing.T) {
 	at := time.Now().UTC().Add(-time.Hour)
 	first := selectedItem(at)
@@ -472,7 +706,8 @@ func TestSelectedExpiredOriginalDeadlineNeverReaccepts(t *testing.T) {
 			gh.currentItem = func(github.Item) (github.Item, error) { return selectedItem(firstAt), nil }
 			store := openState(t, scanAt.Add(-time.Minute))
 			id := jobID(item.Key, "review")
-			store.Data.JobFailures[id] = state.JobFailure{AcceptedAt: firstAt, Deadline: firstAt.Add(7 * time.Minute)}
+			store.Data.JobFailures[id] = state.JobFailure{AcceptedAt: firstAt, Deadline: firstAt.Add(7 * time.Minute),
+				MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "test-model", Effort: "medium"}}
 			if held {
 				accepted := selectedAcceptance(t, firstAt)
 				store.Data.Accepted = &accepted
@@ -504,7 +739,7 @@ func TestSelectedPreassignmentDeadlineErrorFinishesOriginalReply(t *testing.T) {
 	accepted := selectedAcceptance(t, firstAt)
 	store := openState(t, firstAt.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: firstAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: firstAt, Deadline: accepted.Deadline})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +871,7 @@ func TestSelectedUnassignedRecoveryKeepsAcceptanceWithoutCapacity(t *testing.T) 
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	accepted := selectedAcceptance(t, at)
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 2, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 2, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline})
 	store.Data.NextInviteCheckAt = at.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -679,7 +914,7 @@ func TestSelectedRecoveryRejectsChangedSourceOrAuthority(t *testing.T) {
 			store := openState(t, at.Add(-time.Minute))
 			accepted := selectedAcceptance(t, at)
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -711,7 +946,7 @@ func TestSelectedRecoveryKeepsReservationOnTransientSourceError(t *testing.T) {
 	store := openState(t, at.Add(-time.Minute))
 	accepted := selectedAcceptance(t, at)
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -750,7 +985,7 @@ func TestPreWorkerAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
 	accepted := selectedAcceptance(t, at)
 	accepted.Assigned = true
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1})
 	store.Data.NextInviteCheckAt = at.Add(time.Hour)
 	store.Data.NextPollAt = at.Add(time.Hour)
 	if err := store.Save(); err != nil {
@@ -764,12 +999,14 @@ func TestPreWorkerAssignedRecoveryRepliesWithoutRedispatch(t *testing.T) {
 		permission: github.Permission{Permission: "write"}, currentItem: func(github.Item) (github.Item, error) { return selectedItem(at), nil }}
 	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { t.Fatal("assigned action redispatched"); return nil }))
 	m.SelectedExecutorID = "" // Recovery runs before a new worker attaches.
+	m.Config.Main = "claude"  // Provider changes cannot rewrite a delivered attempt.
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil {
 		t.Fatal(err)
 	}
 	if len(gh.comments) != 1 || gh.comments[0].Body != failureReply+"\n\n"+(Job{ID: accepted.JobID}).Marker() ||
 		len(gh.verifiedCalls) != 1 || !gh.verifiedCalls[0] || len(reopened.Data.Processed) != 1 ||
-		reopened.Data.Accepted != nil || len(reopened.Data.JobFailures) != 0 {
+		reopened.Data.Accepted != nil || len(reopened.Data.JobFailures) != 0 ||
+		reopened.Data.TerminalDecisions[accepted.JobID].Outcome != "lost" {
 		t.Fatalf("assigned recovery did not terminalize original reply target: comments=%+v state=%+v", gh.comments, reopened.Data)
 	}
 	if _, err := m.RunOnce(t.Context(), reopened); err != nil || gh.commentCalls != 1 {
@@ -797,7 +1034,7 @@ func TestSelectedIssueRecoveryChecksOriginalThread(t *testing.T) {
 				if terminal {
 					attempts = maxJobAttempts
 				}
-				store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: attempts, AcceptedAt: at, Deadline: accepted.Deadline}
+				store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: attempts, AcceptedAt: at, Deadline: accepted.Deadline})
 				if err := store.Save(); err != nil {
 					t.Fatal(err)
 				}
@@ -867,7 +1104,7 @@ func TestSelectedRecoveryChecksOriginalRepository(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
 			store := openStateAt(t, path, at.Add(-time.Minute))
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -907,7 +1144,7 @@ func TestSelectedUnassignedModelMarkerRecoversAsTerminal(t *testing.T) {
 	store := openState(t, at.Add(-time.Minute))
 	accepted := selectedAcceptance(t, at)
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, ModelCallStarted: true}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, ModelCallStarted: true})
 	store.Data.NextInviteCheckAt, store.Data.NextPollAt = at.Add(time.Hour), at.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -928,7 +1165,7 @@ func TestSelectedAssignedRecoveryChecksRepositoryIdentityBeforeReply(t *testing.
 	accepted := selectedAcceptance(t, at)
 	accepted.Assigned = true
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -960,9 +1197,9 @@ func TestSelectedTerminalRecoverySkipsRemoteLookupAfterLocalRevocation(t *testin
 			accepted.Assigned = true
 			store := openState(t, at.Add(-time.Minute))
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+			store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 				Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-			}
+			})
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -1009,8 +1246,8 @@ func TestSelectedTerminalRecoveryRechecksSourceAndAuthority(t *testing.T) {
 			accepted.Assigned = test.assigned
 			store := openState(t, at.Add(-time.Minute))
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, ModelCallStarted: test.modelStarted,
-				AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, ModelCallStarted: test.modelStarted,
+				AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline})
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -1041,7 +1278,7 @@ func TestSelectedTerminalRecoveryFinishesAfterTransientLookup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1074,7 +1311,7 @@ func TestSelectedTerminalRecoveryKeepsExistingVerifiedReply(t *testing.T) {
 	accepted.Assigned = true
 	store := openState(t, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1101,7 +1338,7 @@ func TestSelectedTerminalRestartWithUnknownSourceTimeFindsExistingReply(t *testi
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1170,9 +1407,9 @@ func TestSelectedReservedThirdAttemptResumesAfterRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: maxJobAttempts, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1205,9 +1442,9 @@ func TestSelectedThirdAttemptExpiryKeepsOutcomeAfterUncertainReply(t *testing.T)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: maxJobAttempts, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1244,9 +1481,9 @@ func TestSelectedThirdAttemptTerminalFailureDoesNotRedispatchAfterRestart(t *tes
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: maxJobAttempts, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -1294,9 +1531,9 @@ func TestSelectedDiscardRetainsPushedFixHead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	store.Data.PendingFixes[accepted.JobID] = state.PendingFix{SHA: expectedSHA}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)

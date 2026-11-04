@@ -533,6 +533,33 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 			cfg.CriticSettings = config.RoleModelConfig{Model: role.Model, Effort: role.Effort}
 		}
 		logger.Printf("%s %s settings: model=%s %s=%s", []string{"main", "critic"}[i], label, role.Model, effortName, role.Effort)
+		for _, choice := range cfg.UserChoices(i == 1) {
+			if choice.Model == role.Model && choice.Effort == role.Effort {
+				continue
+			}
+			switch provider {
+			case "codex":
+				settings := cfg.Codex
+				settings.Model, settings.ReasoningEffort = choice.Model, choice.Effort
+				validated, validationErr := codexcli.Validate(ctx, settings)
+				if validationErr != nil {
+					return fmt.Errorf("%s approved Codex choice %s/%s is unsupported: %v", []string{"main", "critic"}[i], choice.Model, choice.Effort, validationErr)
+				}
+				if validated.Model != choice.Model || validated.ReasoningEffort != choice.Effort {
+					return fmt.Errorf("%s approved Codex choice %s/%s was not resolved exactly", []string{"main", "critic"}[i], choice.Model, choice.Effort)
+				}
+			case "claude":
+				settings := cfg.Claude
+				settings.Model, settings.Effort = choice.Model, choice.Effort
+				validated, validationErr := claudecli.Validate(ctx, settings)
+				if validationErr != nil {
+					return fmt.Errorf("%s approved Claude choice %s/%s is unsupported: %v", []string{"main", "critic"}[i], choice.Model, choice.Effort, validationErr)
+				}
+				if validated.Model != choice.Model || validated.Effort != choice.Effort {
+					return fmt.Errorf("%s approved Claude choice %s/%s was not resolved exactly", []string{"main", "critic"}[i], choice.Model, choice.Effort)
+				}
+			}
+		}
 	}
 	logger.Printf("AI roles: main=%s adversarial=%s inactivity_timeout_minutes=%d max_runtime_minutes=%d publication_grace_seconds=%d", cfg.Main, cfg.Adversarial, cfg.InactivityTimeoutMinutes, cfg.MaxRuntimeMinutes, cfg.PublicationGraceSeconds)
 	if cfg.Adversarial != "" {

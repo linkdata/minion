@@ -45,6 +45,7 @@ func TestOrchestratorAllowsQuotedRequestNotesButRejectsNewPrivateText(t *testing
 			}))
 			defer server.Close()
 			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "token"), Store: openState(t, time.Now()), BotLogin: "bot", BotID: 8, Main: "codex", Adversarial: "claude",
+				MainModel: "test-main", MainEffort: "medium", CriticModel: "test-critic", CriticEffort: "low",
 				Commands: map[string]config.CommandMapping{"comment": {Action: string(command.Comment), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 			}
 			e.Executor = executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
@@ -91,7 +92,7 @@ func TestOrchestratorAllowsQuotedRequestNotesButRejectsNewPrivateText(t *testing
 			request.Command = command.Command{Name: "comment", Action: command.Comment}
 			request.Repository.Actions = []string{"comment"}
 			request.Source.Body = "@bot comment\n" + quoted
-			reserveActionRequest(t, e.Store, &request, false)
+			reserveActionRequest(t, e.Store, &request, false, e.Main, e.Adversarial)
 			e.assignmentRequired = true
 			e.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 			e.ValidatePublication = permitSelectedPublication
@@ -111,6 +112,7 @@ func TestPublicationValidationStopsGitHubWrites(t *testing.T) {
 	for _, action := range []command.Action{command.Review, command.Comment} {
 		t.Run(string(action), func(t *testing.T) {
 			job := testJob(action)
+			resolveAcceptedFixtureRoles(&job)
 			result := completedRecoveryResult(job)
 			store, _, request := savedRecoveryFixture(t, job, result)
 			var writes atomic.Int32

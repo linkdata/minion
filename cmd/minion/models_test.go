@@ -116,6 +116,13 @@ fi
 					if err != nil {
 						t.Fatalf("exact-limit resolved model rejected: %v", err)
 					}
+					cfg.Admin = &config.AdminConfig{UserModelChoices: &config.UserModelChoices{
+						Main: []config.RoleModelConfig{{Model: model, Effort: "high"}},
+					}}
+					if err := checkModels(t.Context(), &cfg, log.New(&output, "", 0)); err == nil ||
+						!strings.Contains(err.Error(), "approved Claude choice") || !strings.Contains(err.Error(), "unsupported") {
+						t.Fatalf("unsupported approved Claude effort passed -check: %v", err)
+					}
 				} else if err == nil || !strings.Contains(err.Error(), "claude settings: invalid action model or skills") {
 					t.Fatalf("over-limit resolved model reached jobs: %v", err)
 				}

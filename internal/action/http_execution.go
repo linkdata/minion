@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/linkdata/minion/internal/config"
 )
 
 const httpControlTimeout = 30 * time.Second
@@ -34,6 +36,16 @@ func httpBindingDigest(binding httpBinding) string {
 type httpPull struct {
 	Version    int    `json:"version"`
 	ExecutorID string `json:"executor_id"`
+}
+
+type remoteChoicePreflight struct {
+	Version       int                      `json:"version"`
+	ExecutorID    string                   `json:"executor_id"`
+	Main          RoleSettings             `json:"main"`
+	Critic        *RoleSettings            `json:"critic,omitempty"`
+	MainChoices   []config.RoleModelConfig `json:"main_choices,omitempty"`
+	CriticChoices []config.RoleModelConfig `json:"critic_choices,omitempty"`
+	Credentials   WorkerCredentials        `json:"credentials"`
 }
 
 // WorkerCredentials are trusted parent input for one assignment, outside Job.

@@ -38,6 +38,7 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 	offlineModeCodex(t, modelCalls)
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	cfg := selectedServiceTestConfig(t)
+	cfg.Codex.APIKey = ""
 	cfg.WorkRoot, cfg.StatePath = filepath.Join(base, "work"), filepath.Join(base, "state.json")
 	cfg.BotLogin = "linkdataminion"
 	cfg.Repositories[0].Name, cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = "o/r", 1, 2
@@ -51,7 +52,7 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Add(-time.Minute)
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: cfg.RoleModelSettings(false),
 		JobID: "job-1", AttemptID: "0123456789abcdef0123456789abcdef", ExecutorID: "remote",
 		Repository: "o/r", RepositoryID: 1, OwnerID: 2, SubjectType: "Issue", SubjectNumber: 7,
 		SourceKey: "comment:42", SourceNodeID: "request-node",
@@ -64,7 +65,7 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	store.Data.NextInviteCheckAt, store.Data.NextPollAt = now.Add(time.Hour), now.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -181,6 +182,9 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer workerClient.CloseIdleConnections()
+	if err := action.PreflightRemoteChoices(ctx, workerClient, origin, "remote"); err != nil {
+		t.Fatalf("remote worker preflight failed: %v (%v)", err, errors.Unwrap(err))
+	}
 	workerDone := make(chan error, 1)
 	go func() {
 		workerDone <- action.RunHTTP(ctx, workerClient, origin, "remote", &action.Runner{WorkRoot: cfg.WorkRoot})

@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
@@ -29,14 +28,6 @@ import (
 type cancelAfterReactionGitHub struct {
 	monitor.GitHub
 	cancel context.CancelFunc
-}
-
-type cancelBeforeAssignmentExecutor struct{}
-
-func (cancelBeforeAssignmentExecutor) WaitCapacity(context.Context) error { return nil }
-
-func (cancelBeforeAssignmentExecutor) Execute(context.Context, action.Job, action.Checkpoints) (action.Result, error) {
-	panic("canceled poll must not execute a Job")
 }
 
 func (g cancelAfterReactionGitHub) ReactEyes(ctx context.Context, nodeID string) error {
@@ -178,11 +169,30 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	client := github.New("offline-token")
 	client.HTTPClient, client.BaseURL = server.Client(), server.URL
 	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	approved := config.RoleModelConfig{Model: "main-1", Effort: "low"}
 	cfg := config.Config{WorkRoot: filepath.Join(base, "work"), StatePath: statePath,
-		BotLogin: "linkdataminion", Main: "codex", Codex: config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
+		BotLogin: "linkdataminion", Main: "codex",
+		Admin: &config.AdminConfig{Listen: "127.0.0.1:0",
+			GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
+			UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{approved}}},
 		PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},
 			AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}}
+	if err := checkModels(t.Context(), &cfg, log.New(&bytes.Buffer{}, "", 0)); err != nil {
+		t.Fatalf("local startup did not resolve CLI defaults: %v", err)
+	}
+	resolved := config.RoleModelConfig{Model: "main-1", Effort: "high"}
+	if cfg.MainSettings != resolved {
+		t.Fatalf("local startup resolved pair = %+v, want %+v", cfg.MainSettings, resolved)
+	}
+	links, err := openUserLinks(statePath + ".link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := links.setPreferences((userIdentity{Provider: "github", Host: "github.com", Subject: "7"}).key(),
+		config.UserModelPreferences{Main: approved}); err != nil {
+		t.Fatal(err)
+	}
 	store, err := state.Open(cfg.StatePath, now.Add(-2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -212,18 +222,19 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 			t.Fatalf("orchestrate poll returned %d: %s", code, logs.String())
 		}
 	}
-	// Stop after the persisted acceptance and successful reaction, before any
-	// worker assignment. A restarted service must resume this same attempt.
+	// A one-pass cron run reads the saved preference without an admin listener.
+	// Stop after persisted acceptance and reaction, before worker assignment.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	firstOwner := newOrchestrator(cfg, client, store, log.New(&bytes.Buffer{}, "", 0), nil)
-	firstOwner.Executor = cancelBeforeAssignmentExecutor{}
+	var firstLogs bytes.Buffer
+	firstLogger := log.New(&firstLogs, "", 0)
+	firstOwner := newOrchestrator(cfg, client, store, firstLogger, nil)
 	first := &monitor.Monitor{Config: cfg, GitHub: cancelAfterReactionGitHub{GitHub: client, cancel: cancel},
-		Handler: firstOwner,
-		Now:     func() time.Time { return now }, SelectedExecutorID: action.LocalExecutorID,
-		SelectedCommands: map[string]bool{"comment": true}}
-	if _, err := first.RunOnce(ctx, store); !errors.Is(err, context.Canceled) {
-		t.Fatalf("first poll did not stop after reaction: %v", err)
+		Handler: firstOwner, Now: func() time.Time { return now }}
+	if code := runOrchestrateMode(ctx, firstOwner, first, store, false, firstLogger, worker, 40*time.Second); code != 1 ||
+		strings.Contains(firstLogs.String(), "admin dashboard listening") || first.UserPreferences == nil {
+		t.Fatalf("cron acceptance did not use saved preferences without listener: code=%d lookup=%t logs=%s",
+			code, first.UserPreferences != nil, firstLogs.String())
 	}
 	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.Accepted.AttemptID == "" ||
 		!store.Data.Accepted.Deadline.After(store.Data.Accepted.AcceptedAt) ||
@@ -231,6 +242,9 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		t.Fatalf("first poll did not retain one unassigned acceptance: %+v", store.Data)
 	}
 	accepted := *store.Data.Accepted
+	if accepted.MainProvider != "codex" || accepted.MainSettings != approved {
+		t.Fatalf("cron acceptance lost approved preference: %+v", accepted)
+	}
 	modelData, err := os.ReadFile(modelCalls)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)

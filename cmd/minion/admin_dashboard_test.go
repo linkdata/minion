@@ -44,7 +44,7 @@ func dashboardTestServer(t *testing.T) (http.Handler, *jaws.Jaws, *state.Store, 
 }
 
 func dashboardTestAccepted(at time.Time) *state.AcceptedAction {
-	return &state.AcceptedAction{JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
+	return &state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex, JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2, SubjectType: "Issue", SubjectNumber: 7,
 		SourceKey: "source", SourceNodeID: "source-node", Requester: "writer", RequesterID: 3,
 		CommandName: "comment", Action: "comment", AcceptedAt: at, Deadline: at.Add(7 * time.Minute)}

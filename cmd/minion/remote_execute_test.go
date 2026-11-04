@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/linkdata/minion/internal/config"
 )
@@ -93,6 +95,35 @@ func TestRemoteWorkerLoopDoesNotLogPrivateFailureText(t *testing.T) {
 	if code != 1 || logs.String() != "remote worker: execution or protocol failure\n" || strings.Contains(logs.String(), privateText) {
 		t.Fatalf("remote worker exposed untrusted error text: exit=%d logs=%q", code, logs.String())
 	}
+}
+
+type stalledPreflightBody struct{ ctx context.Context }
+
+func (b stalledPreflightBody) Read([]byte) (int, error) {
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (stalledPreflightBody) Close() error { return nil }
+
+func TestRemoteWorkerStalledPreflightNeverPulls(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var paths []string
+		client := &http.Client{Transport: startupTransport(func(request *http.Request) (*http.Response, error) {
+			paths = append(paths, request.URL.Path)
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: stalledPreflightBody{request.Context()}, Request: request}, nil
+		})}
+		var logs bytes.Buffer
+		start := time.Now()
+		code := runRemoteWorkerPreflightAndLoop(t.Context(), remoteWorkerConfig{
+			BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
+		}, client, log.New(&logs, "", 0))
+		if code != 1 || !strings.Contains(logs.String(), "selection preflight failed") ||
+			len(paths) != 1 || paths[0] != "/preflight" || time.Since(start) > time.Minute {
+			t.Fatalf("stalled preflight reached worker pull or exceeded startup bound: code=%d paths=%v elapsed=%s logs=%q", code, paths, time.Since(start), logs.String())
+		}
+	})
 }
 
 func TestRemoteCheckRejectsMissingTLSFiles(t *testing.T) {

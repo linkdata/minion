@@ -99,8 +99,8 @@ func TestRemoteExecutorConfigRejectsInvalidTransportOrMissingSelectedModel(t *te
 		{"token", "token", func(c *Config) { c.RemoteExecutor.Token = "short" }},
 		{"codex model", "explicit model and effort", func(c *Config) { c.Codex.Model = "" }},
 		{"codex effort", "explicit model and effort", func(c *Config) { c.Codex.ReasoningEffort = "" }},
-		{"critic model", "explicit model and effort", func(c *Config) { c.Adversarial = "claude" }},
-		{"critic effort", "explicit model and effort", func(c *Config) { c.Adversarial = "claude"; c.Claude.Model = "test-model" }},
+		{"critic model", "explicit model and effort", func(c *Config) { c.Adversarial = "claude"; c.Claude.Effort = "medium" }},
+		{"critic effort", "explicit effort", func(c *Config) { c.Adversarial = "claude"; c.Claude.Model = "test-model" }},
 		{"claude default alias", "concrete Claude model", func(c *Config) { c.Adversarial = "claude"; c.Claude.Model, c.Claude.Effort = "default", "medium" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +121,30 @@ func TestLocalConfigDoesNotRequireExplicitModels(t *testing.T) {
 	cfg.Codex = CodexConfig{}
 	if err := cfg.Validate(t.TempDir()); err != nil {
 		t.Fatalf("local config changed: %v", err)
+	}
+}
+
+func TestSelectedClaudeRoleRequiresExplicitEffort(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		main, critic string
+		effort       string
+		want         string
+	}{
+		{"main missing", "claude", "", "", "main Claude role requires explicit effort"},
+		{"critic missing", "codex", "claude", "", "critic Claude role requires explicit effort"},
+		{"main configured", "claude", "", "high", ""},
+		{"critic configured", "codex", "claude", "high", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := remoteTestConfig()
+			cfg.RemoteExecutor = nil
+			cfg.Main, cfg.Adversarial, cfg.Claude.Effort = test.main, test.critic, test.effort
+			err := cfg.Validate(t.TempDir())
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("Validate() = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 

@@ -23,7 +23,7 @@ func TestLoopRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
 	root := t.TempDir()
 	statePath := filepath.Join(root, "state.json")
 	at := time.Now().UTC().Add(-time.Minute)
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7,
@@ -36,7 +36,7 @@ func TestLoopRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	store.Data.TerminalDecisions[accepted.JobID] = state.TerminalDecision{
 		AttemptID: accepted.AttemptID, Outcome: "succeeded", DecidedAt: at,
 	}

@@ -16,6 +16,7 @@ func TestSavedAuditDamagedPrivateCopyKeepsReceipt(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	job := testJob(command.SecurityAudit)
+	resolveAcceptedFixtureRoles(&job)
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
 	root, err := workspace.CanonicalPath(t.TempDir())

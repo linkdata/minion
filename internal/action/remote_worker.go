@@ -78,6 +78,18 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	if err := executor.SetWorkerCredentials(credentials); err != nil {
 		return nil, nil, err
 	}
+	selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: remote.ExecutorID,
+		Main: e.mainRoleSettings(nil), MainChoices: slices.Clone(cfg.UserChoices(false)), CriticChoices: slices.Clone(cfg.UserChoices(true))}
+	selection.Main.Skills, selection.Main.AlwaysOnSkills = nil, nil
+	if e.Adversarial != "" {
+		critic := e.criticRoleSettings()
+		critic.Skills, critic.AlwaysOnSkills = nil, nil
+		selection.Critic = &critic
+	}
+	if err := validateRemoteChoices(selection); err != nil {
+		return nil, nil, err
+	}
+	executor.remoteChoices = &selection
 	executor.lateOutcome = func(outcome httpOutcome) error { return e.receiveLateOutcome(remote.ExecutorID, outcome) }
 	endpoint, err := ListenRemoteExecution(executor, remote.Listen, certificate, remote.Token)
 	if err != nil {

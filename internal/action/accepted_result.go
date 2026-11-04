@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
@@ -68,6 +69,8 @@ func (r AcceptedResultRecord) MatchesAccepted(current state.AcceptedAction) bool
 		a.SourceKey == current.SourceKey && a.SourceNodeID == current.SourceNodeID && a.SourceURL == current.SourceURL &&
 		a.SourceUpdatedAt.Equal(current.SourceUpdatedAt) && strings.EqualFold(a.Requester, current.Requester) &&
 		a.RequesterID == current.RequesterID && a.CommandName == current.CommandName && a.Action == current.Action &&
+		a.MainProvider == current.MainProvider && a.CriticProvider == current.CriticProvider &&
+		a.MainSettings == current.MainSettings && a.CriticSettings == current.CriticSettings &&
 		a.AcceptedAt.Equal(current.AcceptedAt) && a.Deadline.Equal(current.Deadline) &&
 		a.OutcomeBinding == current.OutcomeBinding
 }
@@ -113,7 +116,17 @@ func jobMatchesAccepted(job Job, a state.AcceptedAction) bool {
 		i.Repository == a.Repository && i.RepositoryID == a.RepositoryID && i.OwnerID == a.OwnerID &&
 		i.SubjectType == a.SubjectType && i.Number == a.SubjectNumber &&
 		strings.EqualFold(i.Requester, a.Requester) && i.RequesterID == a.RequesterID &&
-		job.Command == a.CommandName && string(job.Action) == a.Action
+		job.Command == a.CommandName && string(job.Action) == a.Action &&
+		job.Main.Provider == a.MainProvider && job.Main.Model == a.MainSettings.Model && job.Main.Effort == a.MainSettings.Effort &&
+		roleCriticMatchesAccepted(job.Critic, a)
+}
+
+func roleCriticMatchesAccepted(critic *RoleSettings, accepted state.AcceptedAction) bool {
+	if accepted.CriticProvider == "" {
+		return critic == nil && accepted.CriticSettings == (config.RoleModelConfig{})
+	}
+	return critic != nil && critic.Provider == accepted.CriticProvider &&
+		critic.Model == accepted.CriticSettings.Model && critic.Effort == accepted.CriticSettings.Effort
 }
 
 // ReceiveCompletedResult is called only for a successful, sequence-complete

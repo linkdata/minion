@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/usage"
@@ -36,7 +37,23 @@ func newExecutionAdapterFixture(t *testing.T, job Job) *executionAdapterFixture 
 	return &executionAdapterFixture{t: t, job: job, owner: owner, sink: newExecutionCheckpoints(owner, job)}
 }
 
+func (f *executionAdapterFixture) accepted() *state.AcceptedAction {
+	resolveAcceptedFixtureRoles(&f.job)
+	resolveAcceptedFixtureRoles(&f.sink.job)
+	return acceptedForJob(f.job)
+}
+
 func (f *executionAdapterFixture) call(call CallUsage) CallCheckpoint {
+	role := f.job.Main
+	if call.Role == roleCritic && f.job.Critic != nil {
+		role = *f.job.Critic
+	}
+	if call.Model == "" {
+		call.Model = role.Model
+	}
+	if call.Effort == "" {
+		call.Effort = role.Effort
+	}
 	return CallCheckpoint{Version: ProtocolVersion, Identity: f.job.Identity, SourceRef: f.job.Source.Head,
 		Ordinal: len(f.sink.calls) + 1, Call: call}
 }
@@ -165,7 +182,7 @@ func TestExecutionBeforeCallRechecksSelectedStateAfterUsageSave(t *testing.T) {
 	f.owner.assignmentRequired = true
 	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	f.sink.assignmentContext = t.Context()
-	accepted := acceptedForJob(f.job)
+	accepted := f.accepted()
 	f.sink.assignmentRequest = monitor.Job{Deadline: accepted.Deadline}
 	store.Data.Accepted = accepted
 	store.Data.JobFailures[f.job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
@@ -210,7 +227,7 @@ func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T)
 		f.owner.Store = store
 		f.owner.assignmentRequired = true
 		f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
-		accepted := acceptedForJob(f.job)
+		accepted := f.accepted()
 		accepted.AcceptedAt = time.Now().UTC()
 		accepted.Deadline = accepted.AcceptedAt.Add(time.Second)
 		store.Data.Accepted = accepted
@@ -251,16 +268,23 @@ func TestExecutionBeforeCallRechecksSelectedDeadlineAfterUsageSave(t *testing.T)
 }
 
 func acceptedForJob(job Job) *state.AcceptedAction {
+	resolveAcceptedFixtureRoles(&job)
 	i := job.Identity
 	now := time.Now().UTC()
-	return &state.AcceptedAction{
+	accepted := &state.AcceptedAction{
 		JobID: i.JobID, AttemptID: i.AttemptID, ExecutorID: i.ExecutorID,
 		Repository: i.Repository, RepositoryID: i.RepositoryID, OwnerID: i.OwnerID,
 		SubjectType: i.SubjectType, SubjectNumber: i.Number,
 		SourceKey: "source-key", SourceNodeID: "source-node", SourceUpdatedAt: now,
 		Requester: i.Requester, RequesterID: i.RequesterID,
+		MainProvider: job.Main.Provider, MainSettings: config.RoleModelConfig{Model: job.Main.Model, Effort: job.Main.Effort},
 		CommandName: job.Command, Action: string(job.Action), AcceptedAt: now, Deadline: now.Add(time.Minute),
 	}
+	if job.Critic != nil {
+		accepted.CriticProvider = job.Critic.Provider
+		accepted.CriticSettings = config.RoleModelConfig{Model: job.Critic.Model, Effort: job.Critic.Effort}
+	}
+	return accepted
 }
 
 func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *testing.T) {
@@ -270,7 +294,7 @@ func TestExecutionAssignmentPersistsBeforeDeliveryAndReleasesUndelivered(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Data.Accepted = acceptedForJob(f.job)
+	store.Data.Accepted = f.accepted()
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +343,7 @@ func TestExecutionAssignmentRevalidatesRepullBeforeDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	accepted := acceptedForJob(f.job)
+	accepted := f.accepted()
 	store.Data.Accepted = accepted
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
 	if err := store.Save(); err != nil {
@@ -354,7 +378,7 @@ func TestExecutionAssignmentRepullDiscardDoesNotReleaseMissingMarker(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	accepted := acceptedForJob(f.job)
+	accepted := f.accepted()
 	store.Data.Accepted = accepted
 	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
 	if err := store.Save(); err != nil {
@@ -407,7 +431,7 @@ func TestExecutionFailedAssignmentReleaseKeepsDurableAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	store.Data.Accepted = acceptedForJob(f.job)
+	store.Data.Accepted = f.accepted()
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +469,7 @@ func TestExecutionAssignmentAllowsCaseOnlyRequesterChange(t *testing.T) {
 	f := newExecutionAdapterFixture(t, testJob(command.Comment))
 	store := openState(t, time.Now())
 	f.owner.Store = store
-	accepted := acceptedForJob(f.job)
+	accepted := f.accepted()
 	accepted.Requester = strings.ToUpper(accepted.Requester)
 	store.Data.Accepted = accepted
 	if err := store.Save(); err != nil {
@@ -462,7 +486,7 @@ func TestExecutionAssignmentRejectsMismatchAndSaveFailure(t *testing.T) {
 			f := newExecutionAdapterFixture(t, testJob(command.Comment))
 			store := openState(t, time.Now())
 			f.owner.Store = store
-			store.Data.Accepted = acceptedForJob(f.job)
+			store.Data.Accepted = f.accepted()
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}

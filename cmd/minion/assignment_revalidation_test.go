@@ -50,7 +50,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			t.Setenv("USERPROFILE", filepath.Join(base, "home"))
 			t.Setenv("CODEX_HOME", filepath.Join(base, "codex-home"))
 			at := time.Now().UTC().Add(-time.Minute)
-			accepted := state.AcceptedAction{
+			accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "main-1", Effort: "high"},
 				JobID: "job-7", AttemptID: "0123456789abcdef0123456789abcdef", ExecutorID: action.LocalExecutorID,
 				Repository: "o/r", RepositoryID: 1, OwnerID: 2,
 				SubjectType: "Issue", SubjectNumber: 7,
@@ -65,7 +65,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 			store.Data.NextInviteCheckAt = at.Add(time.Hour)
 			if err := store.Save(); err != nil {
 				t.Fatal(err)

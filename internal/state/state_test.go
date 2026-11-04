@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/config"
 )
 
 func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
@@ -27,7 +29,8 @@ func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 		t.Fatalf("second writer got %v, want ErrLocked", err)
 	}
 	store.Data.Processed["job"] = initial
-	failure := JobFailure{Attempts: 2, ModelCallStarted: true, AcceptedAt: initial, Deadline: initial.Add(time.Hour)}
+	failure := JobFailure{Attempts: 2, ModelCallStarted: true, AcceptedAt: initial, Deadline: initial.Add(time.Hour),
+		MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "test-model", Effort: "medium"}}
 	store.Data.JobFailures["failed"] = failure
 	store.Data.NextInviteCheckAt = initial.Add(time.Hour)
 	store.Data.RepositoryCursors["owner/repo"] = initial.Add(time.Minute)
@@ -709,6 +712,7 @@ func acceptedActionFixture() AcceptedAction {
 		SourceKey: "owner/repo#issue-comment:123", SourceNodeID: "node:123",
 		SourceURL: "https://github.com/owner/repo/pull/7#issuecomment-123", SourceUpdatedAt: acceptedAt.Add(-time.Minute),
 		Requester: "writer", RequesterID: 3, CommandName: "review", Action: "review",
+		MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "test-model", Effort: "medium"},
 		AcceptedAt: acceptedAt, Deadline: acceptedAt.Add(time.Hour), Assigned: true,
 	}
 }
@@ -737,6 +741,19 @@ func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 		{"malformed outcome binding", func(a *AcceptedAction) { a.OutcomeBinding = "not-hex" }},
 		{"noncanonical outcome binding", func(a *AcceptedAction) { a.OutcomeBinding = strings.Repeat("A", 64) }},
 		{"unassigned outcome binding", func(a *AcceptedAction) { a.Assigned = false; a.OutcomeBinding = strings.Repeat("a", 64) }},
+		{"invalid main setting", func(a *AcceptedAction) { a.MainSettings.Model = "bad model" }},
+		{"missing main model", func(a *AcceptedAction) { a.MainSettings.Model = "" }},
+		{"missing main effort", func(a *AcceptedAction) { a.MainSettings.Effort = "" }},
+		{"missing critic model", func(a *AcceptedAction) { a.CriticProvider = "claude"; a.CriticSettings.Effort = "low" }},
+		{"missing critic effort", func(a *AcceptedAction) { a.CriticProvider = "claude"; a.CriticSettings.Model = "critic" }},
+		{"invalid critic setting", func(a *AcceptedAction) { a.CriticSettings.Effort = strings.Repeat("x", config.MaxModelSettingBytes+1) }},
+		{"missing main provider", func(a *AcceptedAction) { a.MainProvider = "" }},
+		{"invalid main provider", func(a *AcceptedAction) { a.MainProvider = "other" }},
+		{"critic provider without main", func(a *AcceptedAction) { a.MainProvider = ""; a.CriticProvider = "claude" }},
+		{"critic settings without critic", func(a *AcceptedAction) {
+			a.MainProvider = "codex"
+			a.CriticSettings = config.RoleModelConfig{Model: "critic", Effort: "low"}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -769,6 +786,30 @@ func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 	accepted.SourceURL = "" // GitHub may omit a display URL.
 	if err := accepted.Validate(); err != nil {
 		t.Fatalf("optional source URL rejected: %v", err)
+	}
+	accepted.MainSettings = config.RoleModelConfig{Model: "operator-main", Effort: "high"}
+	accepted.CriticProvider = "claude"
+	accepted.CriticSettings = config.RoleModelConfig{Model: "operator-critic", Effort: "low"}
+	if err := accepted.Validate(); err != nil {
+		t.Fatalf("resolved settings rejected: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	data, err := json.Marshal(Data{Cursor: accepted.AcceptedAt, Accepted: &accepted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path, time.Now())
+	if err != nil {
+		t.Fatalf("resolved settings did not survive recovery: %v", err)
+	}
+	if *store.Data.Accepted != accepted {
+		t.Fatalf("recovered settings changed: %+v", store.Data.Accepted)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -928,15 +969,16 @@ func TestStateDirectorySyncsSymlinkTargetParent(t *testing.T) {
 
 func TestOpenFailureReleasesLock(t *testing.T) {
 	for name, content := range map[string]string{
-		"malformed":         "{",
-		"trailing data":     `{"cursor":"2026-10-09T08:00:00Z"} {}`,
-		"missing cursor":    `{}`,
-		"unknown field":     `{"cursor":"2026-10-09T08:00:00Z","unsupported":true}`,
-		"old pending fix":   `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":"old-sha"}}`,
-		"unknown cap field": `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":{"sha":"sha","cap":{"max_rounds":3,"unsupported":true}}}}`,
-		"missing deadline":  `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z"}}}`,
-		"missing accepted":  `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"deadline":"2026-10-09T09:00:00Z"}}}`,
-		"reversed deadline": `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z","deadline":"2026-10-09T07:00:00Z"}}}`,
+		"malformed":          "{",
+		"trailing data":      `{"cursor":"2026-10-09T08:00:00Z"} {}`,
+		"missing cursor":     `{}`,
+		"unknown field":      `{"cursor":"2026-10-09T08:00:00Z","unsupported":true}`,
+		"old pending fix":    `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":"old-sha"}}`,
+		"unknown cap field":  `{"cursor":"2026-10-09T08:00:00Z","pending_fixes":{"job":{"sha":"sha","cap":{"max_rounds":3,"unsupported":true}}}}`,
+		"missing deadline":   `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z"}}}`,
+		"missing accepted":   `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"deadline":"2026-10-09T09:00:00Z"}}}`,
+		"reversed deadline":  `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z","deadline":"2026-10-09T07:00:00Z"}}}`,
+		"unbound retry pair": `{"cursor":"2026-10-09T08:00:00Z","job_failures":{"job":{"attempts":1,"accepted_at":"2026-10-09T08:00:00Z","deadline":"2026-10-09T09:00:00Z","main_settings":{"model":"approved","effort":"low"}}}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")

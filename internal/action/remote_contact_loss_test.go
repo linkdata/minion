@@ -37,6 +37,7 @@ func (h *remoteContactLossHandler) Execute(ctx context.Context, request monitor.
 	job.Identity.Requester, job.Identity.RequesterID = request.Source.Author.Login, request.Source.Author.ID
 	job.Identity.Number, job.Identity.SubjectType = request.Number, request.SubjectType
 	job.Command, job.Action = request.Command.Name, request.Command.Action
+	job.Main.Model, job.Main.Effort = request.MainSettings.Model, request.MainSettings.Effort
 	job.RuntimeBudget = time.Second
 	probe := &remoteAssignmentProbe{before: func(Job) error { return markSelectedAssignment(h.store, request) }}
 	_, err := h.worker.Execute(ctx, job, probe)
@@ -89,7 +90,8 @@ func TestRemoteDeliveredPullLossSettlesWithoutReconnect(t *testing.T) {
 	}}
 	handler := &remoteContactLossHandler{worker: &remoteWorker{executor: executor, endpoint: endpoint}, store: store}
 	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", PollIntervalSeconds: 60,
-		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		MainSettings: config.RoleModelConfig{Model: "test-main", Effort: "medium"},
+		Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},
 			AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 		GitHub: gh, Handler: handler, BotID: 8, SelectedExecutorID: "remote", SelectedCommands: map[string]bool{"comment": true}}

@@ -9,6 +9,7 @@ import (
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/gitwork"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
@@ -146,30 +147,77 @@ func (r *Runner) PreflightSelection(ctx context.Context) (resultErr error) {
 	if err := gitwork.Check(ctx, workRoot); err != nil {
 		return fmt.Errorf("git readiness: %w", err)
 	}
-	roles := []RoleSettings{r.selection.Main}
-	if r.selection.Critic != nil {
-		roles = append(roles, *r.selection.Critic)
-	}
-	for _, role := range roles {
-		message, err = checkSelectedRoleCLI(ctx, &configured, role)
-		if err != nil {
-			return err
-		}
+	message, err = checkOfferedRolesCLI(ctx, &configured, offeredPreflightRoles(r.selection.Main, r.selection.MainChoices, r.selection.Critic, r.selection.CriticChoices))
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
+func offeredPreflightRoles(main RoleSettings, mainChoices []config.RoleModelConfig, critic *RoleSettings, criticChoices []config.RoleModelConfig) []RoleSettings {
+	roles := []RoleSettings{main}
+	for _, choice := range mainChoices {
+		if choice.Model == main.Model && choice.Effort == main.Effort {
+			continue
+		}
+		role := main
+		role.Model, role.Effort = choice.Model, choice.Effort
+		roles = append(roles, role)
+	}
+	if critic != nil {
+		roles = append(roles, *critic)
+		for _, choice := range criticChoices {
+			if choice.Model == critic.Model && choice.Effort == critic.Effort {
+				continue
+			}
+			role := *critic
+			role.Model, role.Effort = choice.Model, choice.Effort
+			roles = append(roles, role)
+		}
+	}
+	return roles
+}
+
+func checkCodexPrerequisites(ctx context.Context, settings config.CodexConfig) (string, error) {
+	if err := codexcli.CheckLogin(ctx, settings); err != nil {
+		return preflightCodexLoginUnavailable, fmt.Errorf("codex login: %w", err)
+	}
+	if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
+		return preflightCodexBoundaryUnavailable, fmt.Errorf("codex instruction boundary: %w", err)
+	}
+	return "", nil
+}
+
+func checkOfferedRolesCLI(ctx context.Context, configured *Runner, roles []RoleSettings) (string, error) {
+	codexChecked := false
+	for _, role := range roles {
+		if role.Provider == "codex" && !codexChecked {
+			if message, err := checkCodexPrerequisites(ctx, configured.Codex); err != nil {
+				return message, err
+			}
+			codexChecked = true
+		}
+		if message, err := checkSelectedRoleChoiceCLI(ctx, configured, role); err != nil {
+			return message, err
+		}
+	}
+	return "", nil
+}
+
 func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings) (string, error) {
+	if role.Provider == "codex" {
+		if message, err := checkCodexPrerequisites(ctx, configured.Codex); err != nil {
+			return message, err
+		}
+	}
+	return checkSelectedRoleChoiceCLI(ctx, configured, role)
+}
+
+func checkSelectedRoleChoiceCLI(ctx context.Context, configured *Runner, role RoleSettings) (string, error) {
 	switch role.Provider {
 	case "codex":
 		settings := configured.Codex
 		settings.Model, settings.ReasoningEffort = role.Model, role.Effort
-		if err := codexcli.CheckLogin(ctx, settings); err != nil {
-			return preflightCodexLoginUnavailable, fmt.Errorf("codex login: %w", err)
-		}
-		if err := codexcli.ValidateInstructionBoundary(ctx); err != nil {
-			return preflightCodexBoundaryUnavailable, fmt.Errorf("codex instruction boundary: %w", err)
-		}
 		validated, err := codexcli.Validate(ctx, settings)
 		if err != nil {
 			return preflightCodexInvocationUnsupported, fmt.Errorf("codex settings: %w", err)
@@ -178,6 +226,9 @@ func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSett
 			return preflightCodexInvocationUnsupported, errors.New("selected Codex model or effort was not resolved at startup")
 		}
 	case "claude":
+		if role.Effort == "" {
+			return preflightClaudeSettingsUnavailable, errors.New("selected Claude effort is not explicit")
+		}
 		settings := configured.Claude
 		settings.Model, settings.Effort = role.Model, role.Effort
 		validated, err := claudecli.Validate(ctx, settings)

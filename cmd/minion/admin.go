@@ -20,14 +20,15 @@ import (
 
 // adminServer owns the dashboard listener and the JaWS processing loop.
 type adminServer struct {
-	listener  net.Listener
-	server    *http.Server
-	jaws      *jaws.Jaws
-	cancel    context.CancelFunc
-	serveDone chan struct{}
-	jawsDone  chan struct{}
-	tickDone  chan struct{}
-	serveErr  error // read only after serveDone closes
+	listener    net.Listener
+	server      *http.Server
+	jaws        *jaws.Jaws
+	cancel      context.CancelFunc
+	serveDone   chan struct{}
+	jawsDone    chan struct{}
+	tickDone    chan struct{}
+	serveErr    error // read only after serveDone closes
+	preferences *userLinks
 }
 
 func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func()) (*adminServer, error) {
@@ -90,6 +91,9 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
 	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	if oauth != nil {
+		a.preferences = oauth.links
+	}
 	go func() {
 		defer close(a.tickDone)
 		ticker := time.NewTicker(2 * time.Second)

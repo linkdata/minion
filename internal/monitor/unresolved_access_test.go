@@ -24,9 +24,9 @@ func unresolvedAcceptedFixture(t *testing.T, at time.Time) (string, *state.Store
 	accepted := selectedAcceptance(t, at)
 	accepted.FixedRefusal = "This request cannot be completed."
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}

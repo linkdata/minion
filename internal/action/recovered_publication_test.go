@@ -30,6 +30,19 @@ import (
 
 func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, string, monitor.Job) {
 	t.Helper()
+	resolveAcceptedFixtureRoles(&job)
+	for i := range result.Calls {
+		role := job.Main
+		if result.Calls[i].Role == roleCritic && job.Critic != nil {
+			role = *job.Critic
+		}
+		if result.Calls[i].Model == "" {
+			result.Calls[i].Model = role.Model
+		}
+		if result.Calls[i].Effort == "" {
+			result.Calls[i].Effort = role.Effort
+		}
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, time.Now())
 	if err != nil {
@@ -67,11 +80,13 @@ func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, s
 			UpdatedAt: accepted.SourceUpdatedAt, Author: github.User{ID: accepted.RequesterID, Login: accepted.Requester}},
 		Command: command.Command{Name: accepted.CommandName, Action: job.Action},
 		ID:      accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings,
 	}
 	return store, path, request
 }
 
 func completedRecoveryResult(job Job) Result {
+	resolveAcceptedFixtureRoles(&job)
 	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Saved complete answer",
 		Calls: []CallUsage{{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: roleMain, Round: 1, Complete: true}}}
 }
