@@ -29,9 +29,7 @@ func TestCanonicalPathResolvesNestedJunctionsWindows(t *testing.T) {
 		{current, release},
 		{visible, filepath.Join(current, "bin")},
 	} {
-		if err := wintest.CreateJunction(link.path, link.target); err != nil {
-			t.Fatal(err)
-		}
+		windowsJunction(t, link.path, link.target)
 	}
 	for _, test := range []struct{ path, want string }{
 		{filepath.Join(visible, "codex.exe"), file},
@@ -186,9 +184,7 @@ func TestWindowsOpenPathRejectsJunction(t *testing.T) {
 		t.Fatal(err)
 	}
 	junction := filepath.Join(root, "junction")
-	if err := wintest.CreateJunction(junction, target); err != nil {
-		t.Fatal(err)
-	}
+	windowsJunction(t, junction, target)
 	for _, test := range []struct {
 		name      string
 		path      string
@@ -230,9 +226,7 @@ func TestWindowsReadRejectsHardLink(t *testing.T) {
 	if err := os.WriteFile(name, []byte("content"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Link(name, filepath.Join(root, "alias")); err != nil {
-		t.Skipf("Windows hard links unavailable: %v", err)
-	}
+	wintest.RequireHardLink(t, name, filepath.Join(root, "alias"))
 	if _, err := ReadRegular(name, MaxBytes); err == nil {
 		t.Fatal("read file with multiple hard links")
 	}
