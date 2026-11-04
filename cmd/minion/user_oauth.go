@@ -28,7 +28,7 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 {{if .Dot.GitHub}}<p><a href="/auth/github/login">Sign in with GitHub</a></p>{{end}}
 {{if .Dot.GitLab}}<p><a href="/auth/gitlab/login">Sign in with GitLab</a></p>{{end}}
 {{end}}
-</main>{{$.TailHTML}}</body></html>`))
+</main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
 
 type userLoginView struct {
 	SignedIn       bool

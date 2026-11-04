@@ -272,7 +272,7 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	}
 }
 
-func TestAdminLoginSubmitClosesJaWSSocket(t *testing.T) {
+func TestAuthFormSubmitClosesJaWSSocket(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node.js is unavailable for the browser hook check")
@@ -282,7 +282,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const script = fs.readFileSync(process.argv[1], 'utf8');
-for (const action of ['/admin/login', '/admin/logout']) {
+for (const action of ['/admin/login', '/admin/logout', '/auth/logout']) {
     const calls = [];
     class WebSocket { removeEventListener(type, fn) { calls.push('socket:' + type + ':' + fn.name); } }
     const jaws = new WebSocket();

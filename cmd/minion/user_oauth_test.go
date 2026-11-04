@@ -100,8 +100,13 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 ||
 		!strings.Contains(page.Body.String(), `name="jawsKey"`) ||
+		!strings.Contains(page.Body.String(), `<script defer src="/admin/login.js"></script>`) ||
 		!strings.Contains(page.Body.String(), "Sign in with GitHub") {
 		t.Fatalf("JaWS sign-in page: status=%d body=%q", page.Code, page.Body.String())
+	}
+	if script := adminResponse(handler, http.MethodGet, "/admin/login.js", nil, nil, ""); script.Code != http.StatusOK ||
+		!strings.Contains(script.Body.String(), `form[action="/auth/logout"]`) {
+		t.Fatalf("OAuth logout JaWS script: status=%d body=%q", script.Code, script.Body.String())
 	}
 	guest := page.Result().Cookies()[0]
 	start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, guest, "")
