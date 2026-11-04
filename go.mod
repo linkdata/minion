@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/linkdata/jaws v0.902.0
-	github.com/linkdata/jawsauth v1.4.1-0.20261104123545-dd152088aa7b
+	github.com/linkdata/jawsauth v1.4.1-0.20261104200206-aaa671416a2a
 	github.com/linkdata/webserv v1.5.0
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
