@@ -73,6 +73,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 				}
 				check := exec.CommandContext(ctx, git, "-C", request.dir, "rev-parse", "HEAD")
 				check.Env = testsupport.GitEnvironment(t.TempDir())
+				check.Stderr = os.Stderr
 				commit, err := check.Output()
 				if err != nil || strings.TrimSpace(string(commit)) != job.Source.Head {
 					t.Fatalf("materialized Git head=%q error=%v", commit, err)
