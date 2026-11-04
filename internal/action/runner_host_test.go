@@ -92,9 +92,9 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 		mutate func(*Job)
 		want   string
 	}{
-		{"source materialization", command.Comment, sourceFailure, "materialize source"},
+		{"source preparation rejection", command.Comment, sourceFailure, "materialize source"},
 		{"repository materialization", command.Comment, func(job *Job) { job.Source.Files[0].Data = []byte("forged\n") }, "materialize repository"},
-		{"context materialization", command.Review, contextFailure, "materialize context"},
+		{"context preparation rejection", command.Review, contextFailure, "materialize context"},
 		{"missing audit task skill", command.SecurityAudit, func(job *Job) { job.Main.Skills = []string{skills.BuiltinAntiPromptInjection} }, "action prompt: security audit requires"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -102,7 +102,7 @@ func TestRunnerPreparationFailuresAreTerminalBeforeModels(t *testing.T) {
 			test.mutate(&job)
 			runner := Runner{WorkRoot: t.TempDir(), runModel: forbidModel(t)}
 			want := test.want
-			if runtime.GOOS == "windows" && (test.name == "source materialization" || test.name == "context materialization") {
+			if runtime.GOOS == "windows" && (test.name == "source preparation rejection" || test.name == "context preparation rejection") {
 				want = "duplicate source path"
 			}
 			if result, err := runner.Run(t.Context(), job); !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), want) || len(result.Calls) != 0 {
