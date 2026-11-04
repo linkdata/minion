@@ -45,7 +45,7 @@ func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 	}
 	t.Run("reject inherited helper", func(t *testing.T) {
 		dir := t.TempDir()
-		cmd := exec.Command(binary, "-test.run=^TestNativeWindowsActionMaterializesGitAndRunsCommand$")
+		cmd := exec.Command(binary, "-test.run=^TestNativeWindowsActionMaterializesGitAndRunsCommand$/^$")
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "MINION_WINDOWS_MODEL_HELPER=fix", "MINION_WINDOWS_MODEL_HELPER_DIR=")
 		out, err := cmd.CombinedOutput()
