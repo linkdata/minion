@@ -21,8 +21,11 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	if realGit := os.Getenv("MINION_TEST_GIT_PROXY"); realGit != "" {
-		for _, arg := range os.Args[1:] {
-			if arg != "clone" && arg != "ls-tree" && arg != "checkout" && arg != "update-ref" {
+		for i, arg := range os.Args[1:] {
+			if arg == "cat-file" && i+2 < len(os.Args) && os.Args[i+2] == "--batch" {
+				arg = "cat-file --batch"
+			}
+			if arg != "clone" && arg != "ls-tree" && arg != "checkout" && arg != "update-ref" && arg != "bundle" && arg != "cat-file --batch" {
 				continue
 			}
 			log, err := os.OpenFile(os.Getenv("MINION_TEST_GIT_COMMANDS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)

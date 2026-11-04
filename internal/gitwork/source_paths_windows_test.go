@@ -183,6 +183,7 @@ func TestWindowsPullRequestRejectsSelectedBaseCaseAliases(t *testing.T) {
 	head := fixture.gitInput(fixture.source, "deleted aliases\n", "commit-tree", headTree, "-p", base)
 	fixture.git(fixture.source, "push", fixture.remote, base+":refs/heads/main")
 	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
+	log := windowsRecordGitCommands(t)
 	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head)
 	if err != nil {
 		t.Fatal(err)
@@ -190,6 +191,9 @@ func TestWindowsPullRequestRejectsSelectedBaseCaseAliases(t *testing.T) {
 	t.Cleanup(func() { _ = checkout.Close() })
 	if _, err := checkout.Snapshot(t.Context()); !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "duplicate source path") {
 		t.Fatalf("selected base aliases passed source preflight: %v", err)
+	}
+	if calls, err := os.ReadFile(log); err != nil || !bytes.Contains(calls, []byte("clone\n")) || bytes.Contains(calls, []byte("bundle\n")) || bytes.Contains(calls, []byte("cat-file --batch\n")) {
+		t.Fatalf("selected base aliases exported source: calls=%q error=%v", calls, err)
 	}
 }
 
