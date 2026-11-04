@@ -33,7 +33,7 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 </main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
 
 var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Minion request failed</title>{{$.HeadHTML}}</head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion request failed</title>{{$.HeadHTML}}</head>
 <body><main><h1>Request failed</h1><p role="alert">Request could not be completed. Try again.</p>
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
 
@@ -66,13 +66,12 @@ func (p *oauthProvider) identity(claims map[string]any) (id userIdentity, ok boo
 }
 
 type oauthAccess struct {
-	jaws         *jaws.Jaws
-	links        *userLinks
-	mux          *http.ServeMux
-	providers    []*oauthProvider
-	admissionMu  sync.Mutex
-	guestErrorMu sync.Mutex
-	linkMu       sync.Mutex
+	jaws        *jaws.Jaws
+	links       *userLinks
+	mux         *http.ServeMux
+	providers   []*oauthProvider
+	admissionMu sync.Mutex
+	linkMu      sync.Mutex
 }
 
 // Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
@@ -157,6 +156,7 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 	p := &oauthProvider{name: name, issuer: issuer, host: host}
 	srv, err := jawsauth.New(a.jaws, cfg, func(path string, handler http.Handler) {
 		if !strings.HasSuffix(path, "/logout") {
+			handler = a.oauthErrors(handler)
 			if strings.HasSuffix(path, "/login") {
 				login := handler
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +172,7 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 					login.ServeHTTP(w, r)
 				})
 			}
-			a.mux.Handle("GET "+path, a.oauthErrors(handler))
+			a.mux.Handle("GET "+path, handler)
 		}
 	})
 	if err != nil {
@@ -329,18 +329,16 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 		w.WriteHeader(http.StatusSeeOther)
 		return
 	}
-	// shortcut: repeated guest errors become status-only to reserve one sign-in page slot; revisit if clients need error history.
-	if account, _ := a.currentUser(sess); account == "" {
-		a.guestErrorMu.Lock()
-		defer a.guestErrorMu.Unlock()
-		if len(sess.Requests()) >= maxGuestLoginRequests-1 {
+	for _, p := range a.providers {
+		if _, ok := p.identity(p.server.CurrentClaims(sess)); ok {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(status)
+			ui.Handler(a.jaws, "user error", nil).ServeHTTP(w, r)
 			return
 		}
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(status)
-	ui.Handler(a.jaws, "user error", nil).ServeHTTP(w, r)
+	w.Header().Set("Location", "/auth/login?error=request")
+	w.WriteHeader(http.StatusSeeOther)
 }
 
 func (a *oauthAccess) oauthErrors(handler http.Handler) http.Handler {
