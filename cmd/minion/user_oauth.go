@@ -97,7 +97,18 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if err := jw.AddTemplateLookuper(userLoginHTML); err != nil {
 		return nil, err
 	}
-	a.mux.Handle("GET /auth/login", jw.SessionMiddleware(http.HandlerFunc(a.loginPage)))
+	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
+	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.admissionMu.Lock()
+		defer a.admissionMu.Unlock()
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		page.ServeHTTP(w, r)
+	}))
 	a.mux.HandleFunc("HEAD /auth/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
@@ -156,6 +167,7 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 		return fmt.Errorf("configure %s sign-in: %w", name, err)
 	}
 	p.server = srv
+	srv.SessionRotationLock = &a.linkMu
 	srv.LinkEvent = func(sess *jaws.Session, _ *http.Request, claims map[string]any) (int, error) {
 		a.linkMu.Lock()
 		defer a.linkMu.Unlock()

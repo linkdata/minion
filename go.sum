@@ -10,6 +10,8 @@ github.com/linkdata/jaws v0.902.0 h1:YU/WN3EpAeq/I1uoEh9w1fkoiWvkgJ30LR67Ks1QJOk
 github.com/linkdata/jaws v0.902.0/go.mod h1:4l/hXl4qhhEzBMyej3tXT3tLlkEyz1iAAEwWS6Yxpqg=
 github.com/linkdata/jawsauth v1.4.1-0.20261104113450-1dfddcf8a3f2 h1:/5bqt8LwX5JaEbQPRamDF80NWLazzEXhF/JLv8q+o7I=
 github.com/linkdata/jawsauth v1.4.1-0.20261104113450-1dfddcf8a3f2/go.mod h1:81gJevK8/9aszF2oFfFM2W0H7e4i2s0TBjI0e1Q9okc=
+github.com/linkdata/jawsauth v1.4.1-0.20261104121548-6d11b14efcc2 h1:Zl9AnJaFR5sCrbZ/X6bW3aKrPEshZNZbKCCm8rdU7gU=
+github.com/linkdata/jawsauth v1.4.1-0.20261104121548-6d11b14efcc2/go.mod h1:81gJevK8/9aszF2oFfFM2W0H7e4i2s0TBjI0e1Q9okc=
 github.com/linkdata/jq v0.6.0 h1:yxAeWsknIWmt7Wbr5CIEkj2i1WwC2DnJDZlOrPxJkr0=
 github.com/linkdata/jq v0.6.0/go.mod h1:b76MMuWybyXrVEKSHJkv+r5IEattnghPf1bNRJ5PNlE=
 github.com/linkdata/rate v1.17.1 h1:b3ld6CaQQzDxk/ChR7x1iDGMQIFyWIZAKQknZWAmiuc=
