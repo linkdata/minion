@@ -62,7 +62,8 @@ func TestRequestStopChecksAttemptAndPreservesFirstRequester(t *testing.T) {
 	}
 	store.path = savedPath
 	decision, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", at.Add(time.Second))
-	if err != nil || decision.Outcome != "canceled" || decision.StopRequest != request || decision.OutcomeBinding != accepted.OutcomeBinding {
+	if err != nil || decision.Outcome != "canceled" || decision.StopRequest != request ||
+		decision.OutcomeBinding != accepted.OutcomeBinding || decision.Deadline != accepted.Deadline {
 		t.Fatalf("completion overwrote stop: decision=%+v error=%v", decision, err)
 	}
 	if err := store.ResolveStop(accepted.JobID, accepted.AttemptID, "confirmed"); err != nil {

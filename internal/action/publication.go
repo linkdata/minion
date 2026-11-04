@@ -465,8 +465,12 @@ func cappedReview(job Job, result Result) *state.CriticCap {
 	if result.CriticStopReason != "round_cap" {
 		return nil
 	}
-	cap := &state.CriticCap{MaxRounds: job.rounds()}
-	for _, call := range result.Calls {
+	return cappedReviewCalls(job.rounds(), result.Calls)
+}
+
+func cappedReviewCalls(rounds int, calls []CallUsage) *state.CriticCap {
+	cap := &state.CriticCap{MaxRounds: rounds}
+	for _, call := range calls {
 		if call.Role == roleCritic && call.Round == cap.MaxRounds {
 			cap.HasBlockers = cap.HasBlockers || call.HasBlockers
 			if call.ReviewPhase == reviewFull {

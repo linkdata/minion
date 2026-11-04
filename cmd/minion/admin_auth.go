@@ -72,6 +72,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := registerAdminDashboard(jw); err != nil {
 		return nil, err
 	}
+	if err := jw.AddTemplateLookuper(adminActionDetailTemplate); err != nil {
+		return nil, err
+	}
 	if err := jw.AddTemplateLookuper(adminUsageHTML); err != nil {
 		return nil, err
 	}
@@ -122,6 +125,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		access.stop(w, r, owner)
 	})
 	mux.Handle("GET /{$}", adminDashboardHandler(jw, owner))
+	mux.Handle("GET /admin/actions/{attempt}", adminActionDetailHandler(jw, owner))
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
