@@ -273,8 +273,8 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if denied := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("anonymous dashboard status=%d, want 403", denied.Code)
 	}
-	if denied := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, nil, ""); denied.Code != http.StatusForbidden {
-		t.Fatalf("anonymous dashboard CSS status=%d, want 403", denied.Code)
+	if asset := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, nil, ""); asset.Code != http.StatusOK {
+		t.Fatalf("public dashboard CSS status=%d, want 200", asset.Code)
 	}
 	cookie := dashboardTestCookie(t, handler)
 	acceptedMetric := `<h2>Tracked accepted actions</h2><p class="metric">3</p>`

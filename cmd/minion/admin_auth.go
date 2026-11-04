@@ -2,12 +2,15 @@ package main
 
 import (
 	"errors"
+	"html/template"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/linkdata/jaws"
+	"github.com/linkdata/jaws/lib/ui"
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/state"
@@ -16,8 +19,25 @@ import (
 
 const adminSessionKey = "minion.admin.username"
 
-const loginPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Minion admin</title></head><body><main><h1>Minion admin</h1><form method="post" action="/admin/login"><label>Username <input name="username" autocomplete="username" required></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form></main></body></html>`
-const signedInPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Minion admin</title></head><body><main><h1>Signed in</h1><a href="/">Open dashboard</a><form method="post" action="/admin/logout"><button>Sign out</button></form></main></body></html>`
+var adminLoginHTML = template.Must(template.New("admin login").Parse(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Minion admin</title>{{$.HeadHTML}}</head>
+<body><main>
+{{if .Dot}}
+<h1>Signed in</h1><a href="/">Open dashboard</a>
+<form method="post" action="/admin/logout"><button>Sign out</button></form>
+{{else}}
+<h1>Minion admin</h1>
+<form method="post" action="/admin/login">
+<label>Username <input name="username" autocomplete="username" required></label>
+<label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+<button>Sign in</button></form>
+{{end}}
+</main>{{$.TailHTML}}</body></html>`))
+
+const (
+	maxAdminSessions      = 2048
+	maxAdminSessionsPerIP = 1024
+)
 
 type adminIdentity string
 
@@ -40,10 +60,15 @@ type adminAccess struct {
 }
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator) (http.Handler, error) {
+	jw.MaxSessions = maxAdminSessions
+	jw.MaxSessionsPerIP = maxAdminSessionsPerIP
 	if err := registerAdminDashboard(jw); err != nil {
 		return nil, err
 	}
 	if err := jw.AddTemplateLookuper(adminUsageHTML); err != nil {
+		return nil, err
+	}
+	if err := jw.AddTemplateLookuper(adminLoginHTML); err != nil {
 		return nil, err
 	}
 	access := &adminAccess{jaws: jw, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
@@ -58,7 +83,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /admin/login", access.loginPage)
+	mux.Handle("GET /admin/login", jw.SessionMiddleware(http.HandlerFunc(access.loginPage)))
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
@@ -150,24 +175,61 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	if len(a.accounts) == 0 {
 		return false
 	}
+	seen := false
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == a.jaws.CookieName {
+			if seen {
+				return false
+			}
+			seen = true
+		}
+	}
 	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
 		return true
 	}
 	if r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
 		return true
 	}
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		// JaWS fingerprints its bundled CSS and JavaScript asset paths.
+		if r.URL.Path == "/admin/dashboard.css" || r.URL.Path == "/jaws/.ping" ||
+			strings.HasPrefix(r.URL.Path, "/jaws/.jaws.") &&
+				(strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css")) {
+			return true
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/jaws/") {
+		return a.ownsJaWSRequest(r)
+	}
 	return a.sessionUsername(a.jaws.GetSession(r)) != ""
+}
+
+func (a *adminAccess) ownsJaWSRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var key string
+	if strings.HasPrefix(r.URL.Path, "/jaws/.tail/") {
+		key = strings.TrimPrefix(r.URL.Path, "/jaws/.tail/")
+	} else {
+		key = strings.TrimPrefix(r.URL.Path, "/jaws/")
+		key = strings.TrimSuffix(key, "/noscript")
+	}
+	if key == "" {
+		return false
+	}
+	for _, rq := range a.jaws.GetSession(r).Requests() {
+		if rq.JawsKeyString() == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if a.sessionUsername(a.jaws.GetSession(r)) != "" {
-		_, _ = w.Write([]byte(signedInPage))
-		return
-	}
-	_, _ = w.Write([]byte(loginPage))
+	ui.Handler(a.jaws, "admin login", a.sessionUsername(a.jaws.GetSession(r)) != "").ServeHTTP(w, r)
 }
 
 func (a *adminAccess) reserveAttempt(username string) bool {
