@@ -21,7 +21,8 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
-		cfg.RemoteExecutor != nil || cfg.Admin == nil || cfg.Admin.Listen != DefaultAdminListen || len(cfg.Admin.Administrators) != 0 ||
+		cfg.RemoteExecutor != nil || cfg.Admin == nil || cfg.Admin.Listen != DefaultAdminListen ||
+		len(cfg.Admin.Administrators) != 1 || cfg.Admin.Administrators[0] != (AdminAccount{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder}) ||
 		cfg.CriticStopping.NonblockingAfterRound != nil || cfg.CriticStopping.ConsecutiveNoBlockerRounds != nil ||
 		cfg.InactivityTimeoutMinutes != 10 || cfg.MaxRuntimeMinutes != 240 || cfg.PublicationGraceSeconds != DefaultPublicationGraceSeconds ||
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||

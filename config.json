@@ -2,7 +2,7 @@
   "bot_login": "example-bot",
   "admin": {
     "listen": "127.0.0.1:8377",
-    "administrators": []
+    "administrators": [{"username": "admin", "password_hash": "PASTE_GENERATED_HASH_HERE"}]
   },
   "main": "codex",
   "adversarial": "",

@@ -365,8 +365,10 @@ func (c *Config) Validate(configDir string) error {
 				return errors.New("admin.administrators username is invalid or duplicated")
 			}
 			seen[strings.ToLower(account.Username)] = true
-			if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
-				return errors.New("admin.administrators password_hash is invalid")
+			if account.PasswordHash != AdminPasswordHashPlaceholder {
+				if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
+					return errors.New("admin.administrators password_hash is invalid")
+				}
 			}
 		}
 		if admin.Listen == "" {

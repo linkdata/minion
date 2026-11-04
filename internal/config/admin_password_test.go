@@ -56,6 +56,9 @@ func TestAdminPasswordLengthAndUTF8(t *testing.T) {
 }
 
 func TestAdminAccountsValidation(t *testing.T) {
+	if (AdminAccount{PasswordHash: AdminPasswordHashPlaceholder}).VerifyPassword("PASTE_GENERATED_HASH_HERE") {
+		t.Fatal("sample placeholder verified as a password hash")
+	}
 	hash := testAdminPasswordHash("secret password")
 	for _, test := range []struct {
 		name     string
@@ -64,6 +67,8 @@ func TestAdminAccountsValidation(t *testing.T) {
 	}{
 		{name: "no default account"},
 		{name: "valid", accounts: []AdminAccount{{Username: "operator", PasswordHash: hash}}},
+		{name: "sample placeholder", accounts: []AdminAccount{{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder}}},
+		{name: "invalid placeholder", accounts: []AdminAccount{{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder + "!"}}, invalid: true},
 		{name: "empty username", accounts: []AdminAccount{{PasswordHash: hash}}, invalid: true},
 		{name: "duplicate username", accounts: []AdminAccount{{Username: "Operator", PasswordHash: hash}, {Username: "operator", PasswordHash: hash}}, invalid: true},
 		{name: "plaintext", accounts: []AdminAccount{{Username: "operator", PasswordHash: "secret password"}}, invalid: true},

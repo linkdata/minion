@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,6 +75,40 @@ func adminResponse(handler http.Handler, method, path string, form url.Values, c
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
 	return response
+}
+
+func TestCheckedInAdminPlaceholderCannotSignIn(t *testing.T) {
+	cfg, err := config.Load(filepath.Join("..", "..", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Admin == nil || len(cfg.Admin.Administrators) != 1 {
+		t.Fatal("checked-in admin placeholder account is missing")
+	}
+	placeholder := cfg.Admin.Administrators[0]
+	handler, _, _ := testAdminHandler(t, cfg.Admin.Administrators)
+	for _, test := range []struct {
+		method, path string
+		form         url.Values
+	}{
+		{method: http.MethodGet, path: "/admin/login"},
+		{method: http.MethodGet, path: "/"},
+		{method: http.MethodPost, path: "/admin/login", form: url.Values{"username": {"admin"}, "password": {"PASTE_GENERATED_HASH_HERE"}}},
+	} {
+		response := adminResponse(handler, test.method, test.path, test.form, nil, "")
+		if response.Code != http.StatusForbidden || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("sample admin %s %s: status=%d cookies=%d, want 403 without session", test.method, test.path, response.Code, len(response.Result().Cookies()))
+		}
+	}
+	mixed, _, _ := testAdminHandler(t, []config.AdminAccount{placeholder, testAdminAccount()})
+	if response := adminResponse(mixed, http.MethodPost, "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"PASTE_GENERATED_HASH_HERE"}}, nil, ""); response.Code != http.StatusUnauthorized || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("placeholder among real accounts: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
+	}
+	if response := adminResponse(mixed, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, nil, ""); response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
+		t.Fatalf("real account alongside placeholder: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
+	}
 }
 
 func TestAdminLoginAndRevocation(t *testing.T) {

@@ -10,6 +10,9 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// AdminPasswordHashPlaceholder marks a disabled example account.
+const AdminPasswordHashPlaceholder = "PASTE_GENERATED_HASH_HERE"
+
 // AdminAccount is one configured dashboard administrator.
 type AdminAccount struct {
 	Username     string `json:"username"`

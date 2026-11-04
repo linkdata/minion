@@ -114,12 +114,12 @@ By default, Minion starts one selected local executor child on Linux, macOS and 
 ./bin/minion -config ./config.local.json -loop
 ```
 
-The bundled [config.json](config.json) includes an optional `admin` block with no accounts. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you add an administrator with a password hash. Restart Minion after adding the account. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+The bundled [config.json](config.json) includes an optional `admin` block with an `admin` account whose `password_hash` is the inert `PASTE_GENERATED_HASH_HERE` placeholder. With `-loop`, it starts a loopback listener that returns HTTP 403 on every route, including login, until you replace the placeholder with a generated hash and restart Minion. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
   "listen": "127.0.0.1:8377",
-  "administrators": [{"username": "operator", "password_hash": "PASTE_GENERATED_ARGON2ID_PHC_HASH"}]
+  "administrators": [{"username": "admin", "password_hash": "PASTE_GENERATED_HASH_HERE"}]
 }
 ```
 

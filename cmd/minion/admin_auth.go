@@ -48,6 +48,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	}
 	access := &adminAccess{jaws: jw, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
 	for _, account := range cfg.Administrators {
+		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
+			continue
+		}
 		access.accounts[account.Username] = account
 		if access.dummy.Username == "" {
 			access.dummy = account
