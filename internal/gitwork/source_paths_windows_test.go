@@ -172,6 +172,27 @@ func TestWindowsPullRequestUsesSafeHeadAndSelectedBaseFiles(t *testing.T) {
 	}
 }
 
+func TestWindowsPullRequestRejectsSelectedBaseCaseAliases(t *testing.T) {
+	fixture := newFixture(t)
+	blob := fixture.gitInput(fixture.source, "base\n", "hash-object", "-w", "--stdin")
+	baseTree := windowsRawTree(fixture,
+		fmt.Sprintf("100644 blob %s\tReadme", blob),
+		fmt.Sprintf("100644 blob %s\tREADME", blob))
+	base := windowsTreeCommit(fixture, baseTree)
+	headTree := windowsRawTree(fixture, fmt.Sprintf("100644 blob %s\tother", blob))
+	head := fixture.gitInput(fixture.source, "deleted aliases\n", "commit-tree", headTree, "-p", base)
+	fixture.git(fixture.source, "push", fixture.remote, base+":refs/heads/main")
+	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
+	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = checkout.Close() })
+	if _, err := checkout.Snapshot(t.Context()); !errors.Is(err, ErrUnsupportedSource) || !strings.Contains(err.Error(), "duplicate source path") {
+		t.Fatalf("selected base aliases passed source preflight: %v", err)
+	}
+}
+
 func TestWindowsImportRejectsHostileResultPathsBeforeMutation(t *testing.T) {
 	for _, test := range []struct {
 		name   string

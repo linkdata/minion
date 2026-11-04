@@ -243,6 +243,7 @@ func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int6
 	headFiles := 0
 	var total int64
 	allEntries := slices.Clone(entries)
+	var basePaths []string
 	for _, entry := range entries {
 		if entry.omitted {
 			s.HeadOmitted = append(s.HeadOmitted, entry.file.Path)
@@ -256,7 +257,13 @@ func (c *Checkout) snapshotWithSourceLimit(ctx context.Context, sourceLimit int6
 			allEntries = append(allEntries, entry)
 			if !entry.omitted {
 				total += entry.size
+				basePaths = append(basePaths, entry.file.Path)
 			}
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if err := workspace.ValidateSourceLayout(basePaths, true); err != nil {
+			return s, fmt.Errorf("%w: %w", ErrUnsupportedSource, err)
 		}
 	}
 	// Bound regular-file transfer before reading contents or rendering a diff. Omitted
