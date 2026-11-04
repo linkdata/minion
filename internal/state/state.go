@@ -116,6 +116,7 @@ type TerminalDecision struct {
 	AttemptID        string            `json:"attempt_id"`
 	Outcome          string            `json:"outcome"`
 	DecidedAt        time.Time         `json:"decided_at"`
+	Deadline         time.Time         `json:"deadline,omitzero"`
 	OutcomeBinding   string            `json:"outcome_binding,omitempty"`
 	UnresolvedAccess AccessDisposition `json:"unresolved_access,omitzero"`
 	StopRequest      StopRequest       `json:"stop_request,omitzero"`
@@ -329,7 +330,7 @@ func (s *Store) DecideTerminalLocked(jobID, attemptID, outcome string, at time.T
 	if accepted.StopRequest != (StopRequest{}) && outcome != "lost" {
 		outcome = "canceled"
 	}
-	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), OutcomeBinding: accepted.OutcomeBinding, StopRequest: accepted.StopRequest}
+	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), Deadline: accepted.Deadline, OutcomeBinding: accepted.OutcomeBinding, StopRequest: accepted.StopRequest}
 	if !validTerminalDecision(jobID, decision) {
 		return TerminalDecision{}, errors.New("invalid terminal decision")
 	}

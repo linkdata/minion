@@ -97,7 +97,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   </tr></thead><tbody><tr>
     <td>{{.Action.Repository}}</td><td>{{.Action.Requester}}</td><td>{{.Action.Action}}</td>
     <td>{{.Action.Phase}}</td><td>{{utc .Action.AcceptedAt}}</td><td>{{utc .Action.Deadline}}</td>
-  </tr></tbody></table><p class="hint">Attempt {{.Action.AttemptID}}</p>
+  </tr></tbody></table><p class="hint"><a href="/admin/actions/{{.Action.AttemptID}}">Open attempt {{.Action.AttemptID}} details</a></p>
   {{else if .Snapshot.InProgress}}<p>No current action matches these filters.</p>
   {{else}}<p>No action is in progress.</p>{{end}}
 {{end}}{{end}}{{else}}<p role="alert">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}

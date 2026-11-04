@@ -411,7 +411,7 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Outcome != "inactivity" || !store.Data.Accepted.Terminal {
+	if first != second || first.Outcome != "inactivity" || first.Deadline != accepted.Deadline || !store.Data.Accepted.Terminal {
 		t.Fatalf("later outcome changed first terminal decision: first=%+v second=%+v accepted=%+v", first, second, store.Data.Accepted)
 	}
 	if err := store.WithLock(func() error {
@@ -609,6 +609,7 @@ func TestReadSavedDistinguishesAmbiguousTerminalDecisionSaves(t *testing.T) {
 	after, err := store.ReadSaved()
 	if err != nil || after.TerminalDecisions[accepted.JobID].Outcome != "lost" ||
 		after.TerminalDecisions[accepted.JobID].OutcomeBinding != accepted.OutcomeBinding ||
+		after.TerminalDecisions[accepted.JobID].Deadline != accepted.Deadline ||
 		after.Accepted == nil || !after.Accepted.Terminal {
 		t.Fatalf("post-replacement decision was not readable: %+v error=%v", after, err)
 	}
