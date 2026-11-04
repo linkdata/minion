@@ -10,9 +10,14 @@ import (
 
 var adminNoticeHTML = template.Must(template.New("admin notice").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion admin request error</title>{{$.HeadHTML}}</head>
-<body><main><h1>Request could not be completed</h1><p role="alert">{{.Dot}}</p>
-{{if .Auth.IsAdmin}}<a href="/">Dashboard</a>{{else}}<a href="/admin/login">Sign in</a>{{end}}
+<body><main><h1>Request could not be completed</h1><p role="alert">{{.Dot.Status}}</p>
+{{if .Auth.IsAdmin}}<a href="/">Dashboard</a>{{else if .Dot.AdminLogin}}<a href="/admin/login">Sign in</a>{{end}}
 </main>{{$.TailHTML}}</body></html>`))
+
+type adminNoticeView struct {
+	Status     string
+	AdminLogin bool
+}
 
 func adminBrowserRoute(r *http.Request) bool {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
@@ -108,7 +113,7 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", http.StatusText(capture.status)).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), AdminLogin: len(a.accounts) != 0}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)
