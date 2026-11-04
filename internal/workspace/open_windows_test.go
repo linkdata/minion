@@ -1,11 +1,13 @@
 package workspace
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -48,6 +50,9 @@ func TestWindowsCollectionRefusesLinkParents(t *testing.T) {
 			if kind == "junction" {
 				windowsJunction(t, parent, outside)
 			} else if err := os.Symlink(outside, parent); err != nil {
+				if errors.Is(err, syscall.ERROR_PRIVILEGE_NOT_HELD) {
+					t.Skipf("Windows symlink privilege unavailable: %v", err)
+				}
 				t.Fatalf("create directory symlink: %v", err)
 			}
 			name := filepath.Join(parent, "secret")
@@ -111,6 +116,9 @@ func TestWindowsCollectionRefusesReparseRootForDeleteOnlySelection(t *testing.T)
 			if kind == "junction" {
 				windowsJunction(t, root, outside)
 			} else if err := os.Symlink(outside, root); err != nil {
+				if errors.Is(err, syscall.ERROR_PRIVILEGE_NOT_HELD) {
+					t.Skipf("Windows symlink privilege unavailable: %v", err)
+				}
 				t.Fatalf("create root directory symlink: %v", err)
 			}
 			matchingTarget := []File{{Path: "file", Mode: Regular, Data: []byte("outside")}}
