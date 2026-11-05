@@ -73,7 +73,7 @@ func TestUsageJSONFiltersAndTotals(t *testing.T) {
 	if strings.Join(output.GroupBy, ",") != "repo,user,action" || len(output.Groups) != 4 {
 		t.Fatalf("unexpected groups: %+v", output)
 	}
-	want := usage.Summary{Attempts: 4, UsageRecordedActions: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, UnallocatedTokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, TotalTokens: 175}
+	want := usage.Summary{Attempts: 4, UsageRecordedActions: 4, Succeeded: 2, Failed: 1, Running: 1, CodexCalls: 4, ClaudeCalls: 3, EstimatedCostUnknownCalls: 7, IncompleteUsage: 2, Tokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, UnallocatedTokens: usage.Tokens{Input: 150, CacheCreationInput: 25, CachedInput: 50, Output: 25}, TotalTokens: 175}
 	if output.ActionCoverage != "unknown" || output.Totals != want {
 		t.Fatalf("totals = %+v, want %+v", output.Totals, want)
 	}

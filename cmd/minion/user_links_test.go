@@ -109,6 +109,35 @@ func TestUserLinksProvenAccountsAndHostIdentity(t *testing.T) {
 	}
 }
 
+func TestUserLinksGitLabRootHasOneGitHubID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json.link")
+	links, err := openUserLinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitlab := (userIdentity{Provider: "gitlab", Host: "gitlab.example", Subject: "person"}).key()
+	github := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	otherGitHub := (userIdentity{Provider: "github", Host: "github.com", Subject: "43"}).key()
+	if err := links.link(gitlab, github); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{gitlab, github} {
+		if id, err := links.githubID(key); err != nil || id != 42 {
+			t.Fatalf("GitHub ID for %q: %d, %v", key, id, err)
+		}
+	}
+	if err := links.link(gitlab, otherGitHub); !errors.Is(err, errUserLinkConflict) {
+		t.Fatalf("second GitHub identity: %v", err)
+	}
+	loaded, err := openUserLinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := loaded.githubID(gitlab); err != nil || id != 42 {
+		t.Fatalf("persisted GitHub ID: %d, %v", id, err)
+	}
+}
+
 func TestUserLinksRejectCorruptFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json.link")
 	for _, data := range []string{

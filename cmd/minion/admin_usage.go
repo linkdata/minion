@@ -17,7 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype html>
+var adminUsageHTML = template.Must(template.New("admin usage").Parse(usageEstimatedCostTemplate + `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -56,23 +56,26 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(`<!doctype 
       <article><h2>Unallocated tokens</h2><p class="metric">{{.Report.Totals.UnallocatedTokens.Total}}</p></article>
       <article><h2>Attempts with incomplete usage or still running</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
     </div>
+    <p>Estimated cost and currency: {{template "estimatedCost" .Report.Totals}}. Billed cost and credits: Unknown.</p>
     <section class="panel actions" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading">Usage by repository, requester, and service</h2>
       {{if .Report.Groups}}<table><thead><tr>
         <th scope="col">Repository</th><th scope="col">Repository ID</th>
         <th scope="col">Requester</th><th scope="col">Requester ID</th><th scope="col">Service</th>
         <th scope="col">Attempts</th><th scope="col">Total tokens</th>
         <th scope="col">Unallocated tokens</th><th scope="col">Attempts with incomplete usage or still running</th>
+        <th scope="col">Estimated cost and currency</th>
       </tr></thead><tbody>{{range .Report.Groups}}<tr>
         <td>{{.Repo}}</td><td>{{if .RepositoryID}}{{.RepositoryID}}{{else}}Unknown{{end}}</td>
         <td>{{.User}}</td><td>{{if .RequesterID}}{{.RequesterID}}{{else}}Unknown{{end}}</td><td>{{.Service}}</td>
         <td class="number">{{.Attempts}}</td><td class="number">{{.TotalTokens}}</td>
         <td class="number">{{.UnallocatedTokens.Total}}</td><td class="number">{{.IncompleteUsage}}</td>
+        <td>{{template "estimatedCost" .}}</td>
       </tr>{{end}}</tbody></table>{{else}}<p>No usage records match these filters.</p>{{end}}
     </section>
     <p class="hint">Action coverage: {{.Report.ActionCoverage}}.
-      Actions without usage files are excluded. Billed credits: unknown.
+      Actions without usage files are excluded.
       Repository and requester ID filters exclude older usage records without the corresponding numeric IDs.
-      Tokens are executor-reported; incomplete usage can omit unknown amounts.
+      Tokens and USD estimates are executor-reported; incomplete usage can omit unknown amounts.
       An attempt using multiple services can appear in more than one service group,
       while the totals above count it once.</p>
   </main>{{end}}{{$.TailHTML}}

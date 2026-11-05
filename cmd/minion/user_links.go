@@ -165,6 +165,36 @@ func (s *userLinks) storageError() error {
 	return s.bad
 }
 
+// githubID returns the proved GitHub identity, if any, in one linked account.
+func (s *userLinks) githubID(key string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bad != nil {
+		return 0, s.bad
+	}
+	if !validUserKey(key) {
+		return 0, errors.New("invalid user identity")
+	}
+	account := s.accountLocked(key)
+	githubKey := account
+	if !strings.HasPrefix(githubKey, "github:github.com:") {
+		for alias, root := range s.links {
+			if root == account && strings.HasPrefix(alias, "github:github.com:") {
+				githubKey = alias
+				break
+			}
+		}
+	}
+	if !strings.HasPrefix(githubKey, "github:github.com:") {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(githubKey, "github:github.com:"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, errors.New("invalid linked GitHub identity")
+	}
+	return id, nil
+}
+
 func (s *userLinks) accountLocked(key string) string {
 	if root := s.links[key]; root != "" {
 		return root

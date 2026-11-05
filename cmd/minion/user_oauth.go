@@ -1,11 +1,16 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,14 +27,15 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 {{if .Dot.Error}}<p role="alert">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
 <h1>Signed in with {{.Dot.Provider}}</h1>
+<p><a href="/user/usage">Your usage</a></p>
 {{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button>Link GitHub account</button></form>{{end}}
 {{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button>Link GitLab account</button></form>{{end}}
 {{if .Dot.Preferences}}<p><a href="/auth/preferences">Model preferences</a></p>{{end}}
 <form method="post" action="/auth/logout"><button>Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
-{{if .Dot.GitHub}}<p><a href="/auth/github/login">Sign in with GitHub</a></p>{{end}}
-{{if .Dot.GitLab}}<p><a href="/auth/gitlab/login">Sign in with GitLab</a></p>{{end}}
+{{if .Dot.GitHub}}<p><a href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
+{{if .Dot.GitLab}}<p><a href="/auth/gitlab/login{{.Dot.SignInSuffix}}">Sign in with GitLab</a></p>{{end}}
 {{end}}
 </main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
 
@@ -47,6 +53,7 @@ type userLoginView struct {
 	Provider       string
 	GitHub, GitLab bool
 	Preferences    bool
+	SignInSuffix   string
 }
 
 type oauthProvider struct {
@@ -65,13 +72,15 @@ func (p *oauthProvider) identity(claims map[string]any) (id userIdentity, ok boo
 }
 
 type oauthAccess struct {
-	jaws        *jaws.Jaws
-	links       *userLinks
-	mux         *http.ServeMux
-	providers   []*oauthProvider
-	choices     *config.UserModelChoices
-	admissionMu sync.Mutex
-	linkMu      sync.Mutex
+	jaws           *jaws.Jaws
+	links          *userLinks
+	mux            *http.ServeMux
+	providers      []*oauthProvider
+	choices        *config.UserModelChoices
+	admissionMu    sync.Mutex
+	linkMu         sync.Mutex
+	usageGate      *userUsageGate
+	usageCursorKey [32]byte
 }
 
 // Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
@@ -100,11 +109,15 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if err != nil {
 		return nil, fmt.Errorf("open user links: %w", err)
 	}
-	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux(), choices: cfg.UserModelChoices}
+	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux(), choices: cfg.UserModelChoices, usageGate: newUserUsageGate()}
+	rand.Read(a.usageCursorKey[:])
 	if err := jw.AddTemplateLookuper(userLoginHTML); err != nil {
 		return nil, err
 	}
 	if err := jw.AddTemplateLookuper(userErrorHTML); err != nil {
+		return nil, err
+	}
+	if err := jw.AddTemplateLookuper(userUsageHTML); err != nil {
 		return nil, err
 	}
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
@@ -178,7 +191,11 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 						w.WriteHeader(http.StatusServiceUnavailable)
 						return
 					}
-					r.Header.Set("Referer", "/auth/login")
+					returnTo := userUsageReturnTarget(r.URL.Query().Get("next"))
+					if returnTo == "" {
+						returnTo = "/auth/login"
+					}
+					r.Header.Set("Referer", returnTo)
 					login.ServeHTTP(w, r)
 				})
 			}
@@ -235,8 +252,66 @@ func (a *oauthAccess) allowed(r *http.Request) bool {
 	if a == nil {
 		return false
 	}
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/user/usage":
+			return true // The handler redirects anonymous readers to sign-in.
+		case "/user/usage.css":
+			return a.sessionAccount(r) != ""
+		}
+	}
 	_, pattern := a.mux.Handler(r)
 	return pattern != ""
+}
+
+func (a *oauthAccess) sessionAccount(r *http.Request) string {
+	account, _ := a.currentUser(a.jaws.GetSession(r))
+	return account
+}
+
+// Only a canonical usage URL may survive an unauthenticated sign-in detour.
+func userUsageReturnTarget(raw string) string {
+	if len(raw) == 0 || len(raw) > 1024 {
+		return ""
+	}
+	target, err := url.Parse(raw)
+	if err != nil || target.Scheme != "" || target.Host != "" || target.User != nil ||
+		target.Opaque != "" || target.Fragment != "" || target.Path != "/user/usage" {
+		return ""
+	}
+	repo, after, signature, ok := parseUserUsageQuery(target.RawQuery)
+	if !ok {
+		return ""
+	}
+	if after != 0 {
+		decoded, err := base64.RawURLEncoding.DecodeString(signature)
+		if err != nil || len(decoded) != sha256.Size {
+			return ""
+		}
+	}
+	return userUsageContinueURL(repo, after, signature)
+}
+
+func (a *oauthAccess) usageCursorMAC(account, repo string, after int) []byte {
+	mac := hmac.New(sha256.New, a.usageCursorKey[:])
+	_, _ = fmt.Fprintf(mac, "%q\n%q\n%d", account, repo, after)
+	return mac.Sum(nil)
+}
+
+func (a *oauthAccess) signedUserUsageURL(account, repo string, after int) string {
+	if after == 0 {
+		return userUsageContinueURL(repo, after, "")
+	}
+	signature := base64.RawURLEncoding.EncodeToString(a.usageCursorMAC(account, repo, after))
+	return userUsageContinueURL(repo, after, signature)
+}
+
+func (a *oauthAccess) validUsageCursor(account, repo string, after int, signature string) bool {
+	if after == 0 {
+		return signature == ""
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(signature)
+	return err == nil && hmac.Equal(decoded, a.usageCursorMAC(account, repo, after))
 }
 
 func (a *oauthAccess) routes(mux *http.ServeMux) {
@@ -255,6 +330,9 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := userLoginView{SignedIn: account != "", Error: r.URL.Query().Get("error") == "request", Preferences: account != "" && a.choices != nil}
+	if returnTo := userUsageReturnTarget(r.URL.Query().Get("next")); returnTo != "" {
+		view.SignInSuffix = "?next=" + url.QueryEscape(returnTo)
+	}
 	if provider != nil {
 		view.Provider = provider.name
 	}
