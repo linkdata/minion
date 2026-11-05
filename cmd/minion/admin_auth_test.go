@@ -48,7 +48,7 @@ func testAdminHandler(t *testing.T, administrators []config.AdminAccount) (http.
 	}
 	logs := new(bytes.Buffer)
 	jw.Logger = slog.New(slog.NewTextHandler(logs, nil))
-	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: administrators}, nil)
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: administrators}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	}
 }
 
-func TestAdminLoginSubmitClosesJaWSSocket(t *testing.T) {
+func TestAuthFormSubmitClosesJaWSSocket(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node.js is unavailable for the browser hook check")
@@ -282,7 +282,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const script = fs.readFileSync(process.argv[1], 'utf8');
-for (const action of ['/admin/login', '/admin/logout']) {
+for (const action of ['/admin/login', '/admin/logout', '/auth/logout']) {
     const calls = [];
     class WebSocket { removeEventListener(type, fn) { calls.push('socket:' + type + ':' + fn.name); } }
     const jaws = new WebSocket();
@@ -482,7 +482,7 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, nil)
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +753,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile,
 		Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil, nil)
+	}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -801,7 +801,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil, nil)
+	}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -850,7 +850,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil, nil)
+	}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1072,7 +1072,7 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{account}}, nil)
+		handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{account}}, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

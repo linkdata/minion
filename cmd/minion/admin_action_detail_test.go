@@ -173,7 +173,7 @@ func TestAdminActionDetailConnectedPageRevoked(t *testing.T) {
 			owner := &action.Orchestrator{Store: store, WorkRoot: t.TempDir()}
 			server, err := startAdminServer(t.Context(), config.AdminConfig{
 				Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-			}, owner, nil)
+			}, owner, "", nil)
 			if err != nil {
 				t.Fatal(err)
 			}

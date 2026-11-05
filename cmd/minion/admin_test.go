@@ -32,7 +32,7 @@ func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
 
 func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	t.Parallel()
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	if err := os.WriteFile(certFile, contents, 0600); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestAdminServerServesNonCleanSymlinkTLSPath(t *testing.T) {
 	if _, err := loadTLSCertificate("admin", certFile, keyFile); err != nil {
 		t.Fatalf("TLS preflight: %v", err)
 	}
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestAdminServerServesNonCleanSymlinkTLSPath(t *testing.T) {
 func TestAdminServerReportsListenerFailure(t *testing.T) {
 	t.Parallel()
 	failed := make(chan struct{})
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, func() { close(failed) })
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, "", func() { close(failed) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestAdminServerStopsWithParentContext(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithCancel(t.Context())
 	failed := make(chan struct{}, 1)
-	admin, err := startAdminServer(ctx, config.AdminConfig{Listen: "127.0.0.1:0"}, nil, func() { failed <- struct{}{} })
+	admin, err := startAdminServer(ctx, config.AdminConfig{Listen: "127.0.0.1:0"}, nil, "", func() { failed <- struct{}{} })
 	if err != nil {
 		t.Fatal(err)
 	}
