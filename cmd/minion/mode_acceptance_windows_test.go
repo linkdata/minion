@@ -17,9 +17,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/testsupport"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 // The test executable doubles as the public execute-mode child and a native
@@ -141,6 +146,25 @@ func windowsModeCodexProbe() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(99)
 		}
+		answer := "No findings."
+		for _, argument := range os.Args[2:] {
+			roots, ok := strings.CutPrefix(argument, "sandbox_workspace_write.writable_roots=")
+			if !ok {
+				continue
+			}
+			var writable []string
+			if json.Unmarshal([]byte(roots), &writable) != nil || len(writable) != 1 {
+				os.Exit(99)
+			}
+			path := filepath.Join(writable[0], "source.txt")
+			if data, err := os.ReadFile(path); err != nil || string(data) != "source\n" {
+				os.Exit(99)
+			}
+			if err := os.WriteFile(path, []byte("fixed\n"), 0600); err != nil {
+				os.Exit(99)
+			}
+			answer = "Fixed source."
+		}
 		if _, err := io.WriteString(calls, "model\n"); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(99)
@@ -150,7 +174,7 @@ func windowsModeCodexProbe() {
 			os.Exit(99)
 		}
 		fmt.Println(`{"type":"thread.started","thread_id":"root"}`)
-		fmt.Println(`{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}`)
+		fmt.Printf("{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":%q}}\n", answer)
 		fmt.Println(`{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}`)
 		return
 	}
@@ -214,5 +238,93 @@ func TestWindowsPublicExecuteModeUsesSelectedHTTPSWorker(t *testing.T) {
 	}
 	if watcher.Handler != owner || !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
 		t.Fatalf("selected child did not hold an authenticated pull: handler=%v commands=%v", watcher.Handler, watcher.SelectedCommands)
+	}
+}
+
+type windowsAcceptCheckpoints struct{}
+
+func (windowsAcceptCheckpoints) BeforeCall(action.CallCheckpoint) error { return nil }
+func (windowsAcceptCheckpoints) AfterCall(action.CallCheckpoint) error  { return nil }
+func (windowsAcceptCheckpoints) Review(action.ReviewCheckpoint) error   { return nil }
+
+func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	modelCalls := filepath.Join(bin, "model-calls")
+	offlineModeCodex(t, modelCalls)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("MINION_WINDOWS_EXECUTE_CHILD", "1")
+	for _, name := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
+		t.Setenv(name, "")
+	}
+	cfg := selectedServiceTestConfig(t)
+	cfg.Commands = map[string]config.CommandMapping{
+		"fix": {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}},
+	}
+	cfg.Repositories[0].Actions = []string{"fix"}
+	cfg.Codex.APIKey = ""
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	owner := newOrchestrator(cfg, nil, nil, logger, nil)
+	watcher := &monitor.Monitor{Config: cfg}
+	done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, binary, []string{"-mode=execute"}, 40*time.Second)
+	if err != nil {
+		t.Fatalf("selected worker startup: %v; logs=%s", err, logs.String())
+	}
+	t.Cleanup(func() { _ = closeWorker() })
+	if watcher.Handler != owner || !watcher.SelectedCommands["fix"] || watcher.SelectedCommands["comment"] {
+		t.Fatalf("selected fix child did not hold an authenticated pull: handler=%v commands=%v", watcher.Handler, watcher.SelectedCommands)
+	}
+	bundle, err := os.ReadFile(filepath.Join("..", "..", "internal", "action", "testdata", "source.bundle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := action.Job{Version: action.ProtocolVersion,
+		Identity: action.Identity{JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
+			Repository: "owner/repo", RepositoryID: 1, OwnerID: 2, Requester: "writer", RequesterID: 3,
+			Number: 7, SubjectType: "Issue"},
+		Command: "fix", Action: command.Fix, Title: "Fix source",
+		Source: workspace.Snapshot{Head: "38a7fa625016861399920bfd0fbea8b0ef053773", Repository: bundle,
+			Files: []workspace.File{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")}}},
+		Main:              action.RoleSettings{Provider: "codex", Model: "main-1", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		RuntimeBudget:     time.Minute,
+		InactivityTimeout: config.DefaultInactivityTimeout,
+	}
+	if err := job.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := owner.Executor.Execute(t.Context(), job, windowsAcceptCheckpoints{})
+	if err != nil {
+		t.Fatalf("selected HTTPS fix: %v; logs=%s", err, logs.String())
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("invalid selected fix result: %v", err)
+	}
+	if result.Answer != "Fixed source." || len(result.Calls) != 1 || len(result.Changes) != 1 ||
+		result.Changes[0].Path != "source.txt" || result.Changes[0].Mode != workspace.Regular ||
+		result.Changes[0].Delete || string(result.Changes[0].Data) != "fixed\n" {
+		t.Fatalf("selected HTTPS worker returned unexpected fix: %+v", result)
+	}
+	if data, err := os.ReadFile(modelCalls); err != nil || string(data) != "model\n" {
+		t.Fatalf("model calls=%q error=%v", data, err)
+	}
+	if err := closeWorker(); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	entries, err := os.ReadDir(cfg.WorkRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "minion-") || strings.HasPrefix(entry.Name(), ".minion-") {
+			t.Fatalf("selected worker left action scratch %q", entry.Name())
+		}
 	}
 }
