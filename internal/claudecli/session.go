@@ -26,6 +26,7 @@ const (
 	maxDarwinSocketPathBytes = 103
 	// Eleven base36 digits cover JavaScript's maximum safe integer mux counter.
 	maxDarwinTempRootBytes = maxDarwinSocketPathBytes - len("/srt-mux-99999-xxxxxxxxxxx.sock") - runtimeRootSuffixBytes
+	maxTempRootBytes       = min(maxLinuxTempRootBytes, maxDarwinTempRootBytes)
 )
 
 // Session owns one action role's native conversation and scratch directories.
@@ -102,6 +103,9 @@ func (s *Session) Close() error {
 			*resource.path = ""
 		}
 	}
+	if s.runtimeRoot == "" {
+		s.runtimeDir, s.cacheDir = "", ""
+	}
 	return aicli.RedactError(err, s.settings.APIKey)
 }
 
@@ -167,7 +171,7 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 }
 
 func (s *Session) initialize() (err error) {
-	// Claude's Linux sandbox bridge uses Unix sockets below TMPDIR, so keep it short.
+	// Claude's sandbox creates Unix sockets directly in TMPDIR, so keep it short.
 	tempRoot, err := runtimeTempRoot()
 	if err != nil {
 		return
@@ -198,25 +202,13 @@ func (s *Session) initialize() (err error) {
 }
 
 func runtimeTempRoot() (string, error) {
-	return runtimeTempRootForOS(runtime.GOOS)
-}
-
-func runtimeTempRootForOS(goos string) (string, error) {
 	tempDir := os.TempDir()
 	root, err := aicli.Directory(tempDir)
 	if err != nil {
 		return "", fmt.Errorf("claude temp root %q: %w", tempDir, err)
 	}
-	var platform string
-	var socketLimit, rootLimit int
-	switch goos {
-	case "linux":
-		platform, socketLimit, rootLimit = "Linux", maxLinuxSocketPathBytes, maxLinuxTempRootBytes
-	case "darwin":
-		platform, socketLimit, rootLimit = "macOS", maxDarwinSocketPathBytes, maxDarwinTempRootBytes
-	}
-	if rootLimit > 0 && len(root) > rootLimit {
-		return "", fmt.Errorf("claude temp root %q (%d bytes): %s sandbox socket path must be at most %d bytes; set TMPDIR to a canonical path of at most %d bytes", root, len(root), platform, socketLimit, rootLimit)
+	if runtime.GOOS != "windows" && len(root) > maxTempRootBytes {
+		return "", fmt.Errorf("claude temp root %q (%d bytes): sandbox socket path is too long; set TMPDIR to a canonical path of at most %d bytes", root, len(root), maxTempRootBytes)
 	}
 	return root, nil
 }

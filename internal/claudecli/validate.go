@@ -62,7 +62,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	policy, err := sandboxSettings(dir, "", authDir)
+	policy, err := sandboxSettings(dir, "", authDir, apparmorUserNSPath)
 	if err != nil {
 		return validated, err
 	}

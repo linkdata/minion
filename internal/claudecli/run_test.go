@@ -231,7 +231,7 @@ printf '%s\n' '`+successfulResult+`'
 			if _, authored := nativeSandbox["filesystem"]; authored {
 				t.Fatalf("Minion authored Claude filesystem rules: %s", raw["sandbox"])
 			}
-			if runtime.GOOS == "linux" {
+			if runtime.GOOS == "linux" && apparmorRestrictedUserNS(apparmorUserNSPath) {
 				if string(nativeSandbox["network"]) != `{"allowAllUnixSockets":true}` {
 					t.Fatalf("Linux Claude sandbox lacks Unix socket workaround: %s", raw["sandbox"])
 				}
@@ -271,6 +271,42 @@ printf '%s\n' '`+successfulResult+`'
 			}
 			if _, err := os.Stat(filepath.Dir(cwd)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("runtime retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestSandboxUnixSocketWorkaroundUsesAppArmorRestriction(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"restricted", "1\n"},
+		{"unrestricted", "0\n"},
+		{"unexpected", "unknown"},
+		{"missing", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "restriction")
+			if tc.value != "" {
+				if err := os.WriteFile(path, []byte(tc.value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			raw, err := sandboxSettings(t.TempDir(), "", "", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var policy struct {
+				Sandbox struct {
+					Network *struct {
+						AllowAllUnixSockets bool `json:"allowAllUnixSockets"`
+					} `json:"network"`
+				} `json:"sandbox"`
+			}
+			if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+				t.Fatal(err)
+			}
+			want := runtime.GOOS == "linux" && tc.name == "restricted"
+			if (policy.Sandbox.Network != nil) != want || want && !policy.Sandbox.Network.AllowAllUnixSockets {
+				t.Fatalf("AppArmor %q: network policy = %+v, want Unix socket workaround %t", tc.value, policy.Sandbox.Network, want)
 			}
 		})
 	}

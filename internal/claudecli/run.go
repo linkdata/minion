@@ -29,8 +29,8 @@ import (
 // Run continues one action role's conversation with sandboxed shell tools.
 //
 // The CLI retains API network access. Model-generated commands use Claude's
-// native sandbox with filesystem and network restrictions. On Linux, host Unix
-// sockets remain reachable and can bypass those restrictions through services.
+// native sandbox with filesystem and network restrictions. On AppArmor-restricted
+// Linux hosts, the Unix-socket workaround leaves host services reachable.
 // A writable run may edit the source snapshot; outputDir grants a separate
 // report directory write. ReadOnlyDirs and configured skills are readable
 // without granting them write access. When OutputSchema is set, the answer
@@ -88,7 +88,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			return result, errors.New("claude read-only directory overlaps a writable grant")
 		}
 	}
-	policy, err := sandboxSettings(workspace, outputDir, authDir)
+	policy, err := sandboxSettings(workspace, outputDir, authDir, apparmorUserNSPath)
 	if err != nil {
 		return result, err
 	}
@@ -271,7 +271,14 @@ func arguments(policy string) []string {
 	}
 }
 
-func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
+const apparmorUserNSPath = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+
+func apparmorRestrictedUserNS(path string) bool {
+	data, err := os.ReadFile(path)
+	return err == nil && strings.TrimSpace(string(data)) == "1"
+}
+
+func sandboxSettings(workspace, outputDir, authDir, apparmorPath string) (string, error) {
 	if authDir != "" && (workspacefs.Within(workspace, authDir) || workspacefs.Within(authDir, workspace) ||
 		outputDir != "" && (workspacefs.Within(outputDir, authDir) || workspacefs.Within(authDir, outputDir))) {
 		return "", errors.New("claude API key directory overlaps a writable directory")
@@ -286,7 +293,7 @@ func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
 		"allowUnsandboxedCommands": false,
 		"credentials":              credentials,
 	}
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" && apparmorRestrictedUserNS(apparmorPath) {
 		// AppArmor-restricted user namespaces block Claude's socket seccomp helper.
 		// shortcut: Linux Bash can reach host and Claude session sockets; replace the CLI sandbox for stronger isolation.
 		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}

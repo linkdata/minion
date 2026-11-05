@@ -25,6 +25,9 @@ func TestInstalledNativeActions(t *testing.T) {
 	for _, role := range roles {
 		for _, action := range []command.Action{command.Review, command.Fix} {
 			t.Run(role.provider+"/"+string(action), func(t *testing.T) {
+				if role.provider == "claude" && runtime.GOOS == "windows" {
+					t.Skip("Claude's native Windows sandbox is unsupported")
+				}
 				if role.model == "" || role.effort == "" {
 					t.Fatalf("set MINION_LIVE_%s_MODEL and MINION_LIVE_%s_EFFORT to resolved installed-CLI choices", strings.ToUpper(role.provider), strings.ToUpper(role.provider))
 				}
@@ -47,9 +50,7 @@ func TestInstalledNativeActions(t *testing.T) {
 					if runner.Claude.APIKey == "" {
 						t.Fatal("set MINION_LIVE_CLAUDE_API_KEY so native transcripts stay in test-owned scratch")
 					}
-					if runtime.GOOS != "windows" {
-						useShortClaudeTempDir(t, "/var/tmp")
-					}
+					useShortClaudeTempDir(t, "/var/tmp")
 				}
 				var successfulClaudeTool atomic.Bool
 				if role.provider == "claude" && action == command.Review {

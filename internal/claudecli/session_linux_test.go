@@ -59,23 +59,6 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 	}
 }
 
-func TestDarwinTempRootPathLimit(t *testing.T) {
-	for _, length := range []int{maxDarwinTempRootBytes, maxDarwinTempRootBytes + 1} {
-		t.Run(fmt.Sprint(length), func(t *testing.T) {
-			root := testCanonicalTempDirLength(t, length)
-			t.Setenv("TMPDIR", root)
-			got, err := runtimeTempRootForOS("darwin")
-			if length == maxDarwinTempRootBytes {
-				if err != nil || got != root {
-					t.Fatalf("accepted macOS temp root = %q, %v", got, err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d bytes", maxDarwinTempRootBytes)) {
-				t.Fatalf("long macOS temp root = %q, %v", got, err)
-			}
-		})
-	}
-}
-
 func testCanonicalTempDirLength(t *testing.T, length int) string {
 	t.Helper()
 	base, err := os.MkdirTemp("/tmp", "m")
