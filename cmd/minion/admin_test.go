@@ -42,6 +42,10 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.listenURL != "http://localhost:"+port {
+		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.listenURL, port, err)
+	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
 			t.Errorf("close admin server: %v", err)
@@ -340,6 +344,10 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.listenURL != "https://"+leaf.DNSNames[0]+":"+port {
+		t.Fatalf("HTTPS listener URL = %q, port=%q: %v", admin.listenURL, port, err)
+	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
 			t.Errorf("close admin server: %v", err)
@@ -411,6 +419,10 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.listenURL != "https://localhost:"+port {
+		t.Fatalf("fallback HTTPS listener URL = %q, port=%q: %v", admin.listenURL, port, err)
 	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {

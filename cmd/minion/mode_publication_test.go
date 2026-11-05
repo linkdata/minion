@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -177,7 +178,12 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		if !found {
 			t.Fatalf("admin listener did not start after reconciliation: log=%q", output.String())
 		}
-		address, _, _ := strings.Cut(addressLine, "\n")
+		loginURL, _, _ := strings.Cut(addressLine, "\n")
+		parsed, err := url.Parse(loginURL)
+		if err != nil || parsed.Scheme != "http" || parsed.Path != "/admin/login" || parsed.Port() == "" {
+			t.Fatalf("admin listener URL is not clickable: %q: %v", loginURL, err)
+		}
+		address := net.JoinHostPort("127.0.0.1", parsed.Port())
 		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			t.Fatalf("admin listener still holds %s after return: %v", address, err)

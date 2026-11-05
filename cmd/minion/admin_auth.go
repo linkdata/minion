@@ -129,7 +129,15 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
 		access.stop(w, r, owner)
 	})
-	mux.Handle("GET /{$}", adminDashboardHandler(jw, owner))
+	dashboard := adminDashboardHandler(jw, owner)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		sess := jw.GetSession(r)
+		if sess == nil || access.sessionUsername(sess) == "" {
+			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+			return
+		}
+		dashboard.ServeHTTP(w, r)
+	})
 	mux.Handle("GET /admin/actions/{attempt}", adminActionDetailHandler(jw, owner))
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
@@ -245,6 +253,9 @@ func validJaWSCookie(r *http.Request, name string) bool {
 }
 
 func (a *adminAccess) allowed(r *http.Request) bool {
+	if len(a.accounts) != 0 && (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/" {
+		return true
+	}
 	if len(a.accounts) != 0 && r.URL.Path == "/admin/login" &&
 		(r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
 		return true

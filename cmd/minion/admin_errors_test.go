@@ -23,7 +23,7 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 		status             int
 	}{
 		{"bad login", http.MethodPost, "/admin/login", url.Values{"username": {"operator"}, "password": {"wrong-password"}}, guest, "", http.StatusUnauthorized},
-		{"guest dashboard", http.MethodGet, "/", nil, guest, "", http.StatusForbidden},
+		{"guest usage", http.MethodGet, "/admin/usage", nil, guest, "", http.StatusForbidden},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := adminResponse(handler, test.method, test.path, test.form, test.cookie, test.origin)
@@ -93,7 +93,7 @@ func TestAdminNoticeOmitsDisabledLogin(t *testing.T) {
 
 func TestAdminErrorWithoutSessionIsStatusOnly(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	response := adminResponse(handler, http.MethodGet, "/admin/usage", nil, nil, "")
 	if response.Code != http.StatusForbidden || response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" ||
 		len(response.Result().Cookies()) != 0 {
 		t.Fatalf("sessionless error: status=%d type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
@@ -148,12 +148,12 @@ func TestAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	guest := adminGuestCookie(t, handler)
 	for range 2 {
-		notice := adminResponse(handler, http.MethodGet, "/", nil, guest, "")
+		notice := adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
 		if notice.Code != http.StatusForbidden || notice.Header().Get("Content-Type") != "text/html; charset=utf-8" {
 			t.Fatalf("available guest notice: status=%d type=%q", notice.Code, notice.Header().Get("Content-Type"))
 		}
 	}
-	limited := adminResponse(handler, http.MethodGet, "/", nil, guest, "")
+	limited := adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
 	if limited.Code != http.StatusForbidden || limited.Body.Len() != 0 || limited.Header().Get("Content-Type") != "" {
 		t.Fatalf("guest notice consumed sign-in slot: status=%d type=%q body=%q", limited.Code, limited.Header().Get("Content-Type"), limited.Body.String())
 	}
@@ -179,7 +179,7 @@ func TestConcurrentAdminGuestNoticesReserveSignInSlot(t *testing.T) {
 			go func() {
 				ready.Done()
 				<-start
-				responses <- adminResponse(handler, http.MethodGet, "/", nil, guest, "")
+				responses <- adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
 			}()
 		}
 		ready.Wait()

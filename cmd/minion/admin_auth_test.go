@@ -176,8 +176,8 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	if noscript := adminResponse(handler, http.MethodGet, "/jaws/"+secondKey+"/noscript", nil, secondCookie, ""); noscript.Code != http.StatusNoContent {
 		t.Fatalf("own JaWS noscript: status=%d, want 204", noscript.Code)
 	}
-	if denied := adminResponse(handler, http.MethodGet, "/", nil, firstCookie, ""); denied.Code != http.StatusForbidden {
-		t.Fatalf("guest reached dashboard: status=%d", denied.Code)
+	if redirect := adminResponse(handler, http.MethodGet, "/", nil, firstCookie, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("guest dashboard entry: status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
 	}
 	assetPath := func(ext string) string {
 		t.Helper()
@@ -809,6 +809,14 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	t.Cleanup(client.CloseIdleConnections)
 	baseURL := "http://" + admin.listener.Addr().String()
+	entry, err := client.Get(baseURL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Body.Close()
+	if entry.StatusCode != http.StatusSeeOther || entry.Header.Get("Location") != "/admin/login" {
+		t.Fatalf("loopback entry: status=%d location=%q", entry.StatusCode, entry.Header.Get("Location"))
+	}
 	response, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 || response.Cookies()[0].Secure {
@@ -1091,8 +1099,8 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		}
 		cookie := response.Result().Cookies()[0]
 		time.Sleep(time.Minute + time.Second)
-		if response := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); response.Code != http.StatusForbidden {
-			t.Fatalf("expired admin session: status=%d, want 403", response.Code)
+		if response := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
+			t.Fatalf("expired admin session: status=%d location=%q", response.Code, response.Header().Get("Location"))
 		}
 		if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
 			t.Fatalf("expired sign-out: status=%d toLogin=%t, want login redirect", response.Code, response.Header().Get("Location") == "/admin/login")

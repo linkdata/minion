@@ -21,6 +21,7 @@ import (
 // adminServer owns the dashboard listener and the JaWS processing loop.
 type adminServer struct {
 	listener    net.Listener
+	listenURL   string
 	server      *http.Server
 	jaws        *jaws.Jaws
 	cancel      context.CancelFunc
@@ -62,6 +63,8 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	}
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
+		// webserv saw the plaintext listener before the manual TLS wrap.
+		service.ListenURL = strings.Replace(service.ListenURL, "http://", "https://", 1)
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -90,7 +93,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		DisableGeneralOptionsHandler: true,
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
-	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	a := &adminServer{listener: listener, listenURL: service.ListenURL, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
 	if oauth != nil {
 		a.preferences = oauth.links
 	}

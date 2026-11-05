@@ -59,7 +59,7 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		if admin.preferences != nil && watcher.Config.Admin.UserModelChoices != nil {
 			watcher.UserPreferences = admin.preferences.preferencesForGitHubID
 		}
-		logger.Printf("admin dashboard listening on %s", admin.listener.Addr())
+		logger.Printf("admin dashboard listening on %s/admin/login", admin.listenURL)
 	} else if watcher.Config.Admin != nil && watcher.Config.Admin.UserModelChoices != nil {
 		links, err := openUserLinks(watcher.Config.StatePath + ".link")
 		if err != nil {

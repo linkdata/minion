@@ -270,8 +270,11 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if denied := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); denied.Code != http.StatusForbidden {
-		t.Fatalf("anonymous dashboard status=%d, want 403", denied.Code)
+	if redirect := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("anonymous dashboard entry: status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	}
+	if redirect := adminResponse(handler, http.MethodHead, "/", nil, nil, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" || redirect.Body.Len() != 0 {
+		t.Fatalf("anonymous dashboard HEAD: status=%d location=%q body=%q", redirect.Code, redirect.Header().Get("Location"), redirect.Body.String())
 	}
 	if asset := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, nil, ""); asset.Code != http.StatusOK {
 		t.Fatalf("public dashboard CSS status=%d, want 200", asset.Code)
@@ -341,8 +344,8 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
-	if denied := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); denied.Code != http.StatusForbidden {
-		t.Fatalf("logged-out dashboard status=%d, want 403", denied.Code)
+	if redirect := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("logged-out dashboard entry: status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
 	}
 }
 
