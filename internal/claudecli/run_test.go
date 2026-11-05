@@ -140,6 +140,76 @@ func readFile(t *testing.T, path string) string {
 	return string(data)
 }
 
+func TestRunRejectsUnsupportedBubblewrapBeforeClaude(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	for _, tc := range []struct {
+		name, wantError string
+		setup           func(*testing.T, string)
+	}{
+		{name: "old", wantError: "does not support", setup: func(t *testing.T, _ string) {
+			fakeBubblewrap(t, "--unshare-user")
+		}},
+		{name: "missing", wantError: "requires non-setuid Bubblewrap", setup: func(t *testing.T, claude string) {
+			t.Setenv("PATH", filepath.Dir(claude))
+		}},
+		{name: "probe fails", wantError: "probe Bubblewrap", setup: func(t *testing.T, _ string) {
+			testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexit 1\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
+			tc.setup(t, binary)
+			var session Session
+			t.Cleanup(func() {
+				if err := session.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			_, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{AllowAllUnixSockets: true})
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("Run passed without supported Bubblewrap: %v", err)
+			}
+			if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
+				t.Fatalf("Claude started despite Bubblewrap failure: %v", err)
+			}
+			if session.runtimeRoot != "" {
+				t.Fatal("Bubblewrap failure created Claude scratch")
+			}
+		})
+	}
+}
+
+func TestRunChecksBubblewrapOncePerSession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	fakeExecutable(t, "claude", `cat >/dev/null
+printf '%s\n' '`+successfulResult+`'
+`)
+	binary := filepath.Join(testsupport.FakeOnPath(t, "bwrap", `#!/bin/sh
+printf 'checked\n' >> "$0.checked"
+printf '%s\n' '--disable-userns'
+`), "bwrap")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	workspace := t.TempDir()
+	settings := config.ClaudeConfig{AllowAllUnixSockets: true}
+	for range 2 {
+		if _, err := session.Run(t.Context(), workspace, "task", false, "", settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readFile(t, binary+".checked"); got != "checked\n" {
+		t.Fatalf("Bubblewrap probes = %q, want one", got)
+	}
+}
+
 func TestRun(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string
@@ -314,7 +384,7 @@ printf '%s\n' '`+successfulResult+`'
 			t.Error(err)
 		}
 	})
-	if err := session.prepare(workspace, binary, true, output, config.ClaudeConfig{}); err != nil {
+	if err := session.prepare(t.Context(), workspace, binary, true, output, config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	blocked := []string{filepath.Join(session.runtimeDir, "bin"), filepath.Join(workspace, "bin"), filepath.Join(output, "bin")}

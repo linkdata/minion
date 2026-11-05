@@ -57,11 +57,6 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if err != nil {
 		return result, err
 	}
-	if runtime.GOOS == "linux" && settings.AllowAllUnixSockets {
-		if err := checkBubblewrap(ctx); err != nil {
-			return result, err
-		}
-	}
 	if outputDir != "" {
 		resolved, err := aicli.Directory(outputDir)
 		if err != nil {
@@ -72,7 +67,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		}
 		outputDir = resolved
 	}
-	if err := s.prepare(workspace, binary, writable, outputDir, settings); err != nil {
+	if err := s.prepare(ctx, workspace, binary, writable, outputDir, settings); err != nil {
 		return result, err
 	}
 	runtimeDir, authDir, cacheDir := s.runtimeDir, s.authDir, s.cacheDir

@@ -18,6 +18,7 @@ import (
 
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 func TestRemoteRolePreflightBeforePull(t *testing.T) {
@@ -190,7 +191,7 @@ func TestRemoteClaudeSocketOptInReachesPreflightAndModel(t *testing.T) {
 	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
 		t.Setenv(key, "")
 	}
-	useShortClaudeTempDir(t, "/tmp")
+	testsupport.UseShortClaudeTempDir(t, "/tmp")
 	fakeOnPath(t, "bwrap", "#!/bin/sh\ncase \"$1\" in --help) echo --disable-userns;; esac\n")
 	settingsPath := filepath.Join(t.TempDir(), "settings")
 	modelMarker := filepath.Join(t.TempDir(), "model")

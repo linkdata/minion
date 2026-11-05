@@ -52,6 +52,24 @@ func FakeOnPath(t *testing.T, name, script string) string {
 	return bin
 }
 
+// UseShortClaudeTempDir keeps native test sockets below Unix path limits.
+func UseShortClaudeTempDir(t *testing.T, parent string) {
+	t.Helper()
+	root, err := os.MkdirTemp(parent, "mc-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+			t.Errorf("Claude temp directory %q not empty: %v, %v", root, entries, err)
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("TMPDIR", root)
+}
+
 // GitEnvironment isolates scratch paths and disables ambient Git configuration.
 func GitEnvironment(scratch string) []string {
 	return append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)

@@ -192,21 +192,6 @@ func assertEmptyDir(t *testing.T, root string) {
 	}
 }
 
-func useShortClaudeTempDir(t *testing.T, parent string) {
-	t.Helper()
-	root, err := os.MkdirTemp(parent, "mc-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(root); err != nil {
-			t.Error(err)
-		}
-	})
-	t.Cleanup(func() { assertEmptyDir(t, root) })
-	t.Setenv("TMPDIR", root)
-}
-
 func gitFixtureRemote(t *testing.T, files ...workspace.File) (base, head, remote string) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")

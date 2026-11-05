@@ -17,7 +17,7 @@ func TestSessionRuntimeOutsideDeepWorkspace(t *testing.T) {
 	t.Setenv("TMPDIR", tempRoot)
 	fakeExecutable(t, "claude", `cat >/dev/null
 [ "$TMPDIR" = "$PWD" ] && [ "$CLAUDE_CODE_TMPDIR" = "$PWD/tmp" ] || exit 2
-[ ${#PWD} -le `+fmt.Sprint(maxTempRootBytes+runtimeRootSuffixBytes)+` ] || exit 3
+[ ${#PWD} -le `+fmt.Sprint(maxTempRootBytes+runtimeDirSuffixBytes)+` ] || exit 3
 printf '%s\n' '`+successfulResult+`'
 `)
 	workspace := filepath.Join(t.TempDir(), strings.Repeat("deep", 25), "source")

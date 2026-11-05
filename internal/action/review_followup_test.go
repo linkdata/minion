@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -94,7 +95,7 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 				}
 				runner.Logger = log.New(journal, "", 0)
 				if provider == "claude" {
-					useShortClaudeTempDir(t, "/tmp")
+					testsupport.UseShortClaudeTempDir(t, "/tmp")
 				}
 				result, err := runner.Run(t.Context(), job)
 				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 || result.Validate(job) != nil {

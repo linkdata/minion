@@ -136,7 +136,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
 	}
-	if runtime.GOOS == "linux" && cfg.RemoteExecutor == nil && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
 		logger.Print(claudeUnixSocketWarning)
 	}
 	logCommandSkills(cfg, logger)

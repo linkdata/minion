@@ -26,7 +26,7 @@ type remoteWorkerConfig struct {
 	Token      string `json:"token"`
 	WorkRoot   string `json:"work_root"`
 	Claude     struct {
-		AllowAllUnixSockets bool `json:"allow_all_unix_sockets,omitempty"`
+		AllowAllUnixSockets bool `json:"allow_all_unix_sockets"`
 	} `json:"claude"`
 }
 
@@ -91,25 +91,20 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 }
 
 func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
-	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, cfg.Claude.AllowAllUnixSockets); err != nil {
+	runner := action.NewRemoteRunner(cfg.WorkRoot)
+	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
+	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner.Claude.AllowAllUnixSockets); err != nil {
 		logger.Printf("remote worker: selection preflight failed: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
-	return runRemoteWorkerLoop(ctx, cfg, client, logger)
+	return runRemoteWorkerLoop(ctx, cfg, client, runner, logger)
 }
 
-func runRemoteWorkerLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
-	runner := newRemoteWorkerRunner(cfg)
+func runRemoteWorkerLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, runner *action.Runner, logger *log.Logger) int {
 	if err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner); err != nil {
 		// Returned errors can contain private model text.
 		logger.Print("remote worker: execution or protocol failure")
 		return 1
 	}
 	return 0
-}
-
-func newRemoteWorkerRunner(cfg remoteWorkerConfig) *action.Runner {
-	runner := action.NewRemoteRunner(cfg.WorkRoot)
-	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
-	return runner
 }

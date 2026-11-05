@@ -94,6 +94,12 @@ func TestBubblewrapOptInPrerequisite(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Bubblewrap opt-in applies only on Linux")
 	}
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if err := checkBubblewrap(t.Context(), false); err != nil {
+			t.Fatalf("disabled Bubblewrap check: %v", err)
+		}
+	})
 	for _, tc := range []struct {
 		name, help, wantError string
 		setuid                bool
@@ -109,7 +115,7 @@ func TestBubblewrapOptInPrerequisite(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			err := checkBubblewrap(t.Context())
+			err := checkBubblewrap(t.Context(), true)
 			if tc.wantError == "" && err != nil || tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
 				t.Fatalf("Bubblewrap check = %v, want %q", err, tc.wantError)
 			}
@@ -117,10 +123,42 @@ func TestBubblewrapOptInPrerequisite(t *testing.T) {
 	}
 	t.Run("missing", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
-		if err := checkBubblewrap(t.Context()); err == nil || !strings.Contains(err.Error(), "requires non-setuid Bubblewrap") {
+		if err := checkBubblewrap(t.Context(), true); err == nil || !strings.Contains(err.Error(), "requires non-setuid Bubblewrap") {
 			t.Fatalf("missing Bubblewrap passed: %v", err)
 		}
 	})
+}
+
+func TestValidateRejectsUnsupportedBubblewrapBeforeClaude(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	for _, tc := range []struct {
+		name, wantError string
+		setup           func(*testing.T, string)
+	}{
+		{name: "old", wantError: "does not support", setup: func(t *testing.T, _ string) {
+			fakeBubblewrap(t, "--unshare-user")
+		}},
+		{name: "missing", wantError: "requires non-setuid Bubblewrap", setup: func(t *testing.T, claude string) {
+			t.Setenv("PATH", filepath.Dir(claude))
+		}},
+		{name: "probe fails", wantError: "probe Bubblewrap", setup: func(t *testing.T, _ string) {
+			testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexit 1\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
+			tc.setup(t, binary)
+			_, err := Validate(t.Context(), config.ClaudeConfig{AllowAllUnixSockets: true})
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("Validate passed without supported Bubblewrap: %v", err)
+			}
+			if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
+				t.Fatalf("Claude started despite Bubblewrap failure: %v", err)
+			}
+		})
+	}
 }
 
 func TestValidateRejectsPaidDiscoveryOutput(t *testing.T) {

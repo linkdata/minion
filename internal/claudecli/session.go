@@ -1,6 +1,7 @@
 package claudecli
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -19,13 +20,12 @@ import (
 const (
 	runtimePrefix            = "mc-"
 	runtimeChild             = "r"
-	runtimeRootSuffixBytes   = len("/" + runtimePrefix + "4294967295/" + runtimeChild)
+	runtimeDirSuffixBytes    = len("/" + runtimePrefix + "4294967295/" + runtimeChild)
 	maxLinuxSocketPathBytes  = 107
-	maxLinuxRuntimeDirBytes  = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock")
-	maxLinuxTempRootBytes    = maxLinuxRuntimeDirBytes - runtimeRootSuffixBytes
+	maxLinuxTempRootBytes    = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock") - runtimeDirSuffixBytes
 	maxDarwinSocketPathBytes = 103
 	// Eleven base36 digits cover JavaScript's maximum safe integer mux counter.
-	maxDarwinTempRootBytes = maxDarwinSocketPathBytes - len("/srt-mux-99999-xxxxxxxxxxx.sock") - runtimeRootSuffixBytes
+	maxDarwinTempRootBytes = maxDarwinSocketPathBytes - len("/srt-mux-99999-xxxxxxxxxxx.sock") - runtimeDirSuffixBytes
 	maxTempRootBytes       = min(maxLinuxTempRootBytes, maxDarwinTempRootBytes)
 )
 
@@ -106,7 +106,7 @@ func (s *Session) Close() error {
 	return aicli.RedactError(err, s.settings.APIKey)
 }
 
-func (s *Session) prepare(workspace, binary string, writable bool, outputDir string, settings config.ClaudeConfig) error {
+func (s *Session) prepare(ctx context.Context, workspace, binary string, writable bool, outputDir string, settings config.ClaudeConfig) error {
 	if s.closed {
 		return errors.New("claude session is closed")
 	}
@@ -133,6 +133,9 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 			return errors.New("claude session native configuration changed")
 		}
 	} else {
+		if err := checkBubblewrap(ctx, settings.AllowAllUnixSockets); err != nil {
+			return err
+		}
 		s.workspace, s.binary, s.outputDir, s.writable, s.settings = workspace, binary, outputDir, writable, bound
 		s.settings.Skills = slices.Clone(bound.Skills)
 		s.initErr = s.initialize()

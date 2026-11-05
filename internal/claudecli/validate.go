@@ -35,10 +35,8 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	if runtime.GOOS == "linux" && settings.AllowAllUnixSockets {
-		if err := checkBubblewrap(ctx); err != nil {
-			return validated, err
-		}
+	if err := checkBubblewrap(ctx, settings.AllowAllUnixSockets); err != nil {
+		return validated, err
 	}
 	dir, err := os.MkdirTemp(tempRoot, runtimePrefix)
 	if err != nil {
@@ -126,7 +124,10 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	return validated, fmt.Errorf("claude model %q is absent from the installed CLI catalogue", settings.Model)
 }
 
-func checkBubblewrap(ctx context.Context) error {
+func checkBubblewrap(ctx context.Context, allowAllUnixSockets bool) error {
+	if runtime.GOOS != "linux" || !allowAllUnixSockets {
+		return nil
+	}
 	binary, err := aicli.ExecutablePath("bwrap")
 	if err != nil {
 		return fmt.Errorf("claude Unix-socket opt-in requires non-setuid Bubblewrap with --disable-userns: %w", err)
@@ -140,8 +141,7 @@ func checkBubblewrap(ctx context.Context) error {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	// #nosec G204 -- The installed Bubblewrap binary comes from the trusted operator's PATH.
-	output, err := exec.CommandContext(probeCtx, binary, "--help").CombinedOutput()
+	output, err := aicli.Probe(probeCtx, binary, "", []string{"--help"}, "", nil, "", "")
 	if err != nil {
 		return fmt.Errorf("probe Bubblewrap %q --disable-userns support: %w", binary, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -51,7 +52,7 @@ func TestInstalledNativeActions(t *testing.T) {
 					if runner.Claude.APIKey == "" {
 						t.Fatal("set MINION_LIVE_CLAUDE_API_KEY so native transcripts stay in test-owned scratch")
 					}
-					useShortClaudeTempDir(t, "/var/tmp")
+					testsupport.UseShortClaudeTempDir(t, "/var/tmp")
 				}
 				var successfulClaudeTool atomic.Bool
 				if role.provider == "claude" && action == command.Review {
