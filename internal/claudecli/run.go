@@ -288,7 +288,7 @@ func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
 	}
 	if runtime.GOOS == "linux" {
 		// AppArmor-restricted user namespaces block Claude's socket seccomp helper.
-		// shortcut: Linux Bash can reach accessible Unix sockets; remove with executor isolation.
+		// shortcut: Linux Bash can reach host and Claude session sockets; replace the CLI sandbox for stronger isolation.
 		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
 	}
 	policy := map[string]any{

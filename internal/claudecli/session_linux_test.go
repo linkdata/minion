@@ -38,7 +38,7 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TMPDIR", tempRoot)
-	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "canonical path of at most 45 bytes") {
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "canonical path of at most 45 bytes") || !strings.Contains(err.Error(), tempRoot) {
 		t.Fatalf("long temp path passed startup validation: %v", err)
 	}
 	var session Session
@@ -47,7 +47,7 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if _, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "canonical path of at most 45 bytes") {
+	if _, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "canonical path of at most 45 bytes") || !strings.Contains(err.Error(), tempRoot) {
 		t.Fatalf("long temp path: %v", err)
 	}
 	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {

@@ -194,10 +194,10 @@ func (s *Session) initialize() (err error) {
 func runtimeTempRoot() (string, error) {
 	root, err := aicli.Directory(os.TempDir())
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("claude temp root %q: %w", os.TempDir(), err)
 	}
 	if runtime.GOOS == "linux" && len(filepath.Join(root, runtimePrefix+"4294967295", runtimeChild, "claude-socks-0123456789abcdef.sock")) >= 108 {
-		return "", errors.New("claude sandbox socket path exceeds Linux's 108-byte limit; set TMPDIR to a canonical path of at most 45 bytes")
+		return "", fmt.Errorf("claude temp root %q (%d bytes): sandbox socket path exceeds Linux's 108-byte limit; set TMPDIR to a canonical path of at most 45 bytes", root, len(root))
 	}
 	return root, nil
 }
