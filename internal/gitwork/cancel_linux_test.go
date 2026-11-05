@@ -18,7 +18,8 @@ import (
 func TestGitOutputLimitStopsDirectProcess(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "git.pid")
-	fakeOnPath(t, "git", "#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf overflow-output\nexec sleep 30\n")
+	stopFile := gitFixtureStopFile(t, pidFile)
+	fakeOnPath(t, "git", "#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf overflow-output\ni=0\nwhile [ ! -f "+shellQuote(stopFile)+" ] && [ \"$i\" -lt 600 ]; do sleep .05; i=$((i+1)); done\n")
 	started := time.Now()
 	_, _, err := (&Checkout{path: dir}).boundedGit(t.Context(), nil, 4, false, "status")
 	if time.Since(started) > 3*time.Second || !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
@@ -30,7 +31,8 @@ func TestGitOutputLimitStopsDirectProcess(t *testing.T) {
 func TestGitDeadlineStopsDirectProcess(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "git.pid")
-	fakeOnPath(t, "git", "#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf 'deadline diagnostic\\nforged journal\\n' >&2\nexec sleep 30\n")
+	stopFile := gitFixtureStopFile(t, pidFile)
+	fakeOnPath(t, "git", "#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf 'deadline diagnostic\\nforged journal\\n' >&2\ni=0\nwhile [ ! -f "+shellQuote(stopFile)+" ] && [ \"$i\" -lt 600 ]; do sleep .05; i=$((i+1)); done\n")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
@@ -82,4 +84,26 @@ func assertGitProcessStopped(t *testing.T, pidFile string) {
 	if err := process.WaitExited(waitCtx); err != nil {
 		t.Fatalf("Git process is still running: %v", err)
 	}
+}
+
+func gitFixtureStopFile(t *testing.T, pidFile string) string {
+	t.Helper()
+	stopFile := pidFile + ".stop"
+	t.Cleanup(func() {
+		process, err := testsupport.PinProcess(pidFile)
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrProcessDone) {
+			return
+		}
+		if err != nil {
+			t.Errorf("pin Git fixture on cleanup: %v", err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := process.Cleanup(ctx); err != nil {
+			t.Errorf("clean Git fixture: %v", err)
+		}
+	})
+	testsupport.StopOnCleanup(t, stopFile)
+	return stopFile
 }
