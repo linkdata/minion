@@ -85,7 +85,7 @@ func readAdminPassword(fd int) (password string, err error) {
 		}
 		close(done)
 	}()
-	if _, err := fmt.Fprint(os.Stderr, "Admin password: "); err != nil {
+	if _, err := fmt.Fprint(os.Stderr, "Password to hash: "); err != nil {
 		return "", err
 	}
 	// x/term.NewTerminal.ReadPassword stalls on a valid U+FFFD rune.

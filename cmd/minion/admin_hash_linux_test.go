@@ -141,12 +141,12 @@ func newHashPTY(t *testing.T) (master, slave *os.File, before *unix.Termios) {
 
 func readHashPrompt(t *testing.T, master *os.File) {
 	t.Helper()
-	prompt := make([]byte, len("Admin password: "))
+	prompt := make([]byte, len("Password to hash: "))
 	promptRead := make(chan error, 1)
 	go func() { _, err := io.ReadFull(master, prompt); promptRead <- err }()
 	select {
 	case err := <-promptRead:
-		if err != nil || string(prompt) != "Admin password: " {
+		if err != nil || string(prompt) != "Password to hash: " {
 			t.Fatalf("prompt=%q error=%v", prompt, err)
 		}
 	case <-time.After(5 * time.Second):
@@ -200,7 +200,7 @@ func TestHashModeRejectsDifferentTerminals(t *testing.T) {
 		t.Fatal(err)
 	}
 	message, _ := io.ReadAll(promptMaster)
-	if !strings.Contains(string(message), "same terminal") || strings.Contains(string(message), "Admin password:") {
+	if !strings.Contains(string(message), "same terminal") || strings.Contains(string(message), "Password to hash:") {
 		t.Fatalf("prompt terminal output=%q", message)
 	}
 	hash, err := os.ReadFile(stdout.Name())
