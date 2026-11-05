@@ -173,6 +173,8 @@ Users choose approved pairs or service defaults at `/auth/preferences`. A withdr
 
 Signed-in users can view their own action history at `/auth/actions`. Actions follow the original GitHub account ID across login renames, including when that account is linked to a GitLab sign-in. Private repository entries and details require current access to the original repository; inaccessible entries are omitted. The page shows progress, retry status, frozen model settings and retained diagnostics.
 
+An active action's detail page offers **Abort this action**. The stop is terminal. A `requested` status awaits verification; `confirmed` means termination completed; `unverified` means an operator must check executor readiness before reuse.
+
 To use one remote executor, add `remote_executor` to the orchestrator config with `executor_id`, `listen` (host:port), `tls_cert_file`, `tls_key_file`, and `token`. The certificate must be trusted by the worker host and cover the name in its HTTPS URL. Use the same 32-random-byte unpadded base64url token in a separate worker config:
 
 ```json

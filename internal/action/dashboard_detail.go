@@ -34,6 +34,8 @@ type DashboardDetail struct {
 	Summary                                            state.AcceptedSummary
 	Outcome, Publication, PushPublication              string
 	Progress                                           string
+	Stoppable                                          bool
+	StopRequest                                        state.StopRequest
 	Deadline                                           time.Time
 	Remaining                                          time.Duration
 	Records                                            []DashboardDetailEntry
@@ -107,6 +109,8 @@ func (e *Orchestrator) dashboardActionDetail(attemptID string, now time.Time, au
 		detail.Repository, detail.Requester, detail.Action = accepted.Repository, accepted.Requester, accepted.Action
 		detail.Summary = accepted.HistorySummary()
 		detail.Deadline = accepted.Deadline
+		detail.StopRequest = accepted.StopRequest
+		detail.Stoppable = !accepted.Terminal && decision.AttemptID == "" && e.Store.SelectedStopActive(jobID, attemptID)
 		if !accepted.Terminal {
 			detail.Remaining = max(0, accepted.Deadline.Sub(now))
 		} else {
@@ -115,6 +119,8 @@ func (e *Orchestrator) dashboardActionDetail(attemptID string, now time.Time, au
 	}
 	if decision.AttemptID != "" {
 		detail.Outcome = decision.Outcome
+		detail.Stoppable = false
+		detail.StopRequest = decision.StopRequest
 		if accepted == nil {
 			detail.Deadline = decision.Deadline
 			if decision.Summary != (state.AcceptedSummary{}) {

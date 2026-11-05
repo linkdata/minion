@@ -30,7 +30,7 @@ func (s *Store) RequestStop(jobID, attemptID, requestedBy string, at time.Time) 
 
 func (s *Store) requestStop(jobID, attemptID, requestedBy string, at time.Time, readSavedDurable func() (Data, error)) (StopRequest, error) {
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(attemptID) ||
-		!workspace.ValidIdentitySegment(requestedBy) || at.IsZero() {
+		!validStopRequester(requestedBy) || at.IsZero() {
 		return StopRequest{}, errors.New("invalid stop request")
 	}
 	var request StopRequest

@@ -223,29 +223,29 @@ func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
 	}
 	page.Dot.View.Snapshot.LastStop = &action.DashboardStop{AttemptID: "attempt-1", Status: "requested"}
 	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
-		stopStatus.String() != "Latest force stop for attempt attempt-1: requested." {
+		stopStatus.String() != "Latest stop request for attempt attempt-1: requested." {
 		t.Fatalf("stop request missing from dedicated status: %q, %v", stopStatus.String(), err)
 	}
 	page.Dot.View.Snapshot.Worker.Phase = "idle"
 	status.Reset()
 	if err := pages.ExecuteTemplate(&status, "dashboard-status", page); err != nil ||
-		!strings.Contains(status.String(), "Worker phase idle.") || strings.Contains(status.String(), "Latest force stop") {
+		!strings.Contains(status.String(), "Worker phase idle.") || strings.Contains(status.String(), "Latest stop request") {
 		t.Fatalf("worker change repeated stop announcement: %q, %v", status.String(), err)
 	}
 	stopStatus.Reset()
 	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
-		stopStatus.String() != "Latest force stop for attempt attempt-1: requested." {
+		stopStatus.String() != "Latest stop request for attempt attempt-1: requested." {
 		t.Fatalf("worker change replaced stop status: %q, %v", stopStatus.String(), err)
 	}
 	page.Dot.View.Snapshot.LastStop.Status = "confirmed"
 	stopStatus.Reset()
 	if err := pages.ExecuteTemplate(&stopStatus, "dashboard-stop-status", page); err != nil ||
-		stopStatus.String() != "Latest force stop for attempt attempt-1: confirmed." {
+		stopStatus.String() != "Latest stop request for attempt attempt-1: confirmed." {
 		t.Fatalf("confirmed stop was not announced: %q, %v", stopStatus.String(), err)
 	}
 	body.Reset()
 	if err := pages.ExecuteTemplate(&body, "dashboard-live", page); err != nil ||
-		!strings.Contains(body.String(), "Latest force stop") || strings.Contains(body.String(), `aria-live="polite"`) {
+		!strings.Contains(body.String(), "Latest stop request") || strings.Contains(body.String(), `aria-live="polite"`) {
 		t.Fatalf("visual stop panel duplicated live announcement: %q, %v", body.String(), err)
 	}
 	page.Auth.IsAdmin = false

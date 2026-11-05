@@ -225,7 +225,7 @@ func TestUserActionsRoutesBindRequesterAndCurrentPrivateAccess(t *testing.T) {
 		if !access.admitRead(context.Background()) {
 			t.Fatal("short identity read refused during GitHub check")
 		}
-		_, found, err := owner.UserActionIdentity("attempt-1", 3)
+		_, _, found, err := owner.UserActionIdentity("attempt-1", 3)
 		access.finishRead()
 		if err != nil || !found {
 			t.Fatalf("short identity read during GitHub check: found=%t err=%v", found, err)
@@ -249,7 +249,7 @@ func TestUserActionsRoutesBindRequesterAndCurrentPrivateAccess(t *testing.T) {
 	for range cap(auth.detailSlots) {
 		<-auth.detailSlots
 	}
-	summary, found, err := owner.UserActionIdentity("attempt-1", 3)
+	_, summary, found, err := owner.UserActionIdentity("attempt-1", 3)
 	if err != nil || !found {
 		t.Fatalf("private callback identity: found=%t err=%v", found, err)
 	}

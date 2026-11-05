@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,7 +185,7 @@ func (s AcceptedSummary) valid() bool {
 	}
 }
 
-// StopRequest records the first operator request and the observed cleanup result.
+// StopRequest records the first stop request and the observed cleanup result.
 // A terminal decision may precede a worker's return, so its outcome is not proof
 // that termination was confirmed.
 type StopRequest struct {
@@ -197,7 +198,7 @@ func (r StopRequest) valid() bool {
 	if r == (StopRequest{}) {
 		return true
 	}
-	if !workspace.ValidIdentitySegment(r.RequestedBy) || r.RequestedAt.IsZero() {
+	if !validStopRequester(r.RequestedBy) || r.RequestedAt.IsZero() {
 		return false
 	}
 	switch r.Status {
@@ -206,6 +207,20 @@ func (r StopRequest) valid() bool {
 	default:
 		return false
 	}
+}
+
+// A GitHub user's numeric ID has a distinct namespace from local admin names.
+func validStopRequester(requestedBy string) bool {
+	if workspace.ValidIdentitySegment(requestedBy) {
+		return true
+	}
+	const prefix = "github-user:"
+	if !strings.HasPrefix(requestedBy, prefix) || len(requestedBy) > len(prefix)+19 {
+		return false
+	}
+	idText := requestedBy[len(prefix):]
+	id, err := strconv.ParseInt(idText, 10, 64)
+	return err == nil && id > 0 && strconv.FormatInt(id, 10) == idText
 }
 
 // AccessDisposition identifies an accepted request that needs operator action.
