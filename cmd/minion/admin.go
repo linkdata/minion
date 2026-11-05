@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ import (
 // adminServer owns the dashboard listener and the JaWS processing loop.
 type adminServer struct {
 	listener    net.Listener
-	listenURL   string
+	entryURL    string
 	server      *http.Server
 	jaws        *jaws.Jaws
 	cancel      context.CancelFunc
@@ -65,6 +66,16 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		listener = tls.NewListener(listener, fallbackTLS)
 		// webserv saw the plaintext listener before the manual TLS wrap.
 		service.ListenURL = strings.Replace(service.ListenURL, "http://", "https://", 1)
+		if leaf := fallbackTLS.Certificates[0].Leaf; leaf != nil && len(leaf.DNSNames) > 0 {
+			name := leaf.DNSNames[0]
+			if name != "" && !strings.Contains(name, "*") {
+				if host, _, err := net.SplitHostPort(name); err == nil {
+					name = host
+				}
+				_, port, _ := net.SplitHostPort(listener.Addr().String())
+				service.ListenURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
+			}
+		}
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -93,7 +104,17 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		DisableGeneralOptionsHandler: true,
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
-	a := &adminServer{listener: listener, listenURL: service.ListenURL, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	entryURL := service.ListenURL
+	for _, account := range cfg.Administrators {
+		if account.PasswordHash != config.AdminPasswordHashPlaceholder {
+			entryURL += "/admin/login"
+			break
+		}
+	}
+	if entryURL == service.ListenURL && oauth != nil {
+		entryURL += "/auth/login"
+	}
+	a := &adminServer{listener: listener, entryURL: entryURL, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
 	if oauth != nil {
 		a.preferences = oauth.links
 	}

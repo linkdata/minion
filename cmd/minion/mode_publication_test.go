@@ -157,7 +157,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		t.Cleanup(func() { _ = listener.Close() })
 		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
 	} else if adminSetup == "active" {
-		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0"}
+		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()}}
 	}
 	var output strings.Builder
 	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {

@@ -809,6 +809,9 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	t.Cleanup(client.CloseIdleConnections)
 	baseURL := "http://" + admin.listener.Addr().String()
+	if !strings.HasPrefix(admin.entryURL, "http://localhost:") || !strings.HasSuffix(admin.entryURL, "/admin/login") {
+		t.Fatalf("admin entry URL = %q", admin.entryURL)
+	}
 	entry, err := client.Get(baseURL + "/")
 	if err != nil {
 		t.Fatal(err)

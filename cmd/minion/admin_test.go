@@ -43,8 +43,8 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.listenURL != "http://localhost:"+port {
-		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.listenURL, port, err)
+	if err != nil || admin.entryURL != "http://localhost:"+port {
+		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
@@ -156,6 +156,9 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	})
 	if admin.preferences == nil {
 		t.Fatal("admin server did not share the account preference store")
+	}
+	if !strings.HasPrefix(admin.entryURL, "http://localhost:") || !strings.HasSuffix(admin.entryURL, "/auth/login") {
+		t.Fatalf("OAuth entry URL = %q", admin.entryURL)
 	}
 	base := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -345,8 +348,8 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.listenURL != "https://"+leaf.DNSNames[0]+":"+port {
-		t.Fatalf("HTTPS listener URL = %q, port=%q: %v", admin.listenURL, port, err)
+	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
+		t.Fatalf("HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
@@ -421,8 +424,8 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.listenURL != "https://localhost:"+port {
-		t.Fatalf("fallback HTTPS listener URL = %q, port=%q: %v", admin.listenURL, port, err)
+	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
+		t.Fatalf("fallback HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
