@@ -216,11 +216,11 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		// high-water mark still bounds later cumulative results.
 		s.costObservedUSD = max(s.costObservedUSD, output.costObservedUSD)
 	}
-	s.costGap = !settled || output.nativeCostUSD == nil || perCallResults || !known
+	s.costGap = !settled || output.nativeCostUSD == nil || perCallResults || !known && output.resumed
 	if settled && output.nativeCostUSD != nil {
 		s.costBaselineUSD = *output.nativeCostUSD
 	}
-	s.usageGap = !output.hasCumulative || !settled || perCallResults || !known
+	s.usageGap = !output.hasCumulative || !settled || perCallResults || !known && output.resumed
 	if output.hasCumulative {
 		s.baseline = output.cumulative
 	} else if floor, valid := s.baseline.AddChecked(result.Tokens); valid {

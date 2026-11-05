@@ -14,6 +14,36 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
+func TestResumedPendingFrameReplayAfterLaterStart(t *testing.T) {
+	const startA = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const frameA = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"first"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const startB = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"B"}}}`
+	const frameB = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"B","content":[{"type":"text","text":"second"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":2}}}`
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"done","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":17}}}`
+	var events []aicli.StreamEvent
+	o := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true, baseline: usage.Tokens{Output: 10},
+		onEvent: func(event aicli.StreamEvent) { events = append(events, event) }}
+	writeChunks(t, &o, startA+"\n"+frameA+"\n"+startB+"\n"+frameB+"\n"+frameA+"\n"+result+"\n")
+	o.finish()
+	if o.err != nil || !o.result.UsageComplete || o.result.Tokens != (usage.Tokens{Output: 7}) ||
+		len(events) != 2 || events[0].Text != "first" || events[1].Text != "second" {
+		t.Fatalf("pending frame replay changed usage or content: result=%+v events=%+v error=%v", o.result, events, o.err)
+	}
+}
+
+func TestResumedPendingFrameReservesContentHistoryBeforeResult(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const frame = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"work"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"done","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":15}}}`
+	o := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true, baseline: usage.Tokens{Output: 10}, progressEntryLimit: 2}
+	writeChunks(t, &o, start+"\n"+frame+"\n"+result+"\n")
+	o.finish()
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || o.progressEntries != 1 ||
+		o.result.UsageComplete || o.hasCumulative || o.nativeCostUSD != nil {
+		t.Fatalf("limit certified a resumed receipt: entries=%d complete=%t cumulative=%t cost=%v error=%v", o.progressEntries, o.result.UsageComplete, o.hasCumulative, o.nativeCostUSD, o.err)
+	}
+}
+
 func TestAssistantContentProofTracksExecutionContent(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, metadataReplay, changed string

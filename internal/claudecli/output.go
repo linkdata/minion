@@ -202,6 +202,14 @@ type assistantSnapshot struct {
 	hasContent bool
 }
 
+type resumedFrame struct {
+	id          streamIdentity
+	event       event
+	tokens      usage.Tokens
+	contentHash [32]byte
+	hasContent  bool
+}
+
 type progressStream struct {
 	key            string
 	messageID      string
@@ -313,6 +321,9 @@ type jsonlOutput struct {
 	aggregateTokens        usage.Tokens
 	assistantUsage         map[streamIdentity]messageUsage
 	assistantHistory       map[streamIdentity]assistantSnapshot
+	resumedFrames          []resumedFrame
+	resumedFrameIndex      map[streamIdentity]int
+	resumedTokens          usage.Tokens
 	assistantTotal         usage.Tokens // Sum of per-message counter maxima.
 	assistantTotalReady    bool
 	assistantTotalOverflow bool
@@ -389,6 +400,7 @@ func (o *jsonlOutput) safeDiagnosticText(detail string) string {
 
 func (o *jsonlOutput) finish() {
 	o.stream.Finish()
+	o.settleResumedFrames(usage.Tokens{}, false)
 	o.updateTaskPending()
 	lower, valid := o.assistantLowerBound()
 	if !valid {
@@ -866,8 +878,6 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			if assistantContentful && o.onEvent != nil {
 				o.onEvent(aicli.StreamEvent{Kind: "content_missing"})
 			}
-		case e.Type == "assistant" && o.resumed:
-			// Exact historical replay has no current receipt content.
 		case e.Type == "assistant" && assistantID == "":
 			receipt := e
 			receipt.SessionID = "" // Keep block kinds without attributing rejected content.
@@ -907,6 +917,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 	}
 	tokens, complete := e.tokens()
+	o.settleResumedFrames(tokens, complete)
 	modelTokens := tokens
 	if complete {
 		current := tokens.Sub(o.baseline)
@@ -2297,6 +2308,42 @@ func (o *jsonlOutput) retainStandaloneFloor(tokens usage.Tokens) {
 	o.result.Tokens = floor // Unallocated or contradictory counters cannot be added to another message.
 }
 
+func (o *jsonlOutput) settleResumedFrames(tokens usage.Tokens, complete bool) {
+	if len(o.resumedFrames) == 0 {
+		return
+	}
+	defer func() {
+		o.resumedFrames = nil
+		o.resumedFrameIndex = nil
+		o.resumedTokens = usage.Tokens{}
+	}()
+	current := tokens.Sub(o.baseline)
+	if !complete || !current.Valid() || !covers(current, o.resumedTokens) || o.provenanceGap {
+		o.markProvenanceGap(true)
+		for _, frame := range o.resumedFrames {
+			if frame.hasContent && o.onEvent != nil {
+				o.onEvent(aicli.StreamEvent{Kind: "content_missing"})
+			}
+		}
+	} else {
+		if o.assistantHistory == nil {
+			o.assistantHistory = make(map[streamIdentity]assistantSnapshot)
+		}
+		for _, frame := range o.resumedFrames {
+			o.assistantHistory[frame.id] = assistantSnapshot{tokens: frame.tokens, hasTokens: true, hasContent: frame.hasContent}
+			if frame.hasContent {
+				contentKey := frame.id.progressKey("assistant_content") + ":" + hex.EncodeToString(frame.contentHash[:])
+				if o.progressSeen == nil {
+					o.progressSeen = make(map[string]bool)
+				}
+				o.progressSeen[contentKey] = true // Candidate insertion already reserved this key's budget.
+			}
+			o.captureMessage(frame.event)
+		}
+		o.assistantTotalReady = false
+	}
+}
+
 func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageID string, hasContent, replay bool) {
 	if len(bytes.TrimSpace(e.Message)) == 0 && !reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil {
 		return // A metadata-only assistant notice reports no message work.
@@ -2324,10 +2371,54 @@ func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageI
 	root := e.parentForm == parentRoot
 	unknown := e.parentForm == parentMissing || e.parentForm == parentInvalid
 	prior, historical := o.assistantHistory[id]
+	if at, seen := o.resumedFrameIndex[id]; seen {
+		priorFrame := o.resumedFrames[at]
+		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
+		var reported eventUsage
+		if !unprojectable && json.Unmarshal(message.Usage, &reported) == nil {
+			if tokens, valid := reported.tokens(); valid && tokens == priorFrame.tokens &&
+				contentHash == priorFrame.contentHash && hasContent == priorFrame.hasContent &&
+				!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil {
+				return false, message.ID, false, true
+			}
+		}
+		o.markProvenanceGap(root || unknown)
+		return false, message.ID, false, true // The pending frame will emit one gap marker at settlement.
+	}
+	stream := o.progressStreams[streamKey]
+	freshResumed := o.resumed && !historical && !o.baselineUnknown && o.results == 0 &&
+		stream != nil && stream.messageID == message.ID && reportPresent(message.Usage) && !unknown &&
+		!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil
+	if freshResumed {
+		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
+		var reported eventUsage
+		if !unprojectable && json.Unmarshal(message.Usage, &reported) == nil {
+			if tokens, valid := reported.tokens(); valid && o.claimAssistantOrigin(e, message.ID) {
+				if total, valid := o.resumedTokens.AddChecked(tokens); valid {
+					entries, bytes := 1, len(e.Message)+len(streamKey)+len(message.ID)
+					if hasContent {
+						entries++
+						bytes += len(id.progressKey("assistant_content")) + 1 + hex.EncodedLen(len(contentHash))
+					}
+					if !o.reserveProgress(entries, bytes) {
+						return false, "", false, false
+					}
+					if o.resumedFrameIndex == nil {
+						o.resumedFrameIndex = make(map[streamIdentity]int)
+					}
+					o.resumedFrameIndex[id] = len(o.resumedFrames)
+					receipt := event{Type: e.Type, SessionID: e.SessionID, AgentID: e.AgentID, parentForm: e.parentForm, Message: e.Message}
+					o.resumedFrames = append(o.resumedFrames, resumedFrame{id: id, event: receipt, tokens: tokens, contentHash: contentHash, hasContent: hasContent})
+					o.resumedTokens = total
+					return false, message.ID, false, true // Final usage must prove this frame before content is emitted.
+				}
+			}
+		}
+	}
 	if o.resumed {
-		// Starts and full frames can both be replayed by a resumed CLI. Only a
-		// stored message with the same origin, counters and content is an exact
-		// replay; new work needs a scoped final result for attribution.
+		// A resumed frame without a fresh stream start may replay older work.
+		// Only a stored message with matching origin, counters and content is
+		// an exact replay; other unproved frames leave a provenance gap.
 		hasUsage := reportPresent(message.Usage)
 		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
 		replay := historical && hasUsage == prior.hasTokens && hasContent == prior.hasContent && !unprojectable &&
@@ -2354,7 +2445,6 @@ func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageI
 		}
 		return false, "", assistantReceiptOmitted(message.Content), false
 	}
-	stream := o.progressStreams[streamKey]
 	streamResultIndex, postStream := o.results, false
 	if stream != nil && stream.messageID == message.ID {
 		streamResultIndex = stream.resultIndex

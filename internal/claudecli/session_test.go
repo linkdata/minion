@@ -148,6 +148,106 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 	}
 }
 
+func TestSessionResumedAssistantFramesKeepUsageAndContent(t *testing.T) {
+	start := func(id string) string {
+		return fmt.Sprintf(`{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":%q}}}`, id)
+	}
+	frame := func(id, text string, input, output int) string {
+		return fmt.Sprintf(`{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":%q,"content":[{"type":"text","text":%q}],"usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":%d}}}`, id, text, input, output)
+	}
+	final := func(text string, cost float64, input, output, totalInput, totalOutput int) string {
+		return fmt.Sprintf(`{"type":"result","session_id":"native-id","subtype":"success","result":%q,"total_cost_usd":%g,"usage":{"input_tokens":%d,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":%d},"modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%d}}}`, text, cost, input, output, totalInput, totalOutput)
+	}
+	const helperStart = `{"type":"stream_event","agent_id":"helper","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"h3"}}}`
+	const helperFrame = `{"type":"assistant","session_id":"native-id","agent_id":"helper","parent_tool_use_id":"delegate","message":{"id":"h3","content":[{"type":"text","text":"helper"}],"usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":3}}}`
+	const thirdResult = `{"type":"result","session_id":"native-id","subtype":"success","result":"three","total_cost_usd":1,"usage":{"input_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1},"modelUsage":{"main":{"inputTokens":35,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":13},"helper":{"inputTokens":2,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":3}}}`
+	var script strings.Builder
+	script.WriteString("n=0; [ ! -f \"$0.count\" ] || n=$(cat \"$0.count\")\nn=$((n+1)); printf '%s' \"$n\" > \"$0.count\"\ncat >/dev/null\ncase \"$n\" in\n")
+	for i, call := range [][]string{
+		{start("m1"), frame("m1", "one", 10, 5), final("one", 0.5, 10, 5, 10, 5)},
+		{start("m2"), frame("m2", "two", 20, 7), final("two", 0.75, 20, 7, 30, 12)},
+		{start("m3"), frame("m3", "three", 5, 1), helperStart, helperFrame, thirdResult},
+	} {
+		fmt.Fprintf(&script, "%d) printf '%%s\\n'", i+1)
+		for _, event := range call {
+			fmt.Fprintf(&script, " %s", aicli.ShellQuote(event))
+		}
+		script.WriteString(" ;;\n")
+	}
+	script.WriteString("esac\n")
+	fakeExecutable(t, "claude", script.String())
+	var session Session
+	session.id = "native-id"
+	t.Cleanup(func() { _ = session.Close() })
+	workspace := t.TempDir()
+	var events []aicli.StreamEvent
+	session.OnEvent = func(event aicli.StreamEvent) { events = append(events, event) }
+	want := []usage.Tokens{{Input: 10, Output: 5}, {Input: 20, Output: 7}, {Input: 7, Output: 4}}
+	for i, tokens := range want {
+		start := len(events)
+		result, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{})
+		if err != nil || result.Tokens != tokens || !result.UsageComplete ||
+			result.UsageCoverage != (usage.Coverage{Scope: "invocation"}) ||
+			result.EstimatedCostUSD == nil || *result.EstimatedCostUSD != []float64{0.5, 0.25, 0.25}[i] || !result.EstimatedCostComplete {
+			t.Fatalf("call %d: result=%+v, error=%v", i+1, result, err)
+		}
+		found := false
+		foundHelper := false
+		for _, event := range events[start:] {
+			if event.Kind == "assistant" && event.Text == []string{"one", "two", "three"}[i] {
+				found = true
+			}
+			if event.Kind == "assistant" && event.Text == "helper" {
+				foundHelper = true
+			}
+			if event.Kind == "content_missing" {
+				t.Fatalf("call %d lost assistant content: %+v", i+1, events[start:])
+			}
+		}
+		if !found || i == 2 && !foundHelper {
+			t.Fatalf("call %d omitted assistant content: %+v", i+1, events[start:])
+		}
+	}
+}
+
+func TestSessionResumedAssistantFrameNeedsCoveringResult(t *testing.T) {
+	const first = `{"type":"result","session_id":"native-id","subtype":"success","result":"first","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":100}}}`
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"unproved"}}}`
+	const frame = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"unproved","content":[{"type":"text","text":"prior work"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}`
+	const second = `{"type":"result","session_id":"native-id","subtype":"success","result":"second","total_cost_usd":0.75,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":105}}}`
+	fakeExecutable(t, "claude", `n=0; [ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+if [ "$n" -eq 1 ]; then printf '%s\n' '`+first+`'; else printf '%s\n' '`+start+`' '`+frame+`' '`+second+`'; fi
+`)
+	var session Session
+	session.id = "native-id"
+	t.Cleanup(func() { _ = session.Close() })
+	var events []aicli.StreamEvent
+	session.OnEvent = func(event aicli.StreamEvent) { events = append(events, event) }
+	workspace := t.TempDir()
+	if _, err := session.Run(t.Context(), workspace, "first", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.Run(t.Context(), workspace, "second", false, "", config.ClaudeConfig{})
+	if err != nil || result.Tokens != (usage.Tokens{Output: 5}) || result.UsageComplete ||
+		result.EstimatedCostUSD == nil || *result.EstimatedCostUSD != 0.25 || result.EstimatedCostComplete {
+		t.Fatalf("underreported resumed frame: %+v, %v", result, err)
+	}
+	missing := 0
+	for _, event := range events {
+		if event.Text == "prior work" {
+			t.Fatalf("unproved resumed content escaped: %+v", events)
+		}
+		if event.Kind == "content_missing" {
+			missing++
+		}
+	}
+	if missing != 1 {
+		t.Fatalf("unproved resumed frame lacked one content marker: %+v", events)
+	}
+}
+
 func TestSessionCostEstimateNeedsContiguousSnapshots(t *testing.T) {
 	const resumed = `{"type":"result","subtype":"success","result":"continued","total_cost_usd":1.25,"modelUsage":{"main":{"inputTokens":6,"cacheCreationInputTokens":10,"cacheReadInputTokens":14,"outputTokens":22}}}`
 	firstWithCost := strings.Replace(successfulResult, `"modelUsage":`, `"total_cost_usd":0.25,"modelUsage":`, 1)
@@ -219,6 +319,34 @@ if [ "$n" -eq 1 ]; then printf '%s\n' '`+first+`'; else printf '%s\n' '`+tc.seco
 	}
 }
 
+func TestSessionRecoversAfterInitialVersionProbeFailure(t *testing.T) {
+	first := strings.Replace(successfulResult, `"modelUsage":`, `"total_cost_usd":0.5,"modelUsage":`, 1)
+	const second = `{"type":"result","subtype":"success","result":"continued","total_cost_usd":0.75,"modelUsage":{"main":{"inputTokens":6,"cacheCreationInputTokens":10,"cacheReadInputTokens":14,"outputTokens":22}}}`
+	binary := fakeExecutable(t, "claude", `n=0; [ ! -f "$0.count" ] || n=$(cat "$0.count")
+n=$((n+1)); printf '%s' "$n" > "$0.count"
+cat >/dev/null
+if [ "$n" -eq 1 ]; then printf '%s\n' '`+first+`'; else printf '%s\n' '`+second+`'; fi
+`)
+	if err := os.WriteFile(binary+".version", []byte("unavailable\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var session Session
+	t.Cleanup(func() { _ = session.Close() })
+	workspace := t.TempDir()
+	initial, err := session.Run(t.Context(), workspace, "first", false, "", config.ClaudeConfig{})
+	if err != nil || !initial.UsageComplete || initial.EstimatedCostUSD == nil || *initial.EstimatedCostUSD != 0.5 {
+		t.Fatalf("initial call: %+v, %v", initial, err)
+	}
+	if err := os.WriteFile(binary+".version", []byte("2.1.318 (Claude Code)\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := session.Run(t.Context(), workspace, "second", false, "", config.ClaudeConfig{})
+	if err != nil || !resumed.UsageComplete || resumed.Tokens != initial.Tokens ||
+		resumed.EstimatedCostUSD == nil || *resumed.EstimatedCostUSD != 0.25 || !resumed.EstimatedCostComplete {
+		t.Fatalf("resumed call after recovered version probe: %+v, %v", resumed, err)
+	}
+}
+
 func TestSessionOlderPerCallCostRecoversAfterMissingFirstSnapshot(t *testing.T) {
 	second := strings.Replace(successfulResult, `"modelUsage":`, `"total_cost_usd":0.75,"modelUsage":`, 1)
 	binary := fakeExecutable(t, "claude", `n=0; [ ! -f "$0.count" ] || n=$(cat "$0.count")
@@ -266,9 +394,9 @@ else printf '%s\n' '`+prior+`' '`+freshStart+`' '`+fresh+`' '`+second+`' '`+prio
 		t.Fatalf("first per-call result: %+v, %v", firstResult, err)
 	}
 	resumed, err := session.Run(t.Context(), dir, "second", false, "", config.ClaudeConfig{})
-	if err != nil || resumed.UsageComplete || resumed.Tokens != (usage.Tokens{Input: 1, Output: 1}) ||
-		resumed.EstimatedCostUSD == nil || *resumed.EstimatedCostUSD != 0.75 || resumed.EstimatedCostComplete {
-		t.Fatalf("old replay inflated current call: %+v, %v", resumed, err)
+	if err != nil || !resumed.UsageComplete || resumed.Tokens != (usage.Tokens{Input: 1, Output: 1}) ||
+		resumed.EstimatedCostUSD == nil || *resumed.EstimatedCostUSD != 0.75 || !resumed.EstimatedCostComplete {
+		t.Fatalf("old replay changed current call: %+v, %v", resumed, err)
 	}
 }
 
