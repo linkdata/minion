@@ -36,7 +36,10 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion request failed</title>{{$.HeadHTML}}</head>
 <body><main><h1>Request failed</h1><p role="alert">Request could not be completed. Try again.</p>
+{{if .Dot.RetryAfter}}<p role="status">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
+
+type userErrorView struct{ RetryAfter string }
 
 type userLoginView struct {
 	SignedIn       bool
@@ -332,9 +335,13 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	}
 	for _, p := range a.providers {
 		if _, ok := p.identity(p.server.CurrentClaims(sess)); ok {
+			view := userErrorView{}
+			if status == http.StatusTooManyRequests {
+				view.RetryAfter = w.Header().Get("Retry-After")
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(status)
-			ui.Handler(a.jaws, "user error", nil).ServeHTTP(w, r)
+			ui.Handler(a.jaws, "user error", view).ServeHTTP(w, r)
 			return
 		}
 	}

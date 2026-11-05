@@ -14,7 +14,7 @@ import (
 )
 
 var userPreferencesHTML = template.Must(template.New("user preferences").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Model preferences</title>{{$.HeadHTML}}</head>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Model preferences</title>{{$.HeadHTML}}</head>
 <body><main><h1>Model preferences</h1>
 {{range .Dot.Notices}}<p role="status">{{.}}</p>{{end}}
 {{if .Dot.Fields}}

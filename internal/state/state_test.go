@@ -18,6 +18,36 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
+func TestOpenRejectsIncompleteFrozenRetrySettings(t *testing.T) {
+	at := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		failure JobFailure
+	}{
+		{"missing provider", JobFailure{AcceptedAt: at, Deadline: at.Add(time.Hour)}},
+		{"partial main", JobFailure{AcceptedAt: at, Deadline: at.Add(time.Hour), MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "model"}}},
+		{"missing critic", JobFailure{AcceptedAt: at, Deadline: at.Add(time.Hour), MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "model", Effort: "medium"}, CriticProvider: "claude"}},
+		{"partial critic", JobFailure{AcceptedAt: at, Deadline: at.Add(time.Hour), MainProvider: "codex", MainSettings: config.RoleModelConfig{Model: "model", Effort: "medium"}, CriticProvider: "claude", CriticSettings: config.RoleModelConfig{Effort: "high"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			data, err := json.Marshal(Data{Cursor: at, Processed: map[string]time.Time{}, JobFailures: map[string]JobFailure{"job": test.failure}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := Open(path, at); err == nil {
+				_ = store.Close()
+				t.Fatal("incomplete retry settings were loaded")
+			} else if !strings.Contains(err.Error(), "frozen role settings") {
+				t.Fatalf("load error = %v", err)
+			}
+		})
+	}
+}
+
 func TestStoreLocksAndPersistsCompletedCommands(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "state.json")
 	initial := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)

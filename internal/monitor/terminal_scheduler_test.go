@@ -108,6 +108,9 @@ func TestProcessTerminalItemsSkipsReplyAfterIdentifiedCheckFails(t *testing.T) {
 			siblingID := jobID(sibling.Key, "review")
 			siblingFailure := state.JobFailure{Attempts: 1, NotificationKey: store.Data.JobFailures[id].NotificationKey,
 				AcceptedAt: now, Deadline: now.Add(time.Hour)}
+			roles := selectedAcceptance(t, now)
+			siblingFailure.MainProvider, siblingFailure.CriticProvider = roles.MainProvider, roles.CriticProvider
+			siblingFailure.MainSettings, siblingFailure.CriticSettings = roles.MainSettings, roles.CriticSettings
 			store.Data.JobFailures[siblingID] = siblingFailure
 			decision := state.TerminalDecision{AttemptID: "first-attempt", Outcome: "failed", DecidedAt: now}
 			store.Data.TerminalDecisions[id] = decision

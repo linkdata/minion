@@ -197,7 +197,7 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	}
 	accountKey := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
 	session.Set("oidc_claims.github", map[string]any{"iss": "https://github.com", "sub": "42"})
-	session.Set("oauth2idtokenexpiry.github", time.Now().Add(time.Hour))
+	session.Set("oauth2authexpiry.github", time.Now().Add(time.Hour))
 	cookies := sessionResponse.Result().Cookies()
 	if len(cookies) != 1 {
 		t.Fatalf("signed-in session cookies=%v", cookies)

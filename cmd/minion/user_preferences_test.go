@@ -42,6 +42,7 @@ func TestOAuthPreferencesUseJaWSAndBoundSavedChoice(t *testing.T) {
 	page := adminResponse(handler, http.MethodGet, "/auth/preferences", nil, signed, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="jawsKey"`) ||
 		!strings.Contains(page.Body.String(), `<form method="post" action="/auth/preferences">`) ||
+		!strings.Contains(page.Body.String(), `name="viewport"`) ||
 		!strings.Contains(page.Body.String(), "approved-main") {
 		t.Fatalf("preference JaWS page: status=%d body=%q", page.Code, page.Body.String())
 	}
@@ -52,6 +53,14 @@ func TestOAuthPreferencesUseJaWSAndBoundSavedChoice(t *testing.T) {
 	}
 	if got, err := auth.links.preferencesForGitHubID(42); err != nil || got.Main != choice {
 		t.Fatalf("saved preference: %+v, %v", got, err)
+	}
+	form.Set("main", "default")
+	limited := adminResponse(handler, http.MethodPost, "/auth/preferences", form, signed, "https://admin.example")
+	retry := limited.Header().Get("Retry-After")
+	if limited.Code != http.StatusTooManyRequests || retry == "" ||
+		!strings.Contains(limited.Body.String(), `name="jawsKey"`) ||
+		!strings.Contains(limited.Body.String(), "Wait "+retry+" seconds before retrying") {
+		t.Fatalf("rate limit notice: status=%d retry=%q body=%q", limited.Code, limited.Header().Get("Retry-After"), limited.Body.String())
 	}
 	forged := adminResponse(handler, http.MethodGet, "/auth/preferences?saved=1", nil, signed, "")
 	if forged.Code != http.StatusOK || strings.Contains(forged.Body.String(), "Preferences saved for future actions") {

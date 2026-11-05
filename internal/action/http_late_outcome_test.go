@@ -116,7 +116,9 @@ func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutco
 	t.Cleanup(func() { _ = store.Close() })
 	accepted := acceptedForJob(job)
 	store.Data.Accepted = accepted
-	store.Data.JobFailures[job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainProvider: accepted.MainProvider, CriticProvider: accepted.CriticProvider,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}

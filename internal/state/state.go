@@ -295,16 +295,22 @@ type JobFailure struct {
 	CriticSettings   config.RoleModelConfig `json:"critic_settings,omitzero"`
 }
 
-// Validate checks the optional original action deadline.
+// Validate checks retry timing and frozen role settings.
 func (f JobFailure) Validate() error {
 	if f.AcceptedAt.IsZero() != f.Deadline.IsZero() || !f.Deadline.IsZero() && !f.Deadline.After(f.AcceptedAt) {
 		return errors.New("job failure deadline is invalid")
 	}
-	if !f.MainSettings.ValidSetting() || !f.CriticSettings.ValidSetting() ||
-		f.MainProvider != "" && f.MainProvider != "codex" && f.MainProvider != "claude" ||
+	if f.AcceptedAt.IsZero() {
+		if f.MainProvider != "" || f.CriticProvider != "" ||
+			f.MainSettings != (config.RoleModelConfig{}) || f.CriticSettings != (config.RoleModelConfig{}) {
+			return errors.New("job failure frozen role settings are invalid")
+		}
+		return nil
+	}
+	if f.MainProvider != "codex" && f.MainProvider != "claude" || !f.MainSettings.ValidChoice() ||
 		f.CriticProvider != "" && f.CriticProvider != "codex" && f.CriticProvider != "claude" ||
-		f.MainProvider == "" && (f.CriticProvider != "" || f.MainSettings != (config.RoleModelConfig{}) || f.CriticSettings != (config.RoleModelConfig{})) ||
-		f.MainProvider != "" && (f.AcceptedAt.IsZero() || f.CriticProvider == "" && f.CriticSettings != (config.RoleModelConfig{})) {
+		f.CriticProvider != "" && !f.CriticSettings.ValidChoice() ||
+		f.CriticProvider == "" && f.CriticSettings != (config.RoleModelConfig{}) {
 		return errors.New("job failure frozen role settings are invalid")
 	}
 	return nil
