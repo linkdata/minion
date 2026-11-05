@@ -2356,6 +2356,9 @@ func (o *jsonlOutput) settleResumedFrames(tokens usage.Tokens, complete bool) {
 				}
 				o.progressSeen[contentKey] = true // Candidate insertion already reserved this key's budget.
 			}
+			if frame.event.parentForm == parentRoot && o.rootStartsAfterStop[frame.id.messageID] {
+				o.stopped = false // This covered root began after the latest task stop.
+			}
 			o.captureMessage(frame.event)
 		}
 		o.assistantTotalReady = false

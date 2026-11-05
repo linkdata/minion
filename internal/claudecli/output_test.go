@@ -44,6 +44,34 @@ func TestResumedPendingFrameReservesContentHistoryBeforeResult(t *testing.T) {
 	}
 }
 
+func TestResumedCoveredRootAssessesStoppedTask(t *testing.T) {
+	const stop = `{"type":"system","session_id":"native-id","subtype":"task_notification","uuid":"stop-1","status":"stopped","summary":"worker stopped"}`
+	const secondStop = `{"type":"system","session_id":"native-id","subtype":"task_notification","uuid":"stop-2","status":"stopped","summary":"worker stopped again"}`
+	const start = `{"type":"stream_event","session_id":"native-id","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"new"}}}`
+	const frame = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"new","content":[{"type":"text","text":"assessment"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const covered = `{"type":"result","session_id":"native-id","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":15}}}`
+	const underreported = `{"type":"result","session_id":"native-id","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":12}}}`
+	for _, tc := range []struct {
+		name, events string
+		assessed     bool
+	}{
+		{"covered root after stop", stop + "\n" + start + "\n" + frame + "\n" + covered, true},
+		{"underreported root", stop + "\n" + start + "\n" + frame + "\n" + underreported, false},
+		{"start before stop", start + "\n" + stop + "\n" + frame + "\n" + covered, false},
+		{"second stop", stop + "\n" + start + "\n" + frame + "\n" + secondStop + "\n" + covered, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true, baseline: usage.Tokens{Output: 10}}
+			writeChunks(t, &o, tc.events+"\n")
+			o.finish()
+			if (o.err == nil) != tc.assessed || o.completed != tc.assessed || o.stopped == tc.assessed ||
+				(tc.assessed && (!o.result.UsageComplete || o.result.Answer != "done")) {
+				t.Fatalf("resumed stop assessment: stopped=%t completed=%t result=%+v error=%v", o.stopped, o.completed, o.result, o.err)
+			}
+		})
+	}
+}
+
 func TestResumedAssistantBlocksShareMessageUsage(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m2"}}}`
 	const textBlock = `[{"type":"text","text":"I will look"}]`
