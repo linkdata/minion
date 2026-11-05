@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -46,6 +47,42 @@ func TestRemoteChoicePreflightOpensGateBeforeResponse(t *testing.T) {
 	if writer.Code != http.StatusOK || !writer.gateOpenOnWrite || writer.Body.Len() == 0 {
 		t.Fatalf("preflight response exposed before pull gate: status=%d gate=%t body=%q",
 			writer.Code, writer.gateOpenOnWrite, writer.Body.String())
+	}
+}
+
+func TestRemoteChoicePreflightRejectsUnavailableExecutor(t *testing.T) {
+	const secret = "private-preflight-credential"
+	for _, state := range []string{"closed", "unavailable"} {
+		t.Run(state, func(t *testing.T) {
+			executor, err := NewHTTPExecutor("remote")
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+				Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+			executor.credentials = WorkerCredentials{CodexAccessToken: secret}
+			if state == "closed" {
+				if err := executor.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				executor.mu.Lock()
+				executor.unavailable = true
+				executor.mu.Unlock()
+			}
+			body, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: "remote"}, httpControlBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/preflight", bytes.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			response := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+			executor.serveRemoteChoices(response, request)
+			if response.Code != http.StatusConflict || strings.Contains(response.Body.String(), secret) || executor.choicesFetched {
+				t.Fatalf("%s executor exposed preflight: status=%d body=%q gate=%t",
+					state, response.Code, response.Body.String(), executor.choicesFetched)
+			}
+		})
 	}
 }
 

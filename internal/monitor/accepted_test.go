@@ -116,6 +116,25 @@ func selectedMonitor(t *testing.T, at time.Time, gh GitHub, handler ActionHandle
 	return &Monitor{Config: cfg, GitHub: gh, BotID: 8, Handler: handler, Now: func() time.Time { return at }, SelectedExecutorID: "local"}
 }
 
+func TestSelectedPreferenceReadFailureStopsAcceptance(t *testing.T) {
+	at := time.Now().UTC()
+	store := openState(t, at.Add(-time.Minute))
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{selectedItem(at)},
+		permission: github.Permission{Permission: "write"}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("action ran after preference read failed")
+		return nil
+	}))
+	readErr := errors.New("link store unavailable")
+	m.UserPreferences = func(int64) (config.UserModelPreferences, error) {
+		return config.UserModelPreferences{}, readErr
+	}
+	_, err := m.RunOnce(t.Context(), store)
+	if !errors.Is(err, ErrAcceptanceState) || !errors.Is(err, readErr) || store.Data.Accepted != nil || store.Data.AcceptedTotal != 0 {
+		t.Fatalf("preference failure did not stop acceptance: error=%v state=%+v", err, store.Data)
+	}
+}
+
 func TestSelectedUnassignedRecoveryFailsWhenFrozenProviderIsUnavailable(t *testing.T) {
 	at := time.Now().UTC()
 	item := selectedItem(at)

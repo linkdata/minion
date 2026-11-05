@@ -414,6 +414,11 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 		return
 	}
 	e.mu.Lock()
+	if e.closed || e.unavailable {
+		e.mu.Unlock()
+		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is closed or unavailable"))
+		return
+	}
 	response := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: e.executorID}
 	if e.remoteChoices != nil {
 		response = *e.remoteChoices

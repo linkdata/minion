@@ -741,7 +741,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if m.UserPreferences != nil {
 					preferred, err = m.UserPreferences(item.Author.ID)
 					if err != nil {
-						return stop(fmt.Errorf("read requester preferences: %w", err))
+						return stop(fmt.Errorf("%w: read requester preferences: %w", ErrAcceptanceState, err))
 					}
 				}
 				job.MainSettings, job.CriticSettings = m.Config.ResolveUserPreferences(preferred)

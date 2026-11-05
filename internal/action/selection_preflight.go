@@ -190,7 +190,13 @@ func checkCodexPrerequisites(ctx context.Context, settings config.CodexConfig) (
 
 func checkOfferedRolesCLI(ctx context.Context, configured *Runner, roles []RoleSettings) (string, error) {
 	codexChecked := false
+	checked := make(map[[3]string]bool, len(roles))
 	for _, role := range roles {
+		pair := [3]string{role.Provider, role.Model, role.Effort}
+		if checked[pair] {
+			continue
+		}
+		checked[pair] = true
 		if role.Provider == "codex" && !codexChecked {
 			if message, err := checkCodexPrerequisites(ctx, configured.Codex); err != nil {
 				return message, err

@@ -342,13 +342,14 @@ func TestOfferedCodexChoicesProbeSharedPrerequisitesOnce(t *testing.T) {
 	script = strings.Replace(script, `"supportedReasoningEfforts":[{"reasoningEffort":"high"}]`,
 		`"supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"medium"}]`, 1)
 	fakeOnPath(t, "codex", script)
-	roles := []RoleSettings{{Provider: "codex", Model: "main-1", Effort: "high"}, {Provider: "codex", Model: "main-1", Effort: "medium"}}
+	roles := []RoleSettings{{Provider: "codex", Model: "main-1", Effort: "high"}, {Provider: "codex", Model: "main-1", Effort: "medium"},
+		{Provider: "codex", Model: "main-1", Effort: "high"}}
 	if message, err := checkOfferedRolesCLI(t.Context(), &Runner{}, roles); err != nil {
 		t.Fatalf("offered roles: %s: %v", message, err)
 	}
 	data, err := os.ReadFile(logPath)
 	if err != nil || strings.Count(string(data), "login status\n") != 1 ||
-		strings.Count(string(data), "debug prompt-input\n") != 3 || strings.Count(string(data), "app-server ") < 2 {
+		strings.Count(string(data), "debug prompt-input\n") != 3 || strings.Count(string(data), "app-server ") != 10 {
 		t.Fatalf("provider and pair probes = %q, error=%v", data, err)
 	}
 }
