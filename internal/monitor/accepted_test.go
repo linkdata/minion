@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
@@ -627,6 +628,7 @@ func TestSelectedAcceptedTotalSurvivesRetiredUnassignedReservation(t *testing.T)
 	}
 	failure := store.Data.JobFailures[jobID(first.Key, "review")]
 	failure.AcceptedAt = time.Now().UTC().Add(-15 * time.Minute)
+	failure.RetryAction.Summary.AcceptedAt = failure.AcceptedAt
 	failure.Deadline = time.Now().UTC().Add(-time.Minute)
 	store.Data.JobFailures[jobID(first.Key, "review")] = failure
 	if err := store.Save(); err != nil {
@@ -635,7 +637,10 @@ func TestSelectedAcceptedTotalSurvivesRetiredUnassignedReservation(t *testing.T)
 	if err := m.retireMissingTerminalFailures(store, notificationKey(gh.notifications[0]), nil, nil, nil, at.Add(10*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.Data.JobFailures) != 0 || len(store.Data.TerminalDecisions) != 0 || store.Data.AcceptedTotal != 1 {
+	decision := store.Data.TerminalDecisions[jobID(first.Key, "review")]
+	if len(store.Data.JobFailures) != 0 || len(store.Data.TerminalDecisions) != 1 ||
+		decision.AttemptID != failure.RetryAction.AttemptID || decision.Summary != failure.RetryAction.Summary ||
+		store.Data.AcceptedTotal != 1 {
 		t.Fatalf("retirement discarded accepted count: %+v", store.Data)
 	}
 	second := selectedItem(at.Add(11 * time.Minute))
@@ -647,6 +652,157 @@ func TestSelectedAcceptedTotalSurvivesRetiredUnassignedReservation(t *testing.T)
 	m.Handler = selectedHandler(func(Job) error { return nil })
 	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.AcceptedTotal != 2 {
 		t.Fatalf("distinct acceptance did not increment retained count: err=%v state=%+v", err, store.Data)
+	}
+}
+
+func TestSelectedRetryRetiresSavedTerminalDecisionBeforeReacceptance(t *testing.T) {
+	at := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at.Add(-time.Minute))
+	accepted := selectedAcceptance(t, at)
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+		Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline, MainProvider: accepted.MainProvider,
+		MainSettings: accepted.MainSettings,
+		RetryAction:  state.RetryAction{AttemptID: accepted.AttemptID, Summary: accepted.HistorySummary()},
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	// The decision save succeeded, but the following retirement save did not.
+	if err := store.WithLock(func() error {
+		_, err := store.DecideRetryTerminalLocked(accepted.JobID, "failed", at)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decision := store.Data.TerminalDecisions[accepted.JobID]
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, at)
+	if store.Data.TerminalDecisions[accepted.JobID] != decision ||
+		store.Data.JobFailures[accepted.JobID].RetryAction.AttemptID != accepted.AttemptID {
+		t.Fatalf("crash-point retry decision was not recoverable: %+v", store.Data)
+	}
+	item := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("terminal retry dispatched a new attempt")
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+		len(store.Data.JobFailures) != 0 || store.Data.TerminalDecisions[accepted.JobID] != decision ||
+		len(gh.reactions) != 0 || gh.commentCalls != 0 {
+		t.Fatalf("saved terminal retry was reaccepted or changed: state=%+v reactions=%v comments=%v",
+			store.Data, gh.reactions, gh.comments)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openStateAt(t, path, at)
+	if reopened.Data.Processed[accepted.JobID].IsZero() || len(reopened.Data.JobFailures) != 0 ||
+		reopened.Data.TerminalDecisions[accepted.JobID] != decision {
+		t.Fatalf("terminal retry retirement was not durable: %+v", reopened.Data)
+	}
+}
+
+func TestMissingRetryBatchKeepsDecisionCheckpointAcrossRestart(t *testing.T) {
+	at := time.Now().UTC()
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, at)
+	first := selectedAcceptance(t, at)
+	second := first
+	second.JobID, second.AttemptID = "job-two", "attempt-two"
+	second.SourceKey, second.SourceNodeID = "comment:2", "node:2"
+	for _, accepted := range []state.AcceptedAction{first, second} {
+		store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
+			Attempts: maxJobAttempts, NotificationKey: "thread-1",
+			RetryAction: state.RetryAction{AttemptID: accepted.AttemptID, Summary: accepted.HistorySummary()},
+		})
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	requests := []state.RetryTerminalRequest{
+		{JobID: first.JobID, Outcome: "failed", DecidedAt: at},
+		{JobID: second.JobID, Outcome: "failed", DecidedAt: at},
+	}
+	if err := store.WithLock(func() error { return store.DecideRetryTerminalsLocked(requests) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, at)
+	for _, accepted := range []state.AcceptedAction{first, second} {
+		if store.Data.TerminalDecisions[accepted.JobID].AttemptID != accepted.AttemptID ||
+			store.Data.JobFailures[accepted.JobID].RetryAction.AttemptID != accepted.AttemptID {
+			t.Fatalf("batch checkpoint lost %s: %+v", accepted.JobID, store.Data)
+		}
+	}
+	if err := (&Monitor{}).retireMissingTerminalFailures(store, "thread-1", nil, nil, nil, at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, at)
+	if len(store.Data.JobFailures) != 0 {
+		t.Fatalf("batch retirement left retries: %+v", store.Data.JobFailures)
+	}
+	for _, accepted := range []state.AcceptedAction{first, second} {
+		decision := store.Data.TerminalDecisions[accepted.JobID]
+		if decision.AttemptID != accepted.AttemptID || decision.Outcome != "failed" ||
+			!decision.DecidedAt.Equal(at) || store.Data.Processed[accepted.JobID].IsZero() {
+			t.Fatalf("retirement changed first decision for %s: %+v", accepted.JobID, store.Data)
+		}
+	}
+}
+
+func TestReleasedRetryExpiryUsesDecisionWallTime(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		retireMissing bool
+	}{
+		{name: "missing terminal failure", retireMissing: true},
+		{name: "failure reply"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				started := time.Now().UTC()
+				accepted := selectedAcceptance(t, started.Add(-6*time.Minute))
+				store := openState(t, started.Add(-time.Minute))
+				store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
+					Attempts: maxJobAttempts, NotificationKey: "thread-1",
+					RetryAction: state.RetryAction{AttemptID: accepted.AttemptID, Summary: accepted.HistorySummary()},
+				})
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(2 * time.Minute)
+				gh := &fakeGitHub{items: []github.Item{selectedItem(started)}, permission: github.Permission{Permission: "write"}}
+				m := selectedMonitor(t, started, gh, nil)
+				var err error
+				if test.retireMissing {
+					err = m.retireMissingTerminalFailures(store, "thread-1", nil, nil, nil, started)
+				} else {
+					job := jobFromAccepted(accepted)
+					job.AttemptID = ""
+					err = m.finishFailedJob(t.Context(), store, job, started)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				decision := store.Data.TerminalDecisions[accepted.JobID]
+				if decision.Outcome != "expired" || decision.DecidedAt.Before(accepted.Deadline) {
+					t.Fatalf("retry used poll-start time after deadline: %+v", decision)
+				}
+			})
+		})
 	}
 }
 

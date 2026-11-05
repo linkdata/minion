@@ -418,8 +418,63 @@ func TestOpenRejectsInvalidTerminalDecision(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsPartialAcceptedSummary(t *testing.T) {
+	accepted := acceptedActionFixture()
+	accepted.MainProvider = "codex"
+	accepted.MainSettings = config.RoleModelConfig{Model: "o3", Effort: "high"}
+	summary := accepted.HistorySummary()
+	for _, test := range []struct {
+		name   string
+		change func(*TerminalDecision)
+	}{
+		{"missing requester ID", func(d *TerminalDecision) { d.Summary.RequesterID = 0 }},
+		{"invalid requester", func(d *TerminalDecision) { d.Summary.Requester = "other/user" }},
+		{"missing repository ID", func(d *TerminalDecision) { d.Summary.RepositoryID = 0 }},
+		{"missing owner ID", func(d *TerminalDecision) { d.Summary.OwnerID = 0 }},
+		{"invalid subject", func(d *TerminalDecision) { d.Summary.SubjectType = "Discussion" }},
+		{"missing action", func(d *TerminalDecision) { d.Summary.Action = "" }},
+		{"missing accepted time", func(d *TerminalDecision) { d.Summary.AcceptedAt = time.Time{} }},
+		{"deadline before acceptance", func(d *TerminalDecision) { d.Deadline = d.Summary.AcceptedAt }},
+		{"missing main provider", func(d *TerminalDecision) { d.Summary.MainProvider = "" }},
+		{"critic without main", func(d *TerminalDecision) { d.Summary.MainProvider = ""; d.Summary.CriticProvider = "claude" }},
+		{"critic settings without critic", func(d *TerminalDecision) { d.Summary.CriticSettings.Model = "critic" }},
+		{"invalid model", func(d *TerminalDecision) { d.Summary.MainSettings.Model = "bad model" }},
+		{"missing main model", func(d *TerminalDecision) { d.Summary.MainSettings.Model = "" }},
+		{"missing main effort", func(d *TerminalDecision) { d.Summary.MainSettings.Effort = "" }},
+		{"missing critic model", func(d *TerminalDecision) {
+			d.Summary.CriticProvider = "claude"
+			d.Summary.CriticSettings.Effort = "high"
+		}},
+		{"missing critic effort", func(d *TerminalDecision) {
+			d.Summary.CriticProvider = "claude"
+			d.Summary.CriticSettings.Model = "critic"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.json")
+			decision := TerminalDecision{AttemptID: accepted.AttemptID, Outcome: "failed", DecidedAt: accepted.Deadline,
+				Deadline: accepted.Deadline, Summary: summary}
+			test.change(&decision)
+			data, err := json.Marshal(Data{Cursor: accepted.AcceptedAt, TerminalDecisions: map[string]TerminalDecision{accepted.JobID: decision}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if store, err := Open(path, accepted.AcceptedAt); store != nil || err == nil || !strings.Contains(err.Error(), "invalid terminal decision") {
+				t.Fatalf("partial accepted summary reopened: store=%v err=%v", store, err)
+			}
+		})
+	}
+}
+
 func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 	accepted := acceptedActionFixture()
+	accepted.MainProvider, accepted.CriticProvider = "codex", "claude"
+	accepted.MainSettings = config.RoleModelConfig{Model: "o3", Effort: "high"}
+	accepted.CriticSettings = config.RoleModelConfig{Model: "sonnet", Effort: "medium"}
+	wantSummary := accepted.HistorySummary()
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := Open(path, accepted.AcceptedAt)
 	if err != nil {
@@ -444,7 +499,8 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Outcome != "inactivity" || first.Deadline != accepted.Deadline || !store.Data.Accepted.Terminal {
+	if first != second || first.Outcome != "inactivity" || first.Deadline != accepted.Deadline ||
+		first.Summary != wantSummary || !store.Data.Accepted.Terminal {
 		t.Fatalf("later outcome changed first terminal decision: first=%+v second=%+v accepted=%+v", first, second, store.Data.Accepted)
 	}
 	if err := store.WithLock(func() error {
@@ -452,6 +508,16 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 		return err
 	}); err == nil || store.Data.TerminalDecisions[accepted.JobID] != first {
 		t.Fatalf("another attempt reused first decision: err=%v decision=%+v", err, store.Data.TerminalDecisions[accepted.JobID])
+	}
+	store.Data.Accepted = nil
+	if err := store.WithLock(func() error {
+		third, err := store.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "succeeded", accepted.Deadline)
+		if third != first {
+			t.Fatalf("accepted cleanup changed first decision: third=%+v first=%+v", third, first)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -461,7 +527,7 @@ func TestDecideTerminalLockedKeepsFirstOutcomeAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	if reopened.Data.TerminalDecisions[accepted.JobID] != first || reopened.Data.Accepted == nil || !reopened.Data.Accepted.Terminal {
+	if reopened.Data.TerminalDecisions[accepted.JobID] != first || reopened.Data.Accepted != nil {
 		t.Fatalf("first terminal decision lost after reopen: decision=%+v accepted=%+v", reopened.Data.TerminalDecisions[accepted.JobID], reopened.Data.Accepted)
 	}
 }
@@ -747,6 +813,57 @@ func acceptedActionFixture() AcceptedAction {
 	}
 }
 
+func TestDecideRetryTerminalsLockedKeepsBatchOnPostRenameFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows skips directory sync")
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	first := acceptedActionFixture()
+	second := first
+	second.JobID, second.AttemptID = "job-2", "attempt-2"
+	second.SourceKey, second.SourceNodeID = "source-2", "node-2"
+	store, err := Open(path, first.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, accepted := range []AcceptedAction{first, second} {
+		store.Data.JobFailures[accepted.JobID] = JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt,
+			Deadline: accepted.Deadline, MainProvider: accepted.MainProvider, MainSettings: accepted.MainSettings,
+			RetryAction: RetryAction{AttemptID: accepted.AttemptID, Summary: accepted.HistorySummary()}}
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	requests := []RetryTerminalRequest{{JobID: first.JobID, Outcome: "failed", DecidedAt: first.AcceptedAt},
+		{JobID: second.JobID, Outcome: "failed", DecidedAt: second.AcceptedAt}}
+	if err := store.WithLock(func() error {
+		return store.DecideRetryTerminalsLocked(append(requests, RetryTerminalRequest{JobID: "missing", Outcome: "failed", DecidedAt: first.AcceptedAt}))
+	}); err == nil || len(store.Data.TerminalDecisions) != 0 {
+		t.Fatalf("invalid batch left partial decisions: err=%v state=%+v", err, store.Data.TerminalDecisions)
+	}
+	store.syncDir = filepath.Join(filepath.Dir(path), "missing-sync")
+	if err := store.WithLock(func() error { return store.DecideRetryTerminalsLocked(requests) }); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("post-rename sync failure missing: %v", err)
+	}
+	if len(store.Data.JobFailures) != 2 || len(store.Data.TerminalDecisions) != 2 {
+		t.Fatalf("failed batch lost retry identity or first decision: %+v", store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, first.AcceptedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	for _, accepted := range []AcceptedAction{first, second} {
+		if reopened.Data.JobFailures[accepted.JobID].RetryAction.AttemptID != accepted.AttemptID ||
+			reopened.Data.TerminalDecisions[accepted.JobID].AttemptID != accepted.AttemptID {
+			t.Fatalf("checkpoint lost %s after restart: %+v", accepted.JobID, reopened.Data)
+		}
+	}
+}
+
 func TestOpenRejectsInvalidAcceptedAction(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -890,6 +1007,38 @@ func TestJobFailureOmitsUnsetOriginalDeadline(t *testing.T) {
 	}
 	if string(data) != `{"attempts":1}` {
 		t.Fatalf("unset deadline encoded as %s", data)
+	}
+}
+
+func TestJobFailureRequiresConcreteFrozenChoices(t *testing.T) {
+	accepted := acceptedActionFixture()
+	valid := JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainProvider: accepted.MainProvider, MainSettings: accepted.MainSettings}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("complete frozen choice was rejected: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		change func(*JobFailure)
+	}{
+		{"missing main model", func(f *JobFailure) { f.MainSettings.Model = "" }},
+		{"missing main effort", func(f *JobFailure) { f.MainSettings.Effort = "" }},
+		{"missing critic model", func(f *JobFailure) {
+			f.CriticProvider = "claude"
+			f.CriticSettings.Effort = "high"
+		}},
+		{"missing critic effort", func(f *JobFailure) {
+			f.CriticProvider = "claude"
+			f.CriticSettings.Model = "critic"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failure := valid
+			test.change(&failure)
+			if err := failure.Validate(); err == nil {
+				t.Fatalf("partial frozen choice was accepted: %+v", failure)
+			}
+		})
 	}
 }
 

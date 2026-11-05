@@ -656,18 +656,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				// The latest editor may not be the actor who introduced a
 				// retained command. Do not run commands from edited content.
 				m.logf("ignore edited command in %s (last editor @%s)", itemLocation(item), item.Editor.Login)
-				store.Data.Processed[job.ID] = started
-				delete(store.Data.JobFailures, job.ID)
-				if err := store.Save(); err != nil {
+				if err := retireIgnoredJob(store, job.ID, started); err != nil {
 					return stop(err)
 				}
 				continue
 			}
 			if !repo.AllowsAction(cmd.Name) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
 				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
-				store.Data.Processed[job.ID] = started
-				delete(store.Data.JobFailures, job.ID)
-				if err := store.Save(); err != nil {
+				if err := retireIgnoredJob(store, job.ID, started); err != nil {
 					return stop(err)
 				}
 				continue
@@ -682,18 +678,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			}
 			if permission.User.ID != item.Author.ID || !strings.EqualFold(permission.User.Login, item.Author.Login) {
 				m.logf("ignore %s from @%s in %s: permission identity differs", cmd.Action, item.Author.Login, repo.Name)
-				store.Data.Processed[job.ID] = started
-				delete(store.Data.JobFailures, job.ID)
-				if err := store.Save(); err != nil {
+				if err := retireIgnoredJob(store, job.ID, started); err != nil {
 					return stop(err)
 				}
 				continue
 			}
 			if permission.Permission != "write" && permission.Permission != "admin" && permission.Permission != "maintain" {
 				m.logf("ignore %s from @%s in %s: permission %q", cmd.Action, item.Author.Login, repo.Name, permission.Permission)
-				store.Data.Processed[job.ID] = started
-				delete(store.Data.JobFailures, job.ID)
-				if err := store.Save(); err != nil {
+				if err := retireIgnoredJob(store, job.ID, started); err != nil {
 					return stop(err)
 				}
 				continue
@@ -718,6 +710,12 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stop(err)
 				}
 				recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started))
+				continue
+			}
+			if _, decided := store.Data.TerminalDecisions[job.ID]; decided {
+				if err := retireIgnoredJob(store, job.ID, started); err != nil {
+					return stop(err)
+				}
 				continue
 			}
 			if store.Data.Accepted != nil {
@@ -761,6 +759,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				jobFailure.MainProvider, jobFailure.CriticProvider = mainProvider, criticProvider
 				jobFailure.MainSettings, jobFailure.CriticSettings = job.MainSettings, job.CriticSettings
 			}
+			jobFailure.RetryAction = state.RetryAction{} // The new accepted attempt supersedes the unused one.
 			job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
 			accepted := &state.AcceptedAction{
 				JobID: job.ID, AttemptID: job.AttemptID, ExecutorID: m.SelectedExecutorID,
@@ -1281,6 +1280,24 @@ func (m *Monitor) serviceTerminalControlsBefore(ctx context.Context, store *stat
 
 // A linked failure was first found in the pending notification's scan window.
 // A completed replay of that window can therefore prove its command is gone.
+func retireIgnoredJob(store *state.Store, jobID string, at time.Time) error {
+	return store.WithLock(func() error {
+		if failure := store.Data.JobFailures[jobID]; failure.RetryAction != (state.RetryAction{}) {
+			decidedAt := time.Now().UTC()
+			outcome := "failed"
+			if !decidedAt.Before(failure.Deadline) {
+				outcome = "expired"
+			}
+			if _, err := store.DecideRetryTerminalLocked(jobID, outcome, decidedAt); err != nil {
+				return err
+			}
+		}
+		store.Data.Processed[jobID] = at
+		delete(store.Data.JobFailures, jobID)
+		return store.Save()
+	})
+}
+
 func (m *Monitor) retireMissingTerminalFailures(store *state.Store, key string, items []github.Item,
 	commands map[string]command.Action, invalid []string, at time.Time) error {
 	present := make(map[string]bool, len(items))
@@ -1310,11 +1327,28 @@ func (m *Monitor) retireMissingTerminalFailures(store *state.Store, key string, 
 				continue
 			}
 			retired[id] = failure
-			store.Data.Processed[id] = at
-			delete(store.Data.JobFailures, id)
 		}
 		if len(retired) == 0 {
 			return nil
+		}
+		decidedAt := time.Now().UTC()
+		var decisions []state.RetryTerminalRequest
+		for id, failure := range retired {
+			if failure.RetryAction == (state.RetryAction{}) {
+				continue
+			}
+			outcome := "failed"
+			if !decidedAt.Before(failure.Deadline) {
+				outcome = "expired"
+			}
+			decisions = append(decisions, state.RetryTerminalRequest{JobID: id, Outcome: outcome, DecidedAt: decidedAt})
+		}
+		if err := store.DecideRetryTerminalsLocked(decisions); err != nil {
+			return err
+		}
+		for id := range retired {
+			store.Data.Processed[id] = at
+			delete(store.Data.JobFailures, id)
 		}
 		if err := store.Save(); err != nil {
 			for id, failure := range retired {
@@ -2984,7 +3018,10 @@ func (m *Monitor) completeSelected(ctx context.Context, store *state.Store, job 
 		}
 		return m.resolveSelectedDecision(ctx, store, job, at, failure, decision)
 	}
-	store.Data.JobFailures[job.ID] = failure // Keep the first deadline after a proven unused attempt.
+	if !accepted.Assigned {
+		failure.RetryAction = state.RetryAction{AttemptID: accepted.AttemptID, Summary: accepted.HistorySummary()}
+	}
+	store.Data.JobFailures[job.ID] = failure // Keep the first deadline and unused attempt after reservation release.
 	if !accepted.Assigned {
 		store.Data.Accepted = nil
 	}
@@ -3049,8 +3086,16 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 		grace = config.DefaultPublicationGraceSeconds
 	}
 	attemptID := job.AttemptID
+	var retry state.RetryAction
 	if attemptID == "" {
-		attemptID = job.ID
+		_ = store.WithLock(func() error {
+			retry = store.Data.JobFailures[job.ID].RetryAction
+			return nil
+		})
+		attemptID = retry.AttemptID
+		if attemptID == "" {
+			attemptID = job.ID
+		}
 	}
 	write := state.PublicationWrite{
 		AttemptID: attemptID, Kind: "comment", BotLogin: m.Config.BotLogin, BotID: m.BotID,
@@ -3071,6 +3116,9 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 			}
 			write.SourceURL = accepted.SourceURL
 			write.SourceKey = accepted.SourceKey
+		} else if retry != (state.RetryAction{}) {
+			write.SourceURL = retry.Summary.SourceURL
+			write.SourceKey = retry.Summary.SourceKey
 		}
 		if _, exists := store.Data.PublicationWrites[job.ID]; exists {
 			return fmt.Errorf("%w: failure reply was already issued", ErrAcceptanceState)
@@ -3104,6 +3152,21 @@ func (m *Monitor) postFailureReply(ctx context.Context, store *state.Store, job 
 
 func (m *Monitor) finishFailedJobWithNotification(ctx context.Context, store *state.Store, job Job, at time.Time,
 	queued bool) error {
+	if err := store.WithLock(func() error {
+		failure := store.Data.JobFailures[job.ID]
+		if failure.RetryAction == (state.RetryAction{}) {
+			return nil
+		}
+		decidedAt := time.Now().UTC()
+		outcome := "failed"
+		if !decidedAt.Before(failure.Deadline) {
+			outcome = "expired"
+		}
+		_, err := store.DecideRetryTerminalLocked(job.ID, outcome, decidedAt)
+		return err
+	}); err != nil {
+		return fmt.Errorf("%w: resolve released retry attempt: %w", ErrAcceptanceState, err)
+	}
 	replyCtx := ctx
 	if !queued {
 		replyCtx = context.WithoutCancel(ctx)

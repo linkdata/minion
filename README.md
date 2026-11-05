@@ -171,6 +171,8 @@ To offer model preferences, configure `admin.user_model_choices.main`, `admin.us
 
 Users choose approved pairs or service defaults at `/auth/preferences`. A withdrawn choice falls back to the default for new actions; accepted actions retain their frozen settings across restarts. Claude roles require an explicit effort in `claude.effort` or the role settings. When accounts link, the initiating account keeps its saved preferences, or inherits the other account's if it has none. Preferences live with account links in `<state_path>.link`; they cannot change providers, skills, permissions, runtime, or repository access.
 
+Signed-in users can view their own action history at `/auth/actions`. Actions follow the original GitHub account ID across login renames, including when that account is linked to a GitLab sign-in. Private repository entries and details require current access to the original repository; inaccessible entries are omitted. The page shows progress, retry status, frozen model settings and retained diagnostics.
+
 To use one remote executor, add `remote_executor` to the orchestrator config with `executor_id`, `listen` (host:port), `tls_cert_file`, `tls_key_file`, and `token`. The certificate must be trusted by the worker host and cover the name in its HTTPS URL. Use the same 32-random-byte unpadded base64url token in a separate worker config:
 
 ```json
