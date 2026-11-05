@@ -95,17 +95,14 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		DisableGeneralOptionsHandler: true,
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
-	entryURL := service.ListenURL
+	signInEnabled := oauth != nil
 	for _, account := range cfg.Administrators {
 		if account.PasswordHash != config.AdminPasswordHashPlaceholder {
-			entryURL += "/admin/login"
+			signInEnabled = true
 			break
 		}
 	}
-	if entryURL == service.ListenURL && oauth != nil {
-		entryURL += "/auth/login"
-	}
-	a := &adminServer{listener: listener, entryURL: entryURL, signInEnabled: entryURL != service.ListenURL, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	a := &adminServer{listener: listener, entryURL: service.ListenURL, signInEnabled: signInEnabled, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
 	if oauth != nil {
 		a.preferences = oauth.links
 	}

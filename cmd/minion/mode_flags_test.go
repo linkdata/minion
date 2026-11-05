@@ -13,7 +13,7 @@ import (
 func TestExecuteModeRejectsServiceFlagsBeforeStartup(t *testing.T) {
 	for _, args := range [][]string{
 		{"-mode=execute", "-config=unused.json"},
-		{"-mode=execute", "-loop"},
+		{"-mode=execute", "-oneshot"},
 		{"-mode=execute", "-check"},
 		{"-mode=execute", "-install-skills"},
 		{"-mode=unknown"},

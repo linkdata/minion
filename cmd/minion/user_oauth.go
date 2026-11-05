@@ -18,8 +18,8 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion account</title>{{$.HeadHTML}}</head>
+var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `<!doctype html>
+<html lang="en"><head>{{template "head.html" $}}<title>Minion account</title></head>
 <body data-bs-theme="dark"><main class="container py-4">
 {{if .Dot.Error}}<p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
@@ -32,13 +32,13 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 <form method="post" action="/auth/logout"><button class="btn btn-outline-secondary">Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
-{{if .Dot.GitHub}}<p><a href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
-{{if .Dot.GitLab}}<p><a href="/auth/gitlab/login{{.Dot.SignInSuffix}}">Sign in with GitLab</a></p>{{end}}
+{{if .Dot.GitHub}}<p><a class="btn btn-primary" href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
+{{if .Dot.GitLab}}<p><a class="btn btn-primary" href="/auth/gitlab/login{{.Dot.SignInSuffix}}">Sign in with GitLab</a></p>{{end}}
 {{end}}
-</main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
+</main>{{$.TailHTML}}</body></html>`))
 
-var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion request failed</title>{{$.HeadHTML}}</head>
+var userErrorHTML = template.Must(template.New("user error").Parse(headHTML + `<!doctype html>
+<html lang="en"><head>{{template "head.html" $}}<title>Minion request failed</title></head>
 <body data-bs-theme="dark"><main class="container py-4"><h1>Request failed</h1><p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>
 {{if .Dot.RetryAfter}}<p role="status" class="alert alert-info">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
@@ -139,7 +139,6 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	})
-	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(a.logout)))
 	if a.choices != nil {
 		if err := jw.AddTemplateLookuper(userPreferencesHTML); err != nil {
 			return nil, err
@@ -285,10 +284,35 @@ func userUsageReturnTarget(raw string) string {
 	return userUsageContinueURL(repo, after)
 }
 
-func (a *oauthAccess) routes(mux *http.ServeMux) {
-	if a != nil {
-		mux.Handle("/auth/", a.mux)
+func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
+	if a == nil {
+		return
 	}
+	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.logout(w, r, admin)
+	})))
+	mux.Handle("/auth/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			guestPage, callback := r.URL.Path == "/auth/login", false
+			for _, provider := range a.providers {
+				path := "/auth/" + provider.name
+				guestPage = guestPage || r.URL.Path == path+"/login"
+				callback = callback || r.URL.Path == path+"/callback"
+			}
+			if callback {
+				admin.serveOAuthCallback(w, r, a.mux)
+				return
+			}
+			if guestPage {
+				admin.sessionAdmissionMu.Lock()
+				defer admin.sessionAdmissionMu.Unlock()
+				if admin.rejectRotatedCookie(w, r) {
+					return
+				}
+			}
+		}
+		a.mux.ServeHTTP(w, r)
+	}))
 }
 
 func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
@@ -319,16 +343,19 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	ui.Handler(a.jaws, "user login", view).ServeHTTP(w, r)
 }
 
-func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
+func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *adminAccess) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
+	admin.sessionAdmissionMu.Lock()
 	a.linkMu.Lock()
 	sess := a.jaws.GetSession(r)
 	account, _ := a.currentUser(sess)
 	if account != "" {
+		admin.forgetRotatedCookie(sess)
 		sess.Close()
 	}
 	a.linkMu.Unlock()
+	admin.sessionAdmissionMu.Unlock()
 	if account == "" {
 		w.WriteHeader(http.StatusForbidden)
 		return
@@ -336,7 +363,7 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
 	for _, p := range a.providers {
 		p.server.Logout(sess, r)
 	}
-	http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 type oauthErrorWriter struct {

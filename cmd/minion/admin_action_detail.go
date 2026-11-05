@@ -14,9 +14,8 @@ import (
 
 var adminActionDetailTemplate = template.Must(template.New("admin action detail").Funcs(template.FuncMap{
 	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Minion action detail</title>{{$.HeadHTML}}</head><body data-bs-theme="dark">{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
+}).Parse(headHTML + `<!doctype html>
+<html lang="en"><head>{{template "head.html" $}}<title>Minion action detail</title></head><body data-bs-theme="dark">{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
 {{if .AllowUser}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-secondary"> / my actions</span></div><form method="post" action="/auth/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form></header>
 <main class="container py-4"><p><a href="/auth/actions">← My actions</a></p>{{else}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-secondary"> / operator</span></div><form method="post" action="/admin/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form></header>
 <main class="container py-4"><p><a href="/">← Live actions</a></p>{{end}}<div class="border-bottom mb-4"><p class="text-secondary small fw-semibold">ACTION DETAIL</p><h1>{{.AttemptID}}</h1></div>

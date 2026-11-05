@@ -275,7 +275,7 @@ func TestUsageRejectsInvalidArguments(t *testing.T) {
 		{"-service", "other"}, {"-repository-id", "-1"}, {"-repository-id", "0"}, {"-repository-id", "bad"},
 		{"-requester-id", "-1"}, {"-requester-id", "0"}, {"-requester-id", "bad"},
 		{"-dir", ""}, {"-dir", "records", "-config", "config.json"},
-		{"-loop"}, {"-check"}, {"extra"},
+		{"-oneshot"}, {"-check"}, {"extra"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

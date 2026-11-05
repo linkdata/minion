@@ -47,10 +47,11 @@ func runWithGitCheck(checkGit func(context.Context, string) error) int {
 func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() time.Time) int {
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, remote-execute, or hash")
-	loop := flag.Bool("loop", false, "poll continuously; default is one cron-friendly pass")
+	oneshot := flag.Bool("oneshot", false, "run one polling pass, then exit; default is a continuous service")
 	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
+	loop := !*oneshot
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
 	if flag.NArg() != 0 {
 		if *mode == "hash" {
@@ -65,12 +66,12 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		incompatible := false
 		flag.Visit(func(f *flag.Flag) {
 			switch f.Name {
-			case "loop", "check", "install-skills":
+			case "oneshot", "check", "install-skills":
 				incompatible = true
 			}
 		})
 		if incompatible {
-			logger.Print("-mode=hash cannot be combined with -loop, -check, or -install-skills")
+			logger.Print("-mode=hash cannot be combined with -oneshot, -check, or -install-skills")
 			return 2
 		}
 		return runHashMode()
@@ -79,12 +80,12 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		incompatible := false
 		flag.Visit(func(f *flag.Flag) {
 			switch f.Name {
-			case "config", "loop", "check", "install-skills":
+			case "config", "oneshot", "check", "install-skills":
 				incompatible = true
 			}
 		})
 		if incompatible {
-			logger.Print("-mode=execute cannot be combined with -config, -loop, -check, or -install-skills")
+			logger.Print("-mode=execute cannot be combined with -config, -oneshot, -check, or -install-skills")
 			return 2
 		}
 		return runExecuteMode()
@@ -92,12 +93,12 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		incompatible := false
 		flag.Visit(func(f *flag.Flag) {
 			switch f.Name {
-			case "loop", "check", "install-skills":
+			case "oneshot", "check", "install-skills":
 				incompatible = true
 			}
 		})
 		if incompatible {
-			logger.Print("-mode=remote-execute cannot be combined with -loop, -check, or -install-skills")
+			logger.Print("-mode=remote-execute cannot be combined with -oneshot, -check, or -install-skills")
 			return 2
 		}
 		return runRemoteExecuteMode(*configPath, logger)
@@ -120,8 +121,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	context.AfterFunc(ctx, stop)
 	defer stop()
 	if *installSkills {
-		if *loop || *check {
-			logger.Printf("-install-skills cannot be combined with -loop or -check")
+		if *oneshot || *check {
+			logger.Printf("-install-skills cannot be combined with -oneshot or -check")
 			return 2
 		}
 		var urls []string
@@ -146,7 +147,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
 	}
 	store, err = state.Open(cfg.StatePath, initial)
-	if errors.Is(err, state.ErrLocked) && !*loop && !*check {
+	if errors.Is(err, state.ErrLocked) && !loop && !*check {
 		logger.Printf("another run is active; skipping this cron pass")
 		return 0
 	}
@@ -215,7 +216,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && (*check || *loop) {
+		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && (*check || loop) {
 			if _, err := loadTLSCertificate("admin", cfg.Admin.TLSCertFile, cfg.Admin.TLSKeyFile); err != nil {
 				logger.Printf("admin TLS preflight: %v", err)
 				return false
@@ -275,11 +276,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		recovery.BotID = user.ID
 		bindPublicationValidation(recovery, watcher)
 		watcher.Handler = recovery
-		code := recoverAcceptedService(ctx, watcher, store, *loop && !failedPreflight, nil, logger)
+		code := recoverAcceptedService(ctx, watcher, store, loop && !failedPreflight, nil, logger)
 		if failedPreflight {
 			return 1
 		}
-		if code != 0 || !*loop || ctx.Err() != nil {
+		if code != 0 || !loop || ctx.Err() != nil {
 			return code
 		}
 		cfg = watcher.Config
@@ -299,7 +300,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			return 1
 		}
 	}
-	return runOrchestrateMode(ctx, orchestrator, watcher, store, *loop, logger, path, 2*time.Minute)
+	return runOrchestrateMode(ctx, orchestrator, watcher, store, loop, logger, path, 2*time.Minute)
 }
 
 func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool) int {

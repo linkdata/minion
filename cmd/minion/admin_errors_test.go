@@ -76,7 +76,7 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 	}
 }
 
-func TestAdminNoticeOmitsDisabledLogin(t *testing.T) {
+func TestOAuthOnlyHomeOmitsAdminLogin(t *testing.T) {
 	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}
 	handler, _, _ := testOAuthAdminHandler(t, cfg, nil)
@@ -84,10 +84,10 @@ func TestAdminNoticeOmitsDisabledLogin(t *testing.T) {
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
 		t.Fatalf("user login: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
-	notice := adminResponse(handler, http.MethodGet, "/", nil, page.Result().Cookies()[0], "")
-	if notice.Code != http.StatusForbidden || !strings.Contains(notice.Body.String(), "Request could not be completed") ||
-		strings.Contains(notice.Body.String(), `href="/admin/login"`) {
-		t.Fatalf("OAuth-only admin notice: status=%d body=%q", notice.Code, notice.Body.String())
+	home := adminResponse(handler, http.MethodGet, "/", nil, page.Result().Cookies()[0], "")
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/auth/login"`) ||
+		strings.Contains(home.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("OAuth-only home: status=%d body=%q", home.Code, home.Body.String())
 	}
 }
 

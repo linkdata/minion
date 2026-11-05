@@ -14,7 +14,7 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
-func TestLoopRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
+func TestServiceRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	markers := startupCommandMarkers(t)
 	t.Setenv("GH_TOKEN", "offline-token")
@@ -73,7 +73,7 @@ func TestLoopRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
 			gitChecks++
 			return nil
 		})
-	}, "-loop")
+	})
 	recovered := strings.Index(output, "confirmed accepted terminal decision job=job-1 outcome=succeeded")
 	tlsFailure := strings.Index(output, "admin TLS preflight:")
 	if code != 1 || gitChecks != 1 || recovered < 0 || tlsFailure <= recovered {

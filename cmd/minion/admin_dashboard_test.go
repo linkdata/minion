@@ -270,11 +270,13 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if redirect := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("anonymous dashboard entry: status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	if home := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), `href="/admin/login"`) || strings.Contains(home.Body.String(), "Live actions") ||
+		len(home.Result().Cookies()) != 1 {
+		t.Fatalf("anonymous home: status=%d cookies=%v body=%q", home.Code, home.Result().Cookies(), home.Body.String())
 	}
-	if redirect := adminResponse(handler, http.MethodHead, "/", nil, nil, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" || redirect.Body.Len() != 0 {
-		t.Fatalf("anonymous dashboard HEAD: status=%d location=%q body=%q", redirect.Code, redirect.Header().Get("Location"), redirect.Body.String())
+	if head := adminResponse(handler, http.MethodHead, "/", nil, nil, ""); head.Code != http.StatusOK || head.Body.Len() != 0 || len(head.Result().Cookies()) != 0 {
+		t.Fatalf("anonymous home HEAD: status=%d cookies=%v body=%q", head.Code, head.Result().Cookies(), head.Body.String())
 	}
 	cookie := dashboardTestCookie(t, handler)
 	acceptedMetric := `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Tracked accepted actions</h2><p class="display-6 font-monospace">3</p>`
@@ -338,11 +340,12 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if invalid := adminResponse(handler, http.MethodGet, "/?action=publish", nil, cookie, ""); invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid action filter status=%d, want 400", invalid.Code)
 	}
-	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
-		t.Fatalf("logout status=%d", logout.Code)
+	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" {
+		t.Fatalf("logout status=%d location=%q", logout.Code, logout.Header().Get("Location"))
 	}
-	if redirect := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("logged-out dashboard entry: status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	if home := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), `href="/admin/login"`) || strings.Contains(home.Body.String(), "Live actions") {
+		t.Fatalf("logged-out home: status=%d body=%q", home.Code, home.Body.String())
 	}
 }
 

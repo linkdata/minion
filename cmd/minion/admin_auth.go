@@ -22,8 +22,11 @@ import (
 
 const adminSessionKey = "minion.admin.username"
 
-var adminLoginHTML = template.Must(template.New("admin login").Parse(`<!doctype html>
-<html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion admin</title>{{$.HeadHTML}}</head>
+//go:embed head.html
+var headHTML string
+
+var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `<!doctype html>
+<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion admin</title></head>
 <body><main class="container py-5">
 {{if .Dot}}
 <h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open dashboard</a></p>
@@ -33,12 +36,22 @@ var adminLoginHTML = template.Must(template.New("admin login").Parse(`<!doctype 
 <form method="post" action="/admin/login" class="vstack gap-3 col-12 col-md-6 col-lg-4">
 <label class="form-label">Username <input class="form-control" name="username" autocomplete="username" required></label>
 <label class="form-label">Password <input class="form-control" name="password" type="password" autocomplete="current-password" required></label>
-<button class="btn btn-primary">Sign in</button></form>
+<button class="btn btn-primary">Sign in</button></form><script defer src="/admin/login.js"></script>
 {{end}}
-</main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
+</main>{{$.TailHTML}}</body></html>`))
 
 //go:embed admin_login.js
 var adminLoginJS []byte
+
+var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `<!doctype html>
+<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion</title></head>
+<body><main class="container py-5"><h1>Minion</h1>
+{{if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
+{{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">User sign in</a>{{end}}
+{{if not (or .Dot.Admin .Dot.User)}}<p role="status">Sign-in is not configured.</p><button class="btn btn-primary" disabled>Sign in</button>{{end}}
+</main>{{$.TailHTML}}</body></html>`))
+
+type adminHomeView struct{ Admin, User bool }
 
 const (
 	maxAdminSessions      = 512
@@ -68,6 +81,7 @@ type adminAccess struct {
 	hashSlots          chan struct{}
 	sessionAdmissionMu sync.Mutex
 	rotatedCookies     map[[32]byte]time.Time
+	pendingRotations   map[[32]byte]int
 }
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess) (http.Handler, error) {
@@ -84,10 +98,13 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := jw.AddTemplateLookuper(adminLoginHTML); err != nil {
 		return nil, err
 	}
+	if err := jw.AddTemplateLookuper(adminHomeHTML); err != nil {
+		return nil, err
+	}
 	if err := jw.AddTemplateLookuper(adminNoticeHTML); err != nil {
 		return nil, err
 	}
-	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2), rotatedCookies: make(map[[32]byte]time.Time)}
+	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2), rotatedCookies: make(map[[32]byte]time.Time), pendingRotations: make(map[[32]byte]int)}
 	for _, account := range cfg.Administrators {
 		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
 			continue
@@ -112,10 +129,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		closeUnreadAdminBody(w, r)
 		access.sessionAdmissionMu.Lock()
 		defer access.sessionAdmissionMu.Unlock()
-		if cookie, err := r.Cookie(jw.CookieName); err == nil &&
-			time.Now().Before(access.rotatedCookies[sha256.Sum256([]byte(cookie.Value))]) {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "Sign-in page changed; reload. If this continues, retry in one minute", http.StatusConflict)
+		if access.rejectRotatedCookie(w, r) {
 			return
 		}
 		loginPage.ServeHTTP(w, r)
@@ -139,13 +153,29 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		access.stop(w, r, owner)
 	})
 	dashboard := adminDashboardHandler(jw, owner)
+	home := jw.SessionMiddleware(http.HandlerFunc(access.homePage))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		closeUnreadAdminBody(w, r)
 		sess := jw.GetSession(r)
-		if sess == nil || access.sessionUsername(sess) == "" {
-			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		if access.sessionUsername(sess) != "" {
+			dashboard.ServeHTTP(w, r)
 			return
 		}
-		dashboard.ServeHTTP(w, r)
+		if oauth != nil && oauth.sessionAccount(r) != "" {
+			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+			return
+		}
+		access.sessionAdmissionMu.Lock()
+		defer access.sessionAdmissionMu.Unlock()
+		if access.rejectRotatedCookie(w, r) {
+			return
+		}
+		home.ServeHTTP(w, r)
+	})
+	mux.HandleFunc("HEAD /{$}", func(w http.ResponseWriter, r *http.Request) {
+		closeUnreadAdminBody(w, r)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	})
 	mux.Handle("GET /admin/actions/{attempt}", adminActionDetailHandler(jw, owner))
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
@@ -156,7 +186,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			return nil, err
 		}
 	}
-	oauth.routes(mux)
+	oauth.routes(mux, access)
 	if oauth != nil {
 		mux.Handle("GET /user/usage", oauth.usageHandler(owner))
 	}
@@ -175,7 +205,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		}
 		mux.ServeHTTP(w, r)
 	}), func(r *http.Request) bool {
-		return (len(access.accounts) != 0 || oauth != nil) && validJaWSCookie(r, jw.CookieName) &&
+		return validJaWSCookie(r, jw.CookieName) &&
 			(access.allowed(r) || oauth.allowed(r))
 	}))), nil
 }
@@ -260,7 +290,7 @@ func validJaWSCookie(r *http.Request, name string) bool {
 }
 
 func (a *adminAccess) allowed(r *http.Request) bool {
-	if len(a.accounts) != 0 && (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/" {
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/" {
 		return true
 	}
 	if len(a.accounts) != 0 && r.URL.Path == "/admin/login" &&
@@ -314,27 +344,98 @@ func (a *adminAccess) ownsJaWSRequest(r *http.Request) bool {
 func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	sess := a.jaws.GetSession(r)
 	signedIn := a.sessionUsername(sess) != ""
-	if !signedIn && len(sess.Requests()) >= maxGuestLoginRequests {
+	a.publicPage(w, r, "admin login", signedIn)
+}
+
+func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
+	a.publicPage(w, r, "home", adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil})
+}
+
+func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name string, view any) {
+	sess := a.jaws.GetSession(r)
+	if a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestLoginRequests {
 		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "Too many sign-in pages", http.StatusTooManyRequests)
+		http.Error(w, "Too many public pages", http.StatusTooManyRequests)
 		return
 	}
-	ui.Handler(a.jaws, "admin login", signedIn).ServeHTTP(w, r)
+	ui.Handler(a.jaws, name, view).ServeHTTP(w, r)
 }
 
 // rememberRotatedCookie is called under sessionAdmissionMu before closing the old session.
 func (a *adminAccess) rememberRotatedCookie(value string) bool {
 	now := time.Now()
 	for key, until := range a.rotatedCookies {
-		if !now.Before(until) {
+		if a.pendingRotations[key] == 0 && !now.Before(until) {
 			delete(a.rotatedCookies, key)
 		}
 	}
-	if len(a.rotatedCookies) >= maxRotatedCookies {
+	key := sha256.Sum256([]byte(value))
+	if _, known := a.rotatedCookies[key]; !known && len(a.rotatedCookies) >= maxRotatedCookies {
 		return false
 	}
-	a.rotatedCookies[sha256.Sum256([]byte(value))] = now.Add(time.Minute)
+	a.rotatedCookies[key] = now.Add(time.Minute)
 	return true
+}
+
+// rejectRotatedCookie is called under sessionAdmissionMu before minting a guest cookie.
+func (a *adminAccess) rejectRotatedCookie(w http.ResponseWriter, r *http.Request) bool {
+	if cookie, err := r.Cookie(a.jaws.CookieName); err == nil {
+		key := sha256.Sum256([]byte(cookie.Value))
+		if a.pendingRotations[key] > 0 || time.Now().Before(a.rotatedCookies[key]) {
+			w.Header().Set("Cache-Control", "no-store")
+			http.Error(w, "Sign-in session changed; reload. If this continues, retry in one minute", http.StatusConflict)
+			return true
+		}
+	}
+	return false
+}
+
+// forgetRotatedCookie is called under sessionAdmissionMu when sign-out closes a session.
+func (a *adminAccess) forgetRotatedCookie(sess *jaws.Session) {
+	key := sha256.Sum256([]byte(sess.CookieValue()))
+	delete(a.pendingRotations, key)
+	delete(a.rotatedCookies, key)
+}
+
+// serveOAuthCallback holds the old cookie out of guest admission until every callback using it finishes.
+func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	original := r.Clone(r.Context()) // JaWS adds the rotated cookie to r during the callback.
+	a.sessionAdmissionMu.Lock()
+	old := a.jaws.GetSession(original)
+	if old == nil {
+		a.sessionAdmissionMu.Unlock()
+		next.ServeHTTP(w, r)
+		return
+	}
+	value := old.CookieValue()
+	if !a.rememberRotatedCookie(value) {
+		a.sessionAdmissionMu.Unlock()
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	key := sha256.Sum256([]byte(value))
+	a.pendingRotations[key]++
+	a.sessionAdmissionMu.Unlock()
+	defer func() {
+		a.sessionAdmissionMu.Lock()
+		if a.pendingRotations[key] == 0 {
+			a.sessionAdmissionMu.Unlock()
+			return // sign-out canceled this cookie's callbacks
+		}
+		a.pendingRotations[key]--
+		if a.pendingRotations[key] == 0 {
+			delete(a.pendingRotations, key)
+			if a.jaws.GetSession(original) == old {
+				delete(a.rotatedCookies, key)
+			} else {
+				a.rotatedCookies[key] = time.Now().Add(time.Minute)
+			}
+		}
+		a.sessionAdmissionMu.Unlock()
+	}()
+	next.ServeHTTP(w, r)
 }
 
 func (a *adminAccess) reserveAttempt(username string) bool {
@@ -438,9 +539,10 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := a.jaws.GetSession(r)
 	if sess != nil {
+		a.forgetRotatedCookie(sess)
 		sess.Clear()
 		sess.Close()
 	}
 	a.sessionAdmissionMu.Unlock()
-	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

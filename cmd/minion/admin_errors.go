@@ -8,8 +8,8 @@ import (
 	"github.com/linkdata/jaws/lib/ui"
 )
 
-var adminNoticeHTML = template.Must(template.New("admin notice").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion admin request error</title>{{$.HeadHTML}}</head>
+var adminNoticeHTML = template.Must(template.New("admin notice").Parse(headHTML + `<!doctype html>
+<html lang="en"><head>{{template "head.html" $}}<title>Minion admin request error</title></head>
 <body data-bs-theme="dark"><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
 {{if .Auth.IsAdmin}}<a href="/">Dashboard</a>{{else if .Dot.AdminLogin}}<a href="/admin/login">Sign in</a>{{end}}
 </main>{{$.TailHTML}}</body></html>`))

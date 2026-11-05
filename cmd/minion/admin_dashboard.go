@@ -20,8 +20,7 @@ var adminDashboardDirty = new(int)
 const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Minion admin</title>{{$.HeadHTML}}
+  {{template "head.html" $}}<title>Minion admin</title>
 </head>
 <body data-bs-theme="dark">
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
@@ -161,7 +160,7 @@ func (page *adminDashboardPage) View() adminDashboardView {
 func parseAdminDashboard() (*template.Template, error) {
 	return template.New("dashboard").Funcs(template.FuncMap{
 		"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-	}).Parse(adminDashboardHTML)
+	}).Parse(headHTML + adminDashboardHTML)
 }
 
 func registerAdminDashboard(jw *jaws.Jaws) error {

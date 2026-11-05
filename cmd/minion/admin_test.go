@@ -36,7 +36,7 @@ func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
 }
 
-func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
+func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 	t.Parallel()
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, "", nil)
 	if err != nil {
@@ -58,13 +58,41 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	home, err := client.Get("http://" + admin.listener.Addr().String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = home.Body.Close() })
+	homeBody, err := io.ReadAll(home.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home.StatusCode != http.StatusOK || len(home.Cookies()) != 1 ||
+		!strings.Contains(string(homeBody), `disabled>Sign in</button>`) ||
+		strings.Contains(string(homeBody), `href="/admin/login"`) || strings.Contains(string(homeBody), `href="/auth/login"`) {
+		t.Fatalf("unconfigured home: status=%d cookies=%v body=%q", home.StatusCode, home.Cookies(), homeBody)
+	}
+	for _, path := range []string{"/jaws/.ping", bootstrapAssetPath(t, string(homeBody), ".css")} {
+		response, err := client.Get("http://" + admin.listener.Addr().String() + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		want := http.StatusOK
+		if path == "/jaws/.ping" {
+			want = http.StatusNoContent
+		}
+		if response.StatusCode != want {
+			t.Fatalf("home asset %s: status=%d, want %d", path, response.StatusCode, want)
+		}
+	}
 	for _, tc := range []struct {
 		name, path string
 		upgrade    bool
 	}{
-		{name: "page", path: "/"},
-		{name: "JaWS ping", path: "/jaws/.ping"},
-		{name: "Bootstrap asset", path: "/static/bootstrap.min.css"},
+		{name: "admin login", path: "/admin/login"},
 		{name: "websocket callback", path: "/jaws/test-key", upgrade: true},
 		{name: "OAuth callback", path: "/auth/callback"},
 		{name: "download", path: "/download/report"},
@@ -161,8 +189,9 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	if admin.preferences == nil {
 		t.Fatal("admin server did not share the account preference store")
 	}
-	if !strings.HasPrefix(admin.entryURL, "http://localhost:") || !strings.HasSuffix(admin.entryURL, "/auth/login") {
-		t.Fatalf("OAuth entry URL = %q", admin.entryURL)
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.entryURL != "http://localhost:"+port {
+		t.Fatalf("OAuth home URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	base := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -408,15 +437,15 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 		if err := resp.Body.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != wantProto {
-			t.Fatalf("HTTPS response = %s %d, want HTTP/%d 403", resp.Proto, resp.StatusCode, wantProto)
+		if resp.StatusCode != http.StatusNoContent || resp.ProtoMajor != wantProto {
+			t.Fatalf("HTTPS response = %s %d, want HTTP/%d 204", resp.Proto, resp.StatusCode, wantProto)
 		}
 		if resp.Header.Get("Strict-Transport-Security") != "" {
 			t.Fatal("admin response sets host-wide HSTS")
 		}
 	}
 	if !reused {
-		t.Fatal("denied HTTPS request did not reuse its connection")
+		t.Fatal("HTTPS request did not reuse its connection")
 	}
 }
 
@@ -458,8 +487,8 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 1 {
-		t.Fatalf("fallback HTTPS response = %s %d, want HTTP/1.1 403", resp.Proto, resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent || resp.ProtoMajor != 1 {
+		t.Fatalf("fallback HTTPS response = %s %d, want HTTP/1.1 204", resp.Proto, resp.StatusCode)
 	}
 	if resp.Header.Get("Strict-Transport-Security") != "" {
 		t.Fatal("fallback admin response sets host-wide HSTS")
@@ -506,8 +535,8 @@ func TestAdminServerServesNonCleanSymlinkTLSPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != 1 {
-		t.Fatalf("HTTPS response = %s %d, want HTTP/1.1 403", resp.Proto, resp.StatusCode)
+	if resp.StatusCode != http.StatusNoContent || resp.ProtoMajor != 1 {
+		t.Fatalf("HTTPS response = %s %d, want HTTP/1.1 204", resp.Proto, resp.StatusCode)
 	}
 }
 
@@ -670,7 +699,7 @@ func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {
 			gitChecks++
 			return nil
 		})
-	})
+	}, "-oneshot")
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "GitHub authentication:") ||
 		strings.Contains(output, "admin TLS preflight:") || strings.Contains(output, "remote TLS preflight:") {
 		t.Fatalf("cron startup was blocked by admin TLS: code=%d git_checks=%d output=%q", code, gitChecks, output)

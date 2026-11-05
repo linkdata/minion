@@ -52,7 +52,7 @@ func TestLoadRemoteWorkerConfig(t *testing.T) {
 }
 
 func TestRemoteExecuteModeRejectsServiceFlags(t *testing.T) {
-	for _, flag := range []string{"-loop", "-check", "-install-skills", "-loop=false", "-check=false", "-install-skills=false"} {
+	for _, flag := range []string{"-oneshot", "-check", "-install-skills", "-oneshot=false", "-check=false", "-install-skills=false"} {
 		t.Run(flag, func(t *testing.T) {
 			code, output := runStartupFixture(t, config.Config{}, "-mode=remote-execute", flag)
 			if code != 2 || !strings.Contains(output, "cannot be combined") {

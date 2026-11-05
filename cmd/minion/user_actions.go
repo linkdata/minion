@@ -28,9 +28,8 @@ type userActionPageKey struct{}
 
 var userActionsHTML = template.Must(template.New("user actions").Funcs(template.FuncMap{
 	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>My Minion actions</title>{{$.HeadHTML}}</head><body data-bs-theme="dark"><main class="container py-4">
+}).Parse(headHTML + `<!doctype html>
+<html lang="en"><head>{{template "head.html" $}}<title>My Minion actions</title></head><body data-bs-theme="dark"><main class="container py-4">
 <h1>My actions</h1><p><a href="/auth/login">Account</a></p>
 {{if .Dot.GitHubLinked}}
 {{if .Dot.Entries}}<ol class="list-group list-group-numbered">{{range .Dot.Entries}}<li class="list-group-item">

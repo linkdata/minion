@@ -146,7 +146,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 			gitChecks++
 			return errors.New("unexpected Git preflight")
 		})
-	}, "-mode=orchestrate")
+	}, "-mode=orchestrate", "-oneshot")
 	if code != 0 || gitChecks != 0 || strings.Contains(output, "preflight:") || strings.Contains(output, "start selected worker:") {
 		t.Fatalf("stored result recovery ran preflight or worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
@@ -177,7 +177,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		return // The next preflight uses a POSIX shell CLI fixture.
 	}
 
-	// Repeat recovery with -loop. Its later preflight resolves the default
+	// Repeat recovery in the default service mode. Its later preflight resolves the default
 	// model; the worker startup must use that resolved selection.
 	accepted.ResultReady = false
 	store.Data.Accepted = &accepted
@@ -231,7 +231,7 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 			mu.Unlock()
 			return nil
 		})
-	}, "-loop")
+	})
 	// The test binary cannot serve as an execute-mode worker, so startup exits 1 after preflight.
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "Claude settings: model=claude-test") ||
 		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
@@ -250,7 +250,7 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 		t.Fatalf("loop did not recover the saved result before preflight: requests=%v publications=%d", observedRequests, observedPublications)
 	}
 
-	// With recovery complete, a default one-pass start still selects the local worker.
+	// With recovery complete, the default service start still selects the local worker.
 	gitChecks = 0
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error {

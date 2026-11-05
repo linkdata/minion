@@ -151,11 +151,10 @@ func (g *userUsageGate) takeGitHubCall(ctx context.Context, account string) bool
 
 const usageEstimatedCostTemplate = `{{define "estimatedCost"}}{{if .EstimatedCostKnownCalls}}USD {{printf "%.15g" .EstimatedCostUSD}} {{if .EstimatedCostUnknownCalls}}known estimated subtotal{{else}}reported estimated total{{end}}{{else}}Unknown{{end}}{{if or .EstimatedCostKnownCalls .EstimatedCostUnknownCalls}} (calls with any reported amount: {{.EstimatedCostKnownCalls}}; calls with missing or incomplete estimates: {{.EstimatedCostUnknownCalls}}{{if and .EstimatedCostKnownCalls .EstimatedCostUnknownCalls}}; counts may overlap{{end}}){{end}}{{end}}`
 
-var userUsageHTML = template.Must(template.New("user usage").Parse(usageEstimatedCostTemplate + `<!doctype html>
+var userUsageHTML = template.Must(template.New("user usage").Parse(headHTML + usageEstimatedCostTemplate + `<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Your usage · Minion</title>{{$.HeadHTML}}
+  {{template "head.html" $}}<title>Your usage · Minion</title>
 </head>
 <body data-bs-theme="dark">{{with .Dot}}
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">

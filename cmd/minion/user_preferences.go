@@ -13,8 +13,8 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-var userPreferencesHTML = template.Must(template.New("user preferences").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Model preferences</title>{{$.HeadHTML}}</head>
+var userPreferencesHTML = template.Must(template.New("user preferences").Parse(headHTML + `<!doctype html>
+<html lang="en"><head>{{template "head.html" $}}<title>Model preferences</title></head>
 <body data-bs-theme="dark"><main class="container py-4"><h1>Model preferences</h1>
 {{range .Dot.Notices}}<p role="status" class="alert alert-info">{{.}}</p>{{end}}
 {{if .Dot.Fields}}

@@ -146,7 +146,7 @@ func TestLocalClaudeSocketOptInReachesModelCheck(t *testing.T) {
 	}
 }
 
-func TestCronPassSkipsPreflightWhenStateLocked(t *testing.T) {
+func TestOneShotPassSkipsPreflightWhenStateLocked(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	markers := startupCommandMarkers(t)
 	for _, key := range []string{"GH_TOKEN", "GITHUB_TOKEN", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} {
@@ -176,7 +176,7 @@ func TestCronPassSkipsPreflightWhenStateLocked(t *testing.T) {
 		args []string
 		code int
 	}{
-		{name: "cron"}, {name: "check", args: []string{"-check"}, code: 1}, {name: "loop", args: []string{"-loop"}, code: 1},
+		{name: "oneshot", args: []string{"-oneshot"}}, {name: "check", args: []string{"-check"}, code: 1}, {name: "service", code: 1},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
 			code, output := runStartupFixture(t, cfg, mode.args...)
@@ -265,8 +265,8 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 		wantCode      int
 		wantRecovered bool
 	}{
-		{name: "cron", args: []string{"-mode=orchestrate"}, wantRecovered: true},
-		{name: "loop", args: []string{"-mode=orchestrate", "-loop"}, wantCode: 1, wantRecovered: true},
+		{name: "oneshot", args: []string{"-mode=orchestrate", "-oneshot"}, wantRecovered: true},
+		{name: "service", args: []string{"-mode=orchestrate"}, wantCode: 1, wantRecovered: true},
 		{name: "check", args: []string{"-mode=orchestrate", "-check"}, wantCode: 1},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
@@ -320,7 +320,7 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 					return errors.New("unexpected Git preflight")
 				})
 			}, mode.args...)
-			if code != mode.wantCode || strings.Contains(output, "work root:") != (mode.name != "cron") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "Git preflight:") {
+			if code != mode.wantCode || strings.Contains(output, "work root:") != (mode.name != "oneshot") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "Git preflight:") {
 				t.Fatalf("terminal discard was blocked by new-work preflight: exit=%d log=%q", code, output)
 			}
 			assertNoStartupCommands(t, markers)
@@ -344,8 +344,8 @@ func TestPreflightFailureRecoversAcceptanceWhoseDeadlinePassed(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "cron", args: []string{"-mode=orchestrate"}},
-		{name: "loop", args: []string{"-mode=orchestrate", "-loop"}},
+		{name: "oneshot", args: []string{"-mode=orchestrate", "-oneshot"}},
+		{name: "service", args: []string{"-mode=orchestrate"}},
 		{name: "check", args: []string{"-mode=orchestrate", "-check"}},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
@@ -470,7 +470,7 @@ func TestRunChecksGitBeforeProvidersAndGitHub(t *testing.T) {
 		name string
 		args []string
 	}{
-		{name: "cron"}, {name: "check", args: []string{"-check"}}, {name: "loop", args: []string{"-loop"}},
+		{name: "oneshot", args: []string{"-oneshot"}}, {name: "check", args: []string{"-check"}}, {name: "service"},
 	} {
 		for _, gitMode := range []string{"old", "failed", "real"} {
 			t.Run(mode.name+"/"+gitMode, func(t *testing.T) {
@@ -553,7 +553,7 @@ func TestCheckRejectsUnverifiedSameProviderPairBeforeWorkerStartup(t *testing.T)
 }
 
 func TestInstallSkillsBypassesGitAndProviderPreflight(t *testing.T) {
-	for _, extra := range []string{"", "-check", "-loop"} {
+	for _, extra := range []string{"", "-check", "-oneshot"} {
 		t.Run("extra="+extra, func(t *testing.T) {
 			isolateHostPaths(t, t.TempDir())
 			markers := startupCommandMarkers(t)
@@ -566,7 +566,7 @@ func TestInstallSkillsBypassesGitAndProviderPreflight(t *testing.T) {
 			wantCode, wantLog := 0, "configured skills installed for Codex and Claude"
 			if extra != "" {
 				args = append(args, extra)
-				wantCode, wantLog = 2, "-install-skills cannot be combined with -loop or -check"
+				wantCode, wantLog = 2, "-install-skills cannot be combined with -oneshot or -check"
 			}
 			code, output := runStartupFixture(t, cfg, args...)
 			if code != wantCode || !strings.Contains(output, wantLog) {
