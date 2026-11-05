@@ -364,11 +364,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			if job.Critic != nil {
 				roles = append(roles, *job.Critic)
 			}
-			for _, role := range roles {
-				message, err := checkSelectedRoleCLI(ctx, &configured, role)
-				if err != nil {
-					return terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
-				}
+			if message, err := checkOfferedRolesCLI(ctx, &configured, roles); err != nil {
+				return terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
 			}
 			return nil
 		}

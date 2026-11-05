@@ -131,7 +131,10 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 			return nil, err
 		}
 		a.mux.Handle("GET /auth/preferences", a.oauthErrors(http.HandlerFunc(a.preferencePage)))
-		a.mux.Handle("POST /auth/preferences", a.oauthErrors(http.HandlerFunc(a.savePreferences)))
+		// The preference form must be read before its body can be closed.
+		a.mux.Handle("POST /auth/preferences", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			a.savePreferences(&oauthErrorWriter{ResponseWriter: w, oauth: a, request: r}, r)
+		}))
 	}
 	if c := cfg.GitHubOAuth; c != nil {
 		if err := a.addProvider("github", "https://github.com", "github.com", &jawsauth.Config{

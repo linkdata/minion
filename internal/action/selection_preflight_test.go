@@ -282,7 +282,7 @@ fi
 		t.Fatalf("resolved Claude model failed preflight: %v", err)
 	}
 	selected.Main.Model = "default"
-	if message, err := checkSelectedRoleCLI(t.Context(), runner, selected.Main); message != preflightClaudeSettingsUnavailable || err == nil {
+	if message, err := checkOfferedRolesCLI(t.Context(), runner, []RoleSettings{selected.Main}); message != preflightClaudeSettingsUnavailable || err == nil {
 		t.Fatalf("remote Claude alias passed CLI validation: message=%q error=%v", message, err)
 	}
 	job := testJob(command.Comment)

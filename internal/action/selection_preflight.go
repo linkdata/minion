@@ -204,15 +204,6 @@ func checkOfferedRolesCLI(ctx context.Context, configured *Runner, roles []RoleS
 	return "", nil
 }
 
-func checkSelectedRoleCLI(ctx context.Context, configured *Runner, role RoleSettings) (string, error) {
-	if role.Provider == "codex" {
-		if message, err := checkCodexPrerequisites(ctx, configured.Codex); err != nil {
-			return message, err
-		}
-	}
-	return checkSelectedRoleChoiceCLI(ctx, configured, role)
-}
-
 func checkSelectedRoleChoiceCLI(ctx context.Context, configured *Runner, role RoleSettings) (string, error) {
 	switch role.Provider {
 	case "codex":

@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/config"
 )
@@ -76,5 +82,81 @@ func TestOAuthPreferencesUseJaWSAndBoundSavedChoice(t *testing.T) {
 		!strings.Contains(withdrawn.Body.String(), `<select name="main">`) ||
 		!strings.Contains(withdrawn.Body.String(), `<option value="default" selected>Service default</option>`) {
 		t.Fatalf("withdrawn choice page: status=%d body=%q", withdrawn.Code, withdrawn.Body.String())
+	}
+}
+
+func TestOAuthPreferencesSaveReadsDelayedHTTPBody(t *testing.T) {
+	choice := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
+	cfg := config.AdminConfig{
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+		UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}},
+	}
+	provider := &http.Client{Transport: oauthRoundTrip(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case "https://github.com/login/oauth/access_token":
+			return oauthJSON(http.StatusOK, `{"access_token":"proof","token_type":"Bearer","expires_in":3600}`), nil
+		case "https://api.github.com/user":
+			return oauthJSON(http.StatusOK, `{"id":42}`), nil
+		default:
+			t.Errorf("unexpected provider request: %s", r.URL)
+			return oauthJSON(http.StatusNotFound, `{}`), nil
+		}
+	})}
+	handler, _, auth := testOAuthAdminHandler(t, cfg, provider)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	browser := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	start, err := browser.Get(server.URL + "/auth/github/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start.Body.Close()
+	location, err := url.Parse(start.Header.Get("Location"))
+	if err != nil || start.StatusCode != http.StatusFound || len(start.Cookies()) != 1 {
+		t.Fatalf("start: status=%d error=%v", start.StatusCode, err)
+	}
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/auth/github/callback?code=proof&state="+url.QueryEscape(location.Query().Get("state")), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(start.Cookies()[0])
+	callback, err := browser.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback.Body.Close()
+	if callback.StatusCode != http.StatusFound || len(callback.Cookies()) != 1 {
+		t.Fatalf("callback: status=%d cookies=%v", callback.StatusCode, callback.Cookies())
+	}
+	signed := callback.Cookies()[0]
+	account := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	body := url.Values{"main": {preferenceChoiceValue(choice)}, "identity": {preferenceFormIdentity(account)}}.Encode()
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "POST /auth/preferences HTTP/1.1\r\nHost: %s\r\nOrigin: %s\r\nCookie: %s=%s\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n\r\n",
+		server.Listener.Addr(), server.URL, signed.Name, signed.Value, len(body)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // Send the form after the handler receives its headers.
+	if _, err := io.WriteString(conn, body); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer saved.Body.Close()
+	if saved.StatusCode != http.StatusSeeOther || saved.Header.Get("Location") != "/auth/preferences" {
+		t.Fatalf("delayed-body save: status=%d location=%q", saved.StatusCode, saved.Header.Get("Location"))
+	}
+	if got, err := auth.links.preferencesForGitHubID(42); err != nil || got.Main != choice {
+		t.Fatalf("delayed-body preference: %+v, %v", got, err)
 	}
 }
