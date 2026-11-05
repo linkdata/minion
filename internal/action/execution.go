@@ -83,6 +83,22 @@ func callMetadata(call CallUsage) CallUsage {
 	return CallUsage{Provider: call.Provider, Role: call.Role, Round: call.Round, ReviewPhase: call.ReviewPhase, Model: call.Model, Effort: call.Effort}
 }
 
+func copyCallUsage(call CallUsage) CallUsage {
+	if call.EstimatedCostUSD != nil {
+		amount := *call.EstimatedCostUSD
+		call.EstimatedCostUSD = &amount
+	}
+	return call
+}
+
+func equalCallUsages(a, b []CallUsage) bool {
+	return slices.EqualFunc(a, b, func(a, b CallUsage) bool {
+		ac, bc := a.EstimatedCostUSD, b.EstimatedCostUSD
+		a.EstimatedCostUSD, b.EstimatedCostUSD = nil, nil
+		return a == b && (ac == nil && bc == nil || ac != nil && bc != nil && *ac == *bc)
+	})
+}
+
 func (c *executionCheckpoints) bound(version int, identity Identity, source string) bool {
 	return (Result{Version: version, Identity: identity, SourceRef: source}).matchesJob(c.job)
 }
@@ -219,7 +235,7 @@ func (c *executionCheckpoints) BeforeCall(fact CallCheckpoint) error {
 	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending != nil || fact.Ordinal != len(c.calls)+1 || fact.Call != callMetadata(fact.Call) {
 		return c.fail(checkpointContractError())
 	}
-	if c.job.Critic != nil && (!c.reviewed || !slices.Equal(c.review.Calls, c.calls)) {
+	if c.job.Critic != nil && (!c.reviewed || !equalCallUsages(c.review.Calls, c.calls)) {
 		return c.fail(checkpointContractError())
 	}
 	calls := append(slices.Clone(c.calls), fact.Call)
@@ -319,6 +335,7 @@ func (c *executionCheckpoints) AfterCall(fact CallCheckpoint) error {
 	if c.failure != nil {
 		return c.failure
 	}
+	fact.Call = copyCallUsage(fact.Call)
 	if !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending == nil || fact.Ordinal != len(c.calls)+1 || callMetadata(fact.Call) != *c.pending {
 		return c.fail(checkpointContractError())
 	}
@@ -341,11 +358,11 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 	if c.failure != nil {
 		return c.failure
 	}
-	if c.job.Critic == nil || !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending != nil || !slices.Equal(fact.Calls, c.calls) {
+	if c.job.Critic == nil || !c.bound(fact.Version, fact.Identity, fact.SourceRef) || c.pending != nil || !equalCallUsages(fact.Calls, c.calls) {
 		return c.fail(checkpointContractError())
 	}
 	// A reached decision acknowledges an already saved receipt/refutation prefix.
-	if fact.CriticStopReason != "" && (!c.reviewed || !slices.Equal(fact.Calls, c.review.Calls) || !slices.Equal(fact.Refutations, c.review.Refutations)) {
+	if fact.CriticStopReason != "" && (!c.reviewed || !equalCallUsages(fact.Calls, c.review.Calls) || !slices.Equal(fact.Refutations, c.review.Refutations)) {
 		return c.fail(checkpointContractError())
 	}
 	if added := len(fact.Refutations) - len(c.review.Refutations); added > 0 {
@@ -354,7 +371,7 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 			return c.fail(checkpointContractError())
 		}
 	}
-	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: fact.Calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
+	result := Result{Version: fact.Version, Identity: fact.Identity, SourceRef: fact.SourceRef, Calls: c.calls, Refutations: fact.Refutations, CriticStopReason: fact.CriticStopReason}
 	if err := saveReviewEvidence(c.owner.WorkRoot, c.job, result, c.owner.Logger, c.owner.Runner.secretValues()...); err != nil {
 		if len(c.calls) == 0 {
 			err = preparationFailure("prepare private review ledger", err)
@@ -364,7 +381,7 @@ func (c *executionCheckpoints) Review(fact ReviewCheckpoint) error {
 		return c.fail(err)
 	}
 	c.review = fact
-	c.review.Calls = slices.Clone(fact.Calls)
+	c.review.Calls = slices.Clone(c.calls)
 	c.review.Refutations = slices.Clone(fact.Refutations)
 	c.reviewed = true
 	return nil
@@ -424,11 +441,11 @@ func (c *executionCheckpoints) finish(result Result, runErr error) error {
 		}
 		return runErr
 	}
-	if c.failure != nil || c.pending != nil || !result.matchesJob(c.job) || !slices.Equal(result.Calls, c.calls) {
+	if c.failure != nil || c.pending != nil || !result.matchesJob(c.job) || !equalCallUsages(result.Calls, c.calls) {
 		return errors.Join(runErr, checkpointContractError())
 	}
 	if c.job.Critic != nil {
-		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !slices.Equal(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
+		if !c.reviewed || c.review.CriticStopReason == "" || result.CriticStopReason != c.review.CriticStopReason || !equalCallUsages(result.Calls, c.review.Calls) || !slices.Equal(result.Refutations, c.review.Refutations) {
 			return checkpointContractError()
 		}
 	}
@@ -441,7 +458,7 @@ func (c *executionCheckpoints) matchesFailedResult(result Result) bool {
 		calls = append(slices.Clone(calls), *c.returned)
 	}
 	return result.matchesJob(c.job) && (c.pending == nil || c.returned != nil) &&
-		slices.Equal(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
+		equalCallUsages(result.Calls, calls) && slices.Equal(result.Refutations, c.review.Refutations) &&
 		result.CriticStopReason == c.review.CriticStopReason
 }
 

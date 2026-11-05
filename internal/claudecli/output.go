@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"html"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,8 @@ const maxResetTimestamp = 253402300799 // 9999-12-31T23:59:59Z, the last RFC3339
 const (
 	maxProgressHistoryBytes   = 16 << 20
 	maxProgressHistoryEntries = 100000
+	maxResultEvents           = 128
+	toolProofBytes            = 64 // Bounded allowance for one transient tool map entry.
 )
 
 type eventUsage struct {
@@ -50,6 +53,64 @@ func (u eventUsage) tokens() (tokens usage.Tokens, valid bool) {
 	return
 }
 
+func partialEventTokens(u eventUsage) (usage.Tokens, bool) {
+	if u.Input == nil && u.Created == nil && u.Cached == nil && u.Output == nil {
+		return usage.Tokens{}, false
+	}
+	zero := int64(0)
+	if u.Input == nil {
+		u.Input = &zero
+	}
+	if u.Created == nil {
+		u.Created = &zero
+	}
+	if u.Cached == nil {
+		u.Cached = &zero
+	}
+	if u.Output == nil {
+		u.Output = &zero
+	}
+	return u.tokens()
+}
+
+func knownTokenFloor(a, b usage.Tokens) (usage.Tokens, bool) {
+	if !a.Valid() || !b.Valid() {
+		return usage.Tokens{}, false
+	}
+	// Keep one reported input/cache tuple; categories from separate snapshots
+	// may describe the same tokens. Keep the larger independent output floor.
+	if b.Input > a.Input {
+		a.Input, a.CacheCreationInput, a.CachedInput = b.Input, b.CacheCreationInput, b.CachedInput
+	}
+	a.Output = max(a.Output, b.Output)
+	return a, a.Valid()
+}
+
+func strongerTokenFloor(a, b usage.Tokens) usage.Tokens {
+	if !a.Valid() {
+		return b
+	}
+	if !b.Valid() {
+		return a
+	}
+	if b.Total() > a.Total() || b.Total() == a.Total() &&
+		(b.Input > a.Input || b.Input == a.Input &&
+			(b.CacheCreationInput > a.CacheCreationInput || b.CacheCreationInput == a.CacheCreationInput && b.CachedInput > a.CachedInput)) {
+		return b
+	}
+	return a
+}
+
+func boundaryReceiptFloor(boundary, receipt usage.Tokens) usage.Tokens {
+	if combined, ok := boundary.AddChecked(receipt); ok {
+		return combined
+	}
+	if combined, ok := knownTokenFloor(receipt, boundary); ok {
+		return combined
+	}
+	return strongerTokenFloor(boundary, receipt)
+}
+
 type event struct {
 	Type              string            `json:"type"`
 	SessionID         string            `json:"session_id"`
@@ -62,6 +123,7 @@ type event struct {
 	Tasks             json.RawMessage   `json:"tasks"`
 	IsError           bool              `json:"is_error"`
 	Result            string            `json:"result"`
+	TotalCostUSD      *float64          `json:"total_cost_usd"`
 	Errors            json.RawMessage   `json:"errors"`
 	StructuredOutput  json.RawMessage   `json:"structured_output"`
 	Usage             json.RawMessage   `json:"usage"`
@@ -70,14 +132,16 @@ type event struct {
 	Message           json.RawMessage   `json:"message"`
 	StreamEvent       json.RawMessage   `json:"event"`
 	ParentToolUseID   json.RawMessage   `json:"parent_tool_use_id"`
-	TaskID            string            `json:"task_id"`
-	RunID             string            `json:"run_id"`
-	Status            string            `json:"status"`
-	Ambient           bool              `json:"ambient"`
-	Summary           string            `json:"summary"`
-	APIError          string            `json:"api_error"`
-	APIErrorStatus    json.RawMessage   `json:"api_error_status"`
-	IsSynthetic       bool              `json:"isSynthetic"`
+	parentID          string
+	parentForm        parentForm
+	TaskID            string          `json:"task_id"`
+	RunID             string          `json:"run_id"`
+	Status            string          `json:"status"`
+	Ambient           bool            `json:"ambient"`
+	Summary           string          `json:"summary"`
+	APIError          string          `json:"api_error"`
+	APIErrorStatus    json.RawMessage `json:"api_error_status"`
+	IsSynthetic       bool            `json:"isSynthetic"`
 	RateLimitInfo     struct {
 		Status         string          `json:"status"`
 		ResetsAt       json.RawMessage `json:"resetsAt"`
@@ -126,7 +190,10 @@ type messageUsage struct {
 	prior        usage.Tokens
 	priorMissing bool
 	generation   int64
+	resultIndex  int64
+	postStream   bool
 	root         bool
+	historical   bool
 }
 
 type assistantSnapshot struct {
@@ -136,17 +203,47 @@ type assistantSnapshot struct {
 }
 
 type progressStream struct {
-	messageID   string
-	activeIndex int
-	sealedIndex int
-	hasSealed   bool
-	tools       map[int]uint8 // 1 started, 2 stopped.
-	deltas      map[streamDelta]bool
+	key            string
+	messageID      string
+	resultIndex    int64 // Number of accepted results at this message's start.
+	stopped        bool
+	activeIndex    int
+	sealedIndex    int
+	hasSealed      bool
+	tools          map[int]toolProgress
+	deltas         map[streamDelta]bool
+	signatureBytes int64
+	lastDeltaProof [32]byte
+	lastWasNoUUID  bool
+}
+
+type toolProgress struct {
+	status   uint8 // 1 started, 2 stopped.
+	proof    [32]byte
+	hasProof bool
 }
 
 type streamDelta struct {
 	uuid, kind, content string
 	index               int
+}
+
+type streamIdentity struct {
+	key, messageID string
+}
+
+type streamUsageSample struct {
+	input, created, cached, output int64
+	resultIndex                    int64 // Number of accepted results when this ID first appeared.
+}
+
+func (s streamUsageSample) tokens() (usage.Tokens, bool) {
+	return (eventUsage{Input: &s.input, Created: &s.created, Cached: &s.cached, Output: &s.output}).tokens()
+}
+
+func (id streamIdentity) progressKey(kind string) string {
+	// Length-prefix the stream key: native IDs may contain separators.
+	return kind + ":" + strconv.Itoa(len(id.key)) + ":" + id.key + id.messageID
 }
 
 type taskProgressState struct {
@@ -161,7 +258,8 @@ type jsonlOutput struct {
 	onProgress             func()
 	progressSeen           map[string]bool
 	progressStreams        map[string]*progressStream
-	streamedSinceAssistant map[string]bool
+	streamUsage            map[streamIdentity]streamUsageSample // Fresh invocation only; never persisted for replay.
+	streamedSinceAssistant map[streamIdentity]bool
 	rootStartsAfterStop    map[string]bool
 	taskProgress           map[string]taskProgressState
 	taskRuns               map[string]bool
@@ -173,11 +271,20 @@ type jsonlOutput struct {
 	anonymousPending       int
 	progressBytes          int64
 	progressEntries        int
+	transientBytes         int64 // Stream proof lives only for this invocation.
+	transientEntries       int
 	progressByteLimit      int64 // Tests may lower the cumulative history limit.
 	progressEntryLimit     int   // Tests may lower the cumulative history limit.
 	identitySeen           bool
 	baseline               usage.Tokens
 	baselineUnknown        bool
+	costBaselineUSD        float64
+	costBaselineUnknown    bool
+	costObservedUSD        float64 // Comparison floor, including prior raw observations of unknown scope.
+	costContradiction      bool
+	nativeCostUSD          *float64
+	perCallResults         bool
+	resumed                bool
 	cumulative             usage.Tokens
 	hasCumulative          bool
 	cancel                 context.CancelFunc
@@ -193,6 +300,8 @@ type jsonlOutput struct {
 	pending                int
 	results                int64
 	indexed                bool
+	resultBoundary         usage.Tokens // Known subtotal at the last accepted result.
+	boundaryRootOnly       bool         // Known boundary has root usage without proved whole-tree coverage.
 	result                 aicli.Result
 	finalModelUsage        bool
 	finalTopUsage          bool
@@ -202,11 +311,12 @@ type jsonlOutput struct {
 	cumulativeUnattributed bool
 	aggregateGeneration    int64
 	aggregateTokens        usage.Tokens
-	assistantUsage         map[string]messageUsage
-	assistantHistory       map[string]assistantSnapshot
+	assistantUsage         map[streamIdentity]messageUsage
+	assistantHistory       map[streamIdentity]assistantSnapshot
 	assistantTotal         usage.Tokens // Sum of per-message counter maxima.
 	assistantTotalReady    bool
 	assistantTotalOverflow bool
+	provenanceGap          bool
 	assistantTokens        usage.Tokens
 	rootTokens             usage.Tokens
 	uncovered              bool
@@ -281,6 +391,57 @@ func (o *jsonlOutput) finish() {
 	o.stream.Finish()
 	o.updateTaskPending()
 	lower, valid := o.assistantLowerBound()
+	if !valid {
+		o.provenanceGap = true
+		if combined, ok := knownTokenFloor(o.result.Tokens, o.assistantTokens); ok {
+			lower = combined
+		} else {
+			lower = strongerTokenFloor(o.result.Tokens, o.assistantTokens)
+		}
+		valid = lower.Valid() // An unrepresentable sum can still have a known standalone floor.
+	}
+	if !o.hasCumulative && !o.resumed {
+		streamLower, streamValid := usage.Tokens{}, true
+		if len(o.streamUsage) != 0 {
+			streamLower, _, _, streamValid = o.streamUsageLowerBound()
+		}
+		if !streamValid {
+			o.provenanceGap = true
+		}
+		if len(o.streamUsage) != 0 && streamLower.Valid() {
+			if !valid {
+				o.provenanceGap = true
+				lower = o.result.Tokens
+				if !lower.Valid() || streamLower.Total() > lower.Total() {
+					lower = streamLower
+				}
+				valid = lower.Valid()
+			} else if combined, ok := knownTokenFloor(streamLower, lower); ok {
+				lower = combined
+			} else {
+				o.provenanceGap = true // Different cache categories need not be additive.
+				if streamLower.Total() > lower.Total() {
+					lower = streamLower
+				}
+			}
+		}
+		if o.results != 0 {
+			post, _, postValid := o.resultBoundaryEvidence()
+			if !postValid {
+				o.provenanceGap = true
+			}
+			if post.Valid() {
+				if combined, ok := knownTokenFloor(lower, post); ok {
+					lower, valid = combined, true
+				} else {
+					o.provenanceGap = true
+					if !valid || post.Total() > lower.Total() {
+						lower, valid = post, true
+					}
+				}
+			}
+		}
+	}
 	if o.aggregateGeneration == 0 || o.uncovered || !valid || lower != o.result.Tokens {
 		if valid {
 			o.result.Tokens = lower
@@ -334,6 +495,171 @@ func (o *jsonlOutput) finish() {
 	o.result.UsageCoverage = coverage
 }
 
+func addStreamFloor(total, full, partial int64) (int64, bool) {
+	if partial <= full {
+		return total, true
+	}
+	if total > math.MaxInt64-(partial-full) {
+		return total, false
+	}
+	return total + partial - full, true
+}
+
+func coversStreamUsage(tokens, required usage.Tokens, regular int64) bool {
+	return tokens.Valid() && tokens.Input >= required.Input &&
+		tokens.CacheCreationInput >= required.CacheCreationInput && tokens.CachedInput >= required.CachedInput &&
+		tokens.Output >= required.Output &&
+		tokens.Input-tokens.CacheCreationInput-tokens.CachedInput >= regular
+}
+
+func (o *jsonlOutput) streamUsageLowerBound() (usage.Tokens, usage.Tokens, int64, bool) {
+	total := o.assistantTokens
+	best := total
+	required := total // Coverage-only component floors may not form a valid token tuple.
+	regular := total.Input - total.CacheCreationInput - total.CachedInput
+	valid, sumValid := true, true
+	for id, sample := range o.streamUsage {
+		partial, ok := sample.tokens()
+		if !ok {
+			valid = false
+			continue
+		}
+		full := o.assistantUsage[id].tokens
+		if !full.Valid() {
+			valid = false
+			continue
+		}
+		fullRegular := full.Input - full.CacheCreationInput - full.CachedInput
+		for _, field := range []struct {
+			target        *int64
+			full, partial int64
+		}{
+			{&required.Input, full.Input, partial.Input},
+			{&required.CacheCreationInput, full.CacheCreationInput, partial.CacheCreationInput},
+			{&required.CachedInput, full.CachedInput, partial.CachedInput},
+			{&required.Output, full.Output, partial.Output},
+			{&regular, fullRegular, sample.input},
+		} {
+			if next, ok := addStreamFloor(*field.target, field.full, field.partial); ok {
+				*field.target = next
+			} else {
+				valid = false
+			}
+		}
+		merged, ok := knownTokenFloor(partial, full)
+		if !ok {
+			valid = false
+			continue
+		}
+		best = strongerTokenFloor(best, merged)
+		if !sumValid {
+			continue
+		}
+		without := total.Sub(full)
+		if !without.Valid() {
+			valid, sumValid = false, false
+			continue
+		}
+		if next, ok := without.AddChecked(merged); ok {
+			total = next
+		} else {
+			valid, sumValid = false, false
+		}
+	}
+	if !sumValid {
+		return best, required, regular, false // Keep a valid individual floor.
+	}
+	return total, required, regular, valid
+}
+
+func (o *jsonlOutput) resultBoundaryEvidence() (usage.Tokens, usage.Tokens, bool) {
+	post, helpers := o.resultBoundary, usage.Tokens{}
+	bestPost, bestHelper, valid := post, usage.Tokens{}, true
+	for id, old := range o.assistantUsage {
+		if old.resultIndex != o.results || old.historical && !old.postStream {
+			continue
+		}
+		helper := helperStreamKey(id.key)
+		if !old.root && !helper {
+			continue // Unknown parentage cannot establish additive usage.
+		}
+		if helper {
+			bestHelper = strongerTokenFloor(bestHelper, old.tokens)
+			if valid {
+				var ok bool
+				helpers, ok = helpers.AddChecked(old.tokens)
+				valid = valid && ok
+			}
+		}
+		if o.results != 0 && (old.root || helper && o.boundaryRootOnly) {
+			bestPost = strongerTokenFloor(bestPost, boundaryReceiptFloor(o.resultBoundary, old.tokens))
+			if valid {
+				var ok bool
+				post, ok = post.AddChecked(old.tokens)
+				valid = valid && ok
+			}
+		}
+	}
+	for id, sample := range o.streamUsage {
+		if sample.resultIndex != o.results {
+			continue // Earlier IDs can revise a floor, but are not new additive work.
+		}
+		root := id.key == "root"
+		helper := helperStreamKey(id.key)
+		if !root && !helper {
+			continue
+		}
+		partial, ok := sample.tokens()
+		if !ok {
+			valid = false
+			continue
+		}
+		full, included, includedHelper := usage.Tokens{}, usage.Tokens{}, usage.Tokens{}
+		if old, seen := o.assistantUsage[id]; seen {
+			full = old.tokens
+			if old.resultIndex == o.results && (!old.historical || old.postStream) && helper {
+				includedHelper = old.tokens
+			}
+			if old.resultIndex == o.results && (!old.historical || old.postStream) && (old.root || helper && o.boundaryRootOnly) {
+				included = old.tokens
+			}
+		}
+		merged, ok := knownTokenFloor(partial, full)
+		if !ok {
+			valid = false
+			continue
+		}
+		if helper {
+			bestHelper = strongerTokenFloor(bestHelper, merged)
+			if valid {
+				without := helpers.Sub(includedHelper)
+				if without.Valid() {
+					helpers, ok = without.AddChecked(merged)
+				} else {
+					ok = false
+				}
+				valid = valid && ok
+			}
+		}
+		if o.results != 0 && (root || helper && o.boundaryRootOnly) {
+			bestPost = strongerTokenFloor(bestPost, boundaryReceiptFloor(o.resultBoundary, merged))
+			if valid {
+				without := post.Sub(included)
+				if without.Valid() {
+					post, ok = without.AddChecked(merged)
+				} else {
+					ok = false
+				}
+				valid = valid && ok
+			}
+		}
+	}
+	if !valid {
+		return bestPost, bestHelper, false // A deterministic valid floor survives unrepresentable sums.
+	}
+	return post, helpers, true
+}
+
 func (o *jsonlOutput) acceptsSession(id string) bool {
 	return id == "" || id == o.sessionID
 }
@@ -347,10 +673,21 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.fail(fmt.Errorf("invalid Claude JSONL event: %w", err))
 		return
 	}
+	if e.Ambient {
+		return // Unrelated background work cannot change this call or its receipt.
+	}
+	e.parentID, e.parentForm = decodeAssistantParent(e.ParentToolUseID, e.AgentID)
+	if e.Type == "user" && !o.acceptsSession(e.SessionID) {
+		o.captureMessage(e) // Foreign content is only an unidentified receipt marker.
+		return
+	}
 	if e.Type == "result" || e.Type == "system" && e.Subtype == "init" {
-		parent := bytes.TrimSpace(e.ParentToolUseID)
-		if len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
-			// A tagged helper is not this invocation's root conversation/result.
+		if e.parentForm == parentInvalid {
+			o.markProvenanceGap(true)
+			return
+		}
+		if e.parentForm != parentMissing && e.parentForm != parentRoot {
+			// A helper cannot claim this invocation's root conversation/result.
 			return
 		}
 		if o.sessionID != "" && e.SessionID != "" {
@@ -361,17 +698,21 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			o.identitySeen = true
 		}
 	}
-	freshAssistantContent, streamedAssistant, assistantContentful, assistantID := false, false, false, ""
-	if e.Type == "assistant" && !e.Ambient && o.acceptsSession(e.SessionID) {
-		freshAssistantContent, assistantID, assistantContentful = o.recordAssistantUsage(e.Message, e.ParentToolUseID)
-		streamedAssistant = o.streamedSinceAssistant[assistantID]
-		delete(o.streamedSinceAssistant, assistantID)
-		if assistantContentful && o.err == nil {
+	freshAssistantContent, streamedAssistant, assistantContentful, assistantReplay, assistantID := false, false, false, false, ""
+	if e.Type == "assistant" && o.acceptsSession(e.SessionID) {
+		freshAssistantContent, assistantID, assistantContentful, assistantReplay = o.recordAssistantUsage(e)
+		streamKey, _ := streamProgressKey(e)
+		streamID := streamIdentity{streamKey, assistantID}
+		streamedAssistant = o.streamedSinceAssistant[streamID]
+		if assistantContentful {
+			delete(o.streamedSinceAssistant, streamID)
+		}
+		if assistantContentful && assistantID != "" && o.err == nil {
 			o.sealStreamBlock(e, assistantID, freshAssistantContent)
 		}
 	}
 	stop := e.Type == "system" && e.Subtype == "task_notification" &&
-		(e.Status == "stopped" || e.Status == "killed") && !e.Ambient && o.acceptsSession(e.SessionID)
+		(e.Status == "stopped" || e.Status == "killed") && o.acceptsSession(e.SessionID)
 	if stop && !o.acceptTaskStop(e.TaskID, e.RunID, e.UUID, e.Summary) {
 		if e.TaskID != "" && e.RunID != "" {
 			// An ambiguous notice can share this UUID without proving the tagged finish.
@@ -383,7 +724,8 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	if stop {
 		o.recordTaskStop(e.Status, e.Summary)
 	}
-	if e.Type == "rate_limit_event" && e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
+	if e.Type == "rate_limit_event" && o.acceptsSession(e.SessionID) &&
+		e.RateLimitInfo.Status == "rejected" && !e.RateLimitInfo.IsUsingOverage && !e.RateLimitInfo.OverageInUse {
 		o.usageLimit = errors.New("provider usage limit reached")
 		var reset int64
 		// Only a validated UTC timestamp may enter the service diagnostic.
@@ -394,7 +736,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
 		o.startFailureGrace()
 	}
-	if e.Type == "system" && e.Subtype == "background_tasks_changed" && !e.Ambient && o.acceptsSession(e.SessionID) {
+	if e.Type == "system" && e.Subtype == "background_tasks_changed" && o.acceptsSession(e.SessionID) {
 		var tasks []struct {
 			TaskID  string `json:"task_id"`
 			RunID   string `json:"run_id"`
@@ -475,7 +817,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		}
 		content := bytes.TrimSpace(message.Content)
 		var text string
-		if e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID) && json.Unmarshal(content, &text) == nil {
+		if e.IsSynthetic && json.Unmarshal(content, &text) == nil {
 			o.recordTaskNotice(text, e.UUID)
 		}
 		if len(content) != 0 && content[0] == '[' {
@@ -487,7 +829,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 				o.fail(fmt.Errorf("invalid Claude tool response: %w", err))
 				return
 			}
-			synthetic := e.IsSynthetic && !e.Ambient && o.acceptsSession(e.SessionID)
+			synthetic := e.IsSynthetic
 			claimed := false
 			var seenNotices map[string]bool
 			for _, content := range blocks {
@@ -516,11 +858,92 @@ func (o *jsonlOutput) finishLine(line []byte) {
 			}
 		}
 	}
-	o.captureMessage(e)
+	if o.err == nil {
+		switch {
+		case e.Type == "assistant" && assistantReplay:
+			// A settled full frame contributes neither counters nor content again.
+		case e.Type == "assistant" && o.resumed && assistantID == "":
+			if assistantContentful && o.onEvent != nil {
+				o.onEvent(aicli.StreamEvent{Kind: "content_missing"})
+			}
+		case e.Type == "assistant" && o.resumed:
+			// Exact historical replay has no current receipt content.
+		case e.Type == "assistant" && assistantID == "":
+			receipt := e
+			receipt.SessionID = "" // Keep block kinds without attributing rejected content.
+			o.captureMessage(receipt)
+		default:
+			o.captureMessage(e)
+		}
+	}
 	if e.Type != "result" {
 		return
 	}
+	if o.results >= maxResultEvents {
+		o.fail(fmt.Errorf("%w: Claude result count exceeded the limit", aicli.ErrOutputLimit))
+		return
+	}
+	// A resumed Claude conversation can report a cumulative estimate. Keep
+	// only a proven delta for this invocation. A settled later snapshot can
+	// reanchor attribution after a gap. A crash can emit zeroed cost after
+	// spending tokens, so that zero is not an estimate.
+	o.nativeCostUSD = nil
+	if e.TotalCostUSD != nil && usage.ValidEstimatedCostUSD(e.TotalCostUSD) &&
+		!(e.Subtype == "error_during_execution" && *e.TotalCostUSD == 0) {
+		if *e.TotalCostUSD < o.costObservedUSD {
+			o.costContradiction = true
+		} else {
+			o.costObservedUSD = *e.TotalCostUSD
+		}
+		if o.costContradiction {
+			o.result.EstimatedCostUSD = nil // Contradictory final snapshot, not a known subtotal.
+		} else if o.costBaselineUnknown {
+			o.nativeCostUSD = e.TotalCostUSD // Reanchor only after a settled final result.
+		} else {
+			delta := *e.TotalCostUSD - o.costBaselineUSD
+			if usage.ValidEstimatedCostUSD(&delta) {
+				o.nativeCostUSD, o.result.EstimatedCostUSD = e.TotalCostUSD, &delta
+			}
+		}
+	}
 	tokens, complete := e.tokens()
+	modelTokens := tokens
+	if complete {
+		current := tokens.Sub(o.baseline)
+		if !current.Valid() || !covers(current, o.resultBoundary) || current.Output <= o.resultBoundary.Output {
+			for id, streamed := range o.streamedSinceAssistant {
+				if streamed && !o.assistantHistory[id].hasContent {
+					o.markProvenanceGap(!helperStreamKey(id.key)) // New text needs reported output or a full receipt.
+					break
+				}
+			}
+		}
+	}
+	if !complete || o.provenanceGap || o.assistantTotalOverflow {
+		o.nativeCostUSD = nil // This report cannot certify a cost snapshot.
+	}
+	streamLower, streamRequired, streamRegular, streamValid := usage.Tokens{}, usage.Tokens{}, int64(0), true
+	if !o.resumed && len(o.streamUsage) != 0 {
+		streamLower, streamRequired, streamRegular, streamValid = o.streamUsageLowerBound()
+		if !streamValid {
+			o.provenanceGap = true
+			o.nativeCostUSD = nil
+		}
+	}
+	postFloor, helpers, postValid := o.resultBoundaryEvidence()
+	if !postValid {
+		o.provenanceGap = true
+		o.nativeCostUSD = nil
+	}
+	coverageFloor := postFloor
+	if o.results != 0 && !o.boundaryRootOnly {
+		var coverageValid bool
+		coverageFloor, coverageValid = coverageFloor.AddChecked(helpers)
+		if !coverageValid {
+			o.provenanceGap = true
+			o.nativeCostUSD = nil
+		}
+	}
 	var top eventUsage
 	if json.Unmarshal(e.Usage, &top) == nil {
 		o.finalTopTokens, o.finalTopUsage = top.tokens()
@@ -530,17 +953,60 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	o.finalModelUsage = complete
 	o.finalReportPresent = reportPresent(e.ModelUsage) || reportPresent(e.Usage)
 	o.finalMalformedUsage = !complete && (reportPresent(e.ModelUsage) || !o.finalTopUsage && reportPresent(e.Usage))
+	rootHelperFloor := usage.Tokens{}
+	if o.finalTopUsage {
+		var rootHelperValid bool
+		rootHelperFloor, rootHelperValid = o.finalTopTokens.AddChecked(helpers)
+		if !rootHelperValid {
+			o.provenanceGap = true
+			o.nativeCostUSD = nil
+		} else if !complete {
+			tokens = rootHelperFloor // Top-level usage excludes helpers; this is an incomplete floor.
+		}
+	}
 	o.hasCumulative = false
 	if complete {
-		o.ensureAssistantTotal()
+		if !o.perCallResults {
+			o.ensureAssistantTotal()
+		}
 		cumulative := tokens
 		tokens = tokens.Sub(o.baseline)
 		root, rootValid := o.finalTopTokens, o.finalTopUsage
 		// An exact snapshot must cover the prior cumulative floor plus all
 		// attributable current counters before it can become the next baseline.
 		lower, valid := o.assistantLowerBound()
-		complete = tokens.Valid() && valid && !o.assistantTotalOverflow &&
-			covers(tokens, lower) && covers(cumulative, o.assistantTotal) &&
+		if streamLower != (usage.Tokens{}) {
+			if combined, ok := knownTokenFloor(lower, streamLower); ok {
+				lower = combined
+			} else {
+				valid = false
+				o.provenanceGap = true
+			}
+		}
+		for _, floor := range []usage.Tokens{postFloor, rootHelperFloor} {
+			if floor == (usage.Tokens{}) {
+				continue
+			}
+			if combined, ok := knownTokenFloor(floor, lower); ok {
+				lower = combined
+			} else {
+				valid = false
+				o.provenanceGap = true
+			}
+		}
+		assistantFloor, assistantValid := o.assistantTotal, !o.assistantTotalOverflow
+		if o.perCallResults {
+			assistantFloor = o.assistantTokens
+		}
+		if !assistantValid || o.provenanceGap || !covers(cumulative, assistantFloor) ||
+			!valid || !covers(tokens, lower) || !covers(tokens, coverageFloor) || !covers(tokens, rootHelperFloor) ||
+			!coversStreamUsage(tokens, streamRequired, streamRegular) {
+			o.nativeCostUSD = nil // The final cost snapshot cannot certify all assistant work.
+		}
+		complete = tokens.Valid() && valid && assistantValid && !o.provenanceGap &&
+			covers(tokens, lower) && covers(tokens, coverageFloor) && covers(tokens, rootHelperFloor) &&
+			coversStreamUsage(tokens, streamRequired, streamRegular) &&
+			covers(cumulative, assistantFloor) &&
 			(!rootValid || covers(tokens, root))
 		if complete {
 			o.cumulative, o.hasCumulative = cumulative, true
@@ -561,10 +1027,27 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	}
 	// Native modelUsage is cumulative across result turns. A later partial
 	// report must not erase previously recorded usage.
+	for _, floor := range []usage.Tokens{postFloor, rootHelperFloor} {
+		if floor == (usage.Tokens{}) {
+			continue
+		}
+		if combined, ok := knownTokenFloor(floor, o.result.Tokens); ok {
+			o.result.Tokens = combined
+		} else {
+			o.provenanceGap = true
+			complete = false
+			o.nativeCostUSD = nil
+			if floor.Valid() && (!o.result.Tokens.Valid() || floor.Total() > o.result.Tokens.Total()) {
+				o.result.Tokens = floor
+			}
+		}
+	}
 	if covers(tokens, o.result.Tokens) {
 		o.result.Tokens = tokens
 	} else {
-		if lower := o.result.Tokens.Max(tokens); lower.Valid() {
+		if lower, ok := knownTokenFloor(o.result.Tokens, tokens); ok {
+			o.result.Tokens = lower
+		} else if lower := o.result.Tokens.Max(tokens); lower.Valid() {
 			o.result.Tokens = lower
 		}
 		complete = false
@@ -647,6 +1130,13 @@ func (o *jsonlOutput) finishLine(line []byte) {
 	}
 	o.indexed = e.ResultIndex != nil
 	o.results++
+	modelDelta := modelTokens.Sub(o.baseline)
+	modelCovers := func(floor usage.Tokens) bool {
+		return o.finalModelUsage && modelDelta.Valid() && covers(modelDelta, floor)
+	}
+	o.boundaryRootOnly = o.finalTopUsage && !modelCovers(o.finalTopTokens) ||
+		o.boundaryRootOnly && !modelCovers(o.result.Tokens)
+	o.resultBoundary = o.result.Tokens
 	if len(e.TerminalReason) != 0 {
 		if !terminalValid || terminalReason != "completed" {
 			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
@@ -714,8 +1204,18 @@ func (o *jsonlOutput) captureMessage(e event) {
 			continue
 		}
 		switch {
-		case e.Type == "assistant" && block.Type == "text" && block.Text != "":
-			o.emitContent(e, "assistant", block.Text)
+		case e.Type == "assistant" && block.Type == "text":
+			if block.Text != "" {
+				o.emitContent(e, "assistant", block.Text)
+			} else {
+				wrapped := make([]byte, 0, len(raw)+2)
+				wrapped = append(wrapped, '[')
+				wrapped = append(wrapped, raw...)
+				wrapped = append(wrapped, ']')
+				if _, _, unprojectable := assistantContentProof(wrapped); unprojectable {
+					o.emitContent(e, kind, "")
+				}
+			}
 		case e.Type == "assistant" && block.Type == "tool_use":
 			o.emitContent(e, "tool_request", string(raw))
 		case e.Type == "user" && block.Type == "tool_result":
@@ -734,13 +1234,11 @@ func (o *jsonlOutput) emitContent(e event, kind, text string) {
 		o.onEvent(aicli.StreamEvent{Kind: kind})
 		return
 	}
-	parent := bytes.TrimSpace(e.ParentToolUseID)
-	if bytes.Equal(parent, []byte("null")) {
+	if e.parentForm == parentRoot {
 		o.emitEventWithID(o.sessionID, kind, text)
 		return
 	}
-	var helper string
-	if json.Unmarshal(parent, &helper) == nil && helper != "" {
+	if e.parentForm == parentTagged {
 		o.emitEventWithID(e.AgentID, kind, text)
 		return
 	}
@@ -866,7 +1364,7 @@ func (o *jsonlOutput) recordTaskNotice(text, noticeUUID string) {
 // result-only usage, result waiting, or repeated snapshots. The callback is
 // separate from transcript capture and sends no text.
 func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAssistant bool, assistantID string) {
-	if e.Ambient || !o.acceptsSession(e.SessionID) {
+	if !o.acceptsSession(e.SessionID) {
 		return
 	}
 	if e.Type == "stream_event" {
@@ -892,7 +1390,8 @@ func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAss
 	switch e.Type {
 	case "assistant":
 		if freshAssistantContent {
-			o.recordAssistantContentProgress(assistantID, streamedAssistant)
+			streamKey, _ := streamProgressKey(e)
+			o.recordAssistantContentProgress(streamIdentity{streamKey, assistantID}, streamedAssistant)
 		}
 	case "user":
 		if e.IsSynthetic {
@@ -915,20 +1414,19 @@ func (o *jsonlOutput) recordProgress(e event, freshAssistantContent, streamedAss
 		switch e.Subtype {
 		case "thinking_tokens":
 			// Helper estimates lack a task/run identity; root estimates have an explicit null parent.
-			parent := bytes.TrimSpace(e.ParentToolUseID)
 			if o.sessionID != "" && e.SessionID == o.sessionID && e.UUID != "" && e.ThinkingDelta > 0 &&
-				e.AgentID == "" && bytes.Equal(parent, []byte("null")) {
+				e.parentForm == parentRoot {
 				o.recordUniqueProgress("thinking_tokens:" + e.UUID)
 			}
 		}
 	}
 }
 
-func (o *jsonlOutput) recordAssistantContentProgress(id string, streamed bool) {
+func (o *jsonlOutput) recordAssistantContentProgress(id streamIdentity, streamed bool) {
 	if streamed {
 		return // Stream output already reported this message's activity.
 	}
-	key := "assistant:" + id
+	key := id.progressKey("assistant")
 	if o.progressSeen[key] {
 		o.onProgress() // The new content snapshot already reserved bounded history.
 	} else {
@@ -936,72 +1434,334 @@ func (o *jsonlOutput) recordAssistantContentProgress(id string, streamed bool) {
 	}
 }
 
-func streamProgressKey(e event) string {
-	if e.AgentID != "" {
-		return "agent:" + e.AgentID
+type parentForm uint8
+
+const (
+	parentInvalid parentForm = iota
+	parentMissing
+	parentRoot
+	parentTagged
+	parentUntagged
+)
+
+func decodeAssistantParent(raw json.RawMessage, agentID string) (id string, form parentForm) {
+	parent := bytes.TrimSpace(raw)
+	if len(parent) == 0 {
+		if agentID == "" {
+			return "", parentMissing
+		}
+		return "", parentInvalid
 	}
-	if parent := bytes.TrimSpace(e.ParentToolUseID); len(parent) != 0 && !bytes.Equal(parent, []byte("null")) {
-		return "parent:" + string(parent)
+	if bytes.Equal(parent, []byte("null")) {
+		if agentID == "" {
+			return "", parentRoot
+		}
+		return "", parentInvalid
 	}
-	return "root"
+	if json.Unmarshal(parent, &id) != nil || id == "" {
+		return "", parentInvalid
+	}
+	if agentID != "" {
+		return id, parentTagged
+	}
+	return id, parentUntagged
+}
+
+func streamProgressKey(e event) (key string, root bool) {
+	switch e.parentForm {
+	case parentMissing:
+		return "root-untagged", true
+	case parentRoot:
+		return "root", true
+	case parentTagged:
+		return taggedStreamKey(e.AgentID, e.parentID), false
+	case parentUntagged:
+		return "parent:" + e.parentID, false
+	default:
+		return "unknown-parent", true // Invalid parentage cannot prove a root answer.
+	}
+}
+
+func taggedStreamKey(agentID, parentID string) string {
+	return "agent:" + strconv.Itoa(len(agentID)) + ":" + agentID + parentID
+}
+
+func helperStreamKey(key string) bool {
+	return strings.HasPrefix(key, "agent:") || strings.HasPrefix(key, "parent:")
+}
+
+func (o *jsonlOutput) markUncoveredStream(root bool) {
+	o.hasCumulative = false
+	o.result.UsageComplete = false
+	o.nativeCostUSD = nil // The prior result remains a known subtotal only.
+	if root {
+		o.completed, o.result.Answer = false, ""
+	}
+}
+
+func (o *jsonlOutput) markProvenanceGap(root bool) {
+	o.provenanceGap = true
+	o.markUncoveredStream(root)
+}
+
+func (o *jsonlOutput) hasAssistantIdentity(id streamIdentity) bool {
+	_, current := o.assistantUsage[id]
+	_, historical := o.assistantHistory[id]
+	return current || historical || o.progressSeen[id.progressKey("stream_start")] ||
+		o.progressSeen[id.progressKey("assistant")]
+}
+
+func (o *jsonlOutput) claimAssistantOrigin(e event, messageID string) bool {
+	if e.parentForm == parentInvalid {
+		o.markProvenanceGap(true)
+		return false
+	}
+	if e.parentForm == parentRoot || e.parentForm == parentMissing {
+		other := "root"
+		if e.parentForm == parentRoot {
+			other = "root-untagged"
+		}
+		if o.hasAssistantIdentity(streamIdentity{other, messageID}) {
+			o.markProvenanceGap(true)
+			return false
+		}
+		return true
+	}
+	// A helper can be wrapped with agent_id or only parent_tool_use_id.
+	// Opposite forms sharing a parent and message ID cannot prove two calls.
+	id := streamIdentity{e.parentID, messageID}
+	own, opposite := "assistant_tagged", "assistant_untagged"
+	if e.parentForm == parentUntagged {
+		own, opposite = opposite, own
+	}
+	if o.progressSeen[id.progressKey(opposite)] {
+		o.markProvenanceGap(false)
+		return false
+	}
+	key := id.progressKey(own)
+	return o.progressSeen[key] || o.rememberProgress(key)
+}
+
+func (o *jsonlOutput) progressCheckpoint() (bytes int64, entries int) {
+	return o.progressBytes - o.transientBytes, o.progressEntries - o.transientEntries
+}
+
+func (o *jsonlOutput) discardStream(key string) {
+	if state := o.progressStreams[key]; state != nil {
+		entries := len(state.deltas) + len(state.tools)
+		bytes := state.signatureBytes + int64(toolProofBytes*len(state.tools))
+		o.progressEntries -= entries
+		o.progressBytes -= bytes
+		o.transientEntries -= entries
+		o.transientBytes -= bytes
+	}
+	delete(o.progressStreams, key)
 }
 
 func (o *jsonlOutput) sealStreamBlock(e event, id string, freshContent bool) {
-	state := o.progressStreams[streamProgressKey(e)]
+	key, _ := streamProgressKey(e)
+	state := o.progressStreams[key]
 	if state == nil || state.messageID != id || state.hasSealed && !freshContent {
 		return
 	}
+	// Full frames seal stream blocks but do not add replay proof.
 	state.sealedIndex = state.activeIndex
 	state.hasSealed = true
 }
 
-func (o *jsonlOutput) recordStreamProgress(e event) {
-	var native struct {
-		Type    string `json:"type"`
-		Index   *int   `json:"index"`
-		Message struct {
-			ID string `json:"id"`
-		} `json:"message"`
-		ContentBlock struct {
-			Type string `json:"type"`
-		} `json:"content_block"`
-		Delta struct {
-			Type        string `json:"type"`
-			Text        string `json:"text"`
-			Thinking    string `json:"thinking"`
-			PartialJSON string `json:"partial_json"`
-		} `json:"delta"`
+func (o *jsonlOutput) observeStreamUsage(id streamIdentity, root bool, raw json.RawMessage) {
+	if o.resumed || o.results != 0 && (!o.indexed || id.key != "root" && !helperStreamKey(id.key)) || !reportPresent(raw) {
+		return // Only fresh bounded identities with a possible next result can establish usage.
 	}
-	if json.Unmarshal(e.StreamEvent, &native) != nil {
+	var reported eventUsage
+	if json.Unmarshal(raw, &reported) != nil {
 		return
 	}
-	key := streamProgressKey(e)
-	state := o.progressStreams[key]
-	if native.Type == "message_start" {
-		var parentID string
-		helper := e.AgentID != "" || json.Unmarshal(e.ParentToolUseID, &parentID) == nil && parentID != ""
-		if native.Message.ID == "" {
-			delete(o.progressStreams, key)
-			if o.results != 0 && !helper {
-				o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+	snapshot, valid := partialEventTokens(reported)
+	if !valid {
+		return
+	}
+	prior := o.streamUsage[id]
+	if snapshot == (usage.Tokens{}) && prior == (streamUsageSample{}) {
+		return
+	}
+	next := prior
+	contradictory := false
+	for _, field := range []struct {
+		value *int64
+		prior int64
+		dest  *int64
+	}{
+		{reported.Input, prior.input, &next.input},
+		{reported.Created, prior.created, &next.created},
+		{reported.Cached, prior.cached, &next.cached},
+	} {
+		if field.value == nil {
+			continue
+		}
+		if *field.value < field.prior {
+			contradictory = true
+		} else {
+			*field.dest = *field.value
+		}
+	}
+	if _, ok := next.tokens(); !ok || contradictory {
+		o.markProvenanceGap(root)
+		o.retainStandaloneFloor(snapshot)
+		// Contradictory cumulative fields cannot replace the earlier tuple.
+		next.input, next.created, next.cached = prior.input, prior.created, prior.cached
+	}
+	if reported.Output != nil {
+		if *reported.Output < prior.output {
+			o.markProvenanceGap(root)
+		} else {
+			next.output = *reported.Output
+		}
+	}
+	if _, ok := next.tokens(); !ok {
+		o.markProvenanceGap(root)
+		next.output = prior.output
+	}
+	if next == prior {
+		return
+	}
+	if o.streamUsage == nil {
+		o.streamUsage = make(map[streamIdentity]streamUsageSample)
+	}
+	if _, seen := o.streamUsage[id]; !seen {
+		state := o.progressStreams[id.key]
+		if state == nil || state.messageID != id.messageID {
+			return
+		}
+		// The accepted stream start bounds IDs; reserve transient payload space too.
+		bytes := len(id.key) + len(id.messageID) + 40
+		if !o.reserveProgress(1, bytes) {
+			return
+		}
+		o.transientEntries++
+		o.transientBytes += int64(bytes)
+		next.resultIndex = state.resultIndex
+	}
+	o.streamUsage[id] = next
+}
+
+func (o *jsonlOutput) recordStreamProgress(e event) {
+	if e.parentForm == parentInvalid {
+		o.markProvenanceGap(true)
+		return
+	}
+	key, root := streamProgressKey(e)
+	var native struct {
+		Type    string          `json:"type"`
+		Index   *int            `json:"index"`
+		Usage   json.RawMessage `json:"usage"`
+		Message struct {
+			ID      string          `json:"id"`
+			Usage   json.RawMessage `json:"usage"`
+			Content json.RawMessage `json:"content"`
+		} `json:"message"`
+		ContentBlock json.RawMessage `json:"content_block"`
+		Delta        json.RawMessage `json:"delta"`
+	}
+	var delta struct {
+		Type         string          `json:"type"`
+		Text         *string         `json:"text"`
+		Thinking     *string         `json:"thinking"`
+		PartialJSON  *string         `json:"partial_json"`
+		Usage        json.RawMessage `json:"usage"`
+		Signature    json.RawMessage `json:"signature"`
+		StopReason   json.RawMessage `json:"stop_reason"`
+		StopSequence json.RawMessage `json:"stop_sequence"`
+	}
+	if json.Unmarshal(e.StreamEvent, &native) != nil {
+		if o.results != 0 {
+			o.markUncoveredStream(root) // Malformed nested content cannot prove replay.
+		}
+		return
+	}
+	deltaRaw := bytes.TrimSpace(native.Delta)
+	if len(deltaRaw) != 0 && !bytes.Equal(deltaRaw, []byte("null")) {
+		decoder := json.NewDecoder(bytes.NewReader(deltaRaw))
+		decoder.DisallowUnknownFields()
+		if deltaRaw[0] != '{' || decoder.Decode(&delta) != nil {
+			if o.results != 0 {
+				o.markUncoveredStream(root)
 			}
 			return
 		}
-		startKey := "stream_start:" + native.Message.ID
-		_, assistantSeen := o.assistantUsage[native.Message.ID]
-		_, historicalAssistant := o.assistantHistory[native.Message.ID]
-		replay := assistantSeen || historicalAssistant || o.progressSeen["assistant:"+native.Message.ID] || o.progressSeen[startKey]
+	} else if o.results != 0 && native.Type == "content_block_delta" {
+		o.markUncoveredStream(root) // A content event needs an object payload.
+		return
+	}
+	var block struct {
+		Type string `json:"type"`
+	}
+	if native.Type == "content_block_start" {
+		content := bytes.TrimSpace(native.ContentBlock)
+		if len(content) == 0 || content[0] != '{' || json.Unmarshal(content, &block) != nil || block.Type == "" {
+			if o.results != 0 {
+				o.markUncoveredStream(root)
+			}
+			return
+		}
+	}
+	if o.results != 0 && (reportPresent(native.Usage) || reportPresent(native.Message.Usage) || reportPresent(delta.Usage)) {
+		o.markUncoveredStream(root) // A later result must cover newly observed usage.
+	}
+	hasDeltaContent := delta.Text != nil && *delta.Text != "" || delta.Thinking != nil && *delta.Thinking != "" ||
+		delta.PartialJSON != nil && *delta.PartialJSON != ""
+	_, messageContent, unprojectableMessage := assistantContentProof(native.Message.Content)
+	controlDelta := reportPresent(native.Delta) &&
+		(native.Type == "message_start" || native.Type == "message_stop" || native.Type == "content_block_stop")
+	if o.results != 0 && (messageContent || unprojectableMessage || controlDelta ||
+		hasDeltaContent && native.Type != "content_block_delta" ||
+		reportPresent(native.ContentBlock) && native.Type != "content_block_start") {
+		o.markUncoveredStream(root) // Unproved content on any event cannot certify the result.
+		return
+	}
+	if o.results != 0 && key == "unknown-parent" && native.Type != "message_start" && native.Type != "message_stop" {
+		o.markUncoveredStream(true) // Invalid parentage cannot certify a later replay.
+	}
+	state := o.progressStreams[key]
+	if native.Type == "message_start" {
+		if native.Message.ID == "" {
+			o.discardStream(key)
+			if o.results != 0 {
+				o.markUncoveredStream(root)
+			}
+			return
+		}
+		id := streamIdentity{key, native.Message.ID}
+		startKey := id.progressKey("stream_start")
+		_, assistantSeen := o.assistantUsage[id]
+		_, historicalAssistant := o.assistantHistory[id]
+		replay := assistantSeen || historicalAssistant || o.progressSeen[id.progressKey("assistant")] || o.progressSeen[startKey]
+		if state != nil && state.messageID != native.Message.ID && o.results != 0 {
+			oldID := streamIdentity{key, state.messageID}
+			if _, seen := o.assistantUsage[oldID]; !seen && o.streamedSinceAssistant[oldID] {
+				o.markProvenanceGap(false) // Replaced content cannot certify a later result.
+			}
+		}
 		if replay {
-			delete(o.progressStreams, key)
+			if state != nil && state.messageID == native.Message.ID {
+				return // Preserve an active stream; later content may be fresh.
+			}
+			o.discardStream(key)
+			return // An old ID alone cannot prove that later tagged content is a replay.
+		}
+		// A fresh message replaces the old stream's transient signatures before
+		// reserving its start, so proof no longer in use cannot exhaust the quota.
+		o.discardStream(key)
+		if !o.claimAssistantOrigin(e, native.Message.ID) {
 			return
 		}
 		if !o.rememberProgress(startKey) {
 			return
 		}
-		if o.results != 0 && !helper {
-			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+		if o.results != 0 {
+			o.markUncoveredStream(root)
 		}
-		if o.stopped && !helper {
+		if o.stopped && root {
 			if o.rootStartsAfterStop == nil {
 				o.rootStartsAfterStop = make(map[string]bool)
 			}
@@ -1010,16 +1770,36 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 		if o.progressStreams == nil {
 			o.progressStreams = make(map[string]*progressStream)
 		}
-		state = &progressStream{messageID: native.Message.ID}
+		state = &progressStream{key: key, messageID: native.Message.ID, resultIndex: o.results}
 		o.progressStreams[key] = state
+		o.observeStreamUsage(id, root, native.Message.Usage)
 		return
 	}
 	if native.Type == "message_stop" {
-		delete(o.progressStreams, key)
+		// Keep bounded stream proof through this invocation. A later identical
+		// UUID/content can replay after the native stop event.
+		if state != nil {
+			state.stopped = true
+		}
+		return
+	}
+	if native.Type == "message_delta" {
+		if state != nil && !state.stopped {
+			o.observeStreamUsage(streamIdentity{key, state.messageID}, root, native.Usage)
+		}
+		return
+	}
+	if native.Type == "content_block_stop" && o.results != 0 && (native.Index == nil || *native.Index < 0) {
+		o.markUncoveredStream(root)
 		return
 	}
 	if state == nil {
-		return // A delta without a native message identity could be replayed.
+		if o.results != 0 &&
+			(native.Type == "content_block_start" ||
+				native.Type == "content_block_delta" || native.Type == "content_block_stop") {
+			o.markUncoveredStream(root)
+		}
+		return
 	}
 	if native.Index != nil {
 		switch native.Type {
@@ -1029,67 +1809,145 @@ func (o *jsonlOutput) recordStreamProgress(e event) {
 	}
 	switch native.Type {
 	case "content_block_start":
-		if native.Index == nil || native.ContentBlock.Type != "tool_use" {
+		if block.Type != "tool_use" || native.Index == nil || *native.Index < 0 {
+			if o.results != 0 {
+				o.markUncoveredStream(root)
+			}
 			return
 		}
-		if state.hasSealed && *native.Index <= state.sealedIndex {
+		wrapped := make([]byte, 0, len(native.ContentBlock)+2)
+		wrapped = append(wrapped, '[')
+		wrapped = append(wrapped, native.ContentBlock...)
+		wrapped = append(wrapped, ']')
+		proof, valid, unprojectable := assistantContentProof(wrapped)
+		valid = valid && !unprojectable
+		tool := state.tools[*native.Index]
+		if state.hasSealed && *native.Index <= state.sealedIndex || tool.status != 0 {
+			if o.results != 0 && (!valid || !tool.hasProof || tool.proof != proof) {
+				o.markProvenanceGap(root)
+			}
 			return
 		}
-		if state.tools[*native.Index] != 0 {
+		if o.results != 0 {
+			if state.hasSealed {
+				o.markProvenanceGap(root) // New tool content after a full frame revises settled work.
+			} else {
+				o.markUncoveredStream(root)
+			}
+		}
+		if !o.reserveProgress(1, toolProofBytes) {
 			return
 		}
+		o.transientEntries++
+		o.transientBytes += toolProofBytes
 		if state.tools == nil {
-			state.tools = make(map[int]uint8)
+			state.tools = make(map[int]toolProgress)
 		}
-		state.tools[*native.Index] = 1
+		tool.status, tool.proof, tool.hasProof = 1, proof, valid
+		state.tools[*native.Index] = tool
 		o.markStreamProgress(state)
 	case "content_block_delta":
-		index := state.activeIndex
-		if native.Index != nil {
-			index = *native.Index
-		}
-		if state.hasSealed && index <= state.sealedIndex {
-			return // The full block already reported these partial deltas.
-		}
-		switch native.Delta.Type {
+		var content string
+		valid := true
+		switch delta.Type {
 		case "text_delta":
-			if native.Delta.Text != "" {
-				o.markStreamDelta(state, e.UUID, index, native.Delta.Type, native.Delta.Text)
+			valid = delta.Text != nil && delta.Thinking == nil && delta.PartialJSON == nil
+			if delta.Text != nil {
+				content = *delta.Text
 			}
 		case "thinking_delta":
-			if native.Delta.Thinking != "" {
-				o.markStreamDelta(state, e.UUID, index, native.Delta.Type, native.Delta.Thinking)
+			valid = delta.Thinking != nil && delta.Text == nil && delta.PartialJSON == nil
+			if delta.Thinking != nil {
+				content = *delta.Thinking
 			}
 		case "input_json_delta":
-			if native.Delta.PartialJSON != "" {
-				o.markStreamDelta(state, e.UUID, index, native.Delta.Type, native.Delta.PartialJSON)
+			valid = delta.PartialJSON != nil && delta.Text == nil && delta.Thinking == nil
+			if delta.PartialJSON != nil {
+				content = *delta.PartialJSON
+			}
+		case "signature_delta":
+			valid = !hasDeltaContent // Signature changes are metadata, not new work.
+		default:
+			valid = false
+		}
+		if !valid {
+			if o.results != 0 {
+				o.markUncoveredStream(root)
+			}
+			return // A mixed payload is not an exact replay witness.
+		}
+		if o.results != 0 && hasDeltaContent && (native.Index == nil || *native.Index < 0) {
+			o.markUncoveredStream(root)
+			return // Missing position cannot prove a replay.
+		}
+		if native.Index == nil || *native.Index < 0 {
+			return
+		}
+		index := *native.Index
+		if state.hasSealed && index <= state.sealedIndex {
+			if content != "" && o.results != 0 &&
+				(e.UUID == "" || !state.deltas[streamDelta{uuid: e.UUID, index: index, kind: delta.Type, content: content}]) {
+				o.markProvenanceGap(root)
+			}
+			return
+		}
+		if content != "" && o.markStreamDelta(state, e.UUID, index, delta.Type, content) && o.results != 0 {
+			if state.hasSealed {
+				o.markProvenanceGap(root) // A new block after a full frame is not an exact replay.
+			} else {
+				o.markUncoveredStream(root)
 			}
 		}
 	case "content_block_stop":
-		if native.Index != nil && state.tools[*native.Index] == 1 {
-			state.tools[*native.Index] = 2
+		if o.results != 0 && state.tools[*native.Index].status == 0 {
+			o.markUncoveredStream(root) // No proved start for this block.
+			return
+		}
+		if native.Index != nil && state.tools[*native.Index].status == 1 {
+			tool := state.tools[*native.Index]
+			tool.status = 2
+			state.tools[*native.Index] = tool
+			if o.results != 0 && !(state.hasSealed && *native.Index <= state.sealedIndex) {
+				o.markUncoveredStream(root)
+			}
 			o.markStreamProgress(state)
 		}
 	}
 }
 
-func (o *jsonlOutput) markStreamDelta(state *progressStream, uuid string, index int, kind, content string) {
-	if uuid != "" && o.onProgress != nil {
+func (o *jsonlOutput) markStreamDelta(state *progressStream, uuid string, index int, kind, content string) bool {
+	if uuid == "" {
+		// An identical untagged adjacent frame cannot prove new progress.
+		// shortcut: nonadjacent untagged replay is ambiguous, use native sequence IDs if available.
+		proof := sha256.Sum256([]byte(strconv.Itoa(index) + ":" + strconv.Itoa(len(kind)) + ":" + kind + content))
+		if state.lastWasNoUUID && state.lastDeltaProof == proof {
+			return false
+		}
+		state.lastDeltaProof, state.lastWasNoUUID = proof, true
+	} else {
+		state.lastWasNoUUID = false
 		// Keep distinct chunks if the CLI reuses a UUID within one message.
 		key := streamDelta{uuid: uuid, index: index, kind: kind, content: content}
 		if state.deltas[key] {
-			return
+			return false
 		}
+		if !o.reserveProgress(1, len(uuid)+len(kind)+len(content)) {
+			return false
+		}
+		state.signatureBytes += int64(len(uuid) + len(kind) + len(content))
+		o.transientEntries++
+		o.transientBytes += int64(len(uuid) + len(kind) + len(content))
 		if state.deltas == nil {
 			state.deltas = make(map[streamDelta]bool)
 		}
 		state.deltas[key] = true
 	}
 	o.markStreamProgress(state)
+	return true
 }
 
 func (o *jsonlOutput) markStreamProgress(state *progressStream) {
-	key := "assistant:" + state.messageID
+	key := (streamIdentity{state.key, state.messageID}).progressKey("assistant")
 	if !o.progressSeen[key] && !o.reserveProgress(1, len(key)) {
 		return
 	}
@@ -1098,9 +1956,9 @@ func (o *jsonlOutput) markStreamProgress(state *progressStream) {
 	}
 	o.progressSeen[key] = true
 	if o.streamedSinceAssistant == nil {
-		o.streamedSinceAssistant = make(map[string]bool)
+		o.streamedSinceAssistant = make(map[streamIdentity]bool)
 	}
-	o.streamedSinceAssistant[state.messageID] = true
+	o.streamedSinceAssistant[streamIdentity{state.key, state.messageID}] = true
 	if o.onProgress != nil {
 		o.onProgress()
 	}
@@ -1421,47 +2279,118 @@ func (o *jsonlOutput) ensureAssistantTotal() {
 	o.assistantTotalReady = true
 }
 
-func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshContent bool, messageID string, hasContent bool) {
+func (o *jsonlOutput) retainUnallocatedUsage(raw json.RawMessage) {
+	var reported eventUsage
+	if json.Unmarshal(raw, &reported) != nil {
+		return
+	}
+	if tokens, valid := reported.tokens(); valid {
+		o.retainStandaloneFloor(tokens)
+	}
+}
+
+func (o *jsonlOutput) retainStandaloneFloor(tokens usage.Tokens) {
+	floor, ok := knownTokenFloor(o.result.Tokens, tokens)
+	if !ok {
+		floor = strongerTokenFloor(o.result.Tokens, tokens)
+	}
+	o.result.Tokens = floor // Unallocated or contradictory counters cannot be added to another message.
+}
+
+func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageID string, hasContent, replay bool) {
+	if len(bytes.TrimSpace(e.Message)) == 0 && !reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil {
+		return // A metadata-only assistant notice reports no message work.
+	}
 	var message struct {
 		ID      string          `json:"id"`
 		Usage   json.RawMessage `json:"usage"`
 		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(raw, &message) != nil || message.ID == "" {
-		o.hasCumulative = false
-		o.uncovered = o.aggregateGeneration != 0
-		if o.results != 0 {
-			o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+	if json.Unmarshal(e.Message, &message) != nil {
+		o.markProvenanceGap(true)
+		return false, "", true, false // Malformed content cannot certify receipt coverage.
+	}
+	if message.ID == "" {
+		if !o.resumed {
+			o.retainUnallocatedUsage(message.Usage)
 		}
-		return
+		o.markProvenanceGap(true)
+		return false, "", assistantReceiptOmitted(message.Content), false
 	}
 	messageID = message.ID
-	root := bytes.Equal(bytes.TrimSpace(parent), []byte("null"))
-	var parentID string
-	unknown := !root && (json.Unmarshal(parent, &parentID) != nil || parentID == "")
-	old, seen := o.assistantUsage[message.ID]
-	prior, historical := o.assistantHistory[message.ID]
-	coveredStreamSnapshot := !seen && !historical &&
-		o.progressSeen["stream_start:"+message.ID] && o.progressSeen["assistant:"+message.ID] &&
-		(!o.streamedSinceAssistant[message.ID] || o.completed)
+	streamKey, streamRoot := streamProgressKey(e)
+	id := streamIdentity{streamKey, message.ID}
+	// Only an explicit root assistant frame can assess a stopped task.
+	root := e.parentForm == parentRoot
+	unknown := e.parentForm == parentMissing || e.parentForm == parentInvalid
+	prior, historical := o.assistantHistory[id]
+	if o.resumed {
+		// Starts and full frames can both be replayed by a resumed CLI. Only a
+		// stored message with the same origin, counters and content is an exact
+		// replay; new work needs a scoped final result for attribution.
+		hasUsage := reportPresent(message.Usage)
+		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
+		replay := historical && hasUsage == prior.hasTokens && hasContent == prior.hasContent && !unprojectable &&
+			!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil
+		if replay && hasUsage {
+			var reported eventUsage
+			if json.Unmarshal(message.Usage, &reported) != nil {
+				replay = false
+			} else {
+				tokens, valid := reported.tokens()
+				replay = valid && tokens == prior.tokens
+			}
+		}
+		if replay && hasContent {
+			contentKey := id.progressKey("assistant_content") + ":" + hex.EncodeToString(contentHash[:])
+			replay = o.progressSeen[contentKey]
+		}
+		if !replay && (o.results != 0 || hasUsage || hasContent || unprojectable || reportPresent(e.Usage) ||
+			reportPresent(e.ModelUsage) || e.TotalCostUSD != nil) {
+			o.markProvenanceGap(root || unknown)
+		}
+		if replay {
+			return false, message.ID, false, true
+		}
+		return false, "", assistantReceiptOmitted(message.Content), false
+	}
+	stream := o.progressStreams[streamKey]
+	streamResultIndex, postStream := o.results, false
+	if stream != nil && stream.messageID == message.ID {
+		streamResultIndex = stream.resultIndex
+		postStream = o.results != 0 && stream.resultIndex == o.results
+	}
+	currentStreamProof := o.streamedSinceAssistant[id]
+	old, seen := o.assistantUsage[id]
+	streamMatch := (stream != nil && stream.messageID == message.ID) || currentStreamProof || seen
+	if o.progressSeen[id.progressKey("stream_start")] && !streamMatch {
+		// A replaced stream key cannot prove this full frame belongs to its
+		// active stream. Keep only its standalone floor on a fresh call.
+		o.retainUnallocatedUsage(message.Usage)
+		o.markProvenanceGap(root || unknown)
+		return false, "", false, false
+	}
+	if !o.claimAssistantOrigin(e, message.ID) {
+		return false, "", false, false
+	}
+	streamedCurrentMessage := !seen && !historical && currentStreamProof
 	var rawUsage eventUsage
 	valid := json.Unmarshal(message.Usage, &rawUsage) == nil
 	var tokens usage.Tokens
 	if valid {
 		tokens, valid = rawUsage.tokens()
 	}
-	if coveredStreamSnapshot {
-		// A delayed full frame can contain more text than the observed stream
-		// without proving new work. Keep the frame as a baseline so it is not
-		// billed again as a new message.
+	if streamedCurrentMessage {
+		// The result may already cover this streamed message. Its full counters
+		// still enter this call's per-message maxima, but not root addition.
 		historical = true
 	}
 	priorTokens := prior.tokens
-	if !seen && !historical && !o.reserveProgress(1, len(message.ID)) {
+	if !seen && !historical && !o.reserveProgress(1, len(streamKey)+len(message.ID)) {
 		return // The bounded history limit is a fatal output error.
 	}
 	unknownPrior := historical && !prior.hasTokens
-	firstHistoricalCounters := valid && (unknownPrior && !seen || seen && old.priorMissing)
+	firstHistoricalCounters := valid && !streamedCurrentMessage && (unknownPrior && !seen || seen && old.priorMissing)
 	if firstHistoricalCounters {
 		// The first counters for an old ID may include work before this call.
 		// Only later increases are attributable without a cumulative result.
@@ -1469,17 +2398,40 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		old.prior = tokens
 		old.priorMissing = false
 	}
-	contentHash, hasContent := assistantContentHash(message.Content)
+	contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
 	contentKey := ""
 	newContent := false
 	if hasContent {
-		contentKey = "assistant_content:" + message.ID + ":" + hex.EncodeToString(contentHash[:])
+		contentKey = id.progressKey("assistant_content") + ":" + hex.EncodeToString(contentHash[:])
 		newContent = !o.progressSeen[contentKey]
 	}
+	if seen && valid && prior.hasTokens && tokens == old.tokens && hasContent && !newContent && !unprojectable &&
+		!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil {
+		return false, message.ID, false, true // Exact accepted full-frame replay has no new receipt content.
+	}
+	if stream != nil && stream.messageID == message.ID && o.results > max(1, stream.resultIndex) {
+		// The first result may reconcile a stream started before any result.
+		// A first full frame after a later result has uncertain scope; an
+		// identical accepted receipt is only a replay of settled work.
+		if seen && valid && prior.hasTokens && tokens == prior.tokens && !newContent && !unprojectable {
+			return false, message.ID, false, true
+		}
+		o.retainUnallocatedUsage(message.Usage)
+		o.markProvenanceGap(root || unknown)
+		return false, "", false, false
+	}
 	// An empty full frame cannot consume the stream's first content snapshot.
-	firstStreamContent := hasContent && !prior.hasContent &&
-		o.progressSeen["stream_start:"+message.ID] && o.progressSeen["assistant:"+message.ID]
-	if firstStreamContent {
+	firstStreamFrame := !prior.hasContent && currentStreamProof
+	firstStreamContent := hasContent && firstStreamFrame
+	if o.results != 0 && reportPresent(message.Usage) && !valid {
+		defer o.markUncoveredStream(false) // Unusable late counters cannot certify cost.
+	}
+	if o.results != 0 && (unprojectable || firstStreamFrame && hasContent) {
+		// A late frame with no exact content proof may contain work absent from
+		// the stream. Apply the gap after collecting any known counters.
+		defer o.markUncoveredStream(streamRoot)
+	}
+	if streamedCurrentMessage || firstStreamContent {
 		if newContent && !o.rememberProgress(contentKey) {
 			return
 		}
@@ -1488,11 +2440,11 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	if hasContent {
 		prior.hasContent = true
 	}
-	if coveredStreamSnapshot || firstStreamContent {
+	if firstStreamContent {
 		if o.assistantHistory == nil {
-			o.assistantHistory = make(map[string]assistantSnapshot)
+			o.assistantHistory = make(map[streamIdentity]assistantSnapshot)
 		}
-		o.assistantHistory[message.ID] = prior
+		o.assistantHistory[id] = prior
 	}
 	if firstStreamContent && seen && len(message.Usage) == 0 {
 		// An empty frame already registered this ID. Its first full content
@@ -1511,17 +2463,33 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	freshContent = newContent
 	if newContent && o.results != 0 {
 		o.completed, o.result.Answer, o.result.UsageComplete = false, "", false
+		if seen && old.resultIndex < o.results {
+			o.markProvenanceGap(root || unknown) // A changed block revises settled work.
+		}
 	}
 	if valid {
 		updated := prior.tokens.Max(tokens)
-		o.ensureAssistantTotal()
-		if !o.assistantTotalOverflow {
-			remaining := o.assistantTotal.Sub(prior.tokens)
-			total, ok := remaining.AddChecked(updated)
-			if ok {
-				o.assistantTotal = total
+		if prior.hasTokens && !covers(tokens, prior.tokens) {
+			o.markProvenanceGap(false)
+			if updated.Valid() {
+				if floor, ok := knownTokenFloor(prior.tokens, tokens); ok {
+					updated = floor
+				}
 			} else {
-				o.assistantTotalOverflow = true
+				o.retainStandaloneFloor(prior.tokens)
+				o.retainStandaloneFloor(tokens)
+			}
+		}
+		if !o.perCallResults {
+			o.ensureAssistantTotal()
+			if !o.assistantTotalOverflow {
+				remaining := o.assistantTotal.Sub(prior.tokens)
+				total, ok := remaining.AddChecked(updated)
+				if ok {
+					o.assistantTotal = total
+				} else {
+					o.assistantTotalOverflow = true
+				}
 			}
 		}
 		prior.tokens, prior.hasTokens = updated, true
@@ -1533,10 +2501,10 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		}
 	}
 	if o.assistantHistory == nil {
-		o.assistantHistory = make(map[string]assistantSnapshot)
+		o.assistantHistory = make(map[streamIdentity]assistantSnapshot)
 	}
-	o.assistantHistory[message.ID] = prior
-	if o.hasCumulative && (o.assistantTotalOverflow || valid && !covers(o.cumulative, o.assistantTotal)) {
+	o.assistantHistory[id] = prior
+	if o.hasCumulative && !o.perCallResults && (o.assistantTotalOverflow || valid && !covers(o.cumulative, o.assistantTotal)) {
 		if !o.assistantTotalOverflow {
 			if lower := o.result.Tokens.Max(o.assistantTotal.Sub(o.baseline)); lower.Valid() {
 				o.result.Tokens = lower
@@ -1544,30 +2512,38 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		}
 		o.hasCumulative, o.uncovered = false, true
 		o.result.UsageComplete = false
+		o.nativeCostUSD = nil // Later counters exceed the settled cost snapshot.
 	}
 	if firstHistoricalCounters && !newContent {
 		// A newly revealed absolute floor is not evidence of current work.
 		// Keep the answer; only later counter increases are attributable.
 		if seen {
-			o.assistantUsage[message.ID] = old
+			o.assistantUsage[id] = old
 		}
 		return
 	}
-	if o.baselineUnknown || !seen {
+	if o.results != 0 && (newContent || !seen && !streamedCurrentMessage) {
+		// A cost snapshot before new assistant work is only a known subtotal.
+		o.nativeCostUSD = nil
+	}
+	if o.baselineUnknown || !seen && !streamedCurrentMessage {
 		o.hasCumulative = false
 	}
 	if !seen {
 		if o.assistantUsage == nil {
-			o.assistantUsage = make(map[string]messageUsage)
+			o.assistantUsage = make(map[streamIdentity]messageUsage)
 		}
 		old = messageUsage{prior: priorTokens, priorMissing: unknownPrior && !valid,
-			generation: o.aggregateGeneration, root: root}
-		// Remember IDs even before usable counters arrive. A later block from
+			generation: o.aggregateGeneration, resultIndex: streamResultIndex, postStream: postStream,
+			root: root, historical: historical}
+		// Remember identities even before usable counters arrive. A later block from
 		// an already covered message must not become a new billable call.
-		o.assistantUsage[message.ID] = old
-		o.uncovered = o.aggregateGeneration != 0
+		o.assistantUsage[id] = old
+		if !streamedCurrentMessage {
+			o.uncovered = o.aggregateGeneration != 0
+		}
 		if root && !historical && (!o.stopped || o.rootStartsAfterStop[message.ID] ||
-			!o.progressSeen["stream_start:"+message.ID]) {
+			!o.progressSeen[id.progressKey("stream_start")]) {
 			o.stopped = false
 		}
 		if (root || unknown) && o.results != 0 {
@@ -1592,22 +2568,47 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 		markUsageUncertain()
 		return
 	}
+	if seen && old.resultIndex < o.results && tokens != old.tokens {
+		// A later result may already include a revised receipt. Its standalone
+		// counters cannot prove an additive delta to that settled result.
+		o.markProvenanceGap(false)
+	}
+	if o.results != 0 && !streamedCurrentMessage && !covers(old.tokens, tokens) {
+		o.nativeCostUSD = nil
+	}
 	total, valid := o.assistantTokens.Sub(old.tokens).AddChecked(tokens)
 	if !valid {
+		o.markProvenanceGap(false)
+		floor := strongerTokenFloor(o.result.Tokens, o.assistantTokens)
+		if merged, ok := knownTokenFloor(tokens, floor); ok {
+			o.result.Tokens = strongerTokenFloor(floor, merged)
+		} else {
+			o.result.Tokens = strongerTokenFloor(floor, tokens)
+		}
 		markUsageUncertain()
 		return
 	}
 	if old.root && old.generation == o.aggregateGeneration {
-		rootTotal, valid := o.rootTokens.Sub(old.tokens).AddChecked(tokens)
-		if !valid {
+		if old.historical {
+			// A late increase on an ID from an earlier call may already be in
+			// this result. Keep its delta as a floor without adding it again.
 			markUsageUncertain()
-			return
+		} else {
+			rootTotal, valid := o.rootTokens.Sub(old.tokens).AddChecked(tokens)
+			if !valid {
+				markUsageUncertain()
+				return
+			}
+			o.rootTokens = rootTotal
 		}
-		o.rootTokens = rootTotal
 	}
 	o.assistantTokens = total
+	if o.results != 0 && !covers(o.result.Tokens, total) {
+		o.uncovered, o.result.UsageComplete = true, false
+		o.nativeCostUSD = nil
+	}
 	old.tokens = tokens
-	o.assistantUsage[message.ID] = old
+	o.assistantUsage[id] = old
 	if o.hasCumulative {
 		lower, valid := o.assistantLowerBound()
 		o.hasCumulative = valid && covers(o.cumulative.Sub(o.baseline), lower)
@@ -1615,32 +2616,69 @@ func (o *jsonlOutput) recordAssistantUsage(raw, parent json.RawMessage) (freshCo
 	return
 }
 
-func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
+// assistantReceiptOmitted mirrors captureMessage's assistant content boundary:
+// thinking is private, while any other block or malformed content needs a
+// receipt marker when a resumed frame cannot be attributed.
+func assistantReceiptOmitted(raw json.RawMessage) bool {
 	content := bytes.TrimSpace(raw)
 	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
-		return [32]byte{}, false
+		return false
+	}
+	if _, _, unprojectable := assistantContentProof(content); unprojectable {
+		return true
+	}
+	if content[0] == '"' {
+		var text string
+		return json.Unmarshal(content, &text) != nil || text != ""
+	}
+	var blocks []json.RawMessage
+	if json.Unmarshal(content, &blocks) != nil {
+		return true
+	}
+	for _, raw := range blocks {
+		var block struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(raw, &block) != nil {
+			return true
+		}
+		if block.Type == "thinking" || block.Type == "redacted_thinking" || block.Type == "text" && block.Text == "" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func assistantContentProof(raw json.RawMessage) ([32]byte, bool, bool) {
+	content := bytes.TrimSpace(raw)
+	if len(content) == 0 || bytes.Equal(content, []byte("null")) {
+		return [32]byte{}, false, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
 	var value any
 	if decoder.Decode(&value) != nil {
-		return [32]byte{}, false
+		return [32]byte{}, false, true
 	}
+	unprojectable := false
 	switch typed := value.(type) {
 	case string:
 		if typed == "" {
-			return [32]byte{}, false
+			return [32]byte{}, false, false
 		}
 		value = []any{map[string]any{"type": "text", "text": typed}}
 	case []any:
 		if len(typed) == 0 {
-			return [32]byte{}, false
+			return [32]byte{}, false, false
 		}
 		// Block metadata can change on replay without new model work.
 		projected := make([]any, 0, len(typed))
 		for _, item := range typed {
 			block, ok := item.(map[string]any)
 			if !ok {
+				unprojectable = true
 				continue
 			}
 			var field string
@@ -1652,8 +2690,12 @@ func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
 			case "redacted_thinking":
 				field = "data"
 			case "tool_use":
+				if block["text"] != nil || block["thinking"] != nil || block["data"] != nil || block["partial_json"] != nil || block["content"] != nil {
+					unprojectable = true
+				}
 				id, ok := block["id"].(string)
 				if !ok || id == "" {
+					unprojectable = true
 					continue
 				}
 				contentBlock := map[string]any{"type": "tool_use", "id": id}
@@ -1665,24 +2707,32 @@ func assistantContentHash(raw json.RawMessage) ([32]byte, bool) {
 				projected = append(projected, contentBlock)
 				continue
 			default:
+				unprojectable = true
 				continue
+			}
+			for _, extra := range []string{"text", "thinking", "data", "name", "input", "partial_json", "content"} {
+				if extra != field && block[extra] != nil {
+					unprojectable = true
+				}
 			}
 			if text, ok := block[field].(string); ok && text != "" {
 				projected = append(projected, map[string]any{"type": block["type"], field: text})
+			} else if !ok {
+				unprojectable = true
 			}
 		}
 		if len(projected) == 0 {
-			return [32]byte{}, false
+			return [32]byte{}, false, unprojectable
 		}
 		value = projected
 	default:
-		return [32]byte{}, false // Native assistant content is a string or list of known blocks.
+		return [32]byte{}, false, true // Native content is a string or list of known blocks.
 	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
-		return [32]byte{}, false
+		return [32]byte{}, false, true
 	}
-	return sha256.Sum256(canonical), true
+	return sha256.Sum256(canonical), true, unprojectable
 }
 
 func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {
@@ -1692,14 +2742,23 @@ func (o *jsonlOutput) assistantLowerBound() (usage.Tokens, bool) {
 		// Unknown/delegate messages may arrive late and are never added to it.
 		root, valid := o.aggregateTokens.AddChecked(o.rootTokens)
 		if !valid {
-			return usage.Tokens{}, false
+			floor := strongerTokenFloor(o.result.Tokens, o.assistantTokens)
+			floor = strongerTokenFloor(floor, o.aggregateTokens)
+			floor = strongerTokenFloor(floor, o.rootTokens)
+			if combined, ok := knownTokenFloor(floor, o.assistantTokens); ok {
+				floor = combined // Input and output can be independently proved.
+			}
+			return floor, false
 		}
 		tokens = tokens.Max(root)
 	}
 	return tokens, tokens.Valid()
 }
 
-func covers(a, b usage.Tokens) bool { return a.Max(b) == a }
+func covers(a, b usage.Tokens) bool {
+	return a.Valid() && b.Valid() && a.Max(b) == a &&
+		a.Input-a.CacheCreationInput-a.CachedInput >= b.Input-b.CacheCreationInput-b.CachedInput
+}
 
 func isWaitCeilingStop(line []byte) bool {
 	// Managed CLI settings can override its launch environment. Match this

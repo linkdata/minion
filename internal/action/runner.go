@@ -627,7 +627,8 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 				failure.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 				configured.eventSink(failure)
 			}
-			entry.Tokens, entry.UsageCoverage, entry.Complete = call.Tokens, call.UsageCoverage, call.UsageComplete
+			entry.Tokens, entry.UsageCoverage, entry.Complete, entry.EstimatedCostUSD, entry.EstimatedCostComplete =
+				call.Tokens, call.UsageCoverage, call.UsageComplete, call.EstimatedCostUSD, call.EstimatedCostComplete
 			if err != nil && call.Tokens == (usage.Tokens{}) && call.UsageCoverage == (usage.Coverage{}) {
 				entry.UsageCoverage, entry.Complete = usage.Coverage{Scope: "unknown", PartialReport: true}, false
 			}

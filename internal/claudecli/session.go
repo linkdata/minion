@@ -39,8 +39,11 @@ type Session struct {
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
 	baseline         usage.Tokens
 	usageGap         bool
+	costBaselineUSD  float64
+	costObservedUSD  float64 // Raw floor for later cumulative cost, including unknown-scope calls.
+	costGap          bool
 	progressSeen     map[string]bool
-	assistantHistory map[string]assistantSnapshot
+	assistantHistory map[streamIdentity]assistantSnapshot
 	taskProgress     map[string]taskProgressState
 	runlessPending   map[string]int
 	runlessExplicit  map[string]bool
@@ -58,6 +61,7 @@ type Session struct {
 // Run clears model-writable scratch before starting the independent conversation.
 func (s *Session) NewConversation() {
 	s.id, s.started, s.baseline, s.usageGap = "", false, usage.Tokens{}, false
+	s.costBaselineUSD, s.costObservedUSD, s.costGap = 0, 0, false
 	s.progressSeen = nil
 	s.assistantHistory = nil
 	s.taskProgress = nil

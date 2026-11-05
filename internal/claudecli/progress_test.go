@@ -63,8 +63,9 @@ func TestStreamReplayProofIsBoundedWithoutProgressCallback(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
 	writeChunks(t, &o, start+"\n"+delta+"\n")
-	if !errors.Is(o.err, aicli.ErrOutputLimit) || o.progressEntries != 1 || o.progressSeen["assistant:old"] {
-		t.Fatalf("unbounded stream proof: entries=%d proof=%t error=%v", o.progressEntries, o.progressSeen["assistant:old"], o.err)
+	assistantKey := (streamIdentity{"root", "old"}).progressKey("assistant")
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || o.progressEntries != 1 || o.progressSeen[assistantKey] {
+		t.Fatalf("unbounded stream proof: entries=%d proof=%t error=%v", o.progressEntries, o.progressSeen[assistantKey], o.err)
 	}
 }
 
@@ -227,8 +228,8 @@ func TestUUIDBearingPartialReplayDoesNotRenewProgress(t *testing.T) {
 			}
 			unidentified := frame("", tc.first)
 			writeChunks(t, &o, unidentified+"\n"+unidentified+"\n")
-			if o.err != nil || progress != 4 {
-				t.Fatalf("unidentified deltas are ambiguous: progress=%d error=%v", progress, o.err)
+			if o.err != nil || progress != 3 {
+				t.Fatalf("repeated untagged delta renewed progress: progress=%d error=%v", progress, o.err)
 			}
 		})
 	}
@@ -289,7 +290,7 @@ func TestThinkingSignatureReplayDoesNotRenewProgressOrRevokeResult(t *testing.T)
 	}
 }
 
-func TestMalformedAssistantBlockChangesDoNotRevokeResult(t *testing.T) {
+func TestMalformedLateRootBlocksRequireNewResult(t *testing.T) {
 	for _, tc := range []struct {
 		name, first, second, after string
 	}{
@@ -306,8 +307,8 @@ func TestMalformedAssistantBlockChangesDoNotRevokeResult(t *testing.T) {
 				return `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"bad","content":` + content + `}}` + "\n"
 			}
 			writeChunks(t, &o, frame(tc.first)+frame(tc.second)+successfulResult+"\n"+frame(tc.after))
-			if o.err != nil || !o.completed || o.result.Answer != "final answer" || progress != 0 {
-				t.Fatalf("malformed block changed result/progress: progress=%d completed=%t answer=%q error=%v",
+			if o.err != nil || o.completed || o.result.Answer != "" || o.result.UsageComplete || progress != 0 {
+				t.Fatalf("malformed late block retained result or renewed progress: progress=%d completed=%t answer=%q error=%v",
 					progress, o.completed, o.result.Answer, o.err)
 			}
 		})
@@ -614,6 +615,46 @@ func TestFullAssistantContentAfterStreamDeltaDoesNotDoubleCount(t *testing.T) {
 	}
 }
 
+func TestUnprovedStreamDeltasDoNotRenewProgress(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const mixed = `{"type":"stream_event","uuid":"chunk","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A","thinking":"B"}}}`
+	const unindexed = `{"type":"stream_event","uuid":"chunk","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"A"}}}`
+	const junk = `{"type":"stream_event","uuid":"chunk","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":[]}}`
+	for _, tc := range []struct{ name, frame, changed string }{
+		{"mixed", mixed, strings.Replace(mixed, `"text":"A"`, `"text":"C"`, 1)},
+		{"unindexed", unindexed, strings.Replace(unindexed, `"text":"A"`, `"text":"C"`, 1)},
+		{"non-content junk", junk, strings.Replace(junk, `"delta":[]`, `"delta":[1]`, 1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var progress int
+			o := jsonlOutput{onProgress: func() { progress++ }}
+			writeChunks(t, &o, start+"\n"+tc.frame+"\n"+tc.frame+"\n"+tc.changed+"\n")
+			if o.err != nil || progress != 0 {
+				t.Fatalf("unproved delta renewed progress: progress=%d error=%v", progress, o.err)
+			}
+		})
+	}
+}
+
+func TestUnprovedDeltasDoNotConsumeResumedProgressQuota(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	first := jsonlOutput{progressEntryLimit: 2}
+	writeChunks(t, &first, start+"\n")
+	for n := range 100 {
+		frame := fmt.Sprintf(`{"type":"stream_event","uuid":"%d","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%d"}}}`, n, n)
+		writeChunks(t, &first, frame+"\n")
+	}
+	bytes, entries := first.progressCheckpoint()
+	if first.err != nil || entries != 1 {
+		t.Fatalf("unproved frames filled progress history: entries=%d error=%v", entries, first.err)
+	}
+	second := jsonlOutput{progressSeen: first.progressSeen, progressBytes: bytes, progressEntries: entries, progressEntryLimit: 2}
+	writeChunks(t, &second, strings.Replace(start, `"id":"A"`, `"id":"B"`, 1)+"\n")
+	if second.err != nil || second.progressEntries != 2 {
+		t.Fatalf("resumed call lost progress quota: entries=%d error=%v", second.progressEntries, second.err)
+	}
+}
+
 func TestEmptyOrReplayedFullFrameDoesNotRepeatStreamCredit(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
@@ -681,7 +722,7 @@ func TestFullClaudeFrameBeforeDeltaAndEmptyFrameStreamCredit(t *testing.T) {
 		want         int
 	}{
 		{"full before delta", start + "\n" + textStart + "\n" + full + "\n" + textDelta, 1},
-		{"empty before delta", start + "\n" + textStart + "\n" + textDelta + "\n" + empty + "\n" + textDelta, 2},
+		{"empty before identical delta", start + "\n" + textStart + "\n" + textDelta + "\n" + empty + "\n" + textDelta, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			progress := 0
@@ -694,7 +735,7 @@ func TestFullClaudeFrameBeforeDeltaAndEmptyFrameStreamCredit(t *testing.T) {
 	}
 }
 
-func TestFirstFullFrameAfterEmptyStreamReplayPreservesResult(t *testing.T) {
+func TestFirstFullFrameAfterEmptyStreamRequiresNewResult(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
 	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
@@ -713,31 +754,30 @@ func TestFirstFullFrameAfterEmptyStreamReplayPreservesResult(t *testing.T) {
 			if first.err != nil || !first.completed || callback && progress != 1 {
 				t.Fatalf("first call: completed=%t progress=%d error=%v", first.completed, progress, first.err)
 			}
-			resumed := jsonlOutput{onProgress: first.onProgress, baseline: first.result.Tokens, progressSeen: first.progressSeen,
+			resumed := jsonlOutput{resumed: true, onProgress: first.onProgress, baseline: first.result.Tokens, progressSeen: first.progressSeen,
 				assistantHistory: first.assistantHistory, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
 			writeChunks(t, &resumed, resumedResult+"\n"+full+"\n")
-			if resumed.err != nil || !resumed.completed || resumed.result.Answer == "" ||
-				!resumed.result.UsageComplete || resumed.result.Tokens != (usage.Tokens{}) || callback && progress != 1 {
-				t.Fatalf("stream-covered replay: result=%+v completed=%t progress=%d error=%v", resumed.result, resumed.completed, progress, resumed.err)
+			if resumed.err != nil || resumed.completed || resumed.result.Answer != "" ||
+				resumed.result.UsageComplete || resumed.result.Tokens != (usage.Tokens{}) || callback && progress != 1 {
+				t.Fatalf("unproved root full frame retained result: result=%+v completed=%t progress=%d error=%v", resumed.result, resumed.completed, progress, resumed.err)
 			}
 			writeChunks(t, &resumed, changed+"\n")
-			if resumed.err != nil || resumed.completed || callback && progress != 2 {
-				t.Fatalf("changed full frame did not count: completed=%t progress=%d error=%v", resumed.completed, progress, resumed.err)
+			if resumed.err != nil || resumed.completed || callback && progress != 1 {
+				t.Fatalf("unmatched historical frame renewed progress: completed=%t progress=%d error=%v", resumed.completed, progress, resumed.err)
 			}
 		})
 	}
 }
 
-func TestFirstFullFrameAfterEmptyStreamKeepsUsageEvidence(t *testing.T) {
+func TestFirstFullFrameAfterEmptyStreamKeepsCountersButRequiresNewResult(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
 	const empty = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[]}}`
 	for _, tc := range []struct {
-		name, full   string
-		wantComplete bool
+		name, full string
 	}{
-		{"omitted usage", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`, true},
-		{"malformed usage", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}],"usage":{}}}`, false},
+		{"omitted usage", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}]}}`},
+		{"malformed usage", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","content":[{"type":"text","text":"A"}],"usage":{}}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			progress := 0
@@ -747,8 +787,13 @@ func TestFirstFullFrameAfterEmptyStreamKeepsUsageEvidence(t *testing.T) {
 				t.Fatalf("stream and result: result=%+v completed=%t progress=%d error=%v", o.result, o.completed, progress, o.err)
 			}
 			writeChunks(t, &o, tc.full+"\n")
-			if o.err != nil || !o.completed || o.result.UsageComplete != tc.wantComplete || o.result.Answer != "final answer" || progress != 1 {
+			if o.err != nil || o.completed || o.result.UsageComplete || o.result.Answer != "" || progress != 1 {
 				t.Fatalf("full frame changed result: result=%+v completed=%t progress=%d error=%v", o.result, o.completed, progress, o.err)
+			}
+			before := o.result.Tokens
+			writeChunks(t, &o, tc.full+"\n")
+			if o.err != nil || o.completed || o.result.UsageComplete || o.result.Tokens != before || progress != 1 {
+				t.Fatalf("exact full-frame replay changed accounting: result=%+v progress=%d error=%v", o.result, progress, o.err)
 			}
 		})
 	}
@@ -759,11 +804,146 @@ func TestReplayedStreamStartsDoNotRetainAgentState(t *testing.T) {
 	progress := 0
 	o := jsonlOutput{onProgress: func() { progress++ }}
 	writeChunks(t, &o, start+"\n")
-	for i := range 100 {
-		writeChunks(t, &o, fmt.Sprintf(`{"type":"stream_event","agent_id":"agent-%d","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"A"}}}`+"\n", i))
+	const agentStart = `{"type":"stream_event","agent_id":"agent","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"A"}}}`
+	for range 100 {
+		writeChunks(t, &o, agentStart+"\n")
 	}
-	if o.err != nil || len(o.progressStreams) != 1 || progress != 0 {
-		t.Fatalf("replayed starts retained agent state: streams=%d progress=%d error=%v", len(o.progressStreams), progress, o.err)
+	writeChunks(t, &o, successfulResult+"\n")
+	entries := o.progressEntries
+	for range 100 {
+		writeChunks(t, &o, agentStart+"\n")
+	}
+	if o.err != nil || len(o.progressStreams) != 2 || o.progressEntries != entries || progress != 0 {
+		t.Fatalf("replayed starts retained agent state or consumed quota: streams=%d entries=%d progress=%d error=%v", len(o.progressStreams), o.progressEntries, progress, o.err)
+	}
+}
+
+func TestHistoricalHelperReplayDoesNotReserveOriginQuota(t *testing.T) {
+	id := streamIdentity{taggedStreamKey("worker", "delegate"), "old"}
+	startKey := id.progressKey("stream_start")
+	o := jsonlOutput{progressSeen: map[string]bool{startKey: true}, progressEntries: 1,
+		progressBytes: int64(len(startKey)), progressEntryLimit: 1}
+	const full = `{"type":"assistant","agent_id":"worker","parent_tool_use_id":"delegate","message":{"id":"old","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	writeChunks(t, &o, full+"\n")
+	origin := (streamIdentity{"delegate", "old"}).progressKey("assistant_tagged")
+	if o.err != nil || o.progressEntries != 1 || o.progressSeen[origin] || o.assistantTokens.Output != 0 {
+		t.Fatalf("historical replay reserved current origin: entries=%d origin=%t assistant=%+v error=%v",
+			o.progressEntries, o.progressSeen[origin], o.assistantTokens, o.err)
+	}
+}
+
+func TestDistinctAgentsCanProgressWithSameMessageID(t *testing.T) {
+	var progress int
+	o := jsonlOutput{onProgress: func() { progress++ }}
+	for i, agent := range []string{"A", "B"} {
+		start := fmt.Sprintf(`{"type":"stream_event","agent_id":%q,"parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`, agent)
+		delta := fmt.Sprintf(`{"type":"stream_event","agent_id":%q,"parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`, agent)
+		writeChunks(t, &o, start+"\n"+delta+"\n")
+		if o.err != nil || progress != i+1 {
+			t.Fatalf("agent %s lost stream progress: count=%d error=%v", agent, progress, o.err)
+		}
+	}
+}
+
+func TestStreamDeltaSignaturesUseProgressBudget(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const first = `{"type":"stream_event","uuid":"first","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}}`
+	const second = `{"type":"stream_event","uuid":"second","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two"}}}`
+	o := jsonlOutput{progressEntryLimit: 3} // Start, first signature, and assistant identity fill the limit.
+	writeChunks(t, &o, start+"\n"+first+"\n")
+	if o.err != nil || o.progressEntries != 3 {
+		t.Fatalf("first signature was not charged to the progress budget: entries=%d error=%v", o.progressEntries, o.err)
+	}
+	writeChunks(t, &o, first+"\n") // Exact UUID/content replay uses no additional entry.
+	if o.err != nil || o.progressEntries != 3 {
+		t.Fatalf("replayed signature consumed quota: entries=%d error=%v", o.progressEntries, o.err)
+	}
+	writeChunks(t, &o, second+"\n")
+	if !errors.Is(o.err, aicli.ErrOutputLimit) {
+		t.Fatalf("distinct delta signatures escaped progress budget: entries=%d error=%v", o.progressEntries, o.err)
+	}
+}
+
+func TestToolStartProofUsesProgressBudget(t *testing.T) {
+	const start = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"helper"}}}`
+	tool := func(index int) string {
+		return fmt.Sprintf(`{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"tool-%d","name":"Task","input":{}}}}`, index, index)
+	}
+	o := jsonlOutput{progressEntryLimit: 4} // Origin, start, first tool proof and assistant identity fill the limit.
+	writeChunks(t, &o, start+"\n"+tool(0)+"\n")
+	if o.err != nil || o.progressEntries != 4 || o.transientEntries != 1 {
+		t.Fatalf("first tool proof was not charged: entries=%d transient=%d error=%v", o.progressEntries, o.transientEntries, o.err)
+	}
+	writeChunks(t, &o, tool(0)+"\n")
+	if o.err != nil || o.progressEntries != 4 {
+		t.Fatalf("identical tool start consumed quota: entries=%d error=%v", o.progressEntries, o.err)
+	}
+	writeChunks(t, &o, tool(1)+"\n")
+	if !errors.Is(o.err, aicli.ErrOutputLimit) {
+		t.Fatalf("distinct tool proof escaped the budget: entries=%d error=%v", o.progressEntries, o.err)
+	}
+}
+
+func TestStoppedStreamDeltaBudgetDoesNotPersist(t *testing.T) {
+	const startA = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"A"}}}`
+	const deltaA = `{"type":"stream_event","uuid":"A","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}}`
+	const stop = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_stop"}}`
+	first := jsonlOutput{progressEntryLimit: 6}
+	writeChunks(t, &first, startA+"\n"+deltaA+"\n"+stop+"\n"+successfulResult+"\n")
+	first.finish()
+	if first.err != nil || first.progressEntries != 4 {
+		t.Fatalf("first stream: entries=%d error=%v", first.progressEntries, first.err)
+	}
+	bytes, entries := first.progressCheckpoint()
+	if entries != 3 || bytes >= first.progressBytes {
+		t.Fatalf("discarded signature remained in session checkpoint: entries=%d bytes=%d", entries, bytes)
+	}
+	const startB = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"B"}}}`
+	const deltaB = `{"type":"stream_event","uuid":"B","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two"}}}`
+	second := jsonlOutput{progressSeen: first.progressSeen, progressEntries: entries, progressBytes: bytes, progressEntryLimit: 6}
+	writeChunks(t, &second, startB+"\n"+deltaB+"\n")
+	if second.err != nil || second.progressEntries != 6 {
+		t.Fatalf("stopped stream quota was not released for the next call: entries=%d error=%v", second.progressEntries, second.err)
+	}
+}
+
+func TestReplacedRootStreamReleasesProofBeforeReservingStart(t *testing.T) {
+	o := jsonlOutput{progressEntryLimit: 4}
+	const first = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const delta = `{"type":"stream_event","uuid":"chunk","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	const tool = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool","name":"Task","input":{}}}}`
+	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
+	const second = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"B"}}}`
+	writeChunks(t, &o, first+"\n"+delta+"\n"+tool+"\n"+stop+"\n")
+	if o.err != nil || o.progressEntries != 4 || o.transientEntries != 2 {
+		t.Fatalf("stopped root stream lost replay proof: entries=%d transient=%d error=%v", o.progressEntries, o.transientEntries, o.err)
+	}
+	writeChunks(t, &o, second+"\n")
+	wantBytes := int64(len((streamIdentity{"root", "A"}).progressKey("stream_start")) +
+		len((streamIdentity{"root", "A"}).progressKey("assistant")) +
+		len((streamIdentity{"root", "B"}).progressKey("stream_start")))
+	if o.err != nil || o.progressEntries != 3 || o.transientEntries != 0 || o.progressBytes != wantBytes || o.transientBytes != 0 {
+		t.Fatalf("replaced stream retained proof before reserving start: entries=%d transient=%d bytes=%d transientBytes=%d error=%v",
+			o.progressEntries, o.transientEntries, o.progressBytes, o.transientBytes, o.err)
+	}
+}
+
+func TestReplacedHelperStreamReleasesProofBeforeOriginQuota(t *testing.T) {
+	o := jsonlOutput{progressEntryLimit: 5}
+	const startA = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"A"}}}`
+	const deltaA = `{"type":"stream_event","uuid":"chunk","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	const toolA = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool","name":"Task","input":{}}}}`
+	const stopA = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_stop"}}`
+	const startB = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"B"}}}`
+	writeChunks(t, &o, startA+"\n"+deltaA+"\n"+toolA+"\n"+stopA+"\n")
+	if o.err != nil || o.progressEntries != 5 || o.transientEntries != 2 {
+		t.Fatalf("first helper did not fill transient budget: entries=%d transient=%d error=%v", o.progressEntries, o.transientEntries, o.err)
+	}
+	writeChunks(t, &o, startB+"\n")
+	stream := o.progressStreams[taggedStreamKey("worker", "delegate")]
+	if o.err != nil || o.progressEntries != 5 || o.transientEntries != 0 ||
+		stream == nil || stream.messageID != "B" {
+		t.Fatalf("replacement helper could not use released budget: entries=%d transient=%d error=%v", o.progressEntries, o.transientEntries, o.err)
 	}
 }
 
@@ -1355,17 +1535,41 @@ func TestProgressRequiresNativeContentIdentity(t *testing.T) {
 		t.Fatalf("unbound or malformed content changed task state: count=%d stopped=%t error=%v", got, o.stopped, o.err)
 	}
 	writeChunks(t, &o, `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"helper-message"}}}`+"\n")
-	writeChunks(t, &o, `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"helper work"}}}`+"\n")
+	writeChunks(t, &o, `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"helper work"}}}`+"\n")
+	if got != 1 || o.err != nil {
+		t.Fatalf("indexed helper delta did not renew progress: count=%d error=%v", got, o.err)
+	}
 	writeChunks(t, &o, `{"type":"assistant","agent_id":"helper-1","parent_tool_use_id":"delegate","message":{"id":"helper-message","content":[{"type":"text","text":"helper work"}]}}`+"\n")
 	if got != 1 || o.err != nil {
-		t.Fatalf("helper delta was missed or full message replayed: count=%d error=%v", got, o.err)
+		t.Fatalf("helper full frame repeated stream progress: count=%d error=%v", got, o.err)
+	}
+}
+
+func TestUntaggedDeltaReplayDoesNotRenewProgress(t *testing.T) {
+	var got int
+	o := jsonlOutput{onProgress: func() { got++ }}
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"message-1"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"same"}}}`
+	writeChunks(t, &o, start+"\n"+delta+"\n"+delta+"\n")
+	if o.err != nil || got != 1 {
+		t.Fatalf("replayed untagged delta: progress=%d err=%v", got, o.err)
+	}
+	writeChunks(t, &o, strings.Replace(delta, `"same"`, `"new"`, 1)+"\n")
+	if o.err != nil || got != 2 {
+		t.Fatalf("new untagged delta: progress=%d err=%v", got, o.err)
+	}
+	const helperStart = `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"message-1"}}}`
+	const helperDelta = `{"type":"stream_event","agent_id":"helper-1","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"same"}}}`
+	writeChunks(t, &o, helperStart+"\n"+helperDelta+"\n")
+	if o.err != nil || got != 3 {
+		t.Fatalf("same delta in independent stream: progress=%d err=%v", got, o.err)
 	}
 }
 
 func TestSessionRunDeliversNativeProgress(t *testing.T) {
 	fakeExecutable(t, "claude", "cat >/dev/null\nprintf '%s\\n' "+
 		`'{"type":"stream_event","event":{"type":"message_start","message":{"id":"message-1"}}}' `+
-		`'{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"working"}}}' `+
+		`'{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"working"}}}' `+
 		"'"+successfulResult+"'\n")
 	var session Session
 	t.Cleanup(func() {
@@ -1384,12 +1588,13 @@ func TestSessionRunDeliversNativeProgress(t *testing.T) {
 func TestSessionRunResumeKeepsProgressIdentity(t *testing.T) {
 	const oldMessage = `{"type":"assistant","message":{"id":"old","content":[{"type":"text","text":"old work"}]}}`
 	const newMessage = `{"type":"assistant","message":{"id":"new","content":[{"type":"text","text":"new work"}]}}`
+	const newStart = `{"type":"stream_event","event":{"type":"message_start","message":{"id":"new"}}}`
 	fakeExecutable(t, "claude", `n=0
 [ ! -f "$0.count" ] || n=$(cat "$0.count")
 n=$((n+1)); printf '%s' "$n" > "$0.count"
 cat >/dev/null
 printf '%s\n' '`+oldMessage+`'
-if [ "$n" -eq 2 ]; then printf '%s\n' '`+newMessage+`'; fi
+if [ "$n" -eq 2 ]; then printf '%s\n' '`+newStart+`' '`+newMessage+`'; fi
 printf '%s\n' '`+successfulResult+`'
 `)
 	var session Session
@@ -1403,7 +1608,11 @@ printf '%s\n' '`+successfulResult+`'
 	workspace := t.TempDir()
 	for call := 1; call <= 2; call++ {
 		result, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{})
-		if err != nil || result.Answer != "final answer" || progress.Load() != int32(3*call) {
+		wantProgress := int32(3)
+		if call == 2 {
+			wantProgress = 5 // A resumed start cannot prove a new assistant frame.
+		}
+		if err != nil || result.Answer != "final answer" || progress.Load() != wantProgress {
 			t.Fatalf("call %d: result=%+v error=%v progress=%d", call, result, err, progress.Load())
 		}
 	}

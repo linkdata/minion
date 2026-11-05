@@ -50,6 +50,7 @@ func TestRunnerNativeDispatchContinuesRolesAndRefreshesFullCritic(t *testing.T) 
 					}
 					script := fmt.Sprintf(`#!/bin/sh
 set -eu
+if [ "$1" = --version ]; then printf '2.1.316 (Claude Code)\n'; exit 0; fi
 base=%s/%s
 root=%s
 provider=%s
@@ -102,8 +103,9 @@ else
  turns=1
  [ ! -f "$base.$id.turns" ] || turns=$(( $(cat "$base.$id.turns") + 1 ))
  printf '%%s' "$turns" > "$base.$id.turns"
+ case "$turns" in 1) cost=0.25 ;; 2) cost=0.50 ;; 3) cost=0.75 ;; esac
  printf '{"type":"system","subtype":"init","session_id":"%%s"}\n' "$id"
- printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"%%s","structured_output":%%s,"modelUsage":{"fixture":{"inputTokens":%%s,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%%s}}}\n' "$id" "$output" "$((turns*3))" "$((turns*2))"
+ printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"%%s","structured_output":%%s,"total_cost_usd":%%s,"modelUsage":{"fixture":{"inputTokens":%%s,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%%s}}}\n' "$id" "$output" "$cost" "$((turns*3))" "$((turns*2))"
 fi
 `, shellQuote(receipts), provider, shellQuote(root), shellQuote(provider), shellQuote(mainProvider), shellQuote(string(action)), shellQuote(first), shellQuote(message(first)), shellQuote(later), shellQuote(message(later)), provider)
 					fakeOnPath(t, provider, script)
@@ -230,6 +232,10 @@ fi
 					}
 					if call.Provider != role.Provider || call.Model != role.Model || call.Effort != role.Effort || !call.Complete || call.ReviewComplete != (call.Role == roleCritic) || call.Tokens != (usage.Tokens{Input: 3, Output: 2}) {
 						t.Fatalf("lost per-invocation accounting/attribution at the native dispatch seam: %+v", call)
+					}
+					if call.Provider == "claude" && (call.EstimatedCostUSD == nil || *call.EstimatedCostUSD != 0.25 || !call.EstimatedCostComplete) ||
+						call.Provider == "codex" && call.EstimatedCostUSD != nil {
+						t.Fatalf("native estimated cost was lost, duplicated, or assigned to Codex: %+v", call)
 					}
 				}
 				if last := result.Calls[len(result.Calls)-1]; !last.Approved || !last.NoBlockers || last.HasBlockers || !last.ReviewComplete {

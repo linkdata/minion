@@ -1,6 +1,7 @@
 package claudecli
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -53,6 +54,43 @@ func TestStreamEventsUnknownParentageMarksGapOnlyForContent(t *testing.T) {
 	}, "\n")+"\n")
 	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "assistant"}, {Kind: "assistant"}}) {
 		t.Fatalf("unknown parentage was attributed to root or content-free events made gaps: %+v", got)
+	}
+}
+
+func TestContradictoryHelperContentHasNoRootIdentity(t *testing.T) {
+	var got []aicli.StreamEvent
+	o := jsonlOutput{sessionID: "native-id", identitySeen: true, onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
+	writeChunks(t, &o, strings.Join([]string{
+		`{"type":"assistant","session_id":"native-id","agent_id":"worker","parent_tool_use_id":null,"message":{"id":"assistant","content":[{"type":"text","text":"helper answer"}]}}`,
+		`{"type":"user","session_id":"native-id","agent_id":"worker","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"helper output"}]}}`,
+	}, "\n")+"\n")
+	if !slices.Equal(got, []aicli.StreamEvent{{Kind: "assistant"}, {Kind: "tool_result"}}) || !o.provenanceGap {
+		t.Fatalf("contradictory helper content claimed root: events=%+v gap=%t", got, o.provenanceGap)
+	}
+}
+
+func TestAmbientContentIsNotEmittedToRootReceipt(t *testing.T) {
+	var got []aicli.StreamEvent
+	o := jsonlOutput{sessionID: "native-id", identitySeen: true, onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
+	writeChunks(t, &o, strings.Join([]string{
+		`{"type":"assistant","session_id":"native-id","ambient":true,"parent_tool_use_id":null,"message":{"id":"ambient","content":[{"type":"text","text":"background answer"}]}}`,
+		`{"type":"user","session_id":"native-id","ambient":true,"parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"call","content":"background output"}]}}`,
+	}, "\n")+"\n")
+	if len(got) != 0 {
+		t.Fatalf("ambient content entered root receipt: %+v", got)
+	}
+}
+
+func TestFatalAssistantReservationCannotEmitContentAfterStop(t *testing.T) {
+	var got []aicli.StreamEvent
+	o := jsonlOutput{sessionID: "native-id", identitySeen: true, progressEntryLimit: 1,
+		onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
+	const first = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"first","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`
+	const excess = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"excess","content":[{"type":"text","text":"must not appear"}]}}`
+	writeChunks(t, &o, first+"\n"+excess+"\n")
+	o.finish()
+	if !errors.Is(o.err, aicli.ErrOutputLimit) || !slices.Equal(got, []aicli.StreamEvent{{Kind: "output_stop"}}) {
+		t.Fatalf("fatal reservation emitted assistant content: events=%+v error=%v", got, o.err)
 	}
 }
 
