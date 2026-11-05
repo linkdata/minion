@@ -135,7 +135,7 @@ func TestUserUsageShowsTotalsWhenRepositoryChecksAreBusy(t *testing.T) {
 		}
 	}()
 	response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", cookie)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">7</p>`) ||
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">7</p>`) ||
 		userUsageRetryPath(response.Body.String()) != "/user/usage" || strings.Contains(response.Body.String(), "org/private") {
 		t.Fatalf("busy repository checks hid totals or disclosed private data: status=%d body=%q", response.Code, response.Body.String())
 	}
@@ -231,10 +231,6 @@ func TestUserUsageWebservListenerRoutes(t *testing.T) {
 		headers.Get("Location") != "/auth/login?next=%2Fuser%2Fusage" || strings.Contains(body, "org/public") {
 		t.Fatalf("anonymous usage route: status=%d location=%q body=%s", status, headers.Get("Location"), body)
 	}
-	if status, _, body := get("/user/usage.css", nil); status != http.StatusForbidden ||
-		strings.Contains(body, "org/public") || strings.Contains(body, ".topbar") {
-		t.Fatalf("anonymous user stylesheet route: status=%d body=%s", status, body)
-	}
 	seed := httptest.NewRequest(http.MethodGet, baseURL+"/auth/login", nil)
 	seed.RemoteAddr = "127.0.0.1:12345"
 	session := admin.jaws.NewSession(nil, seed)
@@ -246,7 +242,7 @@ func TestUserUsageWebservListenerRoutes(t *testing.T) {
 	cookie := session.Cookie()
 	if status, _, body := get("/user/usage", cookie); status != http.StatusOK ||
 		!strings.Contains(body, "Your usage") || !strings.Contains(body, "org/public") ||
-		!strings.Contains(body, `<h2>Reported tokens</h2><p class="metric">7</p>`) ||
+		!strings.Contains(body, `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">7</p>`) ||
 		!strings.Contains(body, `name="jawsKey"`) {
 		t.Fatalf("signed-in usage route: status=%d body=%s", status, body)
 	}
@@ -258,9 +254,8 @@ func TestUserUsageWebservListenerRoutes(t *testing.T) {
 	if status, _, _ := get("/jaws/"+key, cookie); status == http.StatusForbidden {
 		t.Fatalf("authenticated usage JaWS request denied: status=%d", status)
 	}
-	if status, headers, body := get("/user/usage.css", cookie); status != http.StatusOK ||
-		!strings.HasPrefix(headers.Get("Content-Type"), "text/css") || !strings.Contains(body, ".topbar") {
-		t.Fatalf("user stylesheet route: status=%d content-type=%q body=%s", status, headers.Get("Content-Type"), body)
+	if status, headers, _ := get(bootstrapAssetPath(t, page, ".css"), nil); status != http.StatusOK || !strings.HasPrefix(headers.Get("Content-Type"), "text/css") {
+		t.Fatalf("public Bootstrap CSS: status=%d content-type=%q", status, headers.Get("Content-Type"))
 	}
 }
 
@@ -421,12 +416,12 @@ func TestUserUsageRevokedPrivateRowsHideIdentityAtAnyPosition(t *testing.T) {
 	cookie := userUsageCookie(t, jw, (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key(), false)
 	first := userUsageRequest(handler, http.MethodGet, "/user/usage", "", cookie)
 	continueURL := userUsageContinuePath(first.Body.String())
-	if first.Code != http.StatusOK || continueURL == "" || !strings.Contains(first.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) || strings.Contains(first.Body.String(), "org/private-") {
+	if first.Code != http.StatusOK || continueURL == "" || !strings.Contains(first.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">20</p>`) || strings.Contains(first.Body.String(), "org/private-") {
 		t.Fatalf("revoked private page disclosed identity or lost total: status=%d continue=%q body=%s", first.Code, continueURL, first.Body.String())
 	}
 	for _, path := range []string{"/user/usage?after=19", "/user/usage?after=1000000", "/user/usage?repo=org%2Fprivate-01&after=19"} {
 		page := userUsageRequest(handler, http.MethodGet, path, "", cookie)
-		if page.Code != http.StatusOK || strings.Contains(page.Body.String(), `<th scope="row">org/private-`) || !strings.Contains(page.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) {
+		if page.Code != http.StatusOK || strings.Contains(page.Body.String(), `<th scope="row">org/private-`) || !strings.Contains(page.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">20</p>`) {
 			t.Fatalf("position exposed private data or lost total: path=%q status=%d body=%q", path, page.Code, page.Body.String())
 		}
 	}
@@ -437,11 +432,11 @@ func TestUserUsageRevokedPrivateRowsHideIdentityAtAnyPosition(t *testing.T) {
 		}
 	}
 	other := userUsageCookie(t, jw, (userIdentity{Provider: "github", Host: "github.com", Subject: "99"}).key(), false)
-	if cross := userUsageRequest(handler, http.MethodGet, continueURL, "", other); cross.Code != http.StatusOK || strings.Contains(cross.Body.String(), "org/private-") || strings.Contains(cross.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) {
+	if cross := userUsageRequest(handler, http.MethodGet, continueURL, "", other); cross.Code != http.StatusOK || strings.Contains(cross.Body.String(), "org/private-") || strings.Contains(cross.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">20</p>`) {
 		t.Fatalf("cross-account position exposed private data: status=%d body=%s", cross.Code, cross.Body.String())
 	}
 	issued := userUsageRequest(handler, http.MethodGet, continueURL, "", cookie)
-	if issued.Code != http.StatusOK || strings.Contains(issued.Body.String(), "org/private-") || !strings.Contains(issued.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) {
+	if issued.Code != http.StatusOK || strings.Contains(issued.Body.String(), "org/private-") || !strings.Contains(issued.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">20</p>`) {
 		t.Fatalf("issued cursor failed: status=%d body=%s", issued.Code, issued.Body.String())
 	}
 	restartedJaws, _, restartedHandler := userUsageTestHandler(t, &action.Orchestrator{GitHub: githubClient, Usage: store})
@@ -568,16 +563,16 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie)
 	body := response.Body.String()
 	if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" ||
-		!strings.Contains(body, `<h2>Reported tokens</h2><p class="metric">53</p>`) ||
-		!strings.Contains(body, `<h2>Unallocated tokens</h2><p class="metric">10</p>`) ||
-		!strings.Contains(body, `<h2>Usage-recorded actions</h2><p class="metric">4</p>`) ||
-		!strings.Contains(body, `<h2>Incomplete attempts</h2><p class="metric">1</p>`) ||
+		!strings.Contains(body, `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) ||
+		!strings.Contains(body, `<h2 class="h5">Unallocated tokens</h2><p class="display-6 font-monospace">10</p>`) ||
+		!strings.Contains(body, `<h2 class="h5">Usage-recorded actions</h2><p class="display-6 font-monospace">4</p>`) ||
+		!strings.Contains(body, `<h2 class="h5">Incomplete attempts</h2><p class="display-6 font-monospace">1</p>`) ||
 		!strings.Contains(body, "4 (1 succeeded, 3 failed or stopped, 0 running)") ||
 		!strings.Contains(body, "Cache creation input</dt><dd>2") ||
 		!strings.Contains(body, "Cached input</dt><dd>3") ||
 		!strings.Contains(body, "Call checkpoints</dt><dd>4 Codex, 1 Claude") ||
-		!regexp.MustCompile(`<th scope="row">org/accessible</th><td class="number">2</td><td class="number">43</td>\s*<td class="number">0</td><td class="number">1</td>\s*<td>Unknown</td><td>Unknown</td><td>USD 0\.125 known estimated subtotal \(calls with any reported amount: 1; calls with missing or incomplete estimates: 3; counts may overlap\)</td><td>Unknown</td>`).MatchString(body) ||
-		!regexp.MustCompile(`<th scope="row">org/public</th><td class="number">1</td><td class="number">4</td>\s*<td class="number">4</td><td class="number">0</td>\s*<td>Unknown</td><td>Unknown</td><td>Unknown \(calls with any reported amount: 0; calls with missing or incomplete estimates: 1\)</td><td>Unknown</td>`).MatchString(body) || strings.Contains(body, "org/old-name") ||
+		!regexp.MustCompile(`<th scope="row">org/accessible</th><td class="text-end font-monospace">2</td><td class="text-end font-monospace">43</td>\s*<td class="text-end font-monospace">0</td><td class="text-end font-monospace">1</td>\s*<td>Unknown</td><td>Unknown</td><td>USD 0\.125 known estimated subtotal \(calls with any reported amount: 1; calls with missing or incomplete estimates: 3; counts may overlap\)</td><td>Unknown</td>`).MatchString(body) ||
+		!regexp.MustCompile(`<th scope="row">org/public</th><td class="text-end font-monospace">1</td><td class="text-end font-monospace">4</td>\s*<td class="text-end font-monospace">4</td><td class="text-end font-monospace">0</td>\s*<td>Unknown</td><td>Unknown</td><td>Unknown \(calls with any reported amount: 0; calls with missing or incomplete estimates: 1\)</td><td>Unknown</td>`).MatchString(body) || strings.Contains(body, "org/old-name") ||
 		strings.Contains(body, "org/hidden") || strings.Contains(body, "other/private") ||
 		strings.Contains(body, "legacy/private") ||
 		!strings.Contains(body, "Billed credits</dt><dd>Unknown") ||
@@ -599,7 +594,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	}
 	if filtered := userUsageRequest(handler, http.MethodGet, "/user/usage?repo=ORG%2FPUBLIC", "", userCookie); filtered.Code != http.StatusOK ||
 		!strings.Contains(filtered.Body.String(), "org/public") || strings.Contains(filtered.Body.String(), "org/accessible") ||
-		!strings.Contains(filtered.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(filtered.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("repository filter changed owner total or exposed other rows: status=%d body=%s", filtered.Code, filtered.Body.String())
 	}
 	beforeFiltered := apiCalls.Load()
@@ -663,35 +658,31 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 		strings.Contains(denied.Body.String(), "org/accessible") || strings.Contains(denied.Body.String(), "Reported tokens") {
 		t.Fatalf("revoked user reached usage: status=%d body=%s", denied.Code, denied.Body.String())
 	}
-	if stylesheet := userUsageRequest(handler, http.MethodGet, "/user/usage.css", "", userCookie); stylesheet.Code != http.StatusOK ||
-		stylesheet.Header().Get("Content-Type") != "text/css; charset=utf-8" {
-		t.Fatalf("user usage stylesheet: status=%d", stylesheet.Code)
-	}
 
 	revoked.Store(true)
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); response.Code != http.StatusOK ||
 		strings.Contains(response.Body.String(), "org/accessible") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("revoked private access lost aggregate or exposed row: status=%d body=%s", response.Code, response.Body.String())
 	}
 	revoked.Store(false)
 
 	wrongID.Store(true)
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); strings.Contains(response.Body.String(), "org/accessible") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("permission for another numeric ID exposed private repository: %s", response.Body.String())
 	}
 	wrongID.Store(false)
 	wrongRepoID.Store(true)
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); strings.Contains(response.Body.String(), "org/accessible") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("reused repository name exposed previous repository usage: %s", response.Body.String())
 	}
 	wrongRepoID.Store(false)
 	renameReuseAfterPermission.Store(true)
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); strings.Contains(response.Body.String(), `<th scope="row">org/accessible</th>`) ||
 		!strings.Contains(response.Body.String(), "Some repository usage could not be verified") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("name reuse between permission and ID recheck exposed another repository's usage: %s", response.Body.String())
 	}
 	renameReuseAfterPermission.Store(false)
@@ -702,7 +693,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 		strings.Contains(response.Body.String(), "org/accessible") ||
 		!strings.Contains(response.Body.String(), "Some repository usage could not be verified") ||
 		userUsageRetryPath(response.Body.String()) != "/user/usage" ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("GitHub failure looked like access denial or lost totals: %s", response.Body.String())
 	}
 	verificationFailed.Store(false)
@@ -712,7 +703,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	}
 	unknownVisibility.Store(true)
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); strings.Contains(response.Body.String(), "org/public") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) {
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) {
 		t.Fatalf("unknown visibility was treated as public: %s", response.Body.String())
 	}
 	unknownVisibility.Store(false)
@@ -738,7 +729,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); strings.Contains(response.Body.String(), "org/accessible") ||
 		strings.Contains(response.Body.String(), "org/hidden") || !strings.Contains(response.Body.String(), "org/public") ||
 		strings.Contains(response.Body.String(), "Some repository usage could not be verified") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) ||
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) ||
 		!strings.Contains(response.Body.String(), "Estimated cost and currency</dt><dd>USD 0.125 known estimated subtotal") {
 		t.Fatalf("lost private access changed aggregate or leaked breakdown: %s", response.Body.String())
 	}
@@ -771,7 +762,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	oauth.usageGate.readAt = time.Now().Add(-userUsageSnapshotTTL)
 	oauth.usageGate.scanMu.Unlock()
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); response.Code != http.StatusOK ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) ||
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) ||
 		!strings.Contains(response.Body.String(), "Estimated cost and currency</dt><dd>USD 0.125 known estimated subtotal") {
 		t.Fatalf("retention removed owner billing total: status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -780,7 +771,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	oauth.usageGate.mu.Unlock()
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), "Some repository usage could not be verified") ||
-		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) ||
+		!strings.Contains(response.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">53</p>`) ||
 		strings.Contains(response.Body.String(), "org/accessible") {
 		t.Fatalf("API quota exhaustion changed totals or exposed unverified row: status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -799,7 +790,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	oauth.usageGate.mu.Unlock()
 	before = apiCalls.Load()
 	if legacyOnly := userUsageRequest(handler, http.MethodGet, "/user/usage?repo=org%2Flegacy-only", "", userCookie); legacyOnly.Code != http.StatusOK ||
-		!strings.Contains(legacyOnly.Body.String(), `<h2>Reported tokens</h2><p class="metric">9</p>`) ||
+		!strings.Contains(legacyOnly.Body.String(), `<h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">9</p>`) ||
 		!strings.Contains(legacyOnly.Body.String(), "No matching accessible repository was verified") ||
 		strings.Contains(legacyOnly.Body.String(), "Some repository usage could not be verified") || apiCalls.Load() != before {
 		t.Fatalf("legacy-only filter called GitHub or showed a repository row: status=%d body=%s", legacyOnly.Code, legacyOnly.Body.String())

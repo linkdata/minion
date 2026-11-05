@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linkdata/jaws"
+	"github.com/linkdata/jaws/jawsboot"
 	"github.com/linkdata/jaws/lib/ui"
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
@@ -22,17 +23,17 @@ import (
 const adminSessionKey = "minion.admin.username"
 
 var adminLoginHTML = template.Must(template.New("admin login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Minion admin</title>{{$.HeadHTML}}</head>
-<body><main>
+<html lang="en" data-bs-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion admin</title>{{$.HeadHTML}}</head>
+<body><main class="container py-5">
 {{if .Dot}}
-<h1>Signed in</h1><a href="/">Open dashboard</a>
-<form method="post" action="/admin/logout"><button>Sign out</button></form>
+<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open dashboard</a></p>
+<form method="post" action="/admin/logout"><button class="btn btn-outline-secondary">Sign out</button></form>
 {{else}}
-<h1>Minion admin</h1>
-<form method="post" action="/admin/login">
-<label>Username <input name="username" autocomplete="username" required></label>
-<label>Password <input name="password" type="password" autocomplete="current-password" required></label>
-<button>Sign in</button></form>
+<h1 class="h3 mb-3">Minion admin</h1>
+<form method="post" action="/admin/login" class="vstack gap-3 col-12 col-md-6 col-lg-4">
+<label class="form-label">Username <input class="form-control" name="username" autocomplete="username" required></label>
+<label class="form-label">Password <input class="form-control" name="password" type="password" autocomplete="current-password" required></label>
+<button class="btn btn-primary">Sign in</button></form>
 {{end}}
 </main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
 
@@ -98,6 +99,14 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	mux := http.NewServeMux()
+	if err := jw.Setup(func(pattern string, handler http.Handler) {
+		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			closeUnreadAdminBody(w, r)
+			handler.ServeHTTP(w, r)
+		}))
+	}, "/static", jawsboot.Setup); err != nil {
+		return nil, err
+	}
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
@@ -139,7 +148,6 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		dashboard.ServeHTTP(w, r)
 	})
 	mux.Handle("GET /admin/actions/{attempt}", adminActionDetailHandler(jw, owner))
-	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
 	if oauth != nil && owner != nil {
@@ -151,7 +159,6 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	oauth.routes(mux)
 	if oauth != nil {
 		mux.Handle("GET /user/usage", oauth.usageHandler(owner))
-		mux.HandleFunc("GET /user/usage.css", serveAdminDashboardCSS)
 	}
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
 	// body-reading callback, which must not inherit an immediate read deadline.
@@ -265,7 +272,7 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
 		// JaWS fingerprints its bundled CSS and JavaScript asset paths.
-		if r.URL.Path == "/admin/dashboard.css" || r.URL.Path == "/admin/login.js" || r.URL.Path == "/jaws/.ping" ||
+		if strings.HasPrefix(r.URL.Path, "/static/") || r.URL.Path == "/admin/login.js" || r.URL.Path == "/jaws/.ping" ||
 			strings.HasPrefix(r.URL.Path, "/jaws/.jaws.") &&
 				(strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css")) {
 			return true

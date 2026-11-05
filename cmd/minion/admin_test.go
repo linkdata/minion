@@ -51,6 +51,9 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	if err != nil || admin.entryURL != "http://localhost:"+port {
 		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
+	if admin.signInEnabled {
+		t.Fatal("admin sign-in enabled without a configured account or OAuth provider")
+	}
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second,
@@ -61,6 +64,7 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	}{
 		{name: "page", path: "/"},
 		{name: "JaWS ping", path: "/jaws/.ping"},
+		{name: "Bootstrap asset", path: "/static/bootstrap.min.css"},
 		{name: "websocket callback", path: "/jaws/test-key", upgrade: true},
 		{name: "OAuth callback", path: "/auth/callback"},
 		{name: "download", path: "/download/report"},
@@ -336,6 +340,18 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+func TestFallbackTLSListenURL(t *testing.T) {
+	certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"admin.example"}}}
+	for _, test := range []struct{ address, listenURL, want string }{
+		{"127.0.0.1:8080", "http://localhost:8080", "https://admin.example:8080"},
+		{"192.0.2.8:8080", "http://192.0.2.8:8080", "https://192.0.2.8:8080"},
+	} {
+		if got := fallbackTLSListenURL(test.listenURL, test.address, certificate); got != test.want {
+			t.Errorf("fallback URL for %s = %q, want %q", test.address, got, test.want)
 		}
 	}
 }

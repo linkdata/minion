@@ -21,16 +21,17 @@ import (
 
 // adminServer owns the dashboard listener and the JaWS processing loop.
 type adminServer struct {
-	listener    net.Listener
-	entryURL    string
-	server      *http.Server
-	jaws        *jaws.Jaws
-	cancel      context.CancelFunc
-	serveDone   chan struct{}
-	jawsDone    chan struct{}
-	tickDone    chan struct{}
-	serveErr    error // read only after serveDone closes
-	preferences *userLinks
+	listener      net.Listener
+	entryURL      string
+	signInEnabled bool
+	server        *http.Server
+	jaws          *jaws.Jaws
+	cancel        context.CancelFunc
+	serveDone     chan struct{}
+	jawsDone      chan struct{}
+	tickDone      chan struct{}
+	serveErr      error // read only after serveDone closes
+	preferences   *userLinks
 }
 
 func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func()) (*adminServer, error) {
@@ -65,17 +66,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
 		// webserv saw the plaintext listener before the manual TLS wrap.
-		service.ListenURL = strings.Replace(service.ListenURL, "http://", "https://", 1)
-		if leaf := fallbackTLS.Certificates[0].Leaf; leaf != nil && len(leaf.DNSNames) > 0 {
-			name := leaf.DNSNames[0]
-			if name != "" && !strings.Contains(name, "*") {
-				if host, _, err := net.SplitHostPort(name); err == nil {
-					name = host
-				}
-				_, port, _ := net.SplitHostPort(listener.Addr().String())
-				service.ListenURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
-			}
-		}
+		service.ListenURL = fallbackTLSListenURL(service.ListenURL, listener.Addr().String(), &fallbackTLS.Certificates[0])
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -114,7 +105,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	if entryURL == service.ListenURL && oauth != nil {
 		entryURL += "/auth/login"
 	}
-	a := &adminServer{listener: listener, entryURL: entryURL, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	a := &adminServer{listener: listener, entryURL: entryURL, signInEnabled: entryURL != service.ListenURL, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
 	if oauth != nil {
 		a.preferences = oauth.links
 	}
@@ -146,6 +137,26 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		close(a.serveDone)
 	}()
 	return a, nil
+}
+
+func fallbackTLSListenURL(rawURL, address string, certificate *tls.Certificate) string {
+	rawURL = strings.Replace(rawURL, "http://", "https://", 1)
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || certificate.Leaf == nil || len(certificate.Leaf.DNSNames) == 0 {
+		return rawURL
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !(ip.IsLoopback() || ip.IsUnspecified()) {
+		return rawURL
+	}
+	name := certificate.Leaf.DNSNames[0]
+	if host, _, err := net.SplitHostPort(name); err == nil {
+		name = host
+	}
+	if name != "" && !strings.Contains(name, "*") {
+		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
+	}
+	return rawURL
 }
 
 // adminGuard is the single entry gate for all dashboard routes.

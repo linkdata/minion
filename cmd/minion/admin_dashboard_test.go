@@ -276,20 +276,21 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	if redirect := adminResponse(handler, http.MethodHead, "/", nil, nil, ""); redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" || redirect.Body.Len() != 0 {
 		t.Fatalf("anonymous dashboard HEAD: status=%d location=%q body=%q", redirect.Code, redirect.Header().Get("Location"), redirect.Body.String())
 	}
-	if asset := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, nil, ""); asset.Code != http.StatusOK {
-		t.Fatalf("public dashboard CSS status=%d, want 200", asset.Code)
-	}
 	cookie := dashboardTestCookie(t, handler)
-	acceptedMetric := `<h2>Tracked accepted actions</h2><p class="metric">3</p>`
-	inProgressMetric := `<h2>In progress</h2><p class="metric">1</p>`
+	acceptedMetric := `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Tracked accepted actions</h2><p class="display-6 font-monospace">3</p>`
+	inProgressMetric := `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">In progress</h2><p class="display-6 font-monospace">1</p>`
 	matching := adminResponse(handler, http.MethodGet, "/?repo=OWNER&requester=writ&action=comment", nil, cookie, "")
 	if matching.Code != http.StatusOK || matching.Header().Get("Cache-Control") != "no-store" ||
 		matching.Header().Get("Content-Security-Policy") == "" || !strings.Contains(matching.Body.String(), "<td>owner/repo</td>") ||
 		!strings.Contains(matching.Body.String(), "role=status aria-live=polite class=visually-hidden") ||
 		!strings.Contains(matching.Body.String(), acceptedMetric) || !strings.Contains(matching.Body.String(), inProgressMetric) ||
+		!strings.Contains(matching.Body.String(), `tabindex="0"`) ||
 		!strings.Contains(matching.Body.String(), "<dt>Hard action runtime</dt><dd>7m0s</dd>") ||
 		!strings.Contains(matching.Body.String(), "<dt>Executor inactivity</dt><dd>1m0s</dd>") {
 		t.Fatalf("matching dashboard: status=%d body=%s", matching.Code, matching.Body.String())
+	}
+	if css := adminResponse(handler, http.MethodGet, bootstrapAssetPath(t, matching.Body.String(), ".css"), nil, nil, ""); css.Code != http.StatusOK || !strings.HasPrefix(css.Header().Get("Content-Type"), "text/css") {
+		t.Fatalf("public Bootstrap CSS: status=%d content-type=%q", css.Code, css.Header().Get("Content-Type"))
 	}
 	filtered := adminResponse(handler, http.MethodGet, "/?repo=other", nil, cookie, "")
 	if filtered.Code != http.StatusOK || strings.Contains(filtered.Body.String(), "<td>owner/repo</td>") ||
@@ -336,10 +337,6 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	}
 	if invalid := adminResponse(handler, http.MethodGet, "/?action=publish", nil, cookie, ""); invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid action filter status=%d, want 400", invalid.Code)
-	}
-	css := adminResponse(handler, http.MethodGet, "/admin/dashboard.css", nil, cookie, "")
-	if css.Code != http.StatusOK || css.Header().Get("Cache-Control") != "no-store" || !strings.Contains(css.Body.String(), ".metrics") {
-		t.Fatalf("authenticated stylesheet: status=%d", css.Code)
 	}
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
@@ -644,8 +641,8 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 			t.Fatalf("ticker did not patch matching WebSocket: %v", err)
 		}
 		body := string(patch)
-		if strings.Contains(body, `<h2>Tracked accepted actions</h2><p class=\"metric\">1</p>`) {
-			if !strings.Contains(body, `<h2>In progress</h2><p class=\"metric\">1</p>`) {
+		if strings.Contains(body, `<h2 class=\"h5\">Tracked accepted actions</h2><p class=\"display-6 font-monospace\">1</p>`) {
+			if !strings.Contains(body, `<h2 class=\"h5\">In progress</h2><p class=\"display-6 font-monospace\">1</p>`) {
 				t.Fatalf("ticker patch omitted updated metrics: %s", body)
 			}
 			seenMetrics = true

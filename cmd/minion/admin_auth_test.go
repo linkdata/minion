@@ -94,6 +94,17 @@ func adminJaWSKey(t *testing.T, page string) string {
 	return key
 }
 
+func bootstrapAssetPath(t *testing.T, page, suffix string) string {
+	t.Helper()
+	for _, part := range strings.Split(page, `"`) {
+		if strings.HasPrefix(part, "/static/bootstrap") && strings.HasSuffix(part, suffix) {
+			return part
+		}
+	}
+	t.Fatalf("page omitted Bootstrap %s asset", suffix)
+	return ""
+}
+
 func adminGuestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
@@ -192,8 +203,8 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	for _, tc := range []struct {
 		path string
 		want int
-	}{{"/admin/dashboard.css", http.StatusOK}, {"/admin/login.js", http.StatusOK}, {assetPath(".js"), http.StatusOK},
-		{assetPath(".css"), http.StatusOK}, {"/jaws/.ping", http.StatusNoContent}} {
+	}{{bootstrapAssetPath(t, first.Body.String(), ".css"), http.StatusOK}, {bootstrapAssetPath(t, first.Body.String(), ".js"), http.StatusOK},
+		{"/admin/login.js", http.StatusOK}, {assetPath(".js"), http.StatusOK}, {assetPath(".css"), http.StatusOK}, {"/jaws/.ping", http.StatusNoContent}} {
 		if asset := adminResponse(handler, http.MethodGet, tc.path, nil, nil, ""); asset.Code != tc.want {
 			t.Fatalf("public asset %s: status=%d, want %d", tc.path, asset.Code, tc.want)
 		}
@@ -870,6 +881,11 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	response, guestCookie := adminNetworkLogin(t, client, "http://"+admin.listener.Addr().String(),
 		url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	response.Body.Close()
+	page := adminResponse(admin.server.Handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if page.Code != http.StatusOK {
+		t.Fatalf("Bootstrap entry page: status=%d", page.Code)
+	}
+	cssPath := bootstrapAssetPath(t, page.Body.String(), ".css")
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
 		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
 	}
@@ -889,7 +905,7 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
 		{name: "authenticated dashboard", method: http.MethodGet, path: "/",
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
-		{name: "authenticated stylesheet", method: http.MethodGet, path: "/admin/dashboard.css",
+		{name: "authenticated stylesheet", method: http.MethodGet, path: cssPath,
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
 		{name: "authenticated usage page", method: http.MethodGet, path: "/admin/usage",
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusServiceUnavailable},

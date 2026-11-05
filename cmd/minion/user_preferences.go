@@ -15,19 +15,19 @@ import (
 
 var userPreferencesHTML = template.Must(template.New("user preferences").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Model preferences</title>{{$.HeadHTML}}</head>
-<body><main><h1>Model preferences</h1>
-{{range .Dot.Notices}}<p role="status">{{.}}</p>{{end}}
+<body data-bs-theme="dark"><main class="container py-4"><h1>Model preferences</h1>
+{{range .Dot.Notices}}<p role="status" class="alert alert-info">{{.}}</p>{{end}}
 {{if .Dot.Fields}}
 <p>Choose administrator-approved settings for future actions.</p>
-<form method="post" action="/auth/preferences">
+<form class="d-grid gap-3" method="post" action="/auth/preferences">
 <input type="hidden" name="identity" value="{{.Dot.Identity}}">
 {{range .Dot.Fields}}
-<label>{{.Label}} model and effort <select name="{{.Name}}">
+<label>{{.Label}} model and effort <select class="form-select" name="{{.Name}}">
 <option value="default"{{if .DefaultSelected}} selected{{end}}>Service default</option>
 {{range .Options}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Model}} · {{.Effort}}</option>{{end}}
 </select></label>
 {{end}}
-<button type="submit">Save preferences</button>
+<button class="btn btn-primary" type="submit">Save preferences</button>
 </form>
 {{else}}<p>No model choices are currently offered.</p>{{end}}
 <p><a href="/auth/login">Account</a></p>

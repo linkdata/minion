@@ -10,7 +10,7 @@ import (
 
 var adminNoticeHTML = template.Must(template.New("admin notice").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion admin request error</title>{{$.HeadHTML}}</head>
-<body><main><h1>Request could not be completed</h1><p role="alert">{{.Dot.Status}}</p>
+<body data-bs-theme="dark"><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
 {{if .Auth.IsAdmin}}<a href="/">Dashboard</a>{{else if .Dot.AdminLogin}}<a href="/admin/login">Sign in</a>{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
@@ -24,7 +24,7 @@ func adminBrowserRoute(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/admin/usage.json", "/admin/dashboard.css", "/admin/login.js":
+	case "/admin/usage.json", "/admin/login.js":
 		return false
 	}
 	return r.URL.Path == "/" || r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/")

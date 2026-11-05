@@ -16,11 +16,11 @@ var adminActionDetailTemplate = template.Must(template.New("admin action detail"
 	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
 }).Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Minion action detail</title>{{$.HeadHTML}}</head><body>{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
-{{if .AllowUser}}<header class="topbar"><div><strong>MINION</strong><span> / my actions</span></div><form method="post" action="/auth/logout"><button type="submit">Sign out</button></form></header>
-<main class="detail"><p><a href="/auth/actions">← My actions</a></p>{{else}}<header class="topbar"><div><strong>MINION</strong><span> / operator</span></div><form method="post" action="/admin/logout"><button type="submit">Sign out</button></form></header>
-<main class="detail"><p><a href="/">← Live actions</a></p>{{end}}<div class="heading"><p class="eyebrow">ACTION DETAIL</p><h1>{{.AttemptID}}</h1></div>
-<section class="panel"><h2>Action and deadline</h2><dl>
+<title>Minion action detail</title>{{$.HeadHTML}}</head><body data-bs-theme="dark">{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
+{{if .AllowUser}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-secondary"> / my actions</span></div><form method="post" action="/auth/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form></header>
+<main class="container py-4"><p><a href="/auth/actions">← My actions</a></p>{{else}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-secondary"> / operator</span></div><form method="post" action="/admin/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form></header>
+<main class="container py-4"><p><a href="/">← Live actions</a></p>{{end}}<div class="border-bottom mb-4"><p class="text-secondary small fw-semibold">ACTION DETAIL</p><h1>{{.AttemptID}}</h1></div>
+<section class="border rounded p-3 mb-3"><h2 class="h5">Action and deadline</h2><dl class="text-break">
 <dt>Repository</dt><dd>{{if .Repository}}{{.Repository}}{{else}}Unavailable in retained records{{end}}</dd>
 <dt>Requester</dt><dd>{{if .Requester}}{{.Requester}}{{else}}Unavailable in retained records{{end}}</dd>
 <dt>Action</dt><dd>{{if .Action}}{{.Action}}{{else}}Unavailable after action cleanup{{end}}</dd>
@@ -33,15 +33,15 @@ var adminActionDetailTemplate = template.Must(template.New("admin action detail"
 <dt>Original deadline</dt><dd>{{if .Deadline.IsZero}}Unavailable in older saved decision{{else}}{{utc .Deadline}}{{end}}</dd>
 <dt>Remaining budget</dt><dd>{{if or (eq .Outcome "In progress") (eq .Outcome "Retry pending")}}{{.Remaining}}{{else}}No longer running{{end}}</dd>
 <dt>Publication</dt><dd>{{.Publication}}</dd>{{if .PushPublication}}<dt>Fix push</dt><dd>{{.PushPublication}}</dd>{{end}}
-</dl>{{if and .AllowUser .Stoppable}}<form method="post" action="/auth/actions/{{.AttemptID}}/abort"><button type="submit">Abort this action</button></form>{{end}}</section>
-<section class="panel"><h2>Critic evidence</h2><dl><dt>Actual full-review verdict</dt><dd>{{if .CriticVerdict}}{{.CriticVerdict}}{{else}}Unavailable{{end}}</dd>
-<dt>Stopping reason</dt><dd>{{if .CriticStop}}{{.CriticStop}}{{else}}Unavailable{{end}}</dd></dl><p class="hint">{{.ReviewNotice}}</p>
-{{if .Refutations}}<h3>Main-model refutations</h3>{{range .Refutations}}<article class="detail-entry"><p>{{.Meta}}{{if .Truncated}} · text truncated{{end}}</p><pre>{{.Text}}</pre></article>{{end}}{{end}}</section>
-<section class="panel"><h2>Received private discussion, reports and diagnostics</h2><p class="hint">{{.RecordsNotice}}</p>
-{{if .Records}}{{range .Records}}<article class="detail-entry"><p>{{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><pre>{{.Text}}</pre></article>{{end}}{{else}}<p>No received text shown.</p>{{end}}</section>
-<section class="panel"><h2>Worker diagnostics</h2><p class="hint">{{.WorkerNotice}}</p>{{if .WorkerFailure}}<article class="detail-entry"><p>Worker-reported failure</p><pre>{{.WorkerFailure}}</pre></article>{{end}}{{if .WorkerObservedFailure}}<article class="detail-entry"><p>Worker-observed failure</p><pre>{{.WorkerObservedFailure}}</pre></article>{{end}}
-{{range .Diagnostics}}<article class="detail-entry"><p>{{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><pre>{{.Text}}</pre></article>{{end}}</section>
-</main>{{end}}{{else}}<p role="alert">Admin session ended.</p>{{end}}{{$.TailHTML}}</body></html>`))
+</dl>{{if and .AllowUser .Stoppable}}<form method="post" action="/auth/actions/{{.AttemptID}}/abort"><button class="btn btn-warning" type="submit">Abort this action</button></form>{{end}}</section>
+<section class="border rounded p-3 mb-3"><h2 class="h5">Critic evidence</h2><dl class="text-break"><dt>Actual full-review verdict</dt><dd>{{if .CriticVerdict}}{{.CriticVerdict}}{{else}}Unavailable{{end}}</dd>
+<dt>Stopping reason</dt><dd>{{if .CriticStop}}{{.CriticStop}}{{else}}Unavailable{{end}}</dd></dl><p class="text-secondary small">{{.ReviewNotice}}</p>
+{{if .Refutations}}<h3 class="h6">Main-model refutations</h3>{{range .Refutations}}<article class="border-top pt-2 mt-2"><p class="text-secondary small">{{.Meta}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="8" wrap="soft" readonly aria-label="Evidence text">{{.Text}}</textarea></article>{{end}}{{end}}</section>
+<section class="border rounded p-3 mb-3"><h2 class="h5">Received private discussion, reports and diagnostics</h2><p class="text-secondary small">{{.RecordsNotice}}</p>
+{{if .Records}}{{range .Records}}<article class="border-top pt-2 mt-2"><p class="text-secondary small">{{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="8" wrap="soft" readonly aria-label="Evidence text">{{.Text}}</textarea></article>{{end}}{{else}}<p>No received text shown.</p>{{end}}</section>
+<section class="border rounded p-3 mb-3"><h2 class="h5">Worker diagnostics</h2><p class="text-secondary small">{{.WorkerNotice}}</p>{{if .WorkerFailure}}<article class="border-top pt-2 mt-2"><p class="text-secondary small">Worker-reported failure</p><textarea class="form-control font-monospace" rows="8" wrap="soft" readonly aria-label="Evidence text">{{.WorkerFailure}}</textarea></article>{{end}}{{if .WorkerObservedFailure}}<article class="border-top pt-2 mt-2"><p class="text-secondary small">Worker-observed failure</p><textarea class="form-control font-monospace" rows="8" wrap="soft" readonly aria-label="Evidence text">{{.WorkerObservedFailure}}</textarea></article>{{end}}
+{{range .Diagnostics}}<article class="border-top pt-2 mt-2"><p class="text-secondary small">{{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="8" wrap="soft" readonly aria-label="Evidence text">{{.Text}}</textarea></article>{{end}}</section>
+</main>{{end}}{{else}}<p role="alert" class="alert alert-warning">Admin session ended.</p>{{end}}{{$.TailHTML}}</body></html>`))
 
 type actionDetailView struct {
 	action.DashboardDetail

@@ -103,6 +103,9 @@ func TestOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T) {
 	t.Run("admin_listener_closed", func(t *testing.T) {
 		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, "active")
 	})
+	t.Run("placeholder_admin", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, "placeholder")
+	})
 }
 
 func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted, loop bool, adminSetup string) {
@@ -158,6 +161,8 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
 	} else if adminSetup == "active" {
 		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()}}
+	} else if adminSetup == "placeholder" {
+		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: config.AdminPasswordHashPlaceholder}}}
 	}
 	var output strings.Builder
 	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {
@@ -191,5 +196,8 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		if err := listener.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if adminSetup == "placeholder" && !strings.Contains(output.String(), "sign-in disabled until password_hash or OAuth is configured") {
+		t.Fatalf("placeholder admin log omitted sign-in status: %q", output.String())
 	}
 }

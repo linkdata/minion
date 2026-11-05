@@ -139,6 +139,9 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 		!strings.Contains(page.Body.String(), "Sign in with GitHub") {
 		t.Fatalf("JaWS sign-in page: status=%d body=%q", page.Code, page.Body.String())
 	}
+	if asset := adminResponse(handler, http.MethodGet, bootstrapAssetPath(t, page.Body.String(), ".css"), nil, nil, ""); asset.Code != http.StatusOK {
+		t.Fatalf("OAuth sign-in Bootstrap asset: status=%d", asset.Code)
+	}
 	if script := adminResponse(handler, http.MethodGet, "/admin/login.js", nil, nil, ""); script.Code != http.StatusOK ||
 		!strings.Contains(script.Body.String(), `form[action="/auth/logout"]`) {
 		t.Fatalf("OAuth logout JaWS script: status=%d body=%q", script.Code, script.Body.String())

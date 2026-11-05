@@ -20,16 +20,16 @@ import (
 
 var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion account</title>{{$.HeadHTML}}</head>
-<body><main>
-{{if .Dot.Error}}<p role="alert">Request could not be completed. Try again.</p>{{end}}
+<body data-bs-theme="dark"><main class="container py-4">
+{{if .Dot.Error}}<p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
 <h1>Signed in with {{.Dot.Provider}}</h1>
 <p><a href="/user/usage">Your usage</a></p>
-{{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button>Link GitHub account</button></form>{{end}}
-{{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button>Link GitLab account</button></form>{{end}}
+{{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button class="btn btn-primary">Link GitHub account</button></form>{{end}}
+{{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button class="btn btn-primary">Link GitLab account</button></form>{{end}}
 {{if .Dot.Preferences}}<p><a href="/auth/preferences">Model preferences</a></p>{{end}}
 <p><a href="/auth/actions">My actions</a></p>
-<form method="post" action="/auth/logout"><button>Sign out</button></form>
+<form method="post" action="/auth/logout"><button class="btn btn-outline-secondary">Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
 {{if .Dot.GitHub}}<p><a href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
@@ -39,8 +39,8 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 
 var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion request failed</title>{{$.HeadHTML}}</head>
-<body><main><h1>Request failed</h1><p role="alert">Request could not be completed. Try again.</p>
-{{if .Dot.RetryAfter}}<p role="status">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
+<body data-bs-theme="dark"><main class="container py-4"><h1>Request failed</h1><p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>
+{{if .Dot.RetryAfter}}<p role="status" class="alert alert-info">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
 
 type userErrorView struct{ RetryAfter string }
@@ -257,8 +257,6 @@ func (a *oauthAccess) allowed(r *http.Request) bool {
 		switch r.URL.Path {
 		case "/user/usage":
 			return true // The handler redirects anonymous readers to sign-in.
-		case "/user/usage.css":
-			return a.sessionAccount(r) != ""
 		}
 	}
 	_, pattern := a.mux.Handler(r)

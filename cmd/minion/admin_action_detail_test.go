@@ -129,12 +129,12 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	hostile := `<script>alert("owned")</script><img src=x onerror=alert(1)>`
+	hostile := `</textarea><script>alert("owned")</script><img src=x onerror=alert(1)>`
 	detailTestRecords(t, owner.WorkRoot, hostile+strings.Repeat("x", 15<<10), true)
 	detailTestReview(t, owner.WorkRoot, "approved", detailTestCall(true, true, false, true))
 	detailTestFile(t, owner.WorkRoot, "worker-diagnostics", "attempt-1.json", map[string]any{
 		"identity": detailTestIdentity(), "source_ref": detailTestSource,
-		"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": hostile}},
+		"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": hostile + "\nsecond line"}},
 	})
 	if denied := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, nil, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("anonymous detail status=%d", denied.Code)
@@ -146,7 +146,7 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	}
 	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 	body := view.Body.String()
-	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;"} {
+	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl class="text-break">`, `<textarea class="form-control font-monospace"`, "\nsecond line"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q: %s", want, body)
 		}
