@@ -91,7 +91,7 @@ func TestAdminAccountsDoNotRelaxPublicTLSRequirement(t *testing.T) {
 	cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
 		Listen: "0.0.0.0:8377", Administrators: []AdminAccount{{Username: "operator", PasswordHash: testAdminPasswordHash("password")}},
 	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
-	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "outside literal loopback") {
+	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "without TLS must use 127.0.0.1") {
 		t.Fatal("public admin without TLS did not report the expected error")
 	}
 }
