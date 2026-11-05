@@ -28,8 +28,12 @@ func testWorkerStartup(t *testing.T) WorkerStartup {
 			Commands: map[string]config.CommandMapping{
 				"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
 			},
-			Main:   RoleSettings{Provider: "codex", Model: "main-model", Effort: "high"},
-			Critic: &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "medium"},
+			Main:                  RoleSettings{Provider: "codex", Model: "main-model", Effort: "high"},
+			Critic:                &RoleSettings{Provider: "claude", Model: "critic-model", Effort: "medium"},
+			MainChoices:           []config.RoleModelConfig{{Model: "other-main", Effort: "low"}},
+			CriticChoices:         []config.RoleModelConfig{{Model: "other-critic", Effort: "low"}},
+			RetainedMainChoices:   []config.RoleModelConfig{{Model: "old-main", Effort: "medium"}},
+			RetainedCriticChoices: []config.RoleModelConfig{{Model: "old-critic", Effort: "medium"}},
 		},
 		WorkRoot:     t.TempDir(),
 		Endpoint:     endpoint.Access(),
@@ -112,6 +116,8 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 	}
 	unusedKey := startup
 	unusedKey.Selection.Critic = nil
+	unusedKey.Selection.CriticChoices = nil
+	unusedKey.Selection.RetainedCriticChoices = nil
 	unusedKeyBytes, err := json.Marshal(unusedKey)
 	if err != nil {
 		t.Fatal(err)
@@ -153,6 +159,9 @@ func TestDecodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 			if err == nil {
 				t.Fatal("invalid startup accepted")
 			}
+			if test.name == "unused provider key" && !strings.Contains(err.Error(), "key for an unselected provider") {
+				t.Fatalf("unused-key case failed at a different guard: %v", err)
+			}
 			for _, secret := range []string{startup.CodexAPIKey, startup.ClaudeAPIKey, conflictingCodex.CodexNativeAPIKey, invalidNative.CodexNativeAPIKey, invalidNative.CodexAccessToken} {
 				if strings.Contains(err.Error(), secret) {
 					t.Fatal("invalid startup error leaked a credential")
@@ -177,9 +186,11 @@ func TestEncodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 		{"missing certificate", func(s *WorkerStartup) { s.Endpoint.Certificate = nil }},
 		{"missing token", func(s *WorkerStartup) { s.Endpoint.Token = "" }},
 		{"unselected", func(s *WorkerStartup) { s.Selection = WorkerSelection{} }},
-		{"unused provider key", func(s *WorkerStartup) { s.Selection.Critic = nil }},
+		{"unused provider key", func(s *WorkerStartup) {
+			s.Selection.Critic, s.Selection.CriticChoices, s.Selection.RetainedCriticChoices = nil, nil, nil
+		}},
 		{"unused native Codex key", func(s *WorkerStartup) {
-			s.Selection.Main.Provider, s.Selection.Critic = "claude", nil
+			s.Selection.Main.Provider, s.Selection.Critic, s.Selection.CriticChoices, s.Selection.RetainedCriticChoices = "claude", nil, nil, nil
 			s.CodexAPIKey = ""
 			s.CodexNativeAPIKey = "private-native-key"
 		}},
@@ -196,6 +207,8 @@ func TestEncodeWorkerStartupRejectsInvalidInput(t *testing.T) {
 			test.change(&invalid)
 			if _, err := EncodeWorkerStartup(invalid); err == nil {
 				t.Fatal("invalid worker startup encoded")
+			} else if (test.name == "unused provider key" || test.name == "unused native Codex key") && !strings.Contains(err.Error(), "key for an unselected provider") {
+				t.Fatalf("unused-key case failed at a different guard: %v", err)
 			}
 		})
 	}

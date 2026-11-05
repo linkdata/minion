@@ -220,7 +220,7 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 			}
 			statePath := filepath.Join(root, "state.json")
 			at := time.Now().UTC().Add(-time.Minute)
-			accepted := state.AcceptedAction{
+			accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 				JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
 				Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 				SubjectType: "PullRequest", SubjectNumber: 7,
@@ -233,7 +233,7 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 				t.Fatal(err)
 			}
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -340,7 +340,7 @@ func TestPreflightFailureRecoversAcceptanceWhoseDeadlinePassed(t *testing.T) {
 			t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
 			now := time.Now().UTC()
-			accepted := state.AcceptedAction{
+			accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 				JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "local",
 				Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 				SubjectType: "PullRequest", SubjectNumber: 7,
@@ -353,7 +353,7 @@ func TestPreflightFailureRecoversAcceptanceWhoseDeadlinePassed(t *testing.T) {
 				t.Fatal(err)
 			}
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -477,6 +477,7 @@ func TestRunChecksGitBeforeProvidersAndGitHub(t *testing.T) {
 
 func TestCheckRejectsUnverifiedSameProviderPairBeforeWorkerStartup(t *testing.T) {
 	cfg := config.Config{BotLogin: "fixture", Main: "claude", Adversarial: "claude",
+		Claude:    config.ClaudeConfig{Effort: "medium"},
 		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}

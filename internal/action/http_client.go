@@ -234,6 +234,7 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 		return redactActionError(errors.Join(selectedRunErr, outcomeErr), assignedSecrets...)
 	}
 	jobRunner.executionProgress = inactivity.progress
+	jobRunner.pauseInactivity = inactivity.pause
 	jobRunner.postCallContext = controlCtx
 	watchCtx, stopWatch := context.WithCancelCause(ctx)
 	watchBody, err := httpEncode(checkpoints.binding, httpControlBytes)

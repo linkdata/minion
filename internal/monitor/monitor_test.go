@@ -338,6 +338,7 @@ func testConfig(t *testing.T) config.Config {
 	return config.Config{
 		BotLogin:            "linkdataminion",
 		PollIntervalSeconds: 60,
+		Codex:               config.CodexConfig{Model: "test-model", ReasoningEffort: "medium"},
 		Commands: map[string]config.CommandMapping{
 			"review":         {Action: "review", Skills: []string{urls["review"]}},
 			"fix":            {Action: "fix", Skills: []string{urls["fix"]}},

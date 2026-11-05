@@ -286,6 +286,26 @@ func (f *actionMonitorGitHub) CreateIssueComment(context.Context, string, int, s
 }
 
 func bindSelectedRunner(m *monitor.Monitor, store *state.Store, owner *Orchestrator) {
+	main := m.Config.RoleModelSettings(false)
+	if main.Model == "" {
+		main.Model = "test-main"
+	}
+	if main.Effort == "" {
+		main.Effort = "medium"
+	}
+	m.Config.MainSettings = main
+	owner.MainModel, owner.MainEffort = main.Model, main.Effort
+	if m.Config.Adversarial != "" {
+		critic := m.Config.RoleModelSettings(true)
+		if critic.Model == "" {
+			critic.Model = "test-critic"
+		}
+		if critic.Effort == "" {
+			critic.Effort = "low"
+		}
+		m.Config.CriticSettings = critic
+		owner.CriticModel, owner.CriticEffort = critic.Model, critic.Effort
+	}
 	m.SelectedExecutorID = LocalExecutorID
 	m.SelectedCommands = make(map[string]bool, len(owner.Commands))
 	for name := range owner.Commands {
@@ -312,7 +332,31 @@ func selectFixtureRequest(t *testing.T, owner *Orchestrator, request *monitor.Jo
 	if owner.Store == nil {
 		owner.Store = openState(t, time.Now().UTC())
 	}
-	reserveActionRequest(t, owner.Store, request, assigned)
+	main := owner.mainRoleSettings(nil)
+	if main.Model == "" {
+		owner.MainModel = "test-main"
+	}
+	if main.Effort == "" {
+		owner.MainEffort = "medium"
+	}
+	if owner.Adversarial != "" {
+		critic := owner.criticRoleSettings()
+		if critic.Model == "" {
+			owner.CriticModel = "test-critic"
+		}
+		if critic.Effort == "" {
+			owner.CriticEffort = "low"
+		}
+	}
+	if request.MainSettings == (config.RoleModelConfig{}) {
+		role := owner.mainRoleSettings(nil)
+		request.MainSettings = config.RoleModelConfig{Model: role.Model, Effort: role.Effort}
+	}
+	if owner.Adversarial != "" && request.CriticSettings == (config.RoleModelConfig{}) {
+		role := owner.criticRoleSettings()
+		request.CriticSettings = config.RoleModelConfig{Model: role.Model, Effort: role.Effort}
+	}
+	reserveActionRequest(t, owner.Store, request, assigned, owner.Main, owner.Adversarial)
 	owner.attemptID = request.AttemptID
 	fixtureSelectedValidators(owner)
 }

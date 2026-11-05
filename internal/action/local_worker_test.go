@@ -131,6 +131,7 @@ func TestLocalWorkerCanceledHTTPSPullCannotSupplyCapacity(t *testing.T) {
 
 func TestLocalWorkerReleasesSavedUndeliveredAssignment(t *testing.T) {
 	job := testJob(command.Comment)
+	resolveAcceptedFixtureRoles(&job)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, time.Now())
 	if err != nil {
@@ -139,7 +140,9 @@ func TestLocalWorkerReleasesSavedUndeliveredAssignment(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	accepted := acceptedForJob(job)
 	store.Data.Accepted = accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainProvider: accepted.MainProvider, CriticProvider: accepted.CriticProvider,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}

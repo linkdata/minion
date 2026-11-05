@@ -26,6 +26,7 @@ import (
 
 func TestChangedFixResultRequiresOriginalDestination(t *testing.T) {
 	job := testJob(command.Fix)
+	resolveAcceptedFixtureRoles(&job)
 	result := completedRecoveryResult(job)
 	result.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("changed\n")}}
 	accepted := acceptedForJob(job)
@@ -72,6 +73,10 @@ func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
 				value.Set(reflect.ValueOf(state.StopRequest{RequestedBy: "operator", RequestedAt: time.Now().UTC(), Status: "requested"}))
 				break
 			}
+			if value.Type() == reflect.TypeOf(config.RoleModelConfig{}) {
+				value.Set(reflect.ValueOf(config.RoleModelConfig{Model: "other", Effort: "high"}))
+				break
+			}
 			if value.Type() != reflect.TypeOf(time.Time{}) {
 				t.Fatalf("unhandled accepted-action field %s: %s", field.Name, value.Type())
 			}
@@ -86,12 +91,81 @@ func TestAcceptedResultMatchesEveryImmutableSelectedField(t *testing.T) {
 	}
 }
 
+func TestAcceptedResultBindsFrozenRoleModels(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	job.Main.Model, job.Main.Effort = "main", "low"
+	job.Critic.Model, job.Critic.Effort = "critic", "medium"
+	accepted := acceptedForJob(job)
+	accepted.MainSettings = config.RoleModelConfig{Model: job.Main.Model, Effort: job.Main.Effort}
+	accepted.CriticSettings = config.RoleModelConfig{Model: job.Critic.Model, Effort: job.Critic.Effort}
+	if !jobMatchesAccepted(job, *accepted) {
+		t.Fatal("matching frozen role settings rejected")
+	}
+	mainChanged := job
+	mainChanged.Main.Effort = "high"
+	if jobMatchesAccepted(mainChanged, *accepted) {
+		t.Fatal("accepted result changed main effort")
+	}
+	criticChanged := job
+	critic := *job.Critic
+	critic.Model = "other"
+	criticChanged.Critic = &critic
+	if jobMatchesAccepted(criticChanged, *accepted) {
+		t.Fatal("accepted result changed critic model")
+	}
+	criticChanged.Critic = nil
+	if jobMatchesAccepted(criticChanged, *accepted) {
+		t.Fatal("accepted result removed frozen critic")
+	}
+	accepted.MainSettings.Effort = ""
+	job.Main.Effort = ""
+	if !jobMatchesAccepted(job, *accepted) {
+		t.Fatal("frozen empty effort rejected")
+	}
+	mainChanged = job
+	mainChanged.Main.Effort = "high"
+	if jobMatchesAccepted(mainChanged, *accepted) {
+		t.Fatal("accepted result treated frozen empty effort as a wildcard")
+	}
+	accepted.MainProvider, accepted.CriticProvider = job.Main.Provider, job.Critic.Provider
+	if !jobMatchesAccepted(job, *accepted) {
+		t.Fatal("matching frozen providers rejected")
+	}
+	mainChanged = job
+	mainChanged.Main.Provider = "claude"
+	if jobMatchesAccepted(mainChanged, *accepted) {
+		t.Fatal("accepted result changed main provider")
+	}
+	criticChanged = job
+	critic = *job.Critic
+	critic.Provider = "codex"
+	criticChanged.Critic = &critic
+	if jobMatchesAccepted(criticChanged, *accepted) {
+		t.Fatal("accepted result changed critic provider")
+	}
+	accepted.MainProvider = ""
+	if jobMatchesAccepted(job, *accepted) {
+		t.Fatal("missing frozen main provider acted as a wildcard")
+	}
+	accepted.MainProvider = job.Main.Provider
+	accepted.CriticProvider = ""
+	if jobMatchesAccepted(job, *accepted) {
+		t.Fatal("accepted result added a critic after acceptance")
+	}
+	accepted.CriticProvider = job.Critic.Provider
+	accepted.MainSettings.Model = ""
+	if accepted.Validate() == nil || jobMatchesAccepted(job, *accepted) {
+		t.Fatal("missing frozen model was accepted or matched a job")
+	}
+}
+
 func selectedHTTPResultFixture(t *testing.T, wrap func(http.Handler) http.Handler, server ...func(http.Handler) *httptest.Server) (*httpServerTest, *state.Store, string) {
 	return selectedHTTPResultFixtureForJob(t, testJob(command.Comment), wrap, server...)
 }
 
 func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handler) http.Handler, server ...func(http.Handler) *httptest.Server) (*httpServerTest, *state.Store, string) {
 	t.Helper()
+	resolveAcceptedFixtureRoles(&job)
 	f := newExecutionAdapterFixture(t, job)
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, time.Now())
@@ -114,6 +188,7 @@ func selectedHTTPResultFixtureForJob(t *testing.T, job Job, wrap func(http.Handl
 			UpdatedAt: accepted.SourceUpdatedAt, Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID}},
 		Command: command.Command{Name: accepted.CommandName, Action: f.job.Action},
 		ID:      accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings,
 	}
 	if err := f.sink.BeforeAssignment(f.job); err != nil {
 		t.Fatalf("save selected assignment: %v", err)

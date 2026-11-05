@@ -108,6 +108,9 @@ func TestProcessTerminalItemsSkipsReplyAfterIdentifiedCheckFails(t *testing.T) {
 			siblingID := jobID(sibling.Key, "review")
 			siblingFailure := state.JobFailure{Attempts: 1, NotificationKey: store.Data.JobFailures[id].NotificationKey,
 				AcceptedAt: now, Deadline: now.Add(time.Hour)}
+			roles := selectedAcceptance(t, now)
+			siblingFailure.MainProvider, siblingFailure.CriticProvider = roles.MainProvider, roles.CriticProvider
+			siblingFailure.MainSettings, siblingFailure.CriticSettings = roles.MainSettings, roles.CriticSettings
 			store.Data.JobFailures[siblingID] = siblingFailure
 			decision := state.TerminalDecision{AttemptID: "first-attempt", Outcome: "failed", DecidedAt: now}
 			store.Data.TerminalDecisions[id] = decision
@@ -282,9 +285,9 @@ func TestRunOnceServicesTerminalControlBeforeAcceptedRetryOrFuturePoll(t *testin
 					accepted := selectedAcceptance(t, now)
 					accepted.RetryAt = now.Add(5 * time.Minute)
 					store.Data.Accepted = &accepted
-					store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+					store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 						Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-					}
+					})
 					store.Data.NextInviteCheckAt = now.Add(-time.Second)
 				}
 				if err := store.Save(); err != nil {

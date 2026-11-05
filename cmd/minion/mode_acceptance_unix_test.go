@@ -61,7 +61,7 @@ case "$1" in
     printf '%s\n' '{"id":1,"result":{}}'
     IFS= read -r request || exit 1
     IFS= read -r request || exit 1
-    printf '%s\n' '{"id":2,"result":{"data":[{"model":"main-1","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}]}}'
+    printf '%s\n' '{"id":2,"result":{"data":[{"model":"main-1","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"low"}]}]}}'
     exec /bin/cat >/dev/null ;;
   exec)
     case " $* " in

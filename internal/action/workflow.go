@@ -167,10 +167,10 @@ func (e *Orchestrator) roleSettings(provider string, required []string) RoleSett
 
 func (e *Orchestrator) mainRoleSettings(required []string) RoleSettings {
 	role := e.roleSettings(e.mainProvider(), required)
-	if e.MainModel != "" {
+	if e.mainSettingsFrozen || e.MainModel != "" {
 		role.Model = e.MainModel
 	}
-	if e.MainEffort != "" {
+	if e.mainSettingsFrozen || e.MainEffort != "" {
 		role.Effort = e.MainEffort
 	}
 	return role
@@ -178,10 +178,10 @@ func (e *Orchestrator) mainRoleSettings(required []string) RoleSettings {
 
 func (e *Orchestrator) criticRoleSettings() RoleSettings {
 	role := e.roleSettings(e.Adversarial, nil)
-	if e.CriticModel != "" {
+	if e.criticSettingsFrozen || e.CriticModel != "" {
 		role.Model = e.CriticModel
 	}
-	if e.CriticEffort != "" {
+	if e.criticSettingsFrozen || e.CriticEffort != "" {
 		role.Effort = e.CriticEffort
 	}
 	return role

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -19,7 +20,9 @@ func assignmentValidationFixture(t *testing.T) (*Monitor, *state.Store, Job, *fa
 	path := filepath.Join(t.TempDir(), "state.json")
 	store := openStateAt(t, path, now.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainProvider: accepted.MainProvider, CriticProvider: accepted.CriticProvider,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +131,8 @@ func TestRevalidateAssignmentRejectsChangedReservationAndCancellation(t *testing
 		{"source", func(job *Job) { job.Source.NodeID = "other" }},
 		{"command", func(job *Job) { job.Command.Name = "fix" }},
 		{"deadline", func(job *Job) { job.Deadline = job.Deadline.Add(time.Minute) }},
+		{"main model preference", func(job *Job) { job.MainSettings = config.RoleModelConfig{Model: "other", Effort: "high"} }},
+		{"critic model preference", func(job *Job) { job.CriticSettings = config.RoleModelConfig{Model: "other", Effort: "high"} }},
 	} {
 		t.Run(change.name, func(t *testing.T) {
 			m, store, job, gh, _ := assignmentValidationFixture(t)
@@ -150,6 +155,45 @@ func TestRevalidateAssignmentRejectsChangedReservationAndCancellation(t *testing
 	gh.beforeRepository = func() { store.Data.Accepted.AttemptID = "other" }
 	if err := m.RevalidateAssignment(t.Context(), store, job); !errors.Is(err, ErrAcceptanceState) {
 		t.Fatalf("reservation changed during lookup was accepted: %v", err)
+	}
+}
+
+func TestRevalidateAssignmentRejectsAcceptedRoleProviderDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		acceptedCritic string
+		currentMain    string
+		currentCritic  string
+	}{
+		{name: "main provider changed", currentMain: "claude"},
+		{name: "critic added", currentCritic: "claude"},
+		{name: "critic removed", acceptedCritic: "claude"},
+		{name: "critic provider changed", acceptedCritic: "claude", currentCritic: "codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, store, job, gh, path := assignmentValidationFixture(t)
+			store.Data.Accepted.MainProvider = "codex"
+			store.Data.Accepted.CriticProvider = tc.acceptedCritic
+			if tc.acceptedCritic != "" {
+				store.Data.Accepted.CriticSettings = config.RoleModelConfig{Model: "critic-model", Effort: "medium"}
+				job.CriticSettings = store.Data.Accepted.CriticSettings
+			}
+			failure := store.Data.JobFailures[job.ID]
+			failure.MainProvider, failure.CriticProvider = store.Data.Accepted.MainProvider, store.Data.Accepted.CriticProvider
+			failure.MainSettings, failure.CriticSettings = store.Data.Accepted.MainSettings, store.Data.Accepted.CriticSettings
+			store.Data.JobFailures[job.ID] = failure
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openStateAt(t, path, time.Now())
+			m.Config.Main, m.Config.Adversarial = tc.currentMain, tc.currentCritic
+			if err := m.RevalidateAssignment(t.Context(), store, job); !errors.Is(err, ErrTerminalJob) || gh.repoChecks != 0 || store.Data.Accepted.Assigned {
+				t.Fatalf("changed role topology reached assignment: %v, repository checks=%d", err, gh.repoChecks)
+			}
+		})
 	}
 }
 

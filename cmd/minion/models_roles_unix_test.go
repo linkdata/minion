@@ -5,10 +5,12 @@ package main
 import (
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/testsupport"
 )
@@ -18,9 +20,11 @@ func TestCheckModelsResolvesSameProviderRolesIndependently(t *testing.T) {
 	for _, key := range []string{"CODEX_HOME", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"} {
 		t.Setenv(key, "")
 	}
-	const first = `{"model":"main-1","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"}]}`
+	const first = `{"model":"main-1","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"low"}]}`
 	const second = `{"model":"critic-2","defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium"}]}`
 	script := offlineModeCodexScript(filepath.Join(t.TempDir(), "calls"))
+	probes := filepath.Join(t.TempDir(), "probes")
+	script = strings.Replace(script, "#!/bin/sh\n", "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> "+aicli.ShellQuote(probes)+"\n", 1)
 	script = strings.Replace(script, first, first+","+second, 1)
 	if !strings.Contains(script, second) {
 		t.Fatal("provider fixture did not include the critic model")
@@ -28,7 +32,11 @@ func TestCheckModelsResolvesSameProviderRolesIndependently(t *testing.T) {
 	testsupport.FakeOnPath(t, "codex", script)
 	cfg := config.Config{Main: "codex", Adversarial: "codex",
 		MainSettings:   config.RoleModelConfig{Model: "main-1", Effort: "high"},
-		CriticSettings: config.RoleModelConfig{Model: "critic-2", Effort: "medium"}}
+		CriticSettings: config.RoleModelConfig{Model: "critic-2", Effort: "medium"},
+		Admin: &config.AdminConfig{UserModelChoices: &config.UserModelChoices{
+			Main:   []config.RoleModelConfig{{Model: "main-1", Effort: "high"}},
+			Critic: []config.RoleModelConfig{{Model: "critic-2", Effort: "medium"}},
+		}}}
 	if err := checkModels(t.Context(), &cfg, log.New(io.Discard, "", 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +46,31 @@ func TestCheckModelsResolvesSameProviderRolesIndependently(t *testing.T) {
 	}
 	if got := newOrchestrator(cfg, nil, nil, nil, nil); got.MainModel != "main-1" || got.CriticModel != "critic-2" {
 		t.Fatalf("resolved role settings lost in wiring: main=%q critic=%q", got.MainModel, got.CriticModel)
+	}
+	withChoices, err := os.ReadFile(probes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutChoices := cfg
+	withoutChoices.Admin = nil
+	if err := checkModels(t.Context(), &withoutChoices, log.New(io.Discard, "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	allProbes, err := os.ReadFile(probes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validatedWithChoices := strings.Count(string(withChoices), "app-server ")
+	validatedWithoutChoices := strings.Count(string(allProbes), "app-server ") - validatedWithChoices
+	if validatedWithChoices == 0 || validatedWithChoices != validatedWithoutChoices {
+		t.Fatalf("default-equivalent choices ran duplicate validation: with=%d without=%d probes=%q", validatedWithChoices, validatedWithoutChoices, allProbes)
+	}
+	unsupported := cfg
+	unsupported.Admin = &config.AdminConfig{UserModelChoices: &config.UserModelChoices{
+		Main: []config.RoleModelConfig{{Model: "main-1", Effort: "medium"}},
+	}}
+	if err := checkModels(t.Context(), &unsupported, log.New(io.Discard, "", 0)); err == nil || !strings.Contains(err.Error(), "approved Codex choice") {
+		t.Fatalf("unsupported administrator choice reached worker startup: %v", err)
 	}
 	partial := config.Config{Main: "codex", Adversarial: "codex",
 		CriticSettings: config.RoleModelConfig{Model: "critic-2"}}

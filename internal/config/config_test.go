@@ -32,6 +32,60 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 	}
 }
 
+func TestUserModelChoicesBoundPreferencesAndTrustedDefaults(t *testing.T) {
+	low := RoleModelConfig{Model: "approved-main", Effort: "low"}
+	medium := RoleModelConfig{Model: "approved-critic", Effort: "medium"}
+	high := RoleModelConfig{Model: "approved-main", Effort: "high"}
+	cfg := Config{BotLogin: "bot", Main: "codex", Adversarial: "claude",
+		Codex:        CodexConfig{Model: "default-main", ReasoningEffort: "medium"},
+		Claude:       ClaudeConfig{Model: "default-critic", Effort: "low"},
+		MainSettings: RoleModelConfig{Model: "operator-main"},
+		Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+			UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{low}, Critic: []RoleModelConfig{medium}}},
+		Commands: map[string]CommandMapping{}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	main, critic := cfg.ResolveUserPreferences(UserModelPreferences{Main: low, Critic: medium})
+	if main != low || critic != medium {
+		t.Fatalf("approved preferences: main=%+v critic=%+v", main, critic)
+	}
+	main, _ = cfg.ResolveUserPreferences(UserModelPreferences{Main: high})
+	if main != (RoleModelConfig{Model: "operator-main", Effort: "medium"}) {
+		t.Fatalf("unlisted higher effort changed the trusted default: %+v", main)
+	}
+	cfg.Admin.UserModelChoices.Main = nil // Policy changed after the preference was saved.
+	main, critic = cfg.ResolveUserPreferences(UserModelPreferences{Main: low, Critic: medium})
+	if main != (RoleModelConfig{Model: "operator-main", Effort: "medium"}) || critic != medium {
+		t.Fatalf("removed choice did not fall back by role: main=%+v critic=%+v", main, critic)
+	}
+}
+
+func TestUserModelChoicesValidateExactPairs(t *testing.T) {
+	valid := RoleModelConfig{Model: "chosen", Effort: "low"}
+	for _, tc := range []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"missing GitHub proof", func(c *Config) { c.Admin.GitHubOAuth = nil }},
+		{"partial choice", func(c *Config) { c.Admin.UserModelChoices.Main = []RoleModelConfig{{Model: "chosen"}} }},
+		{"duplicate pair", func(c *Config) { c.Admin.UserModelChoices.Main = []RoleModelConfig{valid, valid} }},
+		{"too many pairs", func(c *Config) { c.Admin.UserModelChoices.Main = make([]RoleModelConfig, MaxUserModelChoicesPerRole+1) }},
+		{"critic without role", func(c *Config) { c.Admin.UserModelChoices.Critic = []RoleModelConfig{valid} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{},
+				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+				Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+					UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{valid}}}}
+			tc.edit(&cfg)
+			if err := cfg.Validate(t.TempDir()); err == nil {
+				t.Fatal("invalid user choice policy accepted")
+			}
+		})
+	}
+}
+
 func TestSkillListsFitPortableRoleLimits(t *testing.T) {
 	urls := make([]string, MaxSkillsPerRole+1)
 	for i := range urls {
@@ -606,6 +660,7 @@ func TestCriticStoppingDefaultsAndExplicitZero(t *testing.T) {
 			if got := [3]int{maxRounds, threshold, streak}; got != tt.want {
 				t.Fatalf("Resolve() = %v; want %v", got, tt.want)
 			}
+			cfg.Claude.Effort = "high"
 			if err := cfg.Validate(t.TempDir()); err != nil || cfg.CriticStopping.MaxRounds != tt.want[0] {
 				t.Fatalf("Validate() maximum=%d err=%v; want %d", cfg.CriticStopping.MaxRounds, err, tt.want[0])
 			}

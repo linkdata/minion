@@ -105,7 +105,7 @@ func windowsModeCodexProbe() {
 			}
 			var result any = map[string]any{}
 			if request.Method == "model/list" {
-				result = map[string]any{"data": []any{map[string]any{"model": "main-1", "isDefault": true, "defaultReasoningEffort": "high", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}}}}}
+				result = map[string]any{"data": []any{map[string]any{"model": "main-1", "isDefault": true, "defaultReasoningEffort": "high", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}, map[string]any{"reasoningEffort": "low"}}}}}
 			}
 			_ = encoder.Encode(map[string]any{"id": *request.ID, "result": result})
 			if request.Method == "model/list" {

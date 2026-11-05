@@ -47,11 +47,12 @@ func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
 		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
 		SubjectType: request.SubjectType, Number: request.Number,
 		Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
-	}, Command: "fix", Action: command.Fix})
+	}, Command: "fix", Action: command.Fix, Main: RoleSettings{Provider: "codex"}})
 	request.AttemptID = attemptID
 	request.Source.Key, request.Source.NodeID = accepted.SourceKey, accepted.SourceNodeID
 	request.Source.UpdatedAt = accepted.SourceUpdatedAt
 	request.AcceptedAt, request.Deadline = accepted.AcceptedAt, accepted.Deadline
+	request.MainSettings = accepted.MainSettings
 	store := openState(t, accepted.AcceptedAt)
 	store.Data.Accepted = accepted
 	if err := store.Save(); err != nil {
@@ -62,7 +63,8 @@ func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
 	called := false
 	stop := errors.New("executor stopped after assignment")
 	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", Store: store, ExecutorID: "remote",
-		Main: "codex", Commands: map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
+		Main: "codex", MainModel: accepted.MainSettings.Model, MainEffort: accepted.MainSettings.Effort,
+		Commands:           map[string]config.CommandMapping{"fix": {Action: "fix", Skills: []string{testFixSkillURL}}},
 		assignmentRequired: true,
 		ValidateAssignment: func(context.Context, monitor.Job) error { return nil },
 		Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
@@ -94,68 +96,116 @@ func TestPerformPassesSelectedFixDestinationToExecutor(t *testing.T) {
 	}
 }
 
-func TestSelectedExecuteRecordsPublicationBeforeMonitorCleanup(t *testing.T) {
-	gitFixtureRemote(t)
-	request := usageJob()
-	request.Command = command.Command{Name: "comment", Action: command.Comment}
-	request.Repository.Actions = []string{"comment"}
-	request.AttemptID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	accepted := acceptedForJob(Job{Identity: Identity{
-		JobID: request.ID, AttemptID: request.AttemptID, ExecutorID: LocalExecutorID,
-		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
-		SubjectType: request.SubjectType, Number: request.Number,
-		Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
-	}, Command: request.Command.Name, Action: command.Comment})
-	request.Source.Key, request.Source.NodeID = accepted.SourceKey, accepted.SourceNodeID
-	request.Source.UpdatedAt = accepted.SourceUpdatedAt
-	request.AcceptedAt, request.Deadline = accepted.AcceptedAt, accepted.Deadline
-	store := openState(t, accepted.AcceptedAt)
-	store.Data.Accepted = accepted
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	var reply string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !serveIssueFixture(t, w, r) && !captureComment(t, w, r, &reply) {
-			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(server.Close)
-	e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Store: store,
-		Commands:            map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
-		assignmentRequired:  true,
-		ValidateAssignment:  func(context.Context, monitor.Job) error { return nil },
-		ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },
-		Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
-			sink := checkpoints.(*executionCheckpoints)
-			if err := sink.BeforeAssignment(job); err != nil {
-				return Result{}, err
+func TestSelectedExecuteFreezesRoleSettingsAndPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, serviceEffort, criticProvider string
+		chosen, criticChosen                          config.RoleModelConfig
+	}{
+		{name: "approved Codex pair", provider: "codex", serviceEffort: "medium", chosen: config.RoleModelConfig{Model: "accepted-main", Effort: "low"}},
+		{name: "frozen Claude effort", provider: "claude", serviceEffort: "high", chosen: config.RoleModelConfig{Model: "accepted-claude", Effort: "high"}},
+		{name: "approved critic pair", provider: "codex", serviceEffort: "medium", chosen: config.RoleModelConfig{Model: "accepted-main", Effort: "low"},
+			criticProvider: "claude", criticChosen: config.RoleModelConfig{Model: "accepted-critic", Effort: "low"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitFixtureRemote(t)
+			probeStop := errors.New("stop after selected critic assignment")
+			request := usageJob()
+			chosen := tc.chosen
+			request.MainSettings = chosen
+			request.CriticSettings = tc.criticChosen
+			request.Command = command.Command{Name: "comment", Action: command.Comment}
+			request.Repository.Actions = []string{"comment"}
+			request.AttemptID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+			accepted := acceptedForJob(Job{Identity: Identity{
+				JobID: request.ID, AttemptID: request.AttemptID, ExecutorID: LocalExecutorID,
+				Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
+				SubjectType: request.SubjectType, Number: request.Number,
+				Requester: request.Source.Author.Login, RequesterID: request.Source.Author.ID,
+			}, Command: request.Command.Name, Action: command.Comment})
+			request.Source.Key, request.Source.NodeID = accepted.SourceKey, accepted.SourceNodeID
+			request.Source.UpdatedAt = accepted.SourceUpdatedAt
+			request.AcceptedAt, request.Deadline = accepted.AcceptedAt, accepted.Deadline
+			accepted.MainSettings = chosen
+			accepted.CriticSettings = tc.criticChosen
+			accepted.MainProvider = tc.provider
+			accepted.CriticProvider = tc.criticProvider
+			store := openState(t, accepted.AcceptedAt)
+			store.Data.Accepted = accepted
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
 			}
-			call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
-			fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}
-			if err := sink.BeforeCall(fact); err != nil {
-				return Result{}, err
+			var reply string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !serveIssueFixture(t, w, r) && !captureComment(t, w, r, &reply) {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			e := &Orchestrator{WorkRoot: t.TempDir(), GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Store: store,
+				Usage: &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")},
+				Main:  tc.provider, Adversarial: tc.criticProvider, CodexModel: "service-main", CodexEffort: tc.serviceEffort,
+				ClaudeModel: "service-main", ClaudeEffort: tc.serviceEffort,
+				MainModel: "service-main", MainEffort: tc.serviceEffort,
+				CriticModel: "service-critic", CriticEffort: "high",
+				Commands:            map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+				assignmentRequired:  true,
+				ValidateAssignment:  func(context.Context, monitor.Job) error { return nil },
+				ValidatePublication: func(context.Context, monitor.Job, bool) error { return nil },
+				Executor: executorFunc(func(_ context.Context, job Job, checkpoints Checkpoints) (Result, error) {
+					if job.Main.Model != chosen.Model || job.Main.Effort != chosen.Effort || job.Main.Provider != tc.provider ||
+						job.Identity.Repository != request.Repository.Name || job.RuntimeBudget > request.Deadline.Sub(request.AcceptedAt) {
+						t.Fatalf("accepted model preference changed provider, scope, runtime, or model: %+v", job)
+					}
+					if tc.criticProvider != "" && (job.Critic == nil || job.Critic.Provider != tc.criticProvider ||
+						job.Critic.Model != tc.criticChosen.Model || job.Critic.Effort != tc.criticChosen.Effort) {
+						t.Fatalf("accepted critic preference changed: %+v", job.Critic)
+					}
+					sink := checkpoints.(*executionCheckpoints)
+					if err := sink.BeforeAssignment(job); err != nil {
+						return Result{}, err
+					}
+					if tc.criticProvider != "" {
+						return Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head}, probeStop
+					}
+					call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
+					fact := CallCheckpoint{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Ordinal: 1, Call: call}
+					if err := sink.BeforeCall(fact); err != nil {
+						return Result{}, err
+					}
+					call.Complete = true
+					fact.Call = call
+					if err := sink.AfterCall(fact); err != nil {
+						return Result{}, err
+					}
+					result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
+						Calls: []CallUsage{call}, Answer: "Published answer"}
+					if err := sink.ReceiveCompletedResult(result); err != nil {
+						return Result{}, err
+					}
+					return result, nil
+				}),
 			}
-			call.Complete = true
-			fact.Call = call
-			if err := sink.AfterCall(fact); err != nil {
-				return Result{}, err
+			if err := e.Execute(t.Context(), request); tc.criticProvider != "" {
+				if !errors.Is(err, probeStop) {
+					t.Fatalf("critic assignment probe: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
 			}
-			result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head,
-				Calls: []CallUsage{call}, Answer: "Published answer"}
-			if err := sink.ReceiveCompletedResult(result); err != nil {
-				return Result{}, err
+			if tc.criticProvider == "" && (!strings.Contains(reply, "Published answer") || store.Data.TerminalDecisions[request.ID].Outcome != "succeeded" ||
+				store.Data.Accepted == nil || !store.Data.Accepted.Terminal || !store.Data.Accepted.ResultReady) {
+				t.Fatalf("selected publication was not terminal before monitor cleanup: reply=%q state=%+v", reply, store.Data)
 			}
-			return result, nil
-		}),
-	}
-	if err := e.Execute(t.Context(), request); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(reply, "Published answer") || store.Data.TerminalDecisions[request.ID].Outcome != "succeeded" ||
-		store.Data.Accepted == nil || !store.Data.Accepted.Terminal || !store.Data.Accepted.ResultReady {
-		t.Fatalf("selected publication was not terminal before monitor cleanup: reply=%q state=%+v", reply, store.Data)
+			record, found, err := e.Usage.Load(request.AttemptID)
+			if err != nil || !found || record.Provider != tc.provider || record.Model != chosen.Model || record.Effort != chosen.Effort {
+				t.Fatalf("usage lost frozen model preference: %+v, found=%t, error=%v", record, found, err)
+			}
+			if tc.criticProvider != "" && (record.CriticProvider != tc.criticProvider ||
+				record.CriticModel != tc.criticChosen.Model || record.CriticEffort != tc.criticChosen.Effort) {
+				t.Fatalf("usage lost frozen critic preference: %+v", record)
+			}
+		})
 	}
 }
 

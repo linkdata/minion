@@ -153,9 +153,9 @@ func storedRecoveryFixtureAt(t *testing.T, at time.Time) (*state.Store, string, 
 	accepted := selectedAcceptance(t, at)
 	accepted.Assigned = true
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	store.Data.NextPollAt = at.Add(time.Hour)
 	store.Data.NextInviteCheckAt = at.Add(time.Hour)
 	if err := store.Save(); err != nil {
@@ -759,9 +759,9 @@ func storedIssuedFixPushFixtureAt(t *testing.T, now time.Time) (*state.Store, st
 	accepted.Deadline = now.Add(15 * time.Second)
 	accepted.RetryAt = accepted.Deadline
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	sha := strings.Repeat("b", 40)
 	branch := fmt.Sprintf("minion/fix-%d-%s", accepted.SubjectNumber, accepted.JobID[:12])
 	store.Data.PendingFixes[accepted.JobID] = state.PendingFix{SHA: sha}
@@ -1840,6 +1840,7 @@ func TestStoredResultRecoveryPublishesAfterRestartWithoutWorkerSkill(t *testing.
 		t.Fatal(err)
 	}
 	monitor.SelectedCommands = map[string]bool{"fix": true}
+	monitor.Config.Main = "claude" // A saved result still publishes after provider topology changes.
 	handler := &recoveredResultHandler{publish: func(job Job) error {
 		if job.ID != accepted.JobID || job.AttemptID != accepted.AttemptID ||
 			job.Source.Key != accepted.SourceKey || job.Source.Author.ID != accepted.RequesterID ||

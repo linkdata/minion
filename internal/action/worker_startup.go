@@ -87,6 +87,14 @@ func EncodeWorkerStartup(startup WorkerStartup) ([]byte, error) {
 	if startup.Selection.Critic != nil && !addRole(*startup.Selection.Critic) {
 		return nil, errHTTPBodyLimit
 	}
+	for _, choices := range [][]config.RoleModelConfig{startup.Selection.MainChoices, startup.Selection.CriticChoices,
+		startup.Selection.RetainedMainChoices, startup.Selection.RetainedCriticChoices} {
+		for _, choice := range choices {
+			if !add(choice.Model) || !add(choice.Effort) {
+				return nil, errHTTPBodyLimit
+			}
+		}
+	}
 	for name, mapping := range startup.Selection.Commands {
 		if !add(name) || !add(mapping.Action) {
 			return nil, errHTTPBodyLimit

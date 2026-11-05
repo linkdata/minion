@@ -127,7 +127,7 @@ func TestRevalidatePublicationKeepsEarlierCancellationAfterSlowLookup(t *testing
 		job.AcceptedAt, job.Deadline = now, now.Add(time.Second)
 		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
 		store.Data.Accepted.Assigned = true
-		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
+		store.Data.JobFailures[job.ID] = failureForAccepted(*store.Data.Accepted, state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline})
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}
@@ -640,7 +640,7 @@ func TestDecideAcceptedPreservesCancellationAfterLateCleanup(t *testing.T) {
 		job.AcceptedAt, job.Deadline = now, now.Add(time.Second)
 		store.Data.Accepted.AcceptedAt, store.Data.Accepted.Deadline = job.AcceptedAt, job.Deadline
 		store.Data.Accepted.Assigned = true
-		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
+		store.Data.JobFailures[job.ID] = failureForAccepted(*store.Data.Accepted, state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline})
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}

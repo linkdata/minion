@@ -38,6 +38,27 @@ func TestInactivityTimerUsesProgressAndStopsAtUpload(t *testing.T) {
 	})
 }
 
+func TestInactivityTimerPauseExcludesSelectedCLICheck(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancelCause(t.Context())
+		watch := startInactivityTimer(time.Now(), 5*time.Second, cancel)
+		t.Cleanup(watch.stop)
+		time.Sleep(2 * time.Second)
+		resume := watch.pause()
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		if ctx.Err() != nil {
+			t.Fatalf("selected CLI check consumed inactivity: %v", context.Cause(ctx))
+		}
+		resume()
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		if !errors.Is(context.Cause(ctx), errExecutorInactivity) {
+			t.Fatalf("inactivity did not resume after CLI check: %v", context.Cause(ctx))
+		}
+	})
+}
+
 func TestInactivityTimerExpiresFromAssignmentReceipt(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancelCause(t.Context())

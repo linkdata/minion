@@ -31,6 +31,8 @@ type HTTPExecutor struct {
 	workRoot        string
 	credentials     WorkerCredentials
 	credentialsSet  bool
+	remoteChoices   *remoteChoicePreflight
+	choicesFetched  bool
 	active          *httpTransaction
 	pull            bool
 	pullDone        <-chan struct{}
@@ -132,7 +134,7 @@ func (e *HTTPExecutor) SetWorkRoot(workRoot string) error {
 	return nil
 }
 
-// SetWorkerCredentials configures assignment-only credentials before the worker pulls.
+// SetWorkerCredentials configures credentials shared during worker preflight and assignment.
 func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error {
 	if e == nil {
 		return errors.New("HTTP executor is missing")
@@ -386,6 +388,8 @@ func (e *HTTPExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/preflight":
+		e.serveRemoteChoices(w, r)
 	case "/next":
 		e.serveNext(w, r)
 	case "/cancel":
@@ -397,6 +401,40 @@ func (e *HTTPExecutor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpServerReject(w, "error", http.StatusNotFound, httpBinding{}, 0, errors.New("unknown HTTP execution route"))
 	}
+}
+
+func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request) {
+	var request httpPull
+	if err := httpServerRead(w, r, httpControlBytes, &request); err != nil {
+		httpServerReject(w, "preflight", httpInputStatus(err), httpBinding{}, 0, err)
+		return
+	}
+	if request.Version != ProtocolVersion || request.ExecutorID != e.executorID {
+		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("remote preflight version or executor differs"))
+		return
+	}
+	e.mu.Lock()
+	if e.closed || e.unavailable {
+		e.mu.Unlock()
+		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is closed or unavailable"))
+		return
+	}
+	response := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: e.executorID}
+	if e.remoteChoices != nil {
+		response = *e.remoteChoices
+		response.Credentials = e.credentials
+	}
+	e.mu.Unlock()
+	body, err := httpEncode(response, httpControlBytes)
+	if err != nil {
+		return
+	}
+	if response.Main.Provider != "" {
+		e.mu.Lock()
+		e.choicesFetched = true
+		e.mu.Unlock()
+	}
+	_ = httpServerWriteBytes(w, http.StatusOK, body)
 }
 
 func (e *HTTPExecutor) serveNext(w http.ResponseWriter, r *http.Request) {
@@ -421,6 +459,11 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	e.mu.Lock()
+	if e.remoteChoices != nil && !e.choicesFetched {
+		e.mu.Unlock()
+		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("remote choices were not preflighted"))
+		return
+	}
 	// Keep a new pull pending while the pre-cleanup handler still owns its slot.
 	for e.pull && e.pullStale && !e.closed && !e.unavailable && generation == e.pullGeneration && r.Context().Err() == nil {
 		changed := e.changed

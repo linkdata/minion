@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/state"
 )
 
@@ -23,12 +24,19 @@ func dashboardStore(t *testing.T, at time.Time) *state.Store {
 }
 
 func dashboardAccepted(job Job, at time.Time) *state.AcceptedAction {
+	resolveAcceptedFixtureRoles(&job)
 	id := job.Identity
-	return &state.AcceptedAction{JobID: id.JobID, AttemptID: id.AttemptID, ExecutorID: id.ExecutorID,
+	accepted := &state.AcceptedAction{JobID: id.JobID, AttemptID: id.AttemptID, ExecutorID: id.ExecutorID,
 		Repository: id.Repository, RepositoryID: id.RepositoryID, OwnerID: id.OwnerID,
 		SubjectType: id.SubjectType, SubjectNumber: id.Number, SourceKey: "source", SourceNodeID: "source-node",
 		Requester: id.Requester, RequesterID: id.RequesterID, CommandName: job.Command, Action: string(job.Action),
+		MainProvider: job.Main.Provider, MainSettings: config.RoleModelConfig{Model: job.Main.Model, Effort: job.Main.Effort},
 		AcceptedAt: at, Deadline: at.Add(10 * time.Minute), Assigned: true, ResultReady: true}
+	if job.Critic != nil {
+		accepted.CriticProvider = job.Critic.Provider
+		accepted.CriticSettings = config.RoleModelConfig{Model: job.Critic.Model, Effort: job.Critic.Effort}
+	}
+	return accepted
 }
 
 func TestReadDashboardStateRetriesOnlyWindowsSharing(t *testing.T) {

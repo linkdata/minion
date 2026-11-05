@@ -62,6 +62,8 @@ type Orchestrator struct {
 	ClaudeModel, ClaudeEffort string
 	MainModel, MainEffort     string
 	CriticModel, CriticEffort string
+	mainSettingsFrozen        bool
+	criticSettingsFrozen      bool
 	GitHub                    *github.Client
 	BotLogin                  string
 	BotID                     int64
@@ -182,6 +184,14 @@ func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr 
 	}
 	attempt := *e
 	e = &attempt
+	if job.MainSettings != (config.RoleModelConfig{}) {
+		e.MainModel, e.MainEffort = job.MainSettings.Model, job.MainSettings.Effort
+		e.mainSettingsFrozen = true
+	}
+	if job.CriticSettings != (config.RoleModelConfig{}) {
+		e.CriticModel, e.CriticEffort = job.CriticSettings.Model, job.CriticSettings.Effort
+		e.criticSettingsFrozen = true
+	}
 	e.usageCheckpoint = nil
 	e.attemptID = job.AttemptID
 	// A panic leaves the last running checkpoint instead of claiming success.

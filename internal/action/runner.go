@@ -51,6 +51,7 @@ type Runner struct {
 	phaseUpdate       func(string, int, string)
 	statusActivity    func()
 	executionProgress func()
+	pauseInactivity   func() func()
 	eventSink         func(attemptRecord)
 	postCallContext   context.Context
 }
@@ -260,13 +261,24 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	defer cancel()
 	configured := *r
 	var inactivity *inactivityTimer
-	if configured.executionProgress == nil {
-		var cancelInactivity context.CancelCauseFunc
+	var cancelInactivity context.CancelCauseFunc
+	startInactivity := func(origin time.Time) {
+		if configured.executionProgress != nil {
+			return
+		}
 		ctx, cancelInactivity = context.WithCancelCause(ctx)
-		defer cancelInactivity(nil)
-		inactivity = startInactivityTimer(started, job.InactivityTimeout, cancelInactivity)
+		inactivity = startInactivityTimer(origin, job.InactivityTimeout, cancelInactivity)
 		configured.executionProgress = inactivity.progress
 	}
+	checkSelectedCLI := r.remote || r.selection != nil && r.runModel == nil
+	if !checkSelectedCLI {
+		startInactivity(started)
+	}
+	defer func() {
+		if cancelInactivity != nil {
+			cancelInactivity(nil)
+		}
+	}()
 	// Final status runs after resource cleanup so cleanup diagnostics survive.
 	defer func() {
 		if inactivity != nil {
@@ -285,9 +297,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "audit_incomplete", Message: "The audit failed; collected artifacts are incomplete and must not be published."})
 		}
 	}()
-	if inactivity != nil && time.Since(started) >= job.InactivityTimeout {
-		inactivity.stop()
-	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -346,17 +355,25 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 	if len(configured.Codex.ReadOnlyDirs) != 0 || len(configured.Claude.ReadOnlyDirs) != 0 {
 		return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, errUnsupportedEvidenceDirs)
 	}
-	if r.remote {
-		roles := []RoleSettings{job.Main}
-		if job.Critic != nil {
-			roles = append(roles, *job.Critic)
-		}
-		for _, role := range roles {
-			message, err := checkSelectedRoleCLI(ctx, &configured, role)
-			if err != nil {
-				return result, terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
+	if checkSelectedCLI {
+		checkRoles := func() error {
+			if configured.pauseInactivity != nil {
+				defer configured.pauseInactivity()()
 			}
+			roles := []RoleSettings{job.Main}
+			if job.Critic != nil {
+				roles = append(roles, *job.Critic)
+			}
+			if message, err := checkOfferedRolesCLI(ctx, &configured, roles); err != nil {
+				return terminalUnlessCanceled(ctx, preflightError{message: message, cause: err})
+			}
+			return nil
 		}
+		if err := checkRoles(); err != nil {
+			return result, err
+		}
+		// CLI discovery uses the absolute runtime budget, not the model inactivity window.
+		startInactivity(time.Now())
 	}
 	if job.Critic != nil {
 		if err := checkpointReview(nil); err != nil {

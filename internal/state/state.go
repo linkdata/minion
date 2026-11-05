@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -177,31 +178,35 @@ func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 
 // AcceptedAction retains the one selected action across process restarts.
 type AcceptedAction struct {
-	JobID           string      `json:"job_id"`
-	AttemptID       string      `json:"attempt_id"`
-	ExecutorID      string      `json:"executor_id"`
-	Repository      string      `json:"repository"`
-	RepositoryID    int64       `json:"repository_id"`
-	OwnerID         int64       `json:"owner_id"`
-	SubjectType     string      `json:"subject_type"`
-	SubjectNumber   int         `json:"subject_number"`
-	SourceKey       string      `json:"source_key"`
-	SourceNodeID    string      `json:"source_node_id"`
-	SourceURL       string      `json:"source_url"`
-	SourceUpdatedAt time.Time   `json:"source_updated_at"`
-	Requester       string      `json:"requester"`
-	RequesterID     int64       `json:"requester_id"`
-	CommandName     string      `json:"command_name"`
-	Action          string      `json:"action"`
-	AcceptedAt      time.Time   `json:"accepted_at"`
-	Deadline        time.Time   `json:"deadline"`
-	RetryAt         time.Time   `json:"retry_at,omitzero"`
-	Assigned        bool        `json:"assigned"`
-	OutcomeBinding  string      `json:"outcome_binding,omitempty"`
-	ResultReady     bool        `json:"result_ready,omitempty"`
-	FixedRefusal    string      `json:"fixed_refusal,omitempty"`
-	Terminal        bool        `json:"terminal,omitempty"`
-	StopRequest     StopRequest `json:"stop_request,omitzero"`
+	JobID           string                 `json:"job_id"`
+	AttemptID       string                 `json:"attempt_id"`
+	ExecutorID      string                 `json:"executor_id"`
+	Repository      string                 `json:"repository"`
+	RepositoryID    int64                  `json:"repository_id"`
+	OwnerID         int64                  `json:"owner_id"`
+	SubjectType     string                 `json:"subject_type"`
+	SubjectNumber   int                    `json:"subject_number"`
+	SourceKey       string                 `json:"source_key"`
+	SourceNodeID    string                 `json:"source_node_id"`
+	SourceURL       string                 `json:"source_url"`
+	SourceUpdatedAt time.Time              `json:"source_updated_at"`
+	Requester       string                 `json:"requester"`
+	RequesterID     int64                  `json:"requester_id"`
+	CommandName     string                 `json:"command_name"`
+	Action          string                 `json:"action"`
+	MainProvider    string                 `json:"main_provider,omitempty"`
+	CriticProvider  string                 `json:"critic_provider,omitempty"`
+	MainSettings    config.RoleModelConfig `json:"main_settings,omitzero"`
+	CriticSettings  config.RoleModelConfig `json:"critic_settings,omitzero"`
+	AcceptedAt      time.Time              `json:"accepted_at"`
+	Deadline        time.Time              `json:"deadline"`
+	RetryAt         time.Time              `json:"retry_at,omitzero"`
+	Assigned        bool                   `json:"assigned"`
+	OutcomeBinding  string                 `json:"outcome_binding,omitempty"`
+	ResultReady     bool                   `json:"result_ready,omitempty"`
+	FixedRefusal    string                 `json:"fixed_refusal,omitempty"`
+	Terminal        bool                   `json:"terminal,omitempty"`
+	StopRequest     StopRequest            `json:"stop_request,omitzero"`
 }
 
 // Validate checks the persisted action identity and absolute runtime window.
@@ -228,6 +233,15 @@ func (a AcceptedAction) Validate() error {
 	}
 	if a.AcceptedAt.IsZero() || !a.Deadline.After(a.AcceptedAt) {
 		return errors.New("accepted action deadline is invalid")
+	}
+	if !a.MainSettings.ValidChoice() ||
+		a.CriticProvider != "" && !a.CriticSettings.ValidChoice() ||
+		a.CriticProvider == "" && a.CriticSettings != (config.RoleModelConfig{}) {
+		return errors.New("accepted action model settings are invalid")
+	}
+	if a.MainProvider != "codex" && a.MainProvider != "claude" ||
+		a.CriticProvider != "" && a.CriticProvider != "codex" && a.CriticProvider != "claude" {
+		return errors.New("accepted action role providers are invalid")
 	}
 	if !a.StopRequest.valid() || a.StopRequest != (StopRequest{}) && !a.Terminal {
 		return errors.New("accepted action stop request is invalid")
@@ -270,17 +284,34 @@ type PendingNotification struct {
 }
 
 type JobFailure struct {
-	Attempts         int       `json:"attempts"`
-	ModelCallStarted bool      `json:"model_call_started,omitempty"`
-	NotificationKey  string    `json:"notification_key,omitempty"`
-	AcceptedAt       time.Time `json:"accepted_at,omitzero"`
-	Deadline         time.Time `json:"deadline,omitzero"`
+	Attempts         int                    `json:"attempts"`
+	ModelCallStarted bool                   `json:"model_call_started,omitempty"`
+	NotificationKey  string                 `json:"notification_key,omitempty"`
+	AcceptedAt       time.Time              `json:"accepted_at,omitzero"`
+	Deadline         time.Time              `json:"deadline,omitzero"`
+	MainProvider     string                 `json:"main_provider,omitempty"`
+	CriticProvider   string                 `json:"critic_provider,omitempty"`
+	MainSettings     config.RoleModelConfig `json:"main_settings,omitzero"`
+	CriticSettings   config.RoleModelConfig `json:"critic_settings,omitzero"`
 }
 
-// Validate checks the optional original action deadline.
+// Validate checks retry timing and frozen role settings.
 func (f JobFailure) Validate() error {
 	if f.AcceptedAt.IsZero() != f.Deadline.IsZero() || !f.Deadline.IsZero() && !f.Deadline.After(f.AcceptedAt) {
 		return errors.New("job failure deadline is invalid")
+	}
+	if f.AcceptedAt.IsZero() {
+		if f.MainProvider != "" || f.CriticProvider != "" ||
+			f.MainSettings != (config.RoleModelConfig{}) || f.CriticSettings != (config.RoleModelConfig{}) {
+			return errors.New("job failure frozen role settings are invalid")
+		}
+		return nil
+	}
+	if f.MainProvider != "codex" && f.MainProvider != "claude" || !f.MainSettings.ValidChoice() ||
+		f.CriticProvider != "" && f.CriticProvider != "codex" && f.CriticProvider != "claude" ||
+		f.CriticProvider != "" && !f.CriticSettings.ValidChoice() ||
+		f.CriticProvider == "" && f.CriticSettings != (config.RoleModelConfig{}) {
+		return errors.New("job failure frozen role settings are invalid")
 	}
 	return nil
 }

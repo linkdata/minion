@@ -34,7 +34,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	root := t.TempDir()
 	statePath := filepath.Join(root, "state.json")
 	at := time.Now().UTC().Add(-time.Minute)
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7,
@@ -50,11 +50,11 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 			Requester: accepted.Requester, RequesterID: accepted.RequesterID, Number: accepted.SubjectNumber, SubjectType: accepted.SubjectType},
 		Command: accepted.CommandName, Action: command.Comment,
 		Source: workspace.Snapshot{Head: strings.Repeat("a", 40), Repository: []byte("saved source bundle")},
-		Main:   action.RoleSettings{Provider: "codex", Skills: []string{skills.BuiltinAntiPromptInjection}}, RuntimeBudget: time.Minute,
+		Main:   action.RoleSettings{Provider: "codex", Model: accepted.MainSettings.Model, Effort: accepted.MainSettings.Effort, Skills: []string{skills.BuiltinAntiPromptInjection}}, RuntimeBudget: time.Minute,
 		InactivityTimeout: config.DefaultInactivityTimeout,
 	}
 	result := action.Result{Version: action.ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
-		Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Complete: true}}}
+		Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1, Model: accepted.MainSettings.Model, Effort: accepted.MainSettings.Effort, Complete: true}}}
 	record := action.AcceptedResultRecord{Accepted: accepted, Job: job, Result: result}
 	if err := record.Validate(); err != nil {
 		t.Fatalf("invalid saved result fixture: %v", err)
@@ -64,7 +64,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		t.Fatal(err)
 	}
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	store.Data.NextPollAt = at.Add(time.Hour)
 	store.Data.NextInviteCheckAt = at.Add(time.Hour)
 	data, err := json.Marshal(record)
@@ -181,7 +181,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	// model; the worker startup must use that resolved selection.
 	accepted.ResultReady = false
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	delete(store.Data.Processed, accepted.JobID)
 	delete(store.Data.TerminalDecisions, accepted.JobID) // Rebuild an unprocessed fixture for the loop case.
 	delete(store.Data.PublicationWrites, accepted.JobID)
@@ -199,6 +199,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		t.Fatal(err)
 	}
 	cfg.Main = "claude"
+	cfg.Claude.Effort = "medium"
 	for _, name := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"} {
 		t.Setenv(name, "")
 	}
@@ -217,7 +218,7 @@ case " $* " in
     exit 1 ;;
 esac
 input=$(/bin/cat)
-case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"default","resolvedModel":"claude-test"}]}}}' ;; *) exit 90 ;; esac
+case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"default","resolvedModel":"claude-test","supportedEffortLevels":["medium"]}]}}}' ;; *) exit 90 ;; esac
 `
 	if err := os.WriteFile(filepath.Join(os.Getenv("PATH"), "claude"), []byte(claude), 0700); err != nil {
 		t.Fatal(err)

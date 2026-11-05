@@ -62,6 +62,7 @@ func TestRetentionFailureClassification(t *testing.T) {
 
 func TestRetentionFailureNeedsSavedResultForPublicationRetry(t *testing.T) {
 	job := testJob(command.Comment)
+	resolveAcceptedFixtureRoles(&job)
 	cause := retainedRecordFailure("save private record", syscall.EMFILE)
 	e := &Orchestrator{}
 	if err := e.requireSavedResultForRetry(job, cause); !errors.Is(err, monitor.ErrTerminalJob) ||
@@ -154,6 +155,7 @@ func TestSavedPrivateRetentionRetriesWithoutModel(t *testing.T) {
 	for _, name := range []string{"worker-diagnostics", "reviews"} {
 		t.Run(name, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
+			resolveAcceptedFixtureRoles(&job)
 			job.Identity.Repository = "o/r"
 			result := privateReviewResult(job)
 			result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
@@ -226,6 +228,7 @@ func TestSavedPrivateRecordConflictHoldsReceiptForRepair(t *testing.T) {
 	for _, name := range []string{"worker-diagnostics", "reviews"} {
 		t.Run(name, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
+			resolveAcceptedFixtureRoles(&job)
 			job.Identity.Repository = "o/r"
 			result := privateReviewResult(job)
 			result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}
@@ -274,6 +277,7 @@ func TestSavedPrivateDirectoryDisappearsDuringSync(t *testing.T) {
 			result := completedRecoveryResult(job)
 			if name == "reviews" {
 				job = withClaudeCritic(job)
+				resolveAcceptedFixtureRoles(&job)
 				result = privateReviewResult(job)
 			} else {
 				result.Diagnostics = []Diagnostic{{Code: "private", Message: "worker message"}}

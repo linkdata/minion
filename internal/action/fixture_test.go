@@ -70,8 +70,15 @@ func attemptFixture(orchestrator *Orchestrator) *Orchestrator {
 }
 
 // reserveActionRequest gives a direct orchestration test the monitor's saved reservation.
-func reserveActionRequest(t *testing.T, store *state.Store, request *monitor.Job, assigned bool) {
+func reserveActionRequest(t *testing.T, store *state.Store, request *monitor.Job, assigned bool, providers ...string) {
 	t.Helper()
+	mainProvider, criticProvider := "codex", ""
+	if len(providers) > 0 && providers[0] != "" {
+		mainProvider = providers[0]
+	}
+	if len(providers) > 1 {
+		criticProvider = providers[1]
+	}
 	if request.AttemptID == "" {
 		var err error
 		request.AttemptID, err = monitor.NewAttemptID()
@@ -97,6 +104,12 @@ func reserveActionRequest(t *testing.T, store *state.Store, request *monitor.Job
 	if request.Deadline.IsZero() {
 		request.Deadline = request.AcceptedAt.Add(config.DefaultMaxRuntime)
 	}
+	if request.MainSettings == (config.RoleModelConfig{}) {
+		request.MainSettings = config.RoleModelConfig{Model: "test-main", Effort: "medium"}
+	}
+	if criticProvider != "" && request.CriticSettings == (config.RoleModelConfig{}) {
+		request.CriticSettings = config.RoleModelConfig{Model: "test-critic", Effort: "low"}
+	}
 	accepted := &state.AcceptedAction{
 		JobID: request.ID, AttemptID: request.AttemptID, ExecutorID: LocalExecutorID,
 		Repository: request.Repository.Name, RepositoryID: request.Repository.ID, OwnerID: request.Repository.OwnerID,
@@ -105,13 +118,17 @@ func reserveActionRequest(t *testing.T, store *state.Store, request *monitor.Job
 		SourceUpdatedAt: request.Source.UpdatedAt,
 		Requester:       request.Source.Author.Login, RequesterID: request.Source.Author.ID,
 		CommandName: request.Command.Name, Action: string(request.Command.Action),
+		MainProvider: mainProvider, CriticProvider: criticProvider,
+		MainSettings: request.MainSettings, CriticSettings: request.CriticSettings,
 		AcceptedAt: request.AcceptedAt, Deadline: request.Deadline, Assigned: assigned,
 	}
 	if err := accepted.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	store.Data.Accepted = accepted
-	store.Data.JobFailures[request.ID] = state.JobFailure{Attempts: 1, AcceptedAt: request.AcceptedAt, Deadline: request.Deadline}
+	store.Data.JobFailures[request.ID] = state.JobFailure{Attempts: 1, AcceptedAt: request.AcceptedAt, Deadline: request.Deadline,
+		MainProvider: accepted.MainProvider, CriticProvider: accepted.CriticProvider,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -142,6 +159,23 @@ func testJob(action command.Action) Job {
 		job.Source.Diff = []byte("exact supplied comparison\n")
 	}
 	return job
+}
+
+func resolveAcceptedFixtureRoles(job *Job) {
+	if job.Main.Model == "" {
+		job.Main.Model = "main-1"
+	}
+	if job.Main.Effort == "" {
+		job.Main.Effort = "high"
+	}
+	if job.Critic != nil {
+		if job.Critic.Model == "" {
+			job.Critic.Model = "critic-1"
+		}
+		if job.Critic.Effort == "" {
+			job.Critic.Effort = "low"
+		}
+	}
 }
 
 func auditRunnerJob(t *testing.T) Job {
@@ -576,11 +610,11 @@ func usageJob() monitor.Job {
 func privateReviewResult(job Job) Result {
 	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Public answer.", CriticStopReason: "approved",
 		Calls: []CallUsage{
-			{Provider: job.Main.Provider, Role: roleMain, Round: 1},
-			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
-			{Provider: job.Main.Provider, Role: roleMain, Round: 2},
-			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
-			{Provider: job.Critic.Provider, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
+			{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: roleMain, Round: 1},
+			{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: roleCritic, ReviewComplete: true, Round: 1, ReviewPhase: reviewFull, HasBlockers: true},
+			{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: roleMain, Round: 2},
+			{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewVerification, Approved: true, NoBlockers: true},
+			{Provider: job.Critic.Provider, Model: job.Critic.Model, Effort: job.Critic.Effort, Role: roleCritic, ReviewComplete: true, Round: 2, ReviewPhase: reviewFull, Approved: true, NoBlockers: true},
 		},
 		Refutations: []Refutation{{Round: 2, Text: "PRIVATE_MAIN_REFUTATION"}},
 	}
@@ -649,5 +683,5 @@ func auditArtifactsFixture(job Job, target, report string) []workspace.File {
 
 func completeAuditResult(job Job) Result {
 	const report = "Reviewed audit report."
-	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: report, Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1}}, Artifacts: auditArtifactsFixture(job, sourceIdentity(job), report)}
+	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: report, Calls: []CallUsage{{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}}, Artifacts: auditArtifactsFixture(job, sourceIdentity(job), report)}
 }

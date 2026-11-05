@@ -30,6 +30,19 @@ import (
 
 func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, string, monitor.Job) {
 	t.Helper()
+	resolveAcceptedFixtureRoles(&job)
+	for i := range result.Calls {
+		role := job.Main
+		if result.Calls[i].Role == roleCritic && job.Critic != nil {
+			role = *job.Critic
+		}
+		if result.Calls[i].Model == "" {
+			result.Calls[i].Model = role.Model
+		}
+		if result.Calls[i].Effort == "" {
+			result.Calls[i].Effort = role.Effort
+		}
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := state.Open(path, time.Now())
 	if err != nil {
@@ -67,11 +80,13 @@ func savedRecoveryFixture(t *testing.T, job Job, result Result) (*state.Store, s
 			UpdatedAt: accepted.SourceUpdatedAt, Author: github.User{ID: accepted.RequesterID, Login: accepted.Requester}},
 		Command: command.Command{Name: accepted.CommandName, Action: job.Action},
 		ID:      accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings,
 	}
 	return store, path, request
 }
 
 func completedRecoveryResult(job Job) Result {
+	resolveAcceptedFixtureRoles(&job)
 	return Result{Version: ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head, Answer: "Saved complete answer",
 		Calls: []CallUsage{{Provider: job.Main.Provider, Model: job.Main.Model, Effort: job.Main.Effort, Role: roleMain, Round: 1, Complete: true}}}
 }
@@ -267,7 +282,7 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 				var nodes []map[string]any
 				if review := posted.Load(); review != nil {
 					nodes = []map[string]any{{"id": "review-node", "fullDatabaseId": "1", "body": review.body,
-						"author": map[string]any{"login": "bot", "id": 8}, "state": "COMMENTED", "submittedAt": request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339)}}
+						"author": map[string]any{"login": "bot", "id": 8}, "state": "COMMENTED", "submittedAt": time.Now().UTC().Format(time.RFC3339)}}
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
 					"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})

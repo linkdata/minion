@@ -30,9 +30,10 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
 	cfg := config.Config{Main: "codex", Commands: commands,
+		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
 		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile, Token: token}}
-	owner := &action.Orchestrator{Main: "codex", Commands: commands}
+	owner := &action.Orchestrator{Main: "codex", Commands: commands, CodexModel: "main-1", CodexEffort: "high"}
 	watcher := &monitor.Monitor{Config: cfg}
 	endpoint, err := attachSelectedRemoteWorker(owner, watcher)
 	if err != nil {
@@ -48,6 +49,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	defer client.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+	fetchRemotePreflight(t, ctx, client, endpoint, token)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
 		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
 	if err != nil {
@@ -87,6 +89,27 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	got := <-pullDone
 	if got.status != http.StatusConflict || got.err != nil || !bytes.Contains(got.body, []byte(`"kind":"next"`)) || !bytes.Contains(got.body, []byte(`"failure"`)) {
 		t.Fatalf("held pull did not receive idle shutdown: status=%d body=%q error=%v", got.status, got.body, got.err)
+	}
+}
+
+func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("remote preflight fixture status=%d error=%v", response.StatusCode, err)
 	}
 }
 

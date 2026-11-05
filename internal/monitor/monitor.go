@@ -1,6 +1,7 @@
 package monitor
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -94,15 +95,17 @@ type StoredResultPublisher interface {
 }
 
 type Job struct {
-	Repository  config.Repository
-	SubjectType string
-	Number      int
-	Source      github.Item
-	Command     command.Command
-	ID          string
-	AttemptID   string
-	AcceptedAt  time.Time
-	Deadline    time.Time
+	Repository     config.Repository
+	SubjectType    string
+	Number         int
+	Source         github.Item
+	Command        command.Command
+	ID             string
+	AttemptID      string
+	AcceptedAt     time.Time
+	Deadline       time.Time
+	MainSettings   config.RoleModelConfig
+	CriticSettings config.RoleModelConfig
 }
 
 type notificationScan struct {
@@ -123,11 +126,12 @@ type Monitor struct {
 	Handler                ActionHandler
 	Logger                 *log.Logger
 	Now                    func() time.Time
-	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
-	SelectedExecutorID     string          // Nonempty only while a selected worker owns actions.
-	AfterAcceptedCleanup   func()          // Called after an accepted reservation is durably released.
-	afterSelectedRunReturn func()          // Test seam after the worker's terminal decision.
-	afterInvitationCheck   func()          // Test seam after the invitation context check.
+	SelectedCommands       map[string]bool                                  // Non-nil freezes discovery to the selected worker's commands.
+	SelectedExecutorID     string                                           // Nonempty only while a selected worker owns actions.
+	UserPreferences        func(int64) (config.UserModelPreferences, error) // Optional proven GitHub requester lookup.
+	AfterAcceptedCleanup   func()                                           // Called after an accepted reservation is durably released.
+	afterSelectedRunReturn func()                                           // Test seam after the worker's terminal decision.
+	afterInvitationCheck   func()                                           // Test seam after the invitation context check.
 }
 
 // NewAttemptID returns a random ID shared by acceptance and action records.
@@ -407,8 +411,19 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return wake(next, false), err
 	}
 	commandSets := make(map[string]map[string]command.Action, len(m.Config.Repositories))
+	// Saved attempts must remain visible when the selected worker no longer offers their command.
+	parseCommands := make(map[string]map[string]command.Action, len(m.Config.Repositories))
 	for _, repo := range m.Config.Repositories {
 		commandSets[repo.Name] = m.availableCommands(repo)
+		parseCommands[repo.Name] = m.controlCommands(repo)
+	}
+	skipUnavailableCommand := func(repoName, itemKey, name string) bool {
+		if _, available := commandSets[repoName][name]; available {
+			return false
+		}
+		failure := store.Data.JobFailures[jobID(itemKey, name)]
+		return failure.AcceptedAt.IsZero() ||
+			failure.MainProvider == cmp.Or(m.Config.Main, "codex") && failure.CriticProvider == m.Config.Adversarial
 	}
 
 	var scans []notificationScan
@@ -585,7 +600,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
-			preliminary, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commandSets[repo.Name])
+			preliminary, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, parseCommands[repo.Name])
 			if errors.Is(err, command.ErrNoCommand) {
 				continue
 			}
@@ -594,6 +609,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Name)]; done {
+				continue
+			}
+			if skipUnavailableCommand(repo.Name, item.Key, preliminary.Name) {
 				continue
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
@@ -612,7 +630,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if strings.EqualFold(item.Author.Login, m.Config.BotLogin) || item.Author.Login == "" {
 				continue
 			}
-			cmd, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, commandSets[repo.Name])
+			cmd, err := command.ParseForLoginCommands(item.Body, m.Config.BotLogin, parseCommands[repo.Name])
 			if errors.Is(err, command.ErrNoCommand) {
 				continue
 			}
@@ -629,6 +647,9 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				ID:          jobID(item.Key, cmd.Name),
 			}
 			if _, done := store.Data.Processed[job.ID]; done {
+				continue
+			}
+			if skipUnavailableCommand(repo.Name, item.Key, cmd.Name) {
 				continue
 			}
 			if item.Edited {
@@ -702,12 +723,43 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if store.Data.Accepted != nil {
 				return stop(fmt.Errorf("%w: another selected action remains accepted", ErrAcceptanceState))
 			}
+			if !firstAcceptance && jobFailure.MainProvider == "" {
+				return stop(fmt.Errorf("%w: prior acceptance has no frozen role provider", ErrAcceptanceState))
+			}
+			mainProvider, criticProvider := cmp.Or(m.Config.Main, "codex"), m.Config.Adversarial
+			if jobFailure.MainProvider != "" {
+				job.MainSettings, job.CriticSettings = jobFailure.MainSettings, jobFailure.CriticSettings
+				job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
+				if jobFailure.MainProvider != mainProvider || jobFailure.CriticProvider != criticProvider {
+					m.logf("finish %s: frozen action role providers are no longer configured", job.ID)
+					jobFailure.Attempts = maxJobAttempts
+					store.Data.JobFailures[job.ID] = jobFailure
+					if err := saveAcceptanceState(store); err != nil {
+						return stop(err)
+					}
+					recordTerminalFailure(job.ID, m.finishFailedJob(ctx, store, job, started))
+					continue
+				}
+			} else {
+				preferred := config.UserModelPreferences{}
+				if m.UserPreferences != nil {
+					preferred, err = m.UserPreferences(item.Author.ID)
+					if err != nil {
+						return stop(fmt.Errorf("%w: read requester preferences: %w", ErrAcceptanceState, err))
+					}
+				}
+				job.MainSettings, job.CriticSettings = m.Config.ResolveUserPreferences(preferred)
+			}
 			job.AttemptID, err = NewAttemptID()
 			if err != nil {
 				return stop(err)
 			}
 			if err := m.originalTiming(&jobFailure); err != nil {
 				return stop(err)
+			}
+			if jobFailure.MainProvider == "" {
+				jobFailure.MainProvider, jobFailure.CriticProvider = mainProvider, criticProvider
+				jobFailure.MainSettings, jobFailure.CriticSettings = job.MainSettings, job.CriticSettings
 			}
 			job.AcceptedAt, job.Deadline = jobFailure.AcceptedAt, jobFailure.Deadline
 			accepted := &state.AcceptedAction{
@@ -717,6 +769,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				SourceKey: item.Key, SourceNodeID: item.NodeID, SourceURL: item.HTMLURL, SourceUpdatedAt: item.UpdatedAt,
 				Requester: item.Author.Login, RequesterID: item.Author.ID,
 				CommandName: cmd.Name, Action: string(cmd.Action), AcceptedAt: job.AcceptedAt, Deadline: job.Deadline,
+				MainProvider: mainProvider, CriticProvider: criticProvider,
+				MainSettings: job.MainSettings, CriticSettings: job.CriticSettings,
 			}
 			if err := accepted.Validate(); err != nil {
 				return stop(fmt.Errorf("accept %s: %w", itemLocation(item), err))
@@ -1452,6 +1506,7 @@ func jobFromAccepted(accepted state.AcceptedAction) Job {
 			Author: github.User{Login: accepted.Requester, ID: accepted.RequesterID}},
 		Command: command.Command{Name: accepted.CommandName, Action: command.Action(accepted.Action)},
 		ID:      accepted.JobID, AttemptID: accepted.AttemptID, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings,
 	}
 }
 
@@ -1695,7 +1750,8 @@ func AssignmentMatchesAccepted(job Job, accepted state.AcceptedAction) bool {
 		job.Source.UpdatedAt.Equal(accepted.SourceUpdatedAt) &&
 		strings.EqualFold(job.Source.Author.Login, accepted.Requester) && job.Source.Author.ID == accepted.RequesterID &&
 		job.Command.Name == accepted.CommandName && string(job.Command.Action) == accepted.Action &&
-		job.AcceptedAt.Equal(accepted.AcceptedAt) && job.Deadline.Equal(accepted.Deadline)
+		job.AcceptedAt.Equal(accepted.AcceptedAt) && job.Deadline.Equal(accepted.Deadline) &&
+		job.MainSettings == accepted.MainSettings && job.CriticSettings == accepted.CriticSettings
 }
 
 // RevalidateAssignment checks a prepared action against its saved reservation and live GitHub state.
@@ -1718,6 +1774,12 @@ func (m *Monitor) RevalidateAssignment(ctx context.Context, store *state.Store, 
 			!ok || failure.Attempts <= 0 || failure.ModelCallStarted ||
 			!failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
 			return fmt.Errorf("%w: accepted action changed before assignment", ErrAcceptanceState)
+		}
+		if accepted.MainProvider != cmp.Or(m.Config.Main, "codex") || accepted.CriticProvider != m.Config.Adversarial {
+			if !accepted.Assigned && !accepted.ResultReady && !failure.ModelCallStarted {
+				return fmt.Errorf("%w: frozen action role providers are no longer configured", ErrTerminalJob)
+			}
+			return fmt.Errorf("%w: accepted action role providers changed after assignment", ErrAcceptanceState)
 		}
 		if accepted.Terminal {
 			if accepted.StopRequest != (state.StopRequest{}) {
@@ -1871,14 +1933,12 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if !exists || failure.Attempts <= 0 {
 		return fmt.Errorf("%w: accepted action has no reserved attempt", ErrAcceptanceState)
 	}
-	if failure.AcceptedAt.IsZero() {
-		failure.AcceptedAt, failure.Deadline = accepted.AcceptedAt, accepted.Deadline
-		store.Data.JobFailures[job.ID] = failure
-		if err := saveAcceptanceState(store); err != nil {
-			return err
-		}
-	} else if !failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
+	if !failure.AcceptedAt.Equal(accepted.AcceptedAt) || !failure.Deadline.Equal(accepted.Deadline) {
 		return fmt.Errorf("%w: accepted action deadline differs from its first acceptance", ErrAcceptanceState)
+	}
+	if failure.MainProvider != accepted.MainProvider || failure.CriticProvider != accepted.CriticProvider ||
+		failure.MainSettings != accepted.MainSettings || failure.CriticSettings != accepted.CriticSettings {
+		return fmt.Errorf("%w: accepted action frozen settings differ from its first acceptance", ErrAcceptanceState)
 	}
 	if decision, decided := store.Data.TerminalDecisions[job.ID]; decided {
 		if accepted.StopRequest.Status == "requested" {
@@ -1944,6 +2004,10 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 		return m.recoverStoredResult(ctx, store, job)
 	}
 	if accepted.Terminal || !time.Now().Before(job.Deadline) {
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
+	if accepted.MainProvider != cmp.Or(m.Config.Main, "codex") || accepted.CriticProvider != m.Config.Adversarial {
+		m.logf("finish %s: frozen action role providers are no longer configured", job.ID)
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {

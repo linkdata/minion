@@ -57,7 +57,8 @@ const (
 	// MaxSkillURLBytes is the portable action limit for one skill source.
 	MaxSkillURLBytes = 4096
 	// MaxModelSettingBytes is the portable limit for each model and effort setting.
-	MaxModelSettingBytes = 128
+	MaxModelSettingBytes       = 128
+	MaxUserModelChoicesPerRole = 16
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -111,12 +112,26 @@ type RemoteExecutorConfig struct {
 
 // AdminConfig configures the optional admin dashboard listener.
 type AdminConfig struct {
-	Listen         string         `json:"listen,omitempty"`
-	TLSCertFile    string         `json:"tls_cert_file,omitempty"`
-	TLSKeyFile     string         `json:"tls_key_file,omitempty"`
-	Administrators []AdminAccount `json:"administrators,omitempty"`
-	GitHubOAuth    *OAuthClient   `json:"github_oauth,omitempty"`
-	GitLabOAuth    *OAuthClient   `json:"gitlab_oauth,omitempty"`
+	Listen           string            `json:"listen,omitempty"`
+	TLSCertFile      string            `json:"tls_cert_file,omitempty"`
+	TLSKeyFile       string            `json:"tls_key_file,omitempty"`
+	Administrators   []AdminAccount    `json:"administrators,omitempty"`
+	GitHubOAuth      *OAuthClient      `json:"github_oauth,omitempty"`
+	GitLabOAuth      *OAuthClient      `json:"gitlab_oauth,omitempty"`
+	UserModelChoices *UserModelChoices `json:"user_model_choices,omitempty"`
+}
+
+// UserModelChoices lists exact role model/effort pairs approved by the operator.
+// Omitting a higher effort caps the user's choice without assuming continuous CLI support.
+type UserModelChoices struct {
+	Main   []RoleModelConfig `json:"main,omitempty"`
+	Critic []RoleModelConfig `json:"critic,omitempty"`
+}
+
+// UserModelPreferences are optional selections made by a signed-in user.
+type UserModelPreferences struct {
+	Main   RoleModelConfig `json:"main,omitzero"`
+	Critic RoleModelConfig `json:"critic,omitzero"`
 }
 
 // OAuthClient configures one operator-registered sign-in application.
@@ -163,6 +178,16 @@ type ClaudeConfig struct {
 type RoleModelConfig struct {
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`
+}
+
+// ValidSetting accepts trusted role defaults, which may override only one field.
+func (r RoleModelConfig) ValidSetting() bool {
+	return validModelSetting(r.Model) && validModelSetting(r.Effort)
+}
+
+// ValidChoice requires a complete, bounded model and effort pair.
+func (r RoleModelConfig) ValidChoice() bool {
+	return r.Model != "" && r.Effort != "" && r.ValidSetting()
 }
 
 // SecurityAuditSkill returns the selected security-audit skill path for this job.
@@ -256,6 +281,30 @@ func (c Config) RoleModelSettings(critic bool) RoleModelConfig {
 		defaults.Effort = override.Effort
 	}
 	return defaults
+}
+
+// UserChoices returns the operator-approved model/effort pairs for one role.
+func (c Config) UserChoices(critic bool) []RoleModelConfig {
+	if c.Admin == nil || c.Admin.UserModelChoices == nil {
+		return nil
+	}
+	if critic {
+		return c.Admin.UserModelChoices.Critic
+	}
+	return c.Admin.UserModelChoices.Main
+}
+
+// ResolveUserPreferences checks saved choices against current operator policy.
+// Removed choices fall back to configured role defaults.
+func (c Config) ResolveUserPreferences(preferred UserModelPreferences) (main, critic RoleModelConfig) {
+	main, critic = c.RoleModelSettings(false), c.RoleModelSettings(true)
+	if preferred.Main.ValidChoice() && slices.Contains(c.UserChoices(false), preferred.Main) {
+		main = preferred.Main
+	}
+	if c.Adversarial != "" && preferred.Critic.ValidChoice() && slices.Contains(c.UserChoices(true), preferred.Critic) {
+		critic = preferred.Critic
+	}
+	return
 }
 
 // Load reads and validates configuration.
@@ -369,9 +418,40 @@ func (c *Config) Validate(configDir string) error {
 	if !validModelSetting(c.Claude.Model) || !validModelSetting(c.Claude.Effort) {
 		return fmt.Errorf("claude model and effort must be at most %d UTF-8 bytes without whitespace or NUL", MaxModelSettingBytes)
 	}
+	for _, role := range []struct {
+		name, provider string
+		critic         bool
+	}{{"main", c.Main, false}, {"critic", c.Adversarial, true}} {
+		if role.provider == "claude" && c.RoleModelSettings(role.critic).Effort == "" {
+			return fmt.Errorf("%s Claude role requires explicit effort", role.name)
+		}
+	}
 	if admin := c.Admin; admin != nil {
 		if err := admin.validateOAuth(); err != nil {
 			return err
+		}
+		if choices := admin.UserModelChoices; choices != nil {
+			if admin.GitHubOAuth == nil {
+				return errors.New("admin.user_model_choices requires github_oauth to prove action requester identity")
+			}
+			if c.Adversarial == "" && len(choices.Critic) != 0 {
+				return errors.New("admin.user_model_choices.critic requires adversarial")
+			}
+			for _, role := range []struct {
+				name, provider string
+				choices        []RoleModelConfig
+			}{{"main", c.Main, choices.Main}, {"critic", c.Adversarial, choices.Critic}} {
+				if len(role.choices) > MaxUserModelChoicesPerRole {
+					return fmt.Errorf("admin.user_model_choices.%s exceeds %d choices", role.name, MaxUserModelChoicesPerRole)
+				}
+				seenChoices := make(map[RoleModelConfig]bool, len(role.choices))
+				for _, choice := range role.choices {
+					if !choice.ValidChoice() || role.provider == "claude" && choice.Model == "default" || seenChoices[choice] {
+						return fmt.Errorf("admin.user_model_choices.%s has an invalid or duplicate model/effort pair", role.name)
+					}
+					seenChoices[choice] = true
+				}
+			}
 		}
 		seen := make(map[string]bool, len(admin.Administrators))
 		for _, account := range admin.Administrators {

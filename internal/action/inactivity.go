@@ -17,6 +17,7 @@ type inactivityTimer struct {
 	mu                    sync.Mutex
 	timer                 *time.Timer
 	last                  time.Time
+	pausedAt              time.Time
 	timeout               time.Duration
 	cancel                context.CancelCauseFunc
 	stopped               bool
@@ -36,6 +37,10 @@ func (w *inactivityTimer) expire() {
 		w.mu.Unlock()
 		return
 	}
+	if !w.pausedAt.IsZero() {
+		w.mu.Unlock()
+		return
+	}
 	if remaining := w.timeout - time.Since(w.last); remaining > 0 {
 		w.timer.Reset(remaining)
 		w.mu.Unlock()
@@ -52,6 +57,10 @@ func (w *inactivityTimer) progress() {
 		w.mu.Unlock()
 		return
 	}
+	if !w.pausedAt.IsZero() {
+		w.mu.Unlock()
+		return
+	}
 	now := time.Now()
 	if !now.Before(w.last.Add(w.timeout)) {
 		w.stopped = true
@@ -65,12 +74,40 @@ func (w *inactivityTimer) progress() {
 	w.mu.Unlock()
 }
 
+// pause excludes selected CLI discovery from model inactivity while the
+// absolute action deadline continues to run.
+func (w *inactivityTimer) pause() func() {
+	w.mu.Lock()
+	now := time.Now()
+	if w.stopped || !now.Before(w.last.Add(w.timeout)) {
+		w.mu.Unlock()
+		w.expire()
+		return func() {}
+	}
+	w.pausedAt = now
+	w.timer.Stop()
+	w.mu.Unlock()
+	return func() {
+		w.mu.Lock()
+		if !w.stopped && !w.pausedAt.IsZero() {
+			w.last = w.last.Add(time.Since(w.pausedAt))
+			w.pausedAt = time.Time{}
+			w.timer.Reset(max(0, time.Until(w.last.Add(w.timeout))))
+		}
+		w.mu.Unlock()
+	}
+}
+
 func (w *inactivityTimer) stop() {
 	w.mu.Lock()
 	if !w.stopped {
 		w.stopped = true
 		w.timer.Stop()
-		if time.Now().Before(w.last.Add(w.timeout)) {
+		deadline := w.last.Add(w.timeout)
+		if !w.pausedAt.IsZero() {
+			deadline = deadline.Add(time.Since(w.pausedAt))
+		}
+		if time.Now().Before(deadline) {
 			w.stoppedBeforeDeadline = true
 		} else {
 			w.cancel(errors.Join(monitor.ErrTerminalJob, errExecutorInactivity))
@@ -85,5 +122,9 @@ func (w *inactivityTimer) deadline() time.Time {
 	if w.stoppedBeforeDeadline {
 		return time.Time{} // Completion ended the inactivity window.
 	}
-	return w.last.Add(w.timeout)
+	deadline := w.last.Add(w.timeout)
+	if !w.pausedAt.IsZero() {
+		deadline = deadline.Add(time.Since(w.pausedAt))
+	}
+	return deadline
 }

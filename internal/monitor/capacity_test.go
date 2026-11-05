@@ -524,7 +524,7 @@ func TestRunOnceAcceptedRecoveryChecksInvitationDuringCapacityWait(t *testing.T)
 		accepted.RetryAt = now.Add(-time.Second)
 		store := openState(t, now.Add(-time.Minute))
 		store.Data.Accepted = &accepted
-		store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: accepted.Deadline}
+		store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: accepted.Deadline})
 		store.Data.NextInviteCheckAt = now.Add(time.Minute)
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
@@ -570,7 +570,7 @@ func TestRunOnceTerminalAcceptedReplyDoesNotWaitForCapacity(t *testing.T) {
 	accepted.Assigned = true
 	store := openState(t, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, AcceptedAt: at, Deadline: accepted.Deadline})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}

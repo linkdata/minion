@@ -36,7 +36,7 @@ func TestRemoteAcceptedCleanupFailureClosesHeldPull(t *testing.T) {
 		Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
 	}
 	now := time.Now().UTC()
-	accepted := state.AcceptedAction{
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
 		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "remote",
 		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
 		SubjectType: "Issue", SubjectNumber: 7,
@@ -52,7 +52,7 @@ func TestRemoteAcceptedCleanupFailureClosesHeldPull(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	store.Data.NextInviteCheckAt, store.Data.NextPollAt = now.Add(time.Hour), now.Add(time.Hour)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -85,6 +85,7 @@ func TestRemoteAcceptedCleanupFailureClosesHeldPull(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token)
 	serviceDone := make(chan int, 1)
 	go func() {
 		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, true, logger, endpoint, 5*time.Second)

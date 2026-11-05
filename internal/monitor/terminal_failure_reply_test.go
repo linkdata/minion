@@ -182,8 +182,7 @@ func TestPostModelFixRefusalUsesTerminalReply(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
 			store := openStateAt(t, path, now.Add(-time.Minute))
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, ModelCallStarted: true,
-				AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+			store.Data.JobFailures[job.ID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1, ModelCallStarted: true})
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}
@@ -266,7 +265,7 @@ func TestSelectedFixedRefusalRecoversBeforeAndAfterUncertainPOST(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "state.json")
 		store := openStateAt(t, path, now.Add(-time.Minute))
 		store.Data.Accepted = &accepted
-		store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+		store.Data.JobFailures[job.ID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1})
 		if err := store.Save(); err != nil {
 			t.Fatal(err)
 		}

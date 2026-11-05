@@ -6,11 +6,15 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +23,8 @@ import (
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
@@ -126,6 +132,205 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 			t.Fatalf("server kept incomplete POST connection open: %v", err)
 		}
 	})
+}
+
+func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	choice := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
+	criticChoice := config.RoleModelConfig{Model: "approved-critic", Effort: "high"}
+	cfg := config.AdminConfig{Listen: "127.0.0.1:0",
+		GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
+		UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}, Critic: []config.RoleModelConfig{criticChoice}}}
+	admin, err := startAdminServer(t.Context(), cfg, nil, statePath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := admin.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	if admin.preferences == nil {
+		t.Fatal("admin server did not share the account preference store")
+	}
+	base := "http://" + admin.listener.Addr().String()
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	request := func(method, path string, form url.Values, cookie *http.Cookie) *http.Response {
+		t.Helper()
+		body := ""
+		if form != nil {
+			body = form.Encode()
+		}
+		req, err := http.NewRequestWithContext(t.Context(), method, base+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if form != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		if method == http.MethodPost {
+			req.Header.Set("Origin", base)
+		}
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.Copy(io.Discard, response.Body); err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	if response := request(http.MethodGet, "/auth/preferences", nil, nil); response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/auth/login" {
+		t.Fatalf("guest preferences status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+	sessionResponse := httptest.NewRecorder()
+	sessionRequest := httptest.NewRequest(http.MethodGet, base+"/auth/login", nil)
+	sessionRequest.RemoteAddr = "127.0.0.1:12345"
+	session := admin.jaws.NewSession(sessionResponse, sessionRequest)
+	if session == nil {
+		t.Fatal("could not create a signed-in user session")
+	}
+	accountKey := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	session.Set("oidc_claims.github", map[string]any{"iss": "https://github.com", "sub": "42"})
+	session.Set("oauth2authexpiry.github", time.Now().Add(time.Hour))
+	cookies := sessionResponse.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("signed-in session cookies=%v", cookies)
+	}
+	cookie := cookies[0]
+	formIdentity := preferenceFormIdentity(accountKey)
+	selected := url.Values{"main": {preferenceChoiceValue(choice)}, "critic": {preferenceChoiceValue(criticChoice)}, "identity": {formIdentity}}
+	if response := request(http.MethodGet, "/auth/preferences", nil, cookie); response.StatusCode != http.StatusOK ||
+		response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("signed-in preferences status=%d", response.StatusCode)
+	}
+	if response := request(http.MethodPost, "/auth/preferences", selected, cookie); response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save preferences status=%d", response.StatusCode)
+	}
+	if got, err := admin.preferences.preferencesForGitHubID(42); err != nil || got != (config.UserModelPreferences{Main: choice, Critic: criticChoice}) {
+		t.Fatalf("monitor-visible preference: %+v, %v", got, err)
+	}
+	if response := request(http.MethodPost, "/auth/preferences", selected, cookie); response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("identical preferences status=%d", response.StatusCode)
+	}
+	for _, invalid := range []struct {
+		name string
+		form url.Values
+	}{
+		{"unapproved main", url.Values{"main": {preferenceChoiceValue(config.RoleModelConfig{Model: "unknown", Effort: "low"})}, "critic": selected["critic"], "identity": {formIdentity}}},
+		{"main choice as critic", url.Values{"main": selected["main"], "critic": {preferenceChoiceValue(choice)}, "identity": {formIdentity}}},
+		{"missing critic", url.Values{"main": selected["main"], "identity": {formIdentity}}},
+		{"extra field", url.Values{"main": selected["main"], "critic": selected["critic"], "identity": {formIdentity}, "extra": {"unexpected"}}},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			if response := request(http.MethodPost, "/auth/preferences", invalid.form, cookie); response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("invalid preferences status=%d", response.StatusCode)
+			}
+			if got, err := admin.preferences.preferencesForGitHubID(42); err != nil || got != (config.UserModelPreferences{Main: choice, Critic: criticChoice}) {
+				t.Fatalf("invalid form changed saved preferences: %+v, %v", got, err)
+			}
+		})
+	}
+	// With every approved choice withdrawn, the saved choice must still be removable.
+	cfg.UserModelChoices.Main = nil
+	cfg.UserModelChoices.Critic = nil
+	pageRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, base+"/auth/preferences", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageRequest.AddCookie(cookie)
+	page, err := client.Do(pageRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, err := io.ReadAll(page.Body)
+	_ = page.Body.Close()
+	if err != nil || page.StatusCode != http.StatusOK ||
+		!strings.Contains(string(pageBody), `name="main"`) || !strings.Contains(string(pageBody), `name="critic"`) ||
+		!strings.Contains(string(pageBody), `value="default"`) || !strings.Contains(string(pageBody), "Saved main choice is unavailable") ||
+		!strings.Contains(string(pageBody), "Saved critic choice is unavailable") {
+		t.Fatalf("withdrawn choice has no reset form: status=%d body=%q error=%v", page.StatusCode, pageBody, err)
+	}
+	reset := url.Values{"main": {"default"}, "critic": {"default"}, "identity": {formIdentity}}
+	admin.preferences.mu.Lock()
+	if admin.preferences.lastPreferenceWrite.IsZero() {
+		admin.preferences.mu.Unlock()
+		t.Fatal("HTTP preference save did not record its write limit")
+	}
+	admin.preferences.lastPreferenceWrite = time.Now()
+	admin.preferences.mu.Unlock()
+	if response := request(http.MethodPost, "/auth/preferences", reset, cookie); response.StatusCode != http.StatusTooManyRequests || response.Header.Get("Retry-After") != "2" {
+		t.Fatalf("rapid changed preference status=%d retry=%q", response.StatusCode, response.Header.Get("Retry-After"))
+	}
+	admin.preferences.mu.Lock()
+	admin.preferences.lastPreferenceWrite = time.Now().Add(-2 * preferenceWriteInterval)
+	admin.preferences.mu.Unlock()
+	if response := request(http.MethodPost, "/auth/preferences", reset, cookie); response.StatusCode != http.StatusSeeOther {
+		t.Fatalf("reset preferences status=%d", response.StatusCode)
+	}
+	reopened, err := openUserLinks(statePath + ".link")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := reopened.preferencesForGitHubID(42); err != nil || got != (config.UserModelPreferences{}) || len(reopened.preferences) != 0 {
+		t.Fatalf("reset preference remained on disk: %+v, %v", got, err)
+	}
+	admin.preferences.mu.Lock()
+	admin.preferences.bad = errors.New("synthetic storage fault")
+	admin.preferences.mu.Unlock()
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		if response := request(method, "/auth/preferences", reset, cookie); response.StatusCode != http.StatusServiceUnavailable {
+			t.Fatalf("storage fault %s status=%d", method, response.StatusCode)
+		}
+	}
+}
+
+func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		for _, loop := range []bool{false, true} {
+			t.Run(fmt.Sprintf("enabled=%t/loop=%t", enabled, loop), func(t *testing.T) {
+				statePath := filepath.Join(t.TempDir(), "state.json")
+				store, err := state.Open(statePath, time.Now().UTC())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				admin := &config.AdminConfig{Listen: "127.0.0.1:0",
+					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"}}
+				choice := config.RoleModelConfig{Model: "approved", Effort: "low"}
+				if enabled {
+					admin.UserModelChoices = &config.UserModelChoices{Main: []config.RoleModelConfig{choice}}
+					links, err := openUserLinks(statePath + ".link")
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := links.setPreferences((userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key(),
+						config.UserModelPreferences{Main: choice}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				watcher := &monitor.Monitor{Config: config.Config{StatePath: statePath, Admin: admin}}
+				if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(io.Discard, "", 0), "", time.Second); code != 1 {
+					t.Fatalf("missing owner did not stop startup: %d", code)
+				}
+				if got := watcher.UserPreferences != nil; got != enabled {
+					t.Fatalf("preference lookup wired=%t, want %t", got, enabled)
+				}
+				if enabled {
+					got, err := watcher.UserPreferences(42)
+					if err != nil || got.Main != choice {
+						t.Fatalf("preference lookup lost persisted choice: %+v, %v", got, err)
+					}
+				}
+			})
+		}
+	}
 }
 
 func TestAdminServerServesConfiguredTLS(t *testing.T) {

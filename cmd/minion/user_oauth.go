@@ -24,6 +24,7 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 <h1>Signed in with {{.Dot.Provider}}</h1>
 {{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button>Link GitHub account</button></form>{{end}}
 {{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button>Link GitLab account</button></form>{{end}}
+{{if .Dot.Preferences}}<p><a href="/auth/preferences">Model preferences</a></p>{{end}}
 <form method="post" action="/auth/logout"><button>Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
@@ -35,13 +36,17 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion request failed</title>{{$.HeadHTML}}</head>
 <body><main><h1>Request failed</h1><p role="alert">Request could not be completed. Try again.</p>
+{{if .Dot.RetryAfter}}<p role="status">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
+
+type userErrorView struct{ RetryAfter string }
 
 type userLoginView struct {
 	SignedIn       bool
 	Error          bool
 	Provider       string
 	GitHub, GitLab bool
+	Preferences    bool
 }
 
 type oauthProvider struct {
@@ -64,6 +69,7 @@ type oauthAccess struct {
 	links       *userLinks
 	mux         *http.ServeMux
 	providers   []*oauthProvider
+	choices     *config.UserModelChoices
 	admissionMu sync.Mutex
 	linkMu      sync.Mutex
 }
@@ -94,7 +100,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if err != nil {
 		return nil, fmt.Errorf("open user links: %w", err)
 	}
-	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux()}
+	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux(), choices: cfg.UserModelChoices}
 	if err := jw.AddTemplateLookuper(userLoginHTML); err != nil {
 		return nil, err
 	}
@@ -120,6 +126,16 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	})
 	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(a.logout)))
+	if a.choices != nil {
+		if err := jw.AddTemplateLookuper(userPreferencesHTML); err != nil {
+			return nil, err
+		}
+		a.mux.Handle("GET /auth/preferences", a.oauthErrors(http.HandlerFunc(a.preferencePage)))
+		// The preference form must be read before its body can be closed.
+		a.mux.Handle("POST /auth/preferences", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			a.savePreferences(&oauthErrorWriter{ResponseWriter: w, oauth: a, request: r}, r)
+		}))
+	}
 	if c := cfg.GitHubOAuth; c != nil {
 		if err := a.addProvider("github", "https://github.com", "github.com", &jawsauth.Config{
 			Namespace: "github", RedirectURL: c.RedirectURL, Issuer: "https://github.com",
@@ -238,7 +254,7 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
-	view := userLoginView{SignedIn: account != "", Error: r.URL.Query().Get("error") == "request"}
+	view := userLoginView{SignedIn: account != "", Error: r.URL.Query().Get("error") == "request", Preferences: account != "" && a.choices != nil}
 	if provider != nil {
 		view.Provider = provider.name
 	}
@@ -322,9 +338,13 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	}
 	for _, p := range a.providers {
 		if _, ok := p.identity(p.server.CurrentClaims(sess)); ok {
+			view := userErrorView{}
+			if status == http.StatusTooManyRequests {
+				view.RetryAfter = w.Header().Get("Retry-After")
+			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(status)
-			ui.Handler(a.jaws, "user error", nil).ServeHTTP(w, r)
+			ui.Handler(a.jaws, "user error", view).ServeHTTP(w, r)
 			return
 		}
 	}

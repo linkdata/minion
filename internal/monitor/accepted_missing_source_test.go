@@ -157,9 +157,9 @@ func TestSelectedRecoveryReleasesDeletedSource(t *testing.T) {
 	accepted.Assigned = true
 	store := openState(t, at.Add(-time.Minute))
 	store.Data.Accepted = &accepted
-	store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 		Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-	}
+	})
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -204,9 +204,9 @@ func TestSelectedDeletedIssueHTTPStatusReleasesAssigned404(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.json")
 			store := openStateAt(t, path, at.Add(-time.Minute))
 			store.Data.Accepted = &accepted
-			store.Data.JobFailures[accepted.JobID] = state.JobFailure{
+			store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{
 				Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
-			}
+			})
 			if err := store.Save(); err != nil {
 				t.Fatal(err)
 			}

@@ -181,6 +181,7 @@ func TestHTTPWatchAdmissionWorkerClaimsDoNotRefundMonitorAttempts(t *testing.T) 
 					return finalErr
 				})
 				m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
+					MainSettings: config.RoleModelConfig{Model: "test-main", Effort: "medium"},
 					Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 					Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 					GitHub: gh, Handler: handler, BotID: 8, Now: func() time.Time { return clock },
@@ -279,6 +280,7 @@ func TestHTTPWorkerFailureClaimsCannotChangeMonitorPolicy(t *testing.T) {
 				return finalErr
 			})
 			m := monitor.Monitor{Config: config.Config{BotLogin: "linkdataminion", Main: "codex", PollIntervalSeconds: 60,
+				MainSettings: config.RoleModelConfig{Model: "test-main", Effort: "medium"},
 				Commands:     map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{testReviewSkillURL}}},
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"}, AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}},
 				GitHub: gh, Handler: handler, BotID: 8, Now: func() time.Time { return clock },

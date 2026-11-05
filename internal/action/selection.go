@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -14,9 +15,13 @@ import (
 // WorkerSelection comes from trusted startup configuration, never from a Job.
 // Main.Skills is supplied by the selected command mapping.
 type WorkerSelection struct {
-	Commands map[string]config.CommandMapping `json:"commands"`
-	Main     RoleSettings                     `json:"main"`
-	Critic   *RoleSettings                    `json:"critic,omitempty"`
+	Commands              map[string]config.CommandMapping `json:"commands"`
+	Main                  RoleSettings                     `json:"main"`
+	Critic                *RoleSettings                    `json:"critic,omitempty"`
+	MainChoices           []config.RoleModelConfig         `json:"main_choices,omitempty"`
+	CriticChoices         []config.RoleModelConfig         `json:"critic_choices,omitempty"`
+	RetainedMainChoices   []config.RoleModelConfig         `json:"retained_main_choices,omitempty"`
+	RetainedCriticChoices []config.RoleModelConfig         `json:"retained_critic_choices,omitempty"`
 }
 
 // WorkerSelection derives a trusted worker boundary from enabled, installed commands.
@@ -30,10 +35,46 @@ func (e *Orchestrator) WorkerSelection(cfg config.Config) (WorkerSelection, erro
 	if err := e.matchConfiguredRoleModels(cfg); err != nil {
 		return WorkerSelection{}, err
 	}
-	selected := WorkerSelection{Commands: make(map[string]config.CommandMapping), Main: e.mainRoleSettings(nil)}
+	selected := WorkerSelection{Commands: make(map[string]config.CommandMapping), Main: e.mainRoleSettings(nil),
+		MainChoices: slices.Clone(cfg.UserChoices(false)), CriticChoices: slices.Clone(cfg.UserChoices(true))}
 	if e.Adversarial != "" {
 		critic := e.criticRoleSettings()
 		selected.Critic = &critic
+	}
+	if e.Store != nil {
+		if err := e.Store.WithLock(func() error {
+			addFrozen := func(main, critic config.RoleModelConfig) {
+				mainDefault := config.RoleModelConfig{Model: selected.Main.Model, Effort: selected.Main.Effort}
+				if main != (config.RoleModelConfig{}) && main.ValidSetting() &&
+					main != mainDefault && !slices.Contains(selected.MainChoices, main) && !slices.Contains(selected.RetainedMainChoices, main) {
+					selected.RetainedMainChoices = append(selected.RetainedMainChoices, main)
+				}
+				if selected.Critic != nil {
+					criticDefault := config.RoleModelConfig{Model: selected.Critic.Model, Effort: selected.Critic.Effort}
+					if critic != (config.RoleModelConfig{}) && critic.ValidSetting() &&
+						critic != criticDefault && !slices.Contains(selected.CriticChoices, critic) && !slices.Contains(selected.RetainedCriticChoices, critic) {
+						selected.RetainedCriticChoices = append(selected.RetainedCriticChoices, critic)
+					}
+				}
+			}
+			if accepted := e.Store.Data.Accepted; accepted != nil && !accepted.Terminal {
+				if accepted.MainProvider == selected.Main.Provider &&
+					(accepted.CriticProvider == "" || selected.Critic != nil && accepted.CriticProvider == selected.Critic.Provider) {
+					addFrozen(accepted.MainSettings, accepted.CriticSettings)
+				}
+			}
+			for _, failure := range e.Store.Data.JobFailures {
+				if failure.ModelCallStarted || failure.MainProvider != selected.Main.Provider || failure.AcceptedAt.IsZero() || !time.Now().Before(failure.Deadline) ||
+					failure.CriticProvider != "" && (selected.Critic == nil || failure.CriticProvider != selected.Critic.Provider) ||
+					failure.CriticProvider == "" && selected.Critic != nil {
+					continue
+				}
+				addFrozen(failure.MainSettings, failure.CriticSettings)
+			}
+			return nil
+		}); err != nil {
+			return WorkerSelection{}, err
+		}
 	}
 	seen := make(map[string]bool)
 	for _, repo := range cfg.Repositories {
@@ -97,21 +138,40 @@ func NewSelectedRunner(runner Runner, selected WorkerSelection) (*Runner, error)
 	if err := selected.Main.Validate(); err != nil {
 		return nil, fmt.Errorf("worker main selection: %w", err)
 	}
-	if selected.Main.Model == "" || selected.Main.Provider == "codex" && selected.Main.Effort == "" {
-		return nil, errors.New("worker main selection requires a resolved model and Codex effort")
+	if selected.Main.Model == "" || selected.Main.Effort == "" {
+		return nil, errors.New("worker main selection requires a resolved model and effort")
 	}
 	if selected.Critic != nil {
 		if err := selected.Critic.Validate(); err != nil {
 			return nil, fmt.Errorf("worker critic selection: %w", err)
 		}
-		if selected.Critic.Model == "" || selected.Critic.Provider == "codex" && selected.Critic.Effort == "" {
-			return nil, errors.New("worker critic selection requires a resolved model and Codex effort")
+		if selected.Critic.Model == "" || selected.Critic.Effort == "" {
+			return nil, errors.New("worker critic selection requires a resolved model and effort")
 		}
 		if len(selected.Critic.Skills) != 0 {
 			return nil, errors.New("worker critic selection accepts only always-on skills")
 		}
 	}
-	frozen := WorkerSelection{Commands: make(map[string]config.CommandMapping, len(selected.Commands)), Main: cloneRoleSettings(selected.Main)}
+	if selected.Critic == nil && (len(selected.CriticChoices) != 0 || len(selected.RetainedCriticChoices) != 0) {
+		return nil, errors.New("worker critic choices require a critic")
+	}
+	if err := validateRoleChoices("main", selected.Main, selected.MainChoices); err != nil {
+		return nil, err
+	}
+	if err := validateRoleChoices("retained main", selected.Main, selected.RetainedMainChoices); err != nil {
+		return nil, err
+	}
+	if selected.Critic != nil {
+		if err := validateRoleChoices("critic", *selected.Critic, selected.CriticChoices); err != nil {
+			return nil, err
+		}
+		if err := validateRoleChoices("retained critic", *selected.Critic, selected.RetainedCriticChoices); err != nil {
+			return nil, err
+		}
+	}
+	frozen := WorkerSelection{Commands: make(map[string]config.CommandMapping, len(selected.Commands)), Main: cloneRoleSettings(selected.Main),
+		MainChoices: slices.Clone(selected.MainChoices), CriticChoices: slices.Clone(selected.CriticChoices),
+		RetainedMainChoices: slices.Clone(selected.RetainedMainChoices), RetainedCriticChoices: slices.Clone(selected.RetainedCriticChoices)}
 	if selected.Critic != nil {
 		critic := cloneRoleSettings(*selected.Critic)
 		frozen.Critic = &critic
@@ -137,6 +197,17 @@ func NewSelectedRunner(runner Runner, selected WorkerSelection) (*Runner, error)
 	return &runner, nil
 }
 
+func validateRoleChoices(name string, base RoleSettings, choices []config.RoleModelConfig) error {
+	for i, pair := range choices {
+		role := base
+		role.Model, role.Effort = pair.Model, pair.Effort
+		if !pair.ValidChoice() || slices.Contains(choices[:i], pair) || role.Validate() != nil {
+			return fmt.Errorf("worker %s choice is invalid or duplicated", name)
+		}
+	}
+	return nil
+}
+
 func cloneRoleSettings(role RoleSettings) RoleSettings {
 	role.Skills = slices.Clone(role.Skills)
 	role.AlwaysOnSkills = slices.Clone(role.AlwaysOnSkills)
@@ -155,11 +226,26 @@ func (s *WorkerSelection) matches(job Job) error {
 	}
 	main := s.Main
 	main.Skills = mapping.Skills
-	if !sameRoleSettings(job.Main, main) {
+	selectedMain := main
+	selectedMain.Model, selectedMain.Effort = job.Main.Model, job.Main.Effort
+	if !sameRoleSettings(job.Main, selectedMain) || !roleChoiceAllowed(main, s.MainChoices, s.RetainedMainChoices, job.Main) {
 		return errors.New("assignment main role differs from worker selection")
 	}
-	if (job.Critic == nil) != (s.Critic == nil) || job.Critic != nil && !sameRoleSettings(*job.Critic, *s.Critic) {
+	if (job.Critic == nil) != (s.Critic == nil) {
 		return errors.New("assignment critic role differs from worker selection")
 	}
+	if job.Critic != nil {
+		selectedCritic := *s.Critic
+		selectedCritic.Model, selectedCritic.Effort = job.Critic.Model, job.Critic.Effort
+		if !sameRoleSettings(*job.Critic, selectedCritic) || !roleChoiceAllowed(*s.Critic, s.CriticChoices, s.RetainedCriticChoices, *job.Critic) {
+			return errors.New("assignment critic role differs from worker selection")
+		}
+	}
 	return nil
+}
+
+func roleChoiceAllowed(defaultRole RoleSettings, choices, retained []config.RoleModelConfig, actual RoleSettings) bool {
+	pair := config.RoleModelConfig{Model: actual.Model, Effort: actual.Effort}
+	return pair == (config.RoleModelConfig{Model: defaultRole.Model, Effort: defaultRole.Effort}) ||
+		slices.Contains(choices, pair) || slices.Contains(retained, pair)
 }

@@ -371,9 +371,10 @@ func TestAttachRemoteWorkerSelectsConfiguredIdentityWithoutHostSkills(t *testing
 	const missingSkill = "https://github.com/example/skills/tree/main/skills/not-installed"
 	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{missingSkill}}}
 	cfg := config.Config{Main: "codex", Commands: commands,
+		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
 		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", Token: token}}
-	orchestrator := &Orchestrator{Main: "codex", Commands: commands}
+	orchestrator := &Orchestrator{Main: "codex", Commands: commands, CodexModel: "main-1", CodexEffort: "high"}
 	selected, endpoint, err := orchestrator.AttachRemoteWorker(cfg, certificate)
 	if err != nil {
 		t.Fatal(err)

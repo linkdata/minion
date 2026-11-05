@@ -14,12 +14,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 const maxUserLinksBytes = 8 << 20
+const preferenceWriteInterval = time.Second
+
+var errPreferenceRateLimited = errors.New("preference update rate limited")
+
+type preferenceRateLimitError struct{ retryAfterSeconds int }
+
+func (e preferenceRateLimitError) Error() string { return errPreferenceRateLimited.Error() }
+func (e preferenceRateLimitError) Unwrap() error { return errPreferenceRateLimited }
 
 var errUserLinkConflict = errors.New("account link conflicts with an existing identity")
 
@@ -58,14 +68,23 @@ func validUserKey(key string) bool {
 }
 
 type userLinks struct {
-	mu    sync.Mutex
-	path  string
-	links map[string]string // alias to an unmapped canonical identity
-	bad   error
+	mu                   sync.Mutex
+	path                 string
+	links                map[string]string // alias to an unmapped canonical identity
+	preferences          map[string]config.UserModelPreferences
+	bad                  error
+	lastPreferenceWrite  time.Time
+	lastPreferenceWriter string
+}
+
+type userLinksRecord struct {
+	Version     int                                    `json:"version"`
+	Links       map[string]string                      `json:"links"`
+	Preferences map[string]config.UserModelPreferences `json:"preferences,omitempty"`
 }
 
 func openUserLinks(path string) (*userLinks, error) {
-	links := &userLinks{path: path, links: make(map[string]string)}
+	links := &userLinks{path: path, links: make(map[string]string), preferences: make(map[string]config.UserModelPreferences)}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return links, nil
@@ -89,10 +108,7 @@ func openUserLinks(path string) (*userLinks, error) {
 	if len(data) > maxUserLinksBytes {
 		return nil, errors.New("user links file exceeds limit")
 	}
-	var saved struct {
-		Version int               `json:"version"`
-		Links   map[string]string `json:"links"`
-	}
+	var saved userLinksRecord
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&saved); err != nil {
@@ -116,8 +132,22 @@ func openUserLinks(path string) (*userLinks, error) {
 		}
 		seenRoots[root] = true
 	}
+	for root, choice := range saved.Preferences {
+		if !validUserKey(root) || saved.Links[root] != "" || !validStoredPreferences(choice) {
+			return nil, errors.New("invalid user preferences")
+		}
+	}
 	links.links = saved.Links
+	links.preferences = saved.Preferences
+	if links.preferences == nil {
+		links.preferences = make(map[string]config.UserModelPreferences)
+	}
 	return links, nil
+}
+
+func validStoredPreferences(value config.UserModelPreferences) bool {
+	return (value.Main == (config.RoleModelConfig{}) || value.Main.ValidChoice()) &&
+		(value.Critic == (config.RoleModelConfig{}) || value.Critic.ValidChoice())
 }
 
 func (s *userLinks) account(key string) string {
@@ -126,6 +156,16 @@ func (s *userLinks) account(key string) string {
 	if s.bad != nil || !validUserKey(key) {
 		return ""
 	}
+	return s.accountLocked(key)
+}
+
+func (s *userLinks) storageError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bad
+}
+
+func (s *userLinks) accountLocked(key string) string {
 	if root := s.links[key]; root != "" {
 		return root
 	}
@@ -141,6 +181,62 @@ func (s *userLinks) hasAlias(account string) bool {
 		}
 	}
 	return false
+}
+
+func (s *userLinks) preferencesFor(key string) (config.UserModelPreferences, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bad != nil {
+		return config.UserModelPreferences{}, s.bad
+	}
+	if !validUserKey(key) {
+		return config.UserModelPreferences{}, errors.New("invalid user identity")
+	}
+	return s.preferences[s.accountLocked(key)], nil
+}
+
+func (s *userLinks) preferencesForGitHubID(id int64) (config.UserModelPreferences, error) {
+	if id <= 0 {
+		return config.UserModelPreferences{}, errors.New("invalid GitHub requester ID")
+	}
+	return s.preferencesFor((userIdentity{Provider: "github", Host: "github.com", Subject: strconv.FormatInt(id, 10)}).key())
+}
+
+func (s *userLinks) setPreferences(key string, value config.UserModelPreferences) error {
+	if !validUserKey(key) || !validStoredPreferences(value) {
+		return errors.New("invalid user preferences")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.bad != nil {
+		return s.bad
+	}
+	root := s.accountLocked(key)
+	if s.preferences[root] == value {
+		return nil
+	}
+	now := time.Now()
+	ready := s.lastPreferenceWrite.Add(preferenceWriteInterval)
+	// shortcut: coordinated accounts can fill every slot; add a fair queue if that becomes a real workload.
+	if s.lastPreferenceWriter == root {
+		ready = ready.Add(preferenceWriteInterval)
+	}
+	if now.Before(ready) {
+		return preferenceRateLimitError{retryAfterSeconds: int((ready.Sub(now) + time.Second - 1) / time.Second)}
+	}
+	next := maps.Clone(s.preferences)
+	if next == nil {
+		next = make(map[string]config.UserModelPreferences)
+	}
+	if value == (config.UserModelPreferences{}) {
+		delete(next, root)
+	} else {
+		next[root] = value
+	}
+	err := s.saveLocked(s.links, next)
+	s.lastPreferenceWrite = time.Now()
+	s.lastPreferenceWriter = root
+	return err
 }
 
 // link attaches a proved identity to the current account.
@@ -177,23 +273,34 @@ func (s *userLinks) link(current, proved string) error {
 	}
 	next := maps.Clone(s.links)
 	next[second] = first
-	data, err := json.Marshal(struct {
-		Version int               `json:"version"`
-		Links   map[string]string `json:"links"`
-	}{Version: 1, Links: next})
+	preferences := maps.Clone(s.preferences)
+	if preferences[first] == (config.UserModelPreferences{}) && preferences[second] != (config.UserModelPreferences{}) {
+		preferences[first] = preferences[second]
+	}
+	delete(preferences, second)
+	err := s.saveLocked(next, preferences)
+	if s.links[second] == first && s.lastPreferenceWriter == second {
+		s.lastPreferenceWriter = first
+	}
+	return err
+}
+
+// saveLocked updates links and preferences together, including ambiguous writes.
+func (s *userLinks) saveLocked(nextLinks map[string]string, nextPreferences map[string]config.UserModelPreferences) error {
+	data, err := json.Marshal(userLinksRecord{Version: 1, Links: nextLinks, Preferences: nextPreferences})
 	if err != nil || len(data) > maxUserLinksBytes {
 		return errors.New("user links exceed limit")
 	}
 	if err := workspace.WriteAtomic(s.path, data); err != nil {
-		return s.recoverAfterWriteFailure(err, next)
+		return s.recoverAfterWriteFailure(err, nextLinks, nextPreferences)
 	}
-	s.links = next
+	s.links, s.preferences = nextLinks, nextPreferences
 	return nil
 }
 
 // recoverAfterWriteFailure reconciles pre-rename and post-rename failures.
 // The caller holds s.mu.
-func (s *userLinks) recoverAfterWriteFailure(writeErr error, next map[string]string) error {
+func (s *userLinks) recoverAfterWriteFailure(writeErr error, nextLinks map[string]string, nextPreferences map[string]config.UserModelPreferences) error {
 	if err := workspace.SyncDirectories(filepath.Dir(s.path)); err != nil {
 		s.bad = fmt.Errorf("save user links: %w", errors.Join(writeErr, err))
 		return s.bad
@@ -203,10 +310,12 @@ func (s *userLinks) recoverAfterWriteFailure(writeErr error, next map[string]str
 		s.bad = fmt.Errorf("save user links: %w", errors.Join(writeErr, err))
 		return s.bad
 	}
-	if !maps.Equal(saved.links, s.links) && !maps.Equal(saved.links, next) {
+	oldState := maps.Equal(saved.links, s.links) && maps.Equal(saved.preferences, s.preferences)
+	newState := maps.Equal(saved.links, nextLinks) && maps.Equal(saved.preferences, nextPreferences)
+	if !oldState && !newState {
 		s.bad = fmt.Errorf("save user links: visible links differ from both old and replacement records: %w", writeErr)
 		return s.bad
 	}
-	s.links = saved.links
+	s.links, s.preferences = saved.links, saved.preferences
 	return fmt.Errorf("save user links: %w", writeErr)
 }

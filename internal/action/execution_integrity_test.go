@@ -91,8 +91,8 @@ func TestExecuteRetainsPaidCriticReceiptAfterSuppliedMetadataIntegrityFailure(t 
 				t.Fatalf("integrity failure lost acknowledged paid counters: %+v", record)
 			}
 			wantCalls := []CallUsage{
-				{Provider: "codex", Role: roleMain, Round: 1, Tokens: mainTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
-				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: criticTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: approved, NoBlockers: approved, HasBlockers: !approved, ReviewComplete: true},
+				{Provider: "codex", Role: roleMain, Round: 1, Model: request.MainSettings.Model, Effort: request.MainSettings.Effort, Tokens: mainTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
+				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Model: request.CriticSettings.Model, Effort: request.CriticSettings.Effort, Tokens: criticTokens, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: approved, NoBlockers: approved, HasBlockers: !approved, ReviewComplete: true},
 			}
 			saved := readPrivateReview(t, work)
 			if saved.Identity.JobID != request.ID || saved.Identity.AttemptID != record.ID || saved.SourceRef != sourceHead || !slices.Equal(saved.Calls, wantCalls) || len(saved.Refutations) != 0 || saved.CriticStopReason != "" {

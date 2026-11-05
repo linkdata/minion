@@ -47,6 +47,7 @@ func TestCanceledSavedAuditDoesNotRetainIncompleteCopy(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	t.Setenv("PATH", t.TempDir())
 	job := testJob(command.SecurityAudit)
+	resolveAcceptedFixtureRoles(&job)
 	result := completeAuditResult(job)
 	store, _, request := savedRecoveryFixture(t, job, result)
 	root := t.TempDir()

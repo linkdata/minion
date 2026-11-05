@@ -104,6 +104,7 @@ func newLateOutcomeFixture(t *testing.T, pending bool) *lateOutcomeFixture {
 
 func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutcomeFixture {
 	t.Helper()
+	resolveAcceptedFixtureRoles(&job)
 	job.Identity.ExecutorID = "remote"
 	f := newExecutionAdapterFixture(t, job)
 	job = f.job
@@ -115,7 +116,9 @@ func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutco
 	t.Cleanup(func() { _ = store.Close() })
 	accepted := acceptedForJob(job)
 	store.Data.Accepted = accepted
-	store.Data.JobFailures[job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline}
+	store.Data.JobFailures[job.Identity.JobID] = state.JobFailure{Attempts: 1, AcceptedAt: accepted.AcceptedAt, Deadline: accepted.Deadline,
+		MainProvider: accepted.MainProvider, CriticProvider: accepted.CriticProvider,
+		MainSettings: accepted.MainSettings, CriticSettings: accepted.CriticSettings}
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +147,7 @@ func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutco
 		if job.Critic != nil {
 			f.saveReview(nil, nil, "")
 		}
-		call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1}
+		call := CallUsage{Provider: job.Main.Provider, Role: roleMain, Round: 1, Model: job.Main.Model, Effort: job.Main.Effort}
 		if err := f.sink.BeforeCall(f.call(call)); err != nil {
 			t.Fatal(err)
 		}
@@ -179,7 +182,11 @@ func lateOutcomeEndpoint(t *testing.T, owner *Orchestrator) (*RemoteEndpoint, *h
 	const skill = "https://github.com/example/skills/tree/main/skills/not-installed"
 	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skill}}}
 	owner.Commands = commands
+	owner.CodexModel, owner.CodexEffort = "fixture-main", "high"
+	owner.ClaudeModel, owner.ClaudeEffort = "fixture-critic", "low"
 	cfg := config.Config{Main: owner.Main, Adversarial: owner.Adversarial, Commands: commands,
+		Codex:          config.CodexConfig{Model: owner.CodexModel, ReasoningEffort: owner.CodexEffort},
+		Claude:         config.ClaudeConfig{Model: owner.ClaudeModel, Effort: owner.ClaudeEffort},
 		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", Token: token}}
 	_, endpoint, err := owner.AttachRemoteWorker(cfg, certificate)
