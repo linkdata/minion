@@ -131,7 +131,11 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 			}
 		}
 	}
-	owned := []string{session.runtimeDir, session.authDir, session.embeddedDir}
+	rootInfo, err := os.Stat(session.runtimeRoot)
+	if err != nil || rootInfo.Mode().Perm() != 0700 {
+		t.Fatalf("private runtime root mode = %v, %v", rootInfo, err)
+	}
+	owned := []string{session.runtimeRoot, session.runtimeDir, session.authDir, session.embeddedDir}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1489,16 +1493,19 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
 	var session Session
 	dir := t.TempDir()
-	if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
-		t.Fatal(err)
-	}
-	runtime := session.runtimeDir
+	var root string
 	t.Cleanup(func() {
-		session.runtimeDir = runtime
+		if root != "" {
+			session.runtimeRoot = root
+		}
 		if err := session.Close(); err != nil {
 			t.Error(err)
 		}
 	})
+	if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	root = session.runtimeRoot
 	session.NewConversation()
 	// A malformed owned path gives a portable filesystem failure without
 	// modifying host permissions or deleting any unowned resource.
@@ -1509,7 +1516,8 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 	if readFile(t, binary+".calls") != "called" {
 		t.Fatal("scratch failure reached native execution")
 	}
-	if err := session.Close(); err == nil || session.runtimeDir == "" {
+	session.runtimeRoot = "invalid\x00path"
+	if err := session.Close(); err == nil || session.runtimeRoot == "" {
 		t.Fatalf("failed cleanup lost its path: %v", err)
 	}
 }

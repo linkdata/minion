@@ -7,12 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
+)
+
+const (
+	runtimePrefix = "minion-claude-"
+	runtimeChild  = "r"
 )
 
 // Session owns one action role's native conversation and scratch directories.
@@ -26,16 +32,16 @@ type Session struct {
 	OnInput func(aicli.PreparedInput)
 	// OnProgress receives process start and exit plus fresh native execution activity.
 	// Stdout may call it concurrently with process lifecycle callbacks.
-	OnProgress                   func()
-	workspace, binary, outputDir string
-	writable                     bool
-	settings                     config.ClaudeConfig
-	runtimeDir, cacheDir         string
-	authDir, configDir           string
-	nativeHome                   string
-	embeddedDir                  string
-	skillPaths                   []string
-	id                           string
+	OnProgress                        func()
+	workspace, binary, outputDir      string
+	writable                          bool
+	settings                          config.ClaudeConfig
+	runtimeRoot, runtimeDir, cacheDir string
+	authDir, configDir                string
+	nativeHome                        string
+	embeddedDir                       string
+	skillPaths                        []string
+	id                                string
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
 	baseline         usage.Tokens
 	usageGap         bool
@@ -79,7 +85,7 @@ func (s *Session) Close() error {
 	for _, resource := range []struct {
 		path  *string
 		label string
-	}{{&s.embeddedDir, "skill cleanup"}, {&s.authDir, "credential cleanup"}, {&s.runtimeDir, "cleanup"}} {
+	}{{&s.embeddedDir, "skill cleanup"}, {&s.authDir, "credential cleanup"}, {&s.runtimeRoot, "runtime cleanup"}} {
 		if *resource.path == "" {
 			continue
 		}
@@ -155,7 +161,17 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 }
 
 func (s *Session) initialize() (err error) {
-	if s.runtimeDir, err = os.MkdirTemp(filepath.Dir(s.workspace), ".minion-claude-"); err != nil {
+	// Claude's Linux sandbox bridge uses Unix sockets below TMPDIR, so keep it short.
+	tempRoot, err := runtimeTempRoot()
+	if err != nil {
+		return
+	}
+	if s.runtimeRoot, err = os.MkdirTemp(tempRoot, runtimePrefix); err != nil {
+		return
+	}
+	// Reset only the child, keeping the private parent against shared-temp races.
+	s.runtimeDir = filepath.Join(s.runtimeRoot, runtimeChild)
+	if err = os.Mkdir(s.runtimeDir, 0700); err != nil {
 		return
 	}
 	if s.authDir, err = authentication(filepath.Dir(s.workspace), s.settings.APIKey); err != nil {
@@ -173,6 +189,17 @@ func (s *Session) initialize() (err error) {
 		return fmt.Errorf("claude skills: %w", err)
 	}
 	return nil
+}
+
+func runtimeTempRoot() (string, error) {
+	root, err := aicli.Directory(os.TempDir())
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "linux" && len(filepath.Join(root, runtimePrefix+"4294967295", runtimeChild, "claude-socks-0123456789abcdef.sock")) >= 108 {
+		return "", errors.New("claude sandbox socket path exceeds Linux's 108-byte limit; set TMPDIR to a canonical path of at most 45 bytes")
+	}
+	return root, nil
 }
 
 func conversationID() (string, error) {

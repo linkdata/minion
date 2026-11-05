@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,11 +29,12 @@ import (
 // Run continues one action role's conversation with sandboxed shell tools.
 //
 // The CLI retains API network access. Model-generated commands use Claude's
-// native sandbox with its default filesystem and network restrictions. A
-// writable run may edit the source snapshot; outputDir grants a separate report
-// directory write. ReadOnlyDirs and configured skills are readable without
-// granting them write access. When OutputSchema is set, the answer contains
-// the CLI's structured JSON result.
+// native sandbox with filesystem and network restrictions. On Linux, host Unix
+// sockets remain reachable and can bypass those restrictions through services.
+// A writable run may edit the source snapshot; outputDir grants a separate
+// report directory write. ReadOnlyDirs and configured skills are readable
+// without granting them write access. When OutputSchema is set, the answer
+// contains the CLI's structured JSON result.
 //
 // APIKey overrides environment credentials and stored CLI login through a
 // temporary, tool-inaccessible key helper. Without APIKey, use Claude's stored
@@ -278,15 +280,21 @@ func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
 	if authDir != "" {
 		credentials["files"] = []map[string]string{{"path": filepath.Join(authDir, "api-key"), "mode": "deny"}}
 	}
+	sandbox := map[string]any{
+		"enabled":                  true,
+		"failIfUnavailable":        true,
+		"allowUnsandboxedCommands": false,
+		"credentials":              credentials,
+	}
+	if runtime.GOOS == "linux" {
+		// AppArmor-restricted user namespaces block Claude's socket seccomp helper.
+		// shortcut: Linux Bash can reach accessible Unix sockets; remove with executor isolation.
+		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
+	}
 	policy := map[string]any{
 		"disableClaudeAiConnectors": true,
 		"autoMemoryEnabled":         false,
-		"sandbox": map[string]any{
-			"enabled":                  true,
-			"failIfUnavailable":        true,
-			"allowUnsandboxedCommands": false,
-			"credentials":              credentials,
-		},
+		"sandbox":                   sandbox,
 	}
 	if authDir != "" {
 		policy["apiKeyHelper"] = apiKeyHelper(authDir)

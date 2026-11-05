@@ -31,7 +31,7 @@ func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/recover=%t", provider, recovers), func(t *testing.T) {
 				crossProviderSecret := "remove temporary directory"
 				if provider == "claude" {
-					crossProviderSecret = "claude cleanup"
+					crossProviderSecret = "claude credential cleanup"
 				}
 				installActionTestSkills(t)
 				t.Setenv("CODEX_HOME", t.TempDir())

@@ -228,10 +228,15 @@ printf '%s\n' '`+successfulResult+`'
 			if err := json.Unmarshal(raw["sandbox"], &nativeSandbox); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"filesystem", "network"} {
-				if _, authored := nativeSandbox[name]; authored {
-					t.Fatalf("Minion authored Claude %s rules: %s", name, raw["sandbox"])
+			if _, authored := nativeSandbox["filesystem"]; authored {
+				t.Fatalf("Minion authored Claude filesystem rules: %s", raw["sandbox"])
+			}
+			if runtime.GOOS == "linux" {
+				if string(nativeSandbox["network"]) != `{"allowAllUnixSockets":true}` {
+					t.Fatalf("Linux Claude sandbox lacks Unix socket workaround: %s", raw["sandbox"])
 				}
+			} else if _, authored := nativeSandbox["network"]; authored {
+				t.Fatalf("Minion authored Claude network rules: %s", raw["sandbox"])
 			}
 			wantDenials := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
 			var denials []string
@@ -256,7 +261,11 @@ printf '%s\n' '`+successfulResult+`'
 			if !strings.Contains(prompt, "Source snapshot: ") || !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {
 				t.Fatalf("prompt = %q", prompt)
 			}
-			if cwd == workspace || filepath.Dir(cwd) != filepath.Dir(workspace) {
+			tempRoot, err := aicli.Directory(os.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cwd == workspace || filepath.Dir(filepath.Dir(cwd)) != tempRoot {
 				t.Fatalf("runtime directory = %q", cwd)
 			}
 			if _, err := os.Stat(cwd); !errors.Is(err, os.ErrNotExist) {
