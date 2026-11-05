@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func stopStoreFixture(t *testing.T) (*Store, string, AcceptedAction) {
@@ -27,6 +29,49 @@ func stopStoreFixture(t *testing.T) (*Store, string, AcceptedAction) {
 		t.Fatal(err)
 	}
 	return store, path, accepted
+}
+
+func TestStopRequesterTypedGitHubID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"operator", true}, {"github-user-3", true}, {"github-user:3", true},
+		{"github-user:9223372036854775807", true},
+		{"github-user:", false}, {"github-user:0", false}, {"github-user:03", false},
+		{"github-user:+3", false}, {"github-user:-3", false}, {"github-user:3:4", false},
+		{"github-user:abc", false}, {"github-user:9223372036854775808", false},
+		{"github-user:11111111111111111111", false},
+		{"github-user:３", false}, {"github-user:3 ", false},
+	} {
+		if got := validStopRequester(tc.name); got != tc.want {
+			t.Errorf("validStopRequester(%q) = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+	if workspace.ValidIdentitySegment("github-user:3") {
+		t.Fatal("typed GitHub user ID also qualifies as a local admin name")
+	}
+	store, _, accepted := stopStoreFixture(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	unregister := store.RegisterSelectedStop(accepted.JobID, accepted.AttemptID, cancel)
+	defer unregister()
+	for _, invalid := range []string{"github-user:0", "github-user:03", "github-user:abc"} {
+		if _, err := store.RequestStop(accepted.JobID, accepted.AttemptID, invalid, time.Now().UTC()); err == nil || err.Error() != "invalid stop request" {
+			t.Fatalf("invalid requester %q: %v", invalid, err)
+		}
+	}
+	if ctx.Err() != nil || store.Data.Accepted.StopRequest != (StopRequest{}) {
+		t.Fatal("invalid requester changed selected action")
+	}
+	request, err := store.RequestStop(accepted.JobID, accepted.AttemptID, "github-user:3", time.Now().UTC())
+	if err != nil || ctx.Err() != context.Canceled || !request.valid() {
+		t.Fatalf("typed GitHub stop: request=%+v err=%v canceled=%v", request, err, ctx.Err())
+	}
+	saved, err := store.ReadSavedDurable()
+	if err != nil || saved.Accepted == nil || saved.Accepted.StopRequest != request {
+		t.Fatalf("typed GitHub stop not persisted: accepted=%+v err=%v", saved.Accepted, err)
+	}
 }
 
 func TestRequestStopChecksAttemptAndPreservesFirstRequester(t *testing.T) {

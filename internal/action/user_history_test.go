@@ -47,13 +47,17 @@ func TestUserHistoryRetainsRetryAndPreExecutionFailureAfterCleanup(t *testing.T)
 		page.Entries[1].Summary.MainSettings.Model != "o3" || page.Entries[1].Summary.SourceKey != preExecution.SourceKey {
 		t.Fatalf("own durable history: page=%+v err=%v", page, err)
 	}
-	if _, found, err := owner.UserActionIdentity(other.AttemptID, 3); err != nil || found {
+	if _, _, found, err := owner.UserActionIdentity(other.AttemptID, 3); err != nil || found {
 		t.Fatalf("other requester identity: found=%t err=%v", found, err)
 	}
 	for _, attempt := range []string{preExecution.AttemptID, retry.AttemptID} {
-		summary, found, err := owner.UserActionIdentity(attempt, 3)
-		if err != nil || !found || summary.RequesterID != 3 {
-			t.Fatalf("own identity %s: summary=%+v found=%t err=%v", attempt, summary, found, err)
+		jobID, summary, found, err := owner.UserActionIdentity(attempt, 3)
+		wantJob := preExecution.JobID
+		if attempt == retry.AttemptID {
+			wantJob = retry.JobID
+		}
+		if err != nil || !found || jobID != wantJob || summary.RequesterID != 3 {
+			t.Fatalf("own identity %s: job=%q summary=%+v found=%t err=%v", attempt, jobID, summary, found, err)
 		}
 		detail, found, err := owner.UserActionDetail(attempt, at.Add(3*time.Minute), summary)
 		if err != nil || !found || detail.Summary.RequesterID != 3 || detail.Summary.SourceKey == "" {
@@ -105,7 +109,7 @@ func TestUserHistoryOmitsLegacyDecisionWithoutRequesterProof(t *testing.T) {
 	if err != nil || len(page.Entries) != 1 || page.Entries[0].AttemptID != "attempt-1" {
 		t.Fatalf("legacy decision leaked or blocked history: page=%+v err=%v", page, err)
 	}
-	if _, found, err := owner.UserActionIdentity("attempt-legacy", 3); err != nil || found {
+	if _, _, found, err := owner.UserActionIdentity("attempt-legacy", 3); err != nil || found {
 		t.Fatalf("legacy decision became requester proof: found=%t err=%v", found, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -234,7 +235,7 @@ func (a *userActionAccess) authorizeJaWSRequest(parent context.Context, sess *ja
 	if !a.admitRead(ctx) {
 		return false
 	}
-	summary, found, err := a.owner.UserActionIdentity(attempt, id)
+	_, summary, found, err := a.owner.UserActionIdentity(attempt, id)
 	a.finishRead()
 	return err == nil && found && a.checkRepository(ctx, summary) == nil
 }
@@ -355,7 +356,7 @@ func (a *oauthAccess) actionRoutes(access *userActionAccess) error {
 			a.browserError(w, r, http.StatusServiceUnavailable)
 			return
 		}
-		summary, found, err := owner.UserActionIdentity(attempt, id)
+		_, summary, found, err := owner.UserActionIdentity(attempt, id)
 		access.finishRead()
 		if err != nil {
 			a.browserError(w, r, http.StatusServiceUnavailable)
@@ -387,11 +388,11 @@ func (a *oauthAccess) actionRoutes(access *userActionAccess) error {
 		view := actionDetailView{DashboardDetail: detail, AllowUser: true, access: access}
 		ui.Handler(a.jaws, "admin action detail", view).ServeHTTP(w, r)
 	})
+	a.mux.HandleFunc("POST /auth/actions/{attempt}/abort", access.abort)
 	return nil
 }
 
-// projectDetail limits concurrent private record reads for both the page and
-// other user actions that need an authorized detail projection.
+// projectDetail limits concurrent private record reads for user detail pages.
 func (a *userActionAccess) projectDetail(ctx context.Context, attempt string, now time.Time, summary state.AcceptedSummary) (action.DashboardDetail, bool, error) {
 	if a == nil || a.oauth == nil || a.owner == nil || ctx.Err() != nil {
 		return action.DashboardDetail{}, false, errUserActionBusy
@@ -403,4 +404,61 @@ func (a *userActionAccess) projectDetail(ctx context.Context, attempt string, no
 	default:
 		return action.DashboardDetail{}, false, errUserActionBusy
 	}
+}
+
+func (a *userActionAccess) abort(w http.ResponseWriter, r *http.Request) {
+	closeUnreadAdminBody(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	attempt := r.PathValue("attempt")
+	if !workspace.ValidIdentitySegment(attempt) {
+		a.oauth.browserError(w, r, http.StatusBadRequest)
+		return
+	}
+	id, err := a.requesterID(a.oauth.jaws.GetSession(r))
+	if err != nil || id == 0 {
+		if err != nil && !errors.Is(err, errUserActionDenied) {
+			a.oauth.browserError(w, r, http.StatusServiceUnavailable)
+		} else {
+			a.oauth.browserError(w, r, http.StatusForbidden)
+		}
+		return
+	}
+	if a.owner == nil || a.owner.Store == nil {
+		a.oauth.browserError(w, r, http.StatusServiceUnavailable)
+		return
+	}
+	if !a.admitRead(r.Context()) {
+		a.oauth.browserError(w, r, http.StatusServiceUnavailable)
+		return
+	}
+	jobID, summary, found, err := a.owner.UserActionIdentity(attempt, id)
+	a.finishRead()
+	if err != nil {
+		a.oauth.browserError(w, r, http.StatusServiceUnavailable)
+		return
+	}
+	if !found {
+		a.oauth.browserError(w, r, http.StatusNotFound)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	if err := a.checkRepository(ctx, summary); err != nil {
+		if errors.Is(err, errUserActionDenied) {
+			a.oauth.browserError(w, r, http.StatusForbidden)
+		} else {
+			a.oauth.browserError(w, r, http.StatusServiceUnavailable)
+		}
+		return
+	}
+	_, err = a.owner.Store.RequestStop(jobID, attempt, "github-user:"+strconv.FormatInt(id, 10), time.Now().UTC())
+	if errors.Is(err, state.ErrStopConflict) {
+		a.oauth.browserError(w, r, http.StatusConflict)
+		return
+	}
+	if err != nil {
+		a.oauth.browserError(w, r, http.StatusServiceUnavailable)
+		return
+	}
+	http.Redirect(w, r, "/auth/actions/"+attempt, http.StatusSeeOther)
 }

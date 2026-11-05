@@ -134,13 +134,13 @@ func (e *Orchestrator) UserHistory(requesterID int64, cursor string) (UserHistor
 }
 
 // UserActionIdentity reads only the durable index, before any private attempt file.
-func (e *Orchestrator) UserActionIdentity(attemptID string, requesterID int64) (state.AcceptedSummary, bool, error) {
+func (e *Orchestrator) UserActionIdentity(attemptID string, requesterID int64) (string, state.AcceptedSummary, bool, error) {
 	if e == nil || e.Store == nil || requesterID <= 0 || !workspace.ValidIdentitySegment(attemptID) {
-		return state.AcceptedSummary{}, false, errors.New("action identity unavailable")
+		return "", state.AcceptedSummary{}, false, errors.New("action identity unavailable")
 	}
 	data, err := readDashboardState(e.Store.ReadSavedDurable, runtime.GOOS == "windows")
 	if err != nil {
-		return state.AcceptedSummary{}, false, err
+		return "", state.AcceptedSummary{}, false, err
 	}
 	var summary state.AcceptedSummary
 	jobID := ""
@@ -156,21 +156,21 @@ func (e *Orchestrator) UserActionIdentity(attemptID string, requesterID int64) (
 	}
 	if accepted := data.Accepted; accepted != nil {
 		if err := add(accepted.JobID, accepted.AttemptID, accepted.HistorySummary()); err != nil {
-			return state.AcceptedSummary{}, false, err
+			return "", state.AcceptedSummary{}, false, err
 		}
 	}
 	for id, failure := range data.JobFailures {
 		if err := add(id, failure.RetryAction.AttemptID, failure.RetryAction.Summary); err != nil {
-			return state.AcceptedSummary{}, false, err
+			return "", state.AcceptedSummary{}, false, err
 		}
 	}
 	for id, decision := range data.TerminalDecisions {
 		if err := add(id, decision.AttemptID, decision.Summary); err != nil {
-			return state.AcceptedSummary{}, false, err
+			return "", state.AcceptedSummary{}, false, err
 		}
 	}
 	if jobID == "" || summary.RequesterID != requesterID {
-		return state.AcceptedSummary{}, false, nil
+		return "", state.AcceptedSummary{}, false, nil
 	}
-	return summary, true, nil
+	return jobID, summary, true, nil
 }

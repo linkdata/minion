@@ -59,7 +59,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 </body>
 </html>{{end}}
 {{define "dashboard-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Unavailable}}Live state unavailable.{{else}}Worker readiness {{.Snapshot.Worker.Readiness}}. Reported state {{.Snapshot.Worker.State}}. Worker phase {{if .Snapshot.Worker.Phase}}{{.Snapshot.Worker.Phase}}{{if .Snapshot.Worker.Round}} / round {{.Snapshot.Worker.Round}}{{end}}{{if .Snapshot.Worker.ReviewPhase}} / {{.Snapshot.Worker.ReviewPhase}}{{end}}{{else}}not observed{{end}}. Tracked accepted actions {{.Snapshot.TrackedAccepted}}. In progress {{.Snapshot.InProgress}}.{{if .Action}} Current {{.Action.Action}} action in {{.Action.Repository}} for {{.Action.Requester}}, accepted {{utc .Action.AcceptedAt}}, phase {{.Action.Phase}}.{{end}}{{end}}{{end}}{{else}}Admin session ended.{{end}}{{end}}
-{{define "dashboard-stop-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Snapshot.LastStop}}Latest force stop for attempt {{.Snapshot.LastStop.AttemptID}}: {{.Snapshot.LastStop.Status}}.{{end}}{{end}}{{end}}{{end}}
+{{define "dashboard-stop-status"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}{{if .Snapshot.LastStop}}Latest stop request for attempt {{.Snapshot.LastStop.AttemptID}}: {{.Snapshot.LastStop.Status}}.{{end}}{{end}}{{end}}{{end}}
 {{define "dashboard-live"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p role="alert">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="metrics">
@@ -82,7 +82,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     <dt>Executor inactivity</dt><dd>{{.Snapshot.InactivityTimeout}}</dd>
   </dl><p class="hint">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section>
 </div>
-{{if .Snapshot.LastStop}}<section class="panel stop-status"><h2>Latest force stop</h2>
+{{if .Snapshot.LastStop}}<section class="panel stop-status"><h2>Latest stop request</h2>
   <p><strong>{{.Snapshot.LastStop.Status}}</strong> · {{.Snapshot.LastStop.JobID}} / attempt {{.Snapshot.LastStop.AttemptID}}</p>
   <p class="hint">Requested by {{.Snapshot.LastStop.RequestedBy}} at {{utc .Snapshot.LastStop.RequestedAt}}.
   {{if eq .Snapshot.LastStop.Status "requested"}}Waiting for the stop to be verified.{{else if eq .Snapshot.LastStop.Status "confirmed"}}The attempt stopped cleanly.{{else}}The stop could not be verified; inspect worker readiness before reuse.{{end}}</p>

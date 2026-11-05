@@ -28,11 +28,12 @@ var adminActionDetailTemplate = template.Must(template.New("admin action detail"
 {{if .Summary.MainProvider}}<dt>Main model</dt><dd>{{.Summary.MainProvider}}{{with .Summary.MainSettings.Model}} / {{.}}{{end}}{{with .Summary.MainSettings.Effort}} / {{.}}{{end}}</dd>{{end}}
 {{if .Summary.CriticProvider}}<dt>Critic model</dt><dd>{{.Summary.CriticProvider}}{{with .Summary.CriticSettings.Model}} / {{.}}{{end}}{{with .Summary.CriticSettings.Effort}} / {{.}}{{end}}</dd>{{end}}
 <dt>Outcome</dt><dd>{{.Outcome}}</dd>
+{{if .StopRequest.Status}}<dt>Stop status</dt><dd>{{if eq .StopRequest.Status "requested"}}Termination requested; waiting for stop verification.{{else if eq .StopRequest.Status "confirmed"}}Termination confirmed.{{else}}Termination could not be verified; {{if .AllowUser}}contact an operator to check executor readiness before reuse.{{else}}check executor readiness before reuse.{{end}}{{end}}</dd>{{end}}
 {{if .Progress}}<dt>Progress</dt><dd>{{.Progress}}</dd>{{end}}
 <dt>Original deadline</dt><dd>{{if .Deadline.IsZero}}Unavailable in older saved decision{{else}}{{utc .Deadline}}{{end}}</dd>
 <dt>Remaining budget</dt><dd>{{if or (eq .Outcome "In progress") (eq .Outcome "Retry pending")}}{{.Remaining}}{{else}}No longer running{{end}}</dd>
 <dt>Publication</dt><dd>{{.Publication}}</dd>{{if .PushPublication}}<dt>Fix push</dt><dd>{{.PushPublication}}</dd>{{end}}
-</dl></section>
+</dl>{{if and .AllowUser .Stoppable}}<form method="post" action="/auth/actions/{{.AttemptID}}/abort"><button type="submit">Abort this action</button></form>{{end}}</section>
 <section class="panel"><h2>Critic evidence</h2><dl><dt>Actual full-review verdict</dt><dd>{{if .CriticVerdict}}{{.CriticVerdict}}{{else}}Unavailable{{end}}</dd>
 <dt>Stopping reason</dt><dd>{{if .CriticStop}}{{.CriticStop}}{{else}}Unavailable{{end}}</dd></dl><p class="hint">{{.ReviewNotice}}</p>
 {{if .Refutations}}<h3>Main-model refutations</h3>{{range .Refutations}}<article class="detail-entry"><p>{{.Meta}}{{if .Truncated}} · text truncated{{end}}</p><pre>{{.Text}}</pre></article>{{end}}{{end}}</section>
@@ -64,7 +65,7 @@ func (v actionDetailView) JawsConnect(rq *jaws.Request) error {
 	if !v.access.admitRead(ctx) {
 		return errUserActionBusy
 	}
-	current, found, err := v.access.owner.UserActionIdentity(v.AttemptID, id)
+	_, current, found, err := v.access.owner.UserActionIdentity(v.AttemptID, id)
 	v.access.finishRead()
 	if err != nil || !found || current != v.Summary {
 		return errUserActionDenied
