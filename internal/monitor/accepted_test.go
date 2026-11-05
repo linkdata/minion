@@ -136,63 +136,90 @@ func TestSelectedPreferenceReadFailureStopsAcceptance(t *testing.T) {
 }
 
 func TestSelectedUnassignedRecoveryFailsWhenFrozenProviderIsUnavailable(t *testing.T) {
-	at := time.Now().UTC()
-	item := selectedItem(at)
-	reactionErr := errors.New("reaction unavailable")
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
-		permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
-	store := openState(t, at.Add(-time.Minute))
-	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
-		t.Fatal("unavailable frozen provider dispatched")
-		return nil
-	}))
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) || store.Data.Accepted == nil {
-		t.Fatalf("reaction failure did not retain acceptance: err=%v state=%+v", err, store.Data)
-	}
-	accepted := *store.Data.Accepted
-	store.Data.Accepted.RetryAt = at.Add(-time.Second)
-	if err := store.Save(); err != nil {
-		t.Fatal(err)
-	}
-	m.Config.Main = "claude"
-	gh.reactionErr = nil
-	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
-	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
-		store.Data.Processed[accepted.JobID].IsZero() || store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" ||
-		len(gh.comments) != 1 || len(store.Data.JobFailures) != 0 {
-		t.Fatalf("unrunnable frozen acceptance did not fail: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
+	for _, change := range []struct {
+		name, initialCritic, nextMain, nextCritic string
+	}{
+		{name: "main changed", nextMain: "claude"},
+		{name: "critic added", nextCritic: "claude"},
+		{name: "critic removed", initialCritic: "claude"},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			item := selectedItem(at)
+			reactionErr := errors.New("reaction unavailable")
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+				permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
+			store := openState(t, at.Add(-time.Minute))
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+				t.Fatal("unavailable frozen provider dispatched")
+				return nil
+			}))
+			m.Config.Adversarial = change.initialCritic
+			m.Config.Claude.Model, m.Config.Claude.Effort = "test-claude", "medium"
+			if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) || store.Data.Accepted == nil {
+				t.Fatalf("reaction failure did not retain acceptance: err=%v state=%+v", err, store.Data)
+			}
+			accepted := *store.Data.Accepted
+			if accepted.CriticProvider != change.initialCritic {
+				t.Fatalf("acceptance lost frozen critic provider: %+v", accepted)
+			}
+			store.Data.Accepted.RetryAt = at.Add(-time.Second)
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+			m.Config.Main, m.Config.Adversarial = change.nextMain, change.nextCritic
+			gh.reactionErr = nil
+			gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+			if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+				store.Data.Processed[accepted.JobID].IsZero() || store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" ||
+				len(gh.comments) != 1 || len(store.Data.JobFailures) != 0 {
+				t.Fatalf("unrunnable frozen acceptance did not fail: err=%v state=%+v comments=%v", err, store.Data, gh.comments)
+			}
+		})
 	}
 }
 
 func TestSelectedPreparationRetryFailsWhenFrozenProviderIsUnavailable(t *testing.T) {
-	at := time.Now().UTC()
-	item := selectedItem(at)
-	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
-		permission: github.Permission{Permission: "write"}}
-	store := openState(t, at.Add(-time.Minute))
-	preparationErr := errors.New("preparation unavailable")
-	var executions int
-	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
-		executions++
-		return preparationErr
-	}))
-	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, preparationErr) || store.Data.Accepted != nil {
-		t.Fatalf("preparation failure did not release acceptance: err=%v state=%+v", err, store.Data)
-	}
-	id := jobID(item.Key, "review")
-	if failure := store.Data.JobFailures[id]; failure.MainProvider != "codex" || failure.Attempts != 1 {
-		t.Fatalf("preparation failure lost frozen provider: %+v", failure)
-	}
-	m.Config.Main = "claude"
-	retryAt := advanceToRetry(at, store).Add(2 * time.Second)
-	m.Now = func() time.Time { return retryAt }
-	m.Handler = selectedHandler(func(Job) error {
-		t.Fatal("unavailable frozen provider retried preparation")
-		return nil
-	})
-	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Processed[id].IsZero() ||
-		store.Data.Accepted != nil || len(store.Data.JobFailures) != 0 || executions != 1 || len(gh.comments) != 1 {
-		t.Fatalf("unrunnable preparation retry did not fail: err=%v state=%+v executions=%d comments=%v notifications=%v threads=%d current=%d", err, store.Data, executions, gh.comments, gh.notificationCalls, gh.threadCalls, gh.currentChecks)
+	for _, change := range []struct {
+		name, initialCritic, nextMain, nextCritic string
+	}{
+		{name: "main changed", nextMain: "claude"},
+		{name: "critic added", nextCritic: "claude"},
+		{name: "critic removed", initialCritic: "claude"},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			at := time.Now().UTC()
+			item := selectedItem(at)
+			gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+				permission: github.Permission{Permission: "write"}}
+			store := openState(t, at.Add(-time.Minute))
+			preparationErr := errors.New("preparation unavailable")
+			var executions int
+			m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+				executions++
+				return preparationErr
+			}))
+			m.Config.Adversarial = change.initialCritic
+			m.Config.Claude.Model, m.Config.Claude.Effort = "test-claude", "medium"
+			if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, preparationErr) || store.Data.Accepted != nil {
+				t.Fatalf("preparation failure did not release acceptance: err=%v state=%+v", err, store.Data)
+			}
+			id := jobID(item.Key, "review")
+			if failure := store.Data.JobFailures[id]; failure.MainProvider != "codex" || failure.CriticProvider != change.initialCritic || failure.Attempts != 1 {
+				t.Fatalf("preparation failure lost frozen provider: %+v", failure)
+			}
+			m.Config.Main, m.Config.Adversarial = change.nextMain, change.nextCritic
+			retryAt := advanceToRetry(at, store).Add(2 * time.Second)
+			m.Now = func() time.Time { return retryAt }
+			m.Handler = selectedHandler(func(Job) error {
+				t.Fatal("unavailable frozen provider retried preparation")
+				return nil
+			})
+			if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Processed[id].IsZero() ||
+				store.Data.Accepted != nil || len(store.Data.JobFailures) != 0 || executions != 1 || len(gh.comments) != 1 {
+				t.Fatalf("unrunnable preparation retry did not fail: err=%v state=%+v executions=%d comments=%v notifications=%v threads=%d current=%d", err, store.Data, executions, gh.comments, gh.notificationCalls, gh.threadCalls, gh.currentChecks)
+			}
+		})
 	}
 }
 

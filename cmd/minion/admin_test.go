@@ -137,9 +137,10 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	choice := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
+	criticChoice := config.RoleModelConfig{Model: "approved-critic", Effort: "high"}
 	cfg := config.AdminConfig{Listen: "127.0.0.1:0",
 		GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
-		UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}}}
+		UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}, Critic: []config.RoleModelConfig{criticChoice}}}
 	admin, err := startAdminServer(t.Context(), cfg, nil, statePath, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -204,21 +205,41 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	}
 	cookie := cookies[0]
 	formIdentity := preferenceFormIdentity(accountKey)
+	selected := url.Values{"main": {preferenceChoiceValue(choice)}, "critic": {preferenceChoiceValue(criticChoice)}, "identity": {formIdentity}}
 	if response := request(http.MethodGet, "/auth/preferences", nil, cookie); response.StatusCode != http.StatusOK ||
 		response.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("signed-in preferences status=%d", response.StatusCode)
 	}
-	if response := request(http.MethodPost, "/auth/preferences", url.Values{"main": {preferenceChoiceValue(choice)}, "identity": {formIdentity}}, cookie); response.StatusCode != http.StatusSeeOther {
+	if response := request(http.MethodPost, "/auth/preferences", selected, cookie); response.StatusCode != http.StatusSeeOther {
 		t.Fatalf("save preferences status=%d", response.StatusCode)
 	}
-	if got, err := admin.preferences.preferencesForGitHubID(42); err != nil || got.Main != choice {
+	if got, err := admin.preferences.preferencesForGitHubID(42); err != nil || got != (config.UserModelPreferences{Main: choice, Critic: criticChoice}) {
 		t.Fatalf("monitor-visible preference: %+v, %v", got, err)
 	}
-	if response := request(http.MethodPost, "/auth/preferences", url.Values{"main": {preferenceChoiceValue(choice)}, "identity": {formIdentity}}, cookie); response.StatusCode != http.StatusSeeOther {
+	if response := request(http.MethodPost, "/auth/preferences", selected, cookie); response.StatusCode != http.StatusSeeOther {
 		t.Fatalf("identical preferences status=%d", response.StatusCode)
+	}
+	for _, invalid := range []struct {
+		name string
+		form url.Values
+	}{
+		{"unapproved main", url.Values{"main": {preferenceChoiceValue(config.RoleModelConfig{Model: "unknown", Effort: "low"})}, "critic": selected["critic"], "identity": {formIdentity}}},
+		{"main choice as critic", url.Values{"main": selected["main"], "critic": {preferenceChoiceValue(choice)}, "identity": {formIdentity}}},
+		{"missing critic", url.Values{"main": selected["main"], "identity": {formIdentity}}},
+		{"extra field", url.Values{"main": selected["main"], "critic": selected["critic"], "identity": {formIdentity}, "extra": {"unexpected"}}},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			if response := request(http.MethodPost, "/auth/preferences", invalid.form, cookie); response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("invalid preferences status=%d", response.StatusCode)
+			}
+			if got, err := admin.preferences.preferencesForGitHubID(42); err != nil || got != (config.UserModelPreferences{Main: choice, Critic: criticChoice}) {
+				t.Fatalf("invalid form changed saved preferences: %+v, %v", got, err)
+			}
+		})
 	}
 	// With every approved choice withdrawn, the saved choice must still be removable.
 	cfg.UserModelChoices.Main = nil
+	cfg.UserModelChoices.Critic = nil
 	pageRequest, err := http.NewRequestWithContext(t.Context(), http.MethodGet, base+"/auth/preferences", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -231,11 +252,12 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	pageBody, err := io.ReadAll(page.Body)
 	_ = page.Body.Close()
 	if err != nil || page.StatusCode != http.StatusOK ||
-		!strings.Contains(string(pageBody), `name="main"`) || !strings.Contains(string(pageBody), `value="default"`) ||
-		!strings.Contains(string(pageBody), "Saved main choice is unavailable") {
+		!strings.Contains(string(pageBody), `name="main"`) || !strings.Contains(string(pageBody), `name="critic"`) ||
+		!strings.Contains(string(pageBody), `value="default"`) || !strings.Contains(string(pageBody), "Saved main choice is unavailable") ||
+		!strings.Contains(string(pageBody), "Saved critic choice is unavailable") {
 		t.Fatalf("withdrawn choice has no reset form: status=%d body=%q error=%v", page.StatusCode, pageBody, err)
 	}
-	reset := url.Values{"main": {"default"}, "identity": {formIdentity}}
+	reset := url.Values{"main": {"default"}, "critic": {"default"}, "identity": {formIdentity}}
 	admin.preferences.mu.Lock()
 	if admin.preferences.lastPreferenceWrite.IsZero() {
 		admin.preferences.mu.Unlock()
