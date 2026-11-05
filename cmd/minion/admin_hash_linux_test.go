@@ -221,11 +221,20 @@ func TestHashModeRestoresTerminalOnSignal(t *testing.T) {
 			if err := child.Start(); err != nil {
 				t.Fatal(err)
 			}
+			waited := false
+			t.Cleanup(func() {
+				if !waited {
+					_ = child.Process.Kill()
+					_ = child.Wait()
+				}
+			})
 			readHashPrompt(t, master)
 			if err := child.Process.Signal(sig); err != nil {
 				t.Fatal(err)
 			}
-			if err := child.Wait(); err == nil || ctx.Err() != nil {
+			err := child.Wait()
+			waited = true
+			if err == nil || ctx.Err() != nil {
 				t.Fatalf("signal exit=%v context=%v", err, ctx.Err())
 			}
 			after, err := unix.IoctlGetTermios(int(slave.Fd()), unix.TCGETS)

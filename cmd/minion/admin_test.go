@@ -42,15 +42,15 @@ func TestAdminServerDeniesEveryInitialEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://localhost:"+port {
-		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
-	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.entryURL != "http://localhost:"+port {
+		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
+	}
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second,
@@ -347,15 +347,15 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
-		t.Fatalf("HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
-	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
+		t.Fatalf("HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
+	}
 	client := adminTLSClient(t, leaf)
 	reused := false
 	wantProto := 2
@@ -423,15 +423,15 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
-		t.Fatalf("fallback HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
-	}
 	t.Cleanup(func() {
 		if err := admin.Close(); err != nil {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
+		t.Fatalf("fallback HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
+	}
 	client := adminTLSClient(t, leaf)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
 	if err != nil {
