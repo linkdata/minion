@@ -51,6 +51,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 	ctx, cancel := context.WithCancel(t.Context())
 	started := make(chan error, 1)
 	go func() {
+		defer close(started)
 		var signal [7]byte
 		_, err := io.ReadFull(marker, signal[:])
 		if err == nil && string(signal[:]) != "started" {
@@ -63,16 +64,56 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 		err    error
 	}
 	done := make(chan outcome, 1)
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		defer close(done)
 		result, err := runner.Run(ctx, job)
 		done <- outcome{result, err}
 	}()
 	defer func() {
 		cancel()
+		if _, err := marker.Write([]byte("started")); err != nil {
+			t.Errorf("release marker reader: %v", err)
+		}
 		select {
-		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Error("marker reader did not stop")
+		}
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-finished:
+				return
+			default:
+			}
+			writer, err := os.OpenFile(holdPath, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+			if err == nil {
+				if err := writer.Close(); err != nil {
+					t.Errorf("release validator hold: %v", err)
+				}
+				break
+			}
+			if !errors.Is(err, syscall.ENXIO) {
+				t.Errorf("open validator hold: %v", err)
+				break
+			}
+			select {
+			case <-finished:
+				return
+			case <-ticker.C:
+			case <-deadline.C:
+				t.Error("canceled runner did not exit")
+				return
+			}
+		}
+		select {
+		case <-finished:
+		case <-deadline.C:
 			t.Error("canceled runner did not exit")
 		}
 	}()
