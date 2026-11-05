@@ -64,9 +64,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 		err    error
 	}
 	done := make(chan outcome, 1)
-	finished := make(chan struct{})
 	go func() {
-		defer close(finished)
 		defer close(done)
 		result, err := runner.Run(ctx, job)
 		done <- outcome{result, err}
@@ -87,7 +85,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 		defer ticker.Stop()
 		for {
 			select {
-			case <-finished:
+			case <-done:
 				return
 			default:
 			}
@@ -103,7 +101,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 				break
 			}
 			select {
-			case <-finished:
+			case <-done:
 				return
 			case <-ticker.C:
 			case <-deadline.C:
@@ -112,7 +110,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 			}
 		}
 		select {
-		case <-finished:
+		case <-done:
 		case <-deadline.C:
 			t.Error("canceled runner did not exit")
 		}

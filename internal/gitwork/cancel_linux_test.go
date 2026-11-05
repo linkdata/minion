@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -19,8 +18,7 @@ import (
 func TestGitOutputLimitStopsDirectProcess(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "git.pid")
-	gate := gitFixtureStopGate(t, pidFile)
-	fakeOnPath(t, "git", "#!/bin/sh\nexec 3<> "+shellQuote(gate)+"\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf overflow-output\nIFS= read -r _ <&3\n")
+	fakeOnPath(t, "git", "#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf overflow-output\nexec sleep 30\n")
 	started := time.Now()
 	_, _, err := (&Checkout{path: dir}).boundedGit(t.Context(), nil, 4, false, "status")
 	if time.Since(started) > 3*time.Second || !errors.Is(err, ErrCheckoutTooLarge) || errors.Is(err, context.Canceled) {
@@ -32,8 +30,7 @@ func TestGitOutputLimitStopsDirectProcess(t *testing.T) {
 func TestGitDeadlineStopsDirectProcess(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "git.pid")
-	gate := gitFixtureStopGate(t, pidFile)
-	fakeOnPath(t, "git", "#!/bin/sh\nexec 3<> "+shellQuote(gate)+"\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf 'deadline diagnostic\\nforged journal\\n' >&2\nIFS= read -r _ <&3\n")
+	fakeOnPath(t, "git", "#!/bin/sh\nprintf '%s' $$ > "+shellQuote(pidFile)+"\nprintf 'deadline diagnostic\\nforged journal\\n' >&2\nexec sleep 30\n")
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	started := time.Now()
@@ -85,41 +82,4 @@ func assertGitProcessStopped(t *testing.T, pidFile string) {
 	if err := process.WaitExited(waitCtx); err != nil {
 		t.Fatalf("Git process is still running: %v", err)
 	}
-}
-
-func gitFixtureStopGate(t *testing.T, pidFile string) string {
-	t.Helper()
-	gate := pidFile + ".gate"
-	if err := syscall.Mkfifo(gate, 0600); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if !t.Failed() {
-			return
-		}
-		process, err := testsupport.PinProcess(pidFile)
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrProcessDone) {
-			return
-		}
-		if err != nil {
-			t.Errorf("pin failed Git fixture: %v", err)
-			return
-		}
-		defer process.Close()
-		writer, err := os.OpenFile(gate, os.O_RDWR, 0)
-		if err != nil {
-			t.Errorf("open failed Git fixture gate: %v", err)
-			return
-		}
-		_, writeErr := writer.Write([]byte("\n"))
-		if err := errors.Join(writeErr, writer.Close()); err != nil {
-			t.Errorf("release failed Git fixture: %v", err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := process.WaitExited(ctx); err != nil {
-			t.Errorf("failed Git fixture remained live: %v", err)
-		}
-	})
-	return gate
 }
