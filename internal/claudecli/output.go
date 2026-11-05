@@ -208,6 +208,13 @@ type resumedFrame struct {
 	tokens      usage.Tokens
 	contentHash [32]byte
 	hasContent  bool
+	visible     bool
+}
+
+type resumedContentKey struct {
+	id         streamIdentity
+	hash       [32]byte
+	hasContent bool
 }
 
 type progressStream struct {
@@ -322,8 +329,11 @@ type jsonlOutput struct {
 	assistantUsage         map[streamIdentity]messageUsage
 	assistantHistory       map[streamIdentity]assistantSnapshot
 	resumedFrames          []resumedFrame
-	resumedFrameIndex      map[streamIdentity]int
+	resumedFrameIndex      map[resumedContentKey]int
+	resumedMessageTokens   map[streamIdentity]usage.Tokens
 	resumedTokens          usage.Tokens
+	resumedProofBytes      int64
+	resumedProofEntries    int
 	assistantTotal         usage.Tokens // Sum of per-message counter maxima.
 	assistantTotalReady    bool
 	assistantTotalOverflow bool
@@ -1068,7 +1078,7 @@ func (o *jsonlOutput) finishLine(line []byte) {
 		o.aggregateGeneration++
 		o.rootTokens, o.uncovered = usage.Tokens{}, false
 	}
-	o.result.UsageComplete = complete && o.usageLimit == nil && o.taskFailure == nil
+	o.result.UsageComplete = complete && o.err == nil && o.usageLimit == nil && o.taskFailure == nil
 	if len(e.PermissionDenials) != 0 {
 		message := fmt.Sprintf("%d native permission denials", len(e.PermissionDenials))
 		var names []string
@@ -2315,13 +2325,18 @@ func (o *jsonlOutput) settleResumedFrames(tokens usage.Tokens, complete bool) {
 	defer func() {
 		o.resumedFrames = nil
 		o.resumedFrameIndex = nil
+		o.resumedMessageTokens = nil
 		o.resumedTokens = usage.Tokens{}
+		o.resumedProofBytes = 0
+		o.resumedProofEntries = 0
 	}()
 	current := tokens.Sub(o.baseline)
 	if !complete || !current.Valid() || !covers(current, o.resumedTokens) || o.provenanceGap {
+		o.progressBytes -= o.resumedProofBytes
+		o.progressEntries -= o.resumedProofEntries
 		o.markProvenanceGap(true)
 		for _, frame := range o.resumedFrames {
-			if frame.hasContent && o.onEvent != nil {
+			if frame.visible && o.onEvent != nil {
 				o.onEvent(aicli.StreamEvent{Kind: "content_missing"})
 			}
 		}
@@ -2330,7 +2345,10 @@ func (o *jsonlOutput) settleResumedFrames(tokens usage.Tokens, complete bool) {
 			o.assistantHistory = make(map[streamIdentity]assistantSnapshot)
 		}
 		for _, frame := range o.resumedFrames {
-			o.assistantHistory[frame.id] = assistantSnapshot{tokens: frame.tokens, hasTokens: true, hasContent: frame.hasContent}
+			snapshot := o.assistantHistory[frame.id]
+			snapshot.tokens, snapshot.hasTokens = o.resumedMessageTokens[frame.id], true
+			snapshot.hasContent = snapshot.hasContent || frame.hasContent
+			o.assistantHistory[frame.id] = snapshot
 			if frame.hasContent {
 				contentKey := frame.id.progressKey("assistant_content") + ":" + hex.EncodeToString(frame.contentHash[:])
 				if o.progressSeen == nil {
@@ -2371,66 +2389,88 @@ func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageI
 	root := e.parentForm == parentRoot
 	unknown := e.parentForm == parentMissing || e.parentForm == parentInvalid
 	prior, historical := o.assistantHistory[id]
-	if at, seen := o.resumedFrameIndex[id]; seen {
+	contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
+	var reported eventUsage
+	reportedTokens, reportedValid := usage.Tokens{}, false
+	if json.Unmarshal(message.Usage, &reported) == nil {
+		reportedTokens, reportedValid = reported.tokens()
+	}
+	frameKey := resumedContentKey{id: id, hash: contentHash, hasContent: hasContent}
+	if at, seen := o.resumedFrameIndex[frameKey]; seen {
 		priorFrame := o.resumedFrames[at]
-		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
-		var reported eventUsage
-		if !unprojectable && json.Unmarshal(message.Usage, &reported) == nil {
-			if tokens, valid := reported.tokens(); valid && tokens == priorFrame.tokens &&
-				contentHash == priorFrame.contentHash && hasContent == priorFrame.hasContent &&
-				!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil {
+		if !unprojectable && reportedValid && !reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil {
+			if reportedTokens == priorFrame.tokens {
 				return false, message.ID, false, true
+			}
+			old := o.resumedMessageTokens[id]
+			next := old.Max(reportedTokens)
+			without := o.resumedTokens.Sub(old)
+			total, added := without.AddChecked(next)
+			if covers(reportedTokens, old) && next.Valid() && without.Valid() && added {
+				o.resumedMessageTokens[id], o.resumedTokens = next, total
+				if next != old && o.onProgress != nil {
+					o.onProgress()
+				}
+				return false, message.ID, false, true // Higher counters for the same content do not emit it twice.
 			}
 		}
 		o.markProvenanceGap(root || unknown)
-		return false, message.ID, false, true // The pending frame will emit one gap marker at settlement.
+		return false, message.ID, false, true // Keep the pending content withheld until settlement.
 	}
 	stream := o.progressStreams[streamKey]
 	freshResumed := o.resumed && !historical && !o.baselineUnknown && o.results == 0 &&
 		stream != nil && stream.messageID == message.ID && reportPresent(message.Usage) && !unknown &&
 		!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil
 	if freshResumed {
-		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
-		var reported eventUsage
-		if !unprojectable && json.Unmarshal(message.Usage, &reported) == nil {
-			if tokens, valid := reported.tokens(); valid && o.claimAssistantOrigin(e, message.ID) {
-				if total, valid := o.resumedTokens.AddChecked(tokens); valid {
-					entries, bytes := 1, len(e.Message)+len(streamKey)+len(message.ID)
-					if hasContent {
-						entries++
-						bytes += len(id.progressKey("assistant_content")) + 1 + hex.EncodedLen(len(contentHash))
-					}
-					if !o.reserveProgress(entries, bytes) {
-						return false, "", false, false
-					}
-					if o.resumedFrameIndex == nil {
-						o.resumedFrameIndex = make(map[streamIdentity]int)
-					}
-					o.resumedFrameIndex[id] = len(o.resumedFrames)
-					receipt := event{Type: e.Type, SessionID: e.SessionID, AgentID: e.AgentID, parentForm: e.parentForm, Message: e.Message}
-					o.resumedFrames = append(o.resumedFrames, resumedFrame{id: id, event: receipt, tokens: tokens, contentHash: contentHash, hasContent: hasContent})
-					o.resumedTokens = total
-					return false, message.ID, false, true // Final usage must prove this frame before content is emitted.
+		if !unprojectable && reportedValid && o.claimAssistantOrigin(e, message.ID) {
+			old, seen := o.resumedMessageTokens[id]
+			if seen && !covers(reportedTokens, old) {
+				o.markProvenanceGap(root || unknown)
+				return false, message.ID, false, true // Decreasing counters cannot certify new content.
+			}
+			next := old.Max(reportedTokens)
+			without := o.resumedTokens.Sub(old)
+			total, added := without.AddChecked(next)
+			if next.Valid() && without.Valid() && added {
+				entries, bytes := 0, 0
+				if !seen {
+					entries, bytes = 1, len(streamKey)+len(message.ID)
 				}
+				if hasContent {
+					entries++
+					bytes += len(id.progressKey("assistant_content")) + 1 + hex.EncodedLen(len(contentHash))
+				}
+				if !o.reserveProgress(entries, bytes) {
+					return false, "", false, false
+				}
+				o.resumedProofEntries += entries
+				o.resumedProofBytes += int64(bytes)
+				if o.resumedFrameIndex == nil {
+					o.resumedFrameIndex = make(map[resumedContentKey]int)
+				}
+				if o.resumedMessageTokens == nil {
+					o.resumedMessageTokens = make(map[streamIdentity]usage.Tokens)
+				}
+				o.resumedFrameIndex[frameKey] = len(o.resumedFrames)
+				receipt := event{Type: e.Type, SessionID: e.SessionID, AgentID: e.AgentID, parentForm: e.parentForm, Message: e.Message}
+				o.resumedFrames = append(o.resumedFrames, resumedFrame{id: id, event: receipt, tokens: reportedTokens, contentHash: contentHash, hasContent: hasContent, visible: assistantReceiptOmitted(message.Content)})
+				o.resumedMessageTokens[id], o.resumedTokens = next, total
+				if o.onProgress != nil {
+					o.onProgress()
+				}
+				return false, message.ID, false, true // Final usage must prove this frame before content is emitted.
 			}
 		}
 	}
 	if o.resumed {
 		// A resumed frame without a fresh stream start may replay older work.
-		// Only a stored message with matching origin, counters and content is
-		// an exact replay; other unproved frames leave a provenance gap.
+		// An old block needs stored origin and content proof. Its counters can be
+		// below the message's stored maximum when blocks carried rising usage.
 		hasUsage := reportPresent(message.Usage)
-		contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
-		replay := historical && hasUsage == prior.hasTokens && hasContent == prior.hasContent && !unprojectable &&
+		replay := historical && hasUsage == prior.hasTokens && (!hasContent || prior.hasContent) && !unprojectable &&
 			!reportPresent(e.Usage) && !reportPresent(e.ModelUsage) && e.TotalCostUSD == nil
 		if replay && hasUsage {
-			var reported eventUsage
-			if json.Unmarshal(message.Usage, &reported) != nil {
-				replay = false
-			} else {
-				tokens, valid := reported.tokens()
-				replay = valid && tokens == prior.tokens
-			}
+			replay = reportedValid && covers(prior.tokens, reportedTokens)
 		}
 		if replay && hasContent {
 			contentKey := id.progressKey("assistant_content") + ":" + hex.EncodeToString(contentHash[:])
@@ -2464,12 +2504,7 @@ func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageI
 		return false, "", false, false
 	}
 	streamedCurrentMessage := !seen && !historical && currentStreamProof
-	var rawUsage eventUsage
-	valid := json.Unmarshal(message.Usage, &rawUsage) == nil
-	var tokens usage.Tokens
-	if valid {
-		tokens, valid = rawUsage.tokens()
-	}
+	tokens, valid := reportedTokens, reportedValid
 	if streamedCurrentMessage {
 		// The result may already cover this streamed message. Its full counters
 		// still enter this call's per-message maxima, but not root addition.
@@ -2488,7 +2523,6 @@ func (o *jsonlOutput) recordAssistantUsage(e event) (freshContent bool, messageI
 		old.prior = tokens
 		old.priorMissing = false
 	}
-	contentHash, hasContent, unprojectable := assistantContentProof(message.Content)
 	contentKey := ""
 	newContent := false
 	if hasContent {

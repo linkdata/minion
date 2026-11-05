@@ -44,6 +44,120 @@ func TestResumedPendingFrameReservesContentHistoryBeforeResult(t *testing.T) {
 	}
 }
 
+func TestResumedAssistantBlocksShareMessageUsage(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m2"}}}`
+	const textBlock = `[{"type":"text","text":"I will look"}]`
+	const toolBlock = `[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"pwd"}}]`
+	frame := func(content string, output int) string {
+		return fmt.Sprintf(`{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"m2","content":%s,"usage":{"input_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":%d}}}`, content, output)
+	}
+	for _, tc := range []struct {
+		name                  string
+		first, second, repeat int
+		complete              bool
+	}{
+		{"same counters and adjacent replay", 7, 7, 7, true},
+		{"rising counters", 5, 7, 8, true},
+		{"decreasing counters", 7, 5, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var events []aicli.StreamEvent
+			progress := 0
+			o := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true,
+				baseline: usage.Tokens{Input: 10, Output: 5}, costBaselineUSD: 0.5,
+				onEvent:    func(event aicli.StreamEvent) { events = append(events, event) },
+				onProgress: func() { progress++ }}
+			resultOutput := max(tc.first, tc.second, tc.repeat)
+			result := fmt.Sprintf(`{"type":"result","session_id":"native-id","subtype":"success","result":"done","total_cost_usd":0.75,"usage":{"input_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":%d},"modelUsage":{"main":{"inputTokens":30,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%d}}}`, resultOutput, resultOutput+5)
+			lines := []string{start, frame(textBlock, tc.first), frame(toolBlock, tc.second)}
+			if tc.repeat != 0 {
+				lines = append(lines, frame(toolBlock, tc.repeat))
+			}
+			lines = append(lines, result)
+			writeChunks(t, &o, strings.Join(lines, "\n")+"\n")
+			o.finish()
+			if o.err != nil || o.result.UsageComplete != tc.complete || o.provenanceGap == tc.complete ||
+				(o.nativeCostUSD != nil) != tc.complete || o.result.Tokens != (usage.Tokens{Input: 20, Output: int64(resultOutput)}) {
+				t.Fatalf("multi-block usage: result=%+v gap=%t cost=%v error=%v", o.result, o.provenanceGap, o.nativeCostUSD, o.err)
+			}
+			if tc.complete {
+				wantProgress := 2
+				if tc.repeat > tc.second {
+					wantProgress++
+				}
+				if progress != wantProgress || len(events) != 2 || events[0].Kind != "assistant" || events[0].Text != "I will look" ||
+					events[1].Kind != "tool_request" || !strings.Contains(events[1].Text, `"command":"pwd"`) {
+					t.Fatalf("block content/progress changed: events=%+v progress=%d", events, progress)
+				}
+				var replayEvents []aicli.StreamEvent
+				bytes, entries := o.progressCheckpoint()
+				replayResult := fmt.Sprintf(`{"type":"result","session_id":"native-id","subtype":"success","result":"done","total_cost_usd":0.75,"modelUsage":{"main":{"inputTokens":30,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%d}}}`, resultOutput+5)
+				replay := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true,
+					baseline: o.cumulative, costBaselineUSD: 0.75,
+					progressSeen: o.progressSeen, progressBytes: bytes, progressEntries: entries,
+					assistantHistory: o.assistantHistory,
+					onEvent:          func(event aicli.StreamEvent) { replayEvents = append(replayEvents, event) }}
+				replayLines := []string{frame(textBlock, tc.first), frame(toolBlock, tc.second)}
+				if tc.repeat != 0 {
+					replayLines = append(replayLines, frame(toolBlock, tc.repeat))
+				}
+				replayLines = append(replayLines, replayResult)
+				writeChunks(t, &replay, strings.Join(replayLines, "\n")+"\n")
+				replay.finish()
+				if replay.err != nil || replay.provenanceGap || !replay.result.UsageComplete || len(replayEvents) != 0 {
+					t.Fatalf("historical blocks replayed as new work: result=%+v events=%+v error=%v", replay.result, replayEvents, replay.err)
+				}
+			} else {
+				for _, event := range events {
+					if event.Text != "" {
+						t.Fatalf("unproved block leaked content: %+v", events)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestResumedAssistantBufferDoesNotConsumeSessionHistory(t *testing.T) {
+	big := strings.Repeat("x", 1<<20)
+	for _, frames := range []int{3, 17} {
+		t.Run(strconv.Itoa(frames), func(t *testing.T) {
+			var lines strings.Builder
+			for i := range frames {
+				id := fmt.Sprintf("m%d", i)
+				fmt.Fprintf(&lines, `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":%q}}}`+"\n", id)
+				fmt.Fprintf(&lines, `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":%q,"content":[{"type":"tool_use","id":"tu%d","name":"Write","input":{"content":%q}}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}`+"\n", id, i, big)
+			}
+			fmt.Fprintf(&lines, `{"type":"result","session_id":"native-id","subtype":"success","result":"done","total_cost_usd":1,"modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%d}}}`+"\n", 100+frames, 100+frames)
+			o := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true, baseline: usage.Tokens{Input: 100, Output: 100}}
+			input := []byte(lines.String())
+			if n, err := o.Write(input); n != len(input) || err != nil {
+				t.Fatalf("Write=%d,%v; want %d bytes", n, err, len(input))
+			}
+			o.finish()
+			bytes, entries := o.progressCheckpoint()
+			if o.err != nil || !o.result.UsageComplete || o.result.Tokens != (usage.Tokens{Input: int64(frames), Output: int64(frames)}) ||
+				bytes >= 1<<20 || entries > frames*3 {
+				t.Fatalf("temporary frames consumed session history: result=%+v bytes=%d entries=%d error=%v", o.result, bytes, entries, o.err)
+			}
+		})
+	}
+}
+
+func TestUnprovedResumedThinkingDoesNotEmitContentGap(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m2"}}}`
+	const thinking = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"m2","content":[{"type":"thinking","thinking":"private"}],"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const underreported = `{"type":"result","session_id":"native-id","subtype":"success","result":"done","total_cost_usd":1,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":12}}}`
+	var events []aicli.StreamEvent
+	o := jsonlOutput{resumed: true, sessionID: "native-id", identitySeen: true, baseline: usage.Tokens{Output: 10},
+		onEvent: func(event aicli.StreamEvent) { events = append(events, event) }}
+	writeChunks(t, &o, start+"\n"+thinking+"\n"+underreported+"\n")
+	o.finish()
+	if o.err != nil || o.result.UsageComplete || !o.provenanceGap || len(events) != 0 {
+		t.Fatalf("private thinking produced visible gap: result=%+v events=%+v error=%v", o.result, events, o.err)
+	}
+}
+
 func TestAssistantContentProofTracksExecutionContent(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, metadataReplay, changed string
