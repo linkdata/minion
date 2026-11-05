@@ -2,6 +2,8 @@ module github.com/linkdata/minion
 
 go 1.27.0
 
+ignore ./var
+
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/linkdata/jaws v0.902.0
