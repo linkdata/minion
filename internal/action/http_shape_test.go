@@ -77,6 +77,39 @@ func TestHTTPCallCheckpointOrdinalBounds(t *testing.T) {
 	}
 }
 
+func TestHTTPCostClaimShape(t *testing.T) {
+	valid, negative, nan, infinite, excess := 0.25, -0.25, math.NaN(), math.Inf(1), 1e12+1
+	for _, test := range []struct {
+		name  string
+		call  CallUsage
+		valid bool
+	}{
+		{"complete Claude estimate", CallUsage{Provider: "claude", EstimatedCostUSD: &valid, EstimatedCostComplete: true}, true},
+		{"unknown Claude estimate", CallUsage{Provider: "claude"}, true},
+		{"negative estimate", CallUsage{Provider: "claude", EstimatedCostUSD: &negative}, false},
+		{"nonfinite estimate", CallUsage{Provider: "claude", EstimatedCostUSD: &nan}, false},
+		{"infinite estimate", CallUsage{Provider: "claude", EstimatedCostUSD: &infinite}, false},
+		{"estimate above bound", CallUsage{Provider: "claude", EstimatedCostUSD: &excess}, false},
+		{"complete without amount", CallUsage{Provider: "claude", EstimatedCostComplete: true}, false},
+		{"Codex estimate", CallUsage{Provider: "codex", EstimatedCostUSD: &valid}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for _, shape := range []struct {
+				name string
+				err  error
+			}{
+				{"after-call", httpCallCheckpointShape(CallCheckpoint{Ordinal: 1, Call: test.call})},
+				{"review", httpReviewShape(ReviewCheckpoint{Calls: []CallUsage{test.call}})},
+				{"result", httpResultShape(Result{Calls: []CallUsage{test.call}})},
+			} {
+				if (shape.err == nil) != test.valid || shape.err != nil && !errors.Is(shape.err, errHTTPShape) {
+					t.Fatalf("%s shape: valid=%t error=%v", shape.name, test.valid, shape.err)
+				}
+			}
+		})
+	}
+}
+
 func TestHTTPPrivateRefutationControlsMatchLocalContract(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)

@@ -94,6 +94,9 @@ func TestReplayedAssistantFromEarlierCallCannotAssessStoppedTask(t *testing.T) {
 
 func TestRootStreamMustStartAfterTaskStopToAssessIt(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root-A"}}}`
+	const helperStart = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"root-A"}}}`
+	const contradictory = `{"type":"assistant","agent_id":"worker","parent_tool_use_id":null,"message":{"id":"root-A"}}`
+	const missingParent = `{"type":"assistant","agent_id":"worker","message":{"id":"root-A"}}`
 	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root-A","content":[{"type":"text","text":"assessment"}]}}`
 	const stop = `{"type":"system","subtype":"task_notification","uuid":"stop-1","status":"stopped"}`
 	for _, tc := range []struct {
@@ -103,6 +106,9 @@ func TestRootStreamMustStartAfterTaskStopToAssessIt(t *testing.T) {
 		{"start before stop", start + "\n" + stop + "\n" + full, false},
 		{"replayed start after stop", start + "\n" + stop + "\n" + start + "\n" + full, false},
 		{"start after stop", stop + "\n" + start + "\n" + full, true},
+		{"root ID shared with helper", helperStart + "\n" + stop + "\n" + start + "\n" + full, true},
+		{"contradictory helper cannot assess stop", stop + "\n" + contradictory, false},
+		{"helper without parent cannot assess stop", stop + "\n" + missingParent, false},
 		{"full response without stream", stop + "\n" + full, true},
 	} {
 		for _, progress := range []bool{false, true} {
@@ -197,7 +203,6 @@ func TestEarlierAssistantEquivalentContentAreReplays(t *testing.T) {
 		name, first, later string
 	}{
 		{"empty list", `{"id":"old"}`, `{"id":"old","content":[]}`},
-		{"empty object", `{"id":"old"}`, `{"id":"old","content":{}}`},
 		{"empty string", `{"id":"old"}`, `{"id":"old","content":""}`},
 		{"string to text block", `{"id":"old","content":"hello"}`, `{"id":"old","content":[{"type":"text","text":"hello"}]}`},
 		{"text block to string", `{"id":"old","content":[{"type":"text","text":"hello"}]}`, `{"id":"old","content":"hello"}`},
@@ -222,6 +227,356 @@ func TestEarlierAssistantEquivalentContentAreReplays(t *testing.T) {
 	}
 }
 
+func TestUnsupportedLateRootContentRequiresNewResult(t *testing.T) {
+	o := jsonlOutput{}
+	writeChunks(t, &o, successfulResult+"\n"+`{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":{}}}`+"\n")
+	o.finish()
+	if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete {
+		t.Fatalf("unsupported late content retained result: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+	}
+}
+
+func TestUnprovedLateRootContentRequiresNewResult(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root"}}}`
+	const delta = `{"type":"stream_event","uuid":"chunk","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root","content":[{"type":"text","text":"A"}]}}`
+	const changed = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root","content":[{"type":"text","text":"B"}]}}`
+	const mixed = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root","content":[{"type":"text","text":"A"},{"type":"tool_use","name":"Bash","input":{}}]}}`
+	const contentStop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop","delta":{"type":"text_delta","text":"B"}}}`
+	const contentStart = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root","content":[{"type":"text","text":"B"}]}}}`
+	untaggedStart := strings.Replace(start, `"parent_tool_use_id":null,`, "", 1)
+	untaggedDelta := strings.Replace(delta, `"parent_tool_use_id":null,`, "", 1)
+	untaggedChanged := strings.Replace(changed, `"parent_tool_use_id":null,`, "", 1)
+	for _, tc := range []struct{ name, before, after string }{
+		{"changed first full frame", start + "\n" + delta, changed},
+		{"untagged changed root frame", untaggedStart + "\n" + untaggedDelta, untaggedChanged},
+		{"malformed historical full frame", full, mixed},
+		{"content on message stop", start + "\n" + delta, contentStop},
+		{"content on replayed message start", start + "\n" + delta, contentStart},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.before+"\n"+successfulResult+"\n"+tc.after+"\n")
+			o.finish()
+			if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete {
+				t.Fatalf("unproved root content retained result: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestCrossKeyStreamIDKeepsLateFullCountersSeparate(t *testing.T) {
+	const agentStart = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const agentDelta = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	const rootStart = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"shared"}}}`
+	const rootDelta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	const agentBFull = `{"type":"assistant","agent_id":"B","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}`
+	const helperFull = `{"type":"assistant","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}`
+	const rootFull = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}`
+	for _, tc := range []struct {
+		name, before, after string
+		completed           bool
+		output              int64
+	}{
+		{"agent A versus B", agentStart + "\n" + agentDelta, agentBFull, true, 100},
+		{"root versus helper", rootStart + "\n" + rootDelta, helperFull, true, 100},
+		{"helper versus root", agentStart + "\n" + agentDelta, rootFull, false, 111},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.before+"\n"+successfulResult+"\n"+tc.after+"\n")
+			o.finish()
+			if o.result.Tokens.Output != tc.output || o.result.UsageComplete || o.completed != tc.completed || (o.err == nil) != tc.completed {
+				t.Fatalf("cross-key counters merged or lost: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestCrossKeyFullFramesCountEachMessageBeforeResult(t *testing.T) {
+	const fullA = `{"type":"assistant","agent_id":"A","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const fullB = `{"type":"assistant","agent_id":"B","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const fullOtherParent = `{"type":"assistant","agent_id":"A","parent_tool_use_id":"other","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const startA = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const deltaA = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	const startOtherParent = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"other","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const deltaOtherParent = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"other","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"work"}}}`
+	const result = `{"type":"result","subtype":"success","result":"done","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	for _, tc := range []struct{ name, before string }{
+		{"two full-only agents", fullA + "\n" + fullB},
+		{"streamed A and full-only B", startA + "\n" + deltaA + "\n" + fullA + "\n" + fullB},
+		{"one agent with two full-only parents", fullA + "\n" + fullOtherParent},
+		{"one agent with two streamed parents", startA + "\n" + deltaA + "\n" + startOtherParent + "\n" + deltaOtherParent + "\n" + fullA + "\n" + fullOtherParent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.before+"\n"+result+"\n")
+			o.finish()
+			if o.err != nil || !o.completed || o.result.Tokens.Output != 10 || o.result.UsageComplete ||
+				o.nativeCostUSD != nil || o.result.EstimatedCostUSD == nil || *o.result.EstimatedCostUSD != 0.5 {
+				t.Fatalf("cross-key full frames merged or certified: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestAmbiguousAssistantProvenanceCannotCertifyUsageOrCost(t *testing.T) {
+	const usage = `"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}`
+	const invalidNumber = `{"type":"assistant","parent_tool_use_id":0,"message":{"id":"shared",` + usage + `}}`
+	const invalidEmpty = `{"type":"assistant","parent_tool_use_id":"","message":{"id":"shared",` + usage + `}}`
+	const missing = `{"type":"assistant","message":{"id":"shared",` + usage + `}}`
+	const root = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"shared",` + usage + `}}`
+	const tagged = `{"type":"assistant","agent_id":"A","parent_tool_use_id":"delegate","message":{"id":"shared",` + usage + `}}`
+	const untagged = `{"type":"assistant","parent_tool_use_id":"delegate","message":{"id":"shared",` + usage + `}}`
+	const taggedStart = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const untaggedStart = `{"type":"stream_event","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const result = `{"type":"result","subtype":"success","result":"done","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	for _, tc := range []struct {
+		name, first, second string
+		known               int64
+	}{
+		{"invalid parent values", invalidNumber, invalidEmpty, 0},
+		{"missing then null root parent", missing, root, 5},
+		{"null then missing root parent", root, missing, 5},
+		{"tagged then untagged helper", tagged, untagged, 5},
+		{"untagged then tagged helper", untagged, tagged, 5},
+		{"tagged stream then untagged full", taggedStart, untagged, 0},
+		{"untagged stream then tagged full", untaggedStart, tagged, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{}
+			writeChunks(t, &o, tc.first+"\n"+tc.second+"\n"+result+"\n")
+			o.finish()
+			if o.err != nil || !o.completed || o.assistantTokens.Output != tc.known ||
+				o.result.Tokens.Output != 5 || o.result.UsageComplete || o.nativeCostUSD != nil ||
+				o.result.EstimatedCostUSD == nil || *o.result.EstimatedCostUSD != 0.5 {
+				t.Fatalf("ambiguous frames were allocated or certified: assistant=%+v result=%+v completed=%t error=%v",
+					o.assistantTokens, o.result, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestMissingAssistantIDCannotCertifySmallerFinalReport(t *testing.T) {
+	const unknown = `{"type":"assistant","parent_tool_use_id":null,"message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":10}}}`
+	const result = `{"type":"result","subtype":"success","result":"done","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	for _, tc := range []struct {
+		name    string
+		resumed bool
+		output  int64
+	}{
+		{"fresh", false, 10},
+		{"resumed", true, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{resumed: tc.resumed}
+			writeChunks(t, &o, unknown+"\n"+result+"\n")
+			o.finish()
+			if o.err != nil || !o.completed || o.assistantTokens != (usage.Tokens{}) ||
+				o.result.Tokens.Output != tc.output || o.result.UsageComplete || o.nativeCostUSD != nil {
+				t.Fatalf("unidentified counters certified final report: assistant=%+v result=%+v completed=%t error=%v",
+					o.assistantTokens, o.result, o.completed, o.err)
+			}
+		})
+	}
+}
+
+func TestRejectedOriginDoesNotAllocateUnprovedFailedCallCounters(t *testing.T) {
+	const rootStart = `{"type":"stream_event","session_id":"native-id","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const rootFull = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const tagged = `{"type":"assistant","session_id":"native-id","agent_id":"A","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const other = `{"type":"assistant","session_id":"native-id","agent_id":"B","parent_tool_use_id":"delegate","message":{"id":"other","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const untaggedRevision = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":8}}}`
+	const taggedStart = `{"type":"stream_event","session_id":"native-id","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const untaggedStart = `{"type":"stream_event","session_id":"native-id","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	for _, tc := range []struct {
+		name, before, rejected string
+		known                  int64
+	}{
+		{"root stream then explicit full", rootStart, rootFull, 0},
+		{"tagged helper then untagged revision", tagged, untaggedRevision, 5},
+		{"two helpers and rejected revision", tagged + "\n" + other, untaggedRevision, 10},
+		{"tagged stream then untagged full", taggedStart, untaggedRevision, 0},
+		{"untagged stream then tagged full", untaggedStart, tagged, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{sessionID: "native-id", identitySeen: true}
+			writeChunks(t, &o, tc.before+"\n"+tc.rejected+"\n")
+			o.finish()
+			if o.err == nil || !o.provenanceGap || o.result.Tokens.Output != tc.known || o.result.UsageComplete || o.nativeCostUSD != nil {
+				t.Fatalf("rejected counters were allocated: result=%+v error=%v", o.result, o.err)
+			}
+		})
+	}
+}
+
+func TestRejectedHistoricalReplayCannotInflateResumedCall(t *testing.T) {
+	const firstResult = `{"type":"result","subtype":"success","result":"first","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":100}}}`
+	const taggedStart = `{"type":"stream_event","agent_id":"A","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"shared"}}}`
+	const tagged = `{"type":"assistant","agent_id":"A","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const oldUntagged = `{"type":"assistant","parent_tool_use_id":"delegate","message":{"id":"shared","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}`
+	const secondResult = `{"type":"result","subtype":"success","result":"second","total_cost_usd":0.75,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":105}}}`
+	first := jsonlOutput{}
+	writeChunks(t, &first, firstResult+"\n")
+	first.finish()
+	if first.err != nil || first.cumulative.Output != 100 {
+		t.Fatalf("first call: result=%+v error=%v", first.result, first.err)
+	}
+	second := jsonlOutput{resumed: true, baseline: first.cumulative, progressSeen: first.progressSeen,
+		assistantHistory: first.assistantHistory, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	writeChunks(t, &second, taggedStart+"\n"+tagged+"\n"+oldUntagged+"\n"+secondResult+"\n")
+	second.finish()
+	if second.err != nil || !second.completed || second.assistantTokens.Output != 0 ||
+		second.result.Tokens.Output != 5 || second.result.UsageComplete || second.nativeCostUSD != nil {
+		t.Fatalf("rejected historical replay inflated resumed subtotal: result=%+v assistant=%+v error=%v",
+			second.result, second.assistantTokens, second.err)
+	}
+}
+
+func TestReplacedFreshStreamCannotCertifySmallerResult(t *testing.T) {
+	const startA = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"A"}}}`
+	const startB = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"B"}}}`
+	const fullA = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"A","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":100}}}`
+	const fullB = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"B","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":5}}}`
+	const result = `{"type":"result","subtype":"success","result":"done","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, startA+"\n"+startB+"\n"+fullA+"\n"+fullB+"\n"+result+"\n")
+	o.finish()
+	if o.err != nil || !o.completed || o.result.Tokens.Output != 100 || o.result.UsageComplete ||
+		o.result.EstimatedCostUSD == nil || *o.result.EstimatedCostUSD != 0.5 || o.nativeCostUSD != nil || !o.provenanceGap {
+		t.Fatalf("replaced stream certified smaller result: result=%+v gap=%t error=%v", o.result, o.provenanceGap, o.err)
+	}
+}
+
+func TestResumedUnprovedLateUnknownParentClearsAnswer(t *testing.T) {
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"old answer","modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	for _, tc := range []struct{ name, parent string }{
+		{"missing", ""},
+		{"invalid", `,"parent_tool_use_id":0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o := jsonlOutput{sessionID: "native-id", resumed: true}
+			late := `{"type":"assistant","session_id":"native-id"` + tc.parent + `,"message":{"id":"late","content":[{"type":"text","text":"new work"}]}}`
+			writeChunks(t, &o, result+"\n"+late+"\n")
+			o.finish()
+			if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete || !o.provenanceGap {
+				t.Fatalf("unproved late frame retained stale answer: result=%+v completed=%t gap=%t error=%v",
+					o.result, o.completed, o.provenanceGap, o.err)
+			}
+		})
+	}
+}
+
+func TestResumedIDOnlyAfterResultCannotCertifyAnswerOrCost(t *testing.T) {
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"old answer","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	const late = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"new"}}`
+	o := jsonlOutput{sessionID: "native-id", resumed: true}
+	writeChunks(t, &o, result+"\n"+late+"\n")
+	o.finish()
+	if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete ||
+		o.nativeCostUSD != nil || !o.provenanceGap {
+		t.Fatalf("ID-only late frame certified stale answer or cost: result=%+v completed=%t gap=%t error=%v",
+			o.result, o.completed, o.provenanceGap, o.err)
+	}
+}
+
+func TestResumedUnprovedAssistantContentMarksOnlyReceiptOmissions(t *testing.T) {
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"old answer","modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+	const emptyText = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"empty","content":[{"type":"text","text":""}]}}`
+	const mixedEmptyText = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"mixed","content":[{"type":"text","text":"","thinking":"private"}]}}`
+	for _, test := range []struct {
+		name, frame string
+		missing     bool
+	}{
+		{"no text ID", `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"content":[{"type":"text","text":"omitted"}]}}`, true},
+		{"no tool ID", `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"tool","name":"Bash","input":{}}]}}`, true},
+		{"malformed message", `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":"malformed"}`, true},
+		{"malformed private block", `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"thought","content":[{"type":"thinking","thinking":"private","text":42}]}}`, true},
+		{"empty text block", emptyText, false},
+		{"mixed empty text block", mixedEmptyText, true},
+		{"thinking only", `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"thought","content":[{"type":"thinking","thinking":"private"}]}}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var events []aicli.StreamEvent
+			o := jsonlOutput{sessionID: "native-id", resumed: true, onEvent: func(e aicli.StreamEvent) { events = append(events, e) }}
+			writeChunks(t, &o, result+"\n"+test.frame+"\n")
+			if !o.provenanceGap {
+				t.Fatalf("unproved resumed frame preserved provenance: %+v", o.result)
+			}
+			if test.missing {
+				if len(events) != 1 || events[0] != (aicli.StreamEvent{Kind: "content_missing"}) {
+					t.Fatalf("missing content lacked one metadata-only marker: %+v", events)
+				}
+			} else if len(events) != 0 {
+				t.Fatalf("private thinking falsely changed receipt coverage: %+v", events)
+			}
+		})
+	}
+	for _, freshTest := range []struct {
+		frame   string
+		missing bool
+	}{{emptyText, false}, {mixedEmptyText, true}} {
+		var freshEvents []aicli.StreamEvent
+		fresh := jsonlOutput{sessionID: "native-id", identitySeen: true,
+			onEvent: func(e aicli.StreamEvent) { freshEvents = append(freshEvents, e) }}
+		writeChunks(t, &fresh, freshTest.frame+"\n")
+		if freshTest.missing {
+			if len(freshEvents) != 1 || freshEvents[0].Kind != "assistant" || freshEvents[0].Text != "" {
+				t.Fatalf("fresh malformed empty text lacked a receipt gap: %+v", freshEvents)
+			}
+		} else if len(freshEvents) != 0 {
+			t.Fatalf("fresh empty text falsely changed receipt coverage: %+v", freshEvents)
+		}
+	}
+}
+
+func TestContradictoryHelperResultAndInitCannotClaimRoot(t *testing.T) {
+	for _, parent := range []string{"null", ""} {
+		t.Run("parent="+parent, func(t *testing.T) {
+			parentField := `,"parent_tool_use_id":` + parent
+			if parent == "" {
+				parentField = ""
+			}
+			result := `{"type":"result","agent_id":"worker"` + parentField + `,"session_id":"native-id","subtype":"success","result":"wrong","total_cost_usd":0.5,"modelUsage":{"main":{"inputTokens":0,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":5}}}`
+			init := `{"type":"system","subtype":"init","agent_id":"worker"` + parentField + `,"session_id":"native-id"}`
+			o := jsonlOutput{sessionID: "native-id", identitySeen: true}
+			writeChunks(t, &o, result+"\n")
+			if o.results != 0 || o.completed || o.result.Answer != "" || o.nativeCostUSD != nil || !o.provenanceGap {
+				t.Fatalf("contradictory helper result claimed root: result=%+v completed=%t", o.result, o.completed)
+			}
+			o = jsonlOutput{sessionID: "native-id"}
+			writeChunks(t, &o, init+"\n")
+			if o.identitySeen || !o.provenanceGap {
+				t.Fatalf("contradictory helper init claimed root: identity=%t gap=%t", o.identitySeen, o.provenanceGap)
+			}
+		})
+	}
+}
+
+func TestLateRootFullFrameRecoversAfterNewResult(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root"}}}`
+	const delta = `{"type":"stream_event","uuid":"chunk","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root","content":[{"type":"text","text":"A"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":11}}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, numberResultEvents(start+"\n"+delta+"\n"+successfulResult+"\n"+full+"\n"+successfulResult+"\n"))
+	o.finish()
+	if o.err != nil || !o.completed || o.result.Answer != "final answer" || !o.result.UsageComplete || o.result.Tokens.Output != 11 {
+		t.Fatalf("covering result did not recover root usage and answer: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+	}
+}
+
+func TestLateRootMalformedCountersKeepAnswerButLoseCoverage(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"root"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A"}}}`
+	const late = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"root","content":[],"usage":{}}}`
+	o := jsonlOutput{}
+	writeChunks(t, &o, start+"\n"+delta+"\n"+successfulResult+"\n"+late+"\n")
+	o.finish()
+	if o.err != nil || !o.completed || o.result.Answer != "final answer" || o.result.UsageComplete || o.result.Tokens.Output != 11 {
+		t.Fatalf("malformed root counters changed answer or certified usage: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+	}
+}
+
 func TestNonadjacentEarlierAssistantContentReplayIsIgnored(t *testing.T) {
 	const firstFrame = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"A"}]}}`
 	const laterFrame = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"AB"}]}}`
@@ -240,7 +595,7 @@ func TestNonadjacentEarlierAssistantContentReplayIsIgnored(t *testing.T) {
 	}
 }
 
-func TestEarlierAssistantIDMakesResumedStreamStartAReplay(t *testing.T) {
+func TestEarlierAssistantIDCannotProveResumedStreamContent(t *testing.T) {
 	const old = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"old output"}}}`
@@ -255,12 +610,12 @@ func TestEarlierAssistantIDMakesResumedStreamStartAReplay(t *testing.T) {
 		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
 	writeChunks(t, &second, successfulResult+"\n"+start+"\n"+delta+"\n"+stop+"\n")
 	second.finish()
-	if second.err != nil || !second.completed || second.result.Answer != "final answer" {
-		t.Fatalf("resumed stream replay revoked result: completed=%t answer=%q error=%v", second.completed, second.result.Answer, second.err)
+	if second.err == nil || second.completed || second.result.Answer != "" || second.result.UsageComplete {
+		t.Fatalf("unproven resumed stream content retained result: completed=%t answer=%q result=%+v error=%v", second.completed, second.result.Answer, second.result, second.err)
 	}
 }
 
-func TestFirstFullAssistantAfterResumedStreamOnlyResultIsReplay(t *testing.T) {
+func TestFirstFullAssistantAfterResumedStreamOnlyResultNeedsNewResult(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"old output"}}}`
 	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
@@ -282,20 +637,20 @@ func TestFirstFullAssistantAfterResumedStreamOnlyResultIsReplay(t *testing.T) {
 			second := jsonlOutput{onProgress: first.onProgress, baseline: first.cumulative, progressSeen: first.progressSeen,
 				assistantHistory: first.assistantHistory, progressBytes: first.progressBytes, progressEntries: first.progressEntries}
 			writeChunks(t, &second, successfulResult+"\n"+replay+"\n")
-			if second.err != nil || !second.completed || second.result.Answer != "final answer" || progress != want {
-				t.Fatalf("first full replay renewed progress or revoked result: completed=%t progress=%d answer=%q error=%v",
+			if second.err != nil || second.completed || second.result.Answer != "" || second.result.UsageComplete || progress != want {
+				t.Fatalf("first unproved full frame retained result or renewed progress: completed=%t progress=%d answer=%q error=%v",
 					second.completed, progress, second.result.Answer, second.err)
 			}
 			writeChunks(t, &second, changed+"\n")
-			if second.err != nil || second.completed || second.result.Answer != "" || progress != 2*want {
-				t.Fatalf("changed full content was lost: completed=%t progress=%d answer=%q error=%v",
+			if second.err != nil || second.completed || second.result.Answer != "" || progress != want {
+				t.Fatalf("unmatched historical content renewed progress: completed=%t progress=%d answer=%q error=%v",
 					second.completed, progress, second.result.Answer, second.err)
 			}
 		})
 	}
 }
 
-func TestFirstFullAssistantAfterSameCallResultCompletesStream(t *testing.T) {
+func TestFirstFullRootAssistantAfterResultNeedsNewResult(t *testing.T) {
 	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"old"}}}`
 	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"old output"}}}`
 	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
@@ -304,17 +659,17 @@ func TestFirstFullAssistantAfterSameCallResultCompletesStream(t *testing.T) {
 	o := jsonlOutput{onProgress: func() { progress++ }}
 	writeChunks(t, &o, start+"\n"+delta+"\n"+stop+"\n"+successfulResult+"\n"+full+"\n")
 	o.finish()
-	if o.err != nil || !o.completed || o.result.Answer != "final answer" || progress != 1 {
+	if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete || progress != 1 {
 		t.Fatalf("full stream completion after result: completed=%t progress=%d answer=%q error=%v",
 			o.completed, progress, o.result.Answer, o.err)
 	}
 }
 
-func TestFirstFullAssistantWithUsageBeyondResultNeedsCoveringUsage(t *testing.T) {
-	const start = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"current"}}}`
-	const delta = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}}`
-	const stop = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_stop"}}`
-	const full = `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"current","content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":12}}}`
+func TestFirstHelperFullWithUsageBeyondResultNeedsCoveringUsage(t *testing.T) {
+	const start = `{"type":"stream_event","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"current"}}}`
+	const delta = `{"type":"stream_event","parent_tool_use_id":"delegate","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}}`
+	const stop = `{"type":"stream_event","parent_tool_use_id":"delegate","event":{"type":"message_stop"}}`
+	const full = `{"type":"assistant","parent_tool_use_id":"delegate","message":{"id":"current","content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":12}}}`
 	data := start + "\n" + delta + "\n" + stop + "\n" + successfulResult + "\n" + full + "\n"
 	for _, recovered := range []bool{false, true} {
 		o := jsonlOutput{}
@@ -350,7 +705,7 @@ func TestImpossibleAssistantCounterFloorPersistsUntilNewConversation(t *testing.
 	first := jsonlOutput{}
 	writeChunks(t, &first, assistantUsageEvent("old", math.MaxInt64-20, 0, 0, 1)+"\n"+
 		assistantUsageEvent("old", 1, 0, 0, math.MaxInt64-2)+"\n")
-	if snapshot := first.assistantHistory["old"]; !snapshot.hasTokens || snapshot.tokens.Valid() {
+	if snapshot := first.assistantHistory[streamIdentity{"root", "old"}]; !snapshot.hasTokens || snapshot.tokens.Valid() {
 		t.Fatalf("impossible counter floor was not retained: %+v", snapshot)
 	}
 	var session Session
@@ -389,7 +744,7 @@ func TestFirstHistoricalCountersBeyondCumulativeResultNeedCoveringUsage(t *testi
 	}
 }
 
-func TestTwoLateStreamedMessagesCannotExceedCumulativeResult(t *testing.T) {
+func TestTwoLateStreamedMessagesKeepKnownFloorButRequireNewResult(t *testing.T) {
 	o := jsonlOutput{}
 	var events string
 	for _, id := range []string{"one", "two"} {
@@ -403,8 +758,8 @@ func TestTwoLateStreamedMessagesCannotExceedCumulativeResult(t *testing.T) {
 	}
 	writeChunks(t, &o, events)
 	o.finish()
-	if o.err != nil || !o.completed || o.result.Answer != "final answer" || o.result.UsageComplete || o.result.Tokens.Output < 16 {
-		t.Fatalf("separate message usage escaped cumulative check: %+v completed=%t error=%v", o.result, o.completed, o.err)
+	if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete || o.result.Tokens.Output < 16 {
+		t.Fatalf("late streamed root usage was lost or left a stale answer: %+v completed=%t error=%v", o.result, o.completed, o.err)
 	}
 }
 
@@ -426,21 +781,27 @@ func TestEarlierAssistantCounterIncreaseInvalidatesCurrentResult(t *testing.T) {
 }
 
 func TestExactEarlierAssistantReplayAfterCurrentResultIsIgnored(t *testing.T) {
-	old := assistantUsageEvent("old", 3, 5, 7, 2)
-	first := jsonlOutput{}
+	const old = `{"type":"assistant","session_id":"native-id","parent_tool_use_id":null,"message":{"id":"old","content":[{"type":"text","text":"historical text"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":5,"cache_read_input_tokens":7,"output_tokens":2}}}`
+	first := jsonlOutput{sessionID: "native-id", identitySeen: true}
 	writeChunks(t, &first, old+"\n"+successfulResult+"\n")
 	first.finish()
 	if first.err != nil || !first.hasCumulative {
 		t.Fatalf("first usage baseline: error=%v cumulative=%t", first.err, first.hasCumulative)
 	}
-	second := jsonlOutput{baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
-		progressBytes: first.progressBytes, progressEntries: first.progressEntries}
+	var events []aicli.StreamEvent
+	second := jsonlOutput{sessionID: "native-id", identitySeen: true, resumed: true,
+		baseline: first.cumulative, progressSeen: first.progressSeen, assistantHistory: first.assistantHistory,
+		progressBytes: first.progressBytes, progressEntries: first.progressEntries,
+		onEvent: func(e aicli.StreamEvent) { events = append(events, e) }}
 	const cumulative = `{"type":"result","subtype":"success","result":"done","modelUsage":{"main":{"inputTokens":3,"cacheCreationInputTokens":5,"cacheReadInputTokens":7,"outputTokens":14}}}`
 	writeChunks(t, &second, cumulative+"\n"+old+"\n")
 	second.finish()
 	if second.err != nil || !second.completed || second.result.Answer != "done" ||
 		second.result.Tokens != (usage.Tokens{Output: 3}) || !second.result.UsageComplete {
 		t.Fatalf("exact replay revoked or inflated current result: result=%+v completed=%t error=%v", second.result, second.completed, second.err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("exact historical replay entered current receipt: %+v", events)
 	}
 }
 
@@ -539,6 +900,71 @@ func TestForeignAndAmbientAssistantsCannotChangeResultOrStopState(t *testing.T) 
 	}
 }
 
+func TestAmbientInitAndResultCannotClaimRoot(t *testing.T) {
+	const ambientInit = `{"type":"system","subtype":"init","session_id":"native-id","ambient":true}`
+	const ambientResult = `{"type":"result","session_id":"native-id","ambient":true,"parent_tool_use_id":null,"subtype":"success","result":"background answer","modelUsage":{"main":{"inputTokens":99,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":99}}}`
+	const currentInit = `{"type":"system","subtype":"init","session_id":"native-id"}`
+	const currentResult = `{"type":"result","session_id":"native-id","subtype":"success","result":"current answer","modelUsage":{"main":{"inputTokens":1,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}`
+	o := jsonlOutput{sessionID: "native-id"}
+	writeChunks(t, &o, ambientInit+"\n"+ambientResult+"\n")
+	if o.identitySeen || o.completed || o.result.Answer != "" || o.result.Tokens != (usage.Tokens{}) {
+		t.Fatalf("ambient event claimed root identity or result: identity=%t result=%+v", o.identitySeen, o.result)
+	}
+	writeChunks(t, &o, currentInit+"\n"+currentResult+"\n"+ambientResult+"\n")
+	o.finish()
+	if o.err != nil || !o.completed || !o.identitySeen || o.result.Answer != "current answer" ||
+		o.result.Tokens != (usage.Tokens{Input: 1, Output: 2}) || !o.result.UsageComplete {
+		t.Fatalf("ambient result changed current root: result=%+v identity=%t error=%v", o.result, o.identitySeen, o.err)
+	}
+}
+
+func TestAmbientAndForeignQuotaCannotFailCurrentResult(t *testing.T) {
+	const currentInit = `{"type":"system","subtype":"init","session_id":"native-id"}`
+	const currentResult = `{"type":"result","session_id":"native-id","subtype":"success","result":"current answer","modelUsage":{"main":{"inputTokens":1,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}`
+	for _, tc := range []struct{ name, fields string }{
+		{"ambient", `"session_id":"native-id","ambient":true`},
+		{"foreign", `"session_id":"foreign"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			o := jsonlOutput{sessionID: "native-id", fatal: func() { calls++ }}
+			quota := `{"type":"rate_limit_event",` + tc.fields + `,"rate_limit_info":{"status":"rejected"}}`
+			writeChunks(t, &o, currentInit+"\n"+currentResult+"\n"+quota+"\n")
+			o.finish()
+			if o.err != nil || o.usageLimit != nil || calls != 0 || !o.completed ||
+				o.result.Answer != "current answer" || !o.result.UsageComplete {
+				t.Fatalf("unrelated quota failed current result: result=%+v calls=%d error=%v", o.result, calls, o.err)
+			}
+		})
+	}
+}
+
+func TestMalformedForeignUserCannotFailCurrentResult(t *testing.T) {
+	const init = `{"type":"system","subtype":"init","session_id":"native-id"}`
+	const result = `{"type":"result","session_id":"native-id","subtype":"success","result":"current answer","modelUsage":{"main":{"inputTokens":1,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}`
+	for _, tc := range []struct {
+		name, session string
+		fails         bool
+	}{
+		{"foreign", "foreign", false},
+		{"current", "native-id", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []aicli.StreamEvent
+			o := jsonlOutput{sessionID: "native-id", onEvent: func(e aicli.StreamEvent) { got = append(got, e) }}
+			malformed := `{"type":"user","session_id":"` + tc.session + `","message":{"content":[{"type":"text","text":42}]}}`
+			writeChunks(t, &o, init+"\n"+result+"\n"+malformed+"\n")
+			o.finish()
+			if (o.err != nil) != tc.fails || o.completed == tc.fails || (o.result.Answer == "current answer") == tc.fails {
+				t.Fatalf("foreign user changed current result: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
+			}
+			if !tc.fails && (len(got) != 1 || got[0] != (aicli.StreamEvent{Kind: "user"})) {
+				t.Fatalf("foreign user content leaked instead of a marker: %+v", got)
+			}
+		})
+	}
+}
+
 func TestCurrentSessionHelperAssistantStillContributesUsage(t *testing.T) {
 	o := jsonlOutput{sessionID: "native-id"}
 	helper := strings.Replace(assistantUsageEvent("helper", 1, 0, 0, 2),
@@ -553,37 +979,52 @@ func TestCurrentSessionHelperAssistantStillContributesUsage(t *testing.T) {
 }
 
 func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
+	rootAssistant := (streamIdentity{"root", "old"}).progressKey("assistant")
+	unknownAssistant := (streamIdentity{"unknown-parent", "old"}).progressKey("assistant")
+	helperAssistant := (streamIdentity{"parent:tool", "helper"}).progressKey("assistant")
+	rootStart := (streamIdentity{"root", "old"}).progressKey("stream_start")
 	start := func(id, fields string) string {
 		return fmt.Sprintf(`{"type":"stream_event"%s,"event":{"type":"message_start","message":{"id":%q}}}`, fields, id)
 	}
 	missingID := func(fields string) string {
 		return fmt.Sprintf(`{"type":"stream_event"%s,"event":{"type":"message_start","message":{}}}`, fields)
 	}
-	const delta = `{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"new answer"}}}`
+	const delta = `{"type":"stream_event","uuid":"chunk","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"new answer"}}}`
+	rootDelta := strings.Replace(delta, `"event":`, `"parent_tool_use_id":null,"event":`, 1)
+	unknownParentDelta := strings.Replace(delta, `"event":`, `"parent_tool_use_id":0,"event":`, 1)
+	emptyParentDelta := strings.Replace(unknownParentDelta, `"parent_tool_use_id":0`, `"parent_tool_use_id":""`, 1)
 	const stop = `{"type":"stream_event","event":{"type":"message_stop"}}`
+	rootStop := strings.Replace(stop, `"event":`, `"parent_tool_use_id":null,"event":`, 1)
 	const helperDelta = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"tool","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"helper answer"}}}`
 	const helperStop = `{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"tool","event":{"type":"message_stop"}}`
 	for _, tc := range []struct {
 		name, before, after, resumeKey string
-		want                           bool
+		want, incomplete               bool
 	}{
-		{"fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", false},
-		{"empty fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + stop, "", false},
-		{"fresh untagged", "", start("new", "") + "\n" + delta + "\n" + stop, "", false},
-		{"unknown parent", "", start("new", `,"parent_tool_use_id":0`) + "\n" + delta + "\n" + stop, "", false},
-		{"missing ID root", "", missingID(`,"parent_tool_use_id":null`), "", false},
-		{"missing ID untagged", "", missingID(""), "", false},
-		{"missing ID unknown parent", "", missingID(`,"parent_tool_use_id":0`), "", false},
-		{"missing ID then fresh result", "", missingID(`,"parent_tool_use_id":null`) + "\n" + successfulResult, "", true},
-		{"missing ID agent helper", "", missingID(`,"agent_id":"worker"`), "", true},
-		{"missing ID parent-tagged helper", "", missingID(`,"parent_tool_use_id":"tool"`), "", true},
-		{"helper", "", start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`) + "\n" + helperDelta + "\n" + helperStop, "", true},
-		{"parent-tagged helper", "", start("helper", `,"parent_tool_use_id":"tool"`) + "\n" + strings.ReplaceAll(helperDelta, `"agent_id":"worker",`, "") + "\n" + strings.ReplaceAll(helperStop, `"agent_id":"worker",`, ""), "", true},
-		{"stream replay", start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", true},
-		{"assistant replay", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`, start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", true},
-		{"resumed replay", "", start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "assistant:old", true},
-		{"resumed empty replay", "", start("old", `,"parent_tool_use_id":null`) + "\n" + stop, "stream_start:old", true},
-		{"fresh result", "", start("new", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop + "\n" + successfulResult, "", true},
+		{"fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", false, false},
+		{"empty fresh root", "", start("new", `,"parent_tool_use_id":null`) + "\n" + stop, "", false, false},
+		{"fresh untagged", "", start("new", "") + "\n" + delta + "\n" + stop, "", false, false},
+		{"unknown parent", "", start("new", `,"parent_tool_use_id":0`) + "\n" + delta + "\n" + stop, "", false, false},
+		{"unknown parent old ID with content", "", start("old", `,"parent_tool_use_id":0`) + "\n" + unknownParentDelta, unknownAssistant, false, true},
+		{"distinct unknown parents cannot share stream proof", start("old", `,"parent_tool_use_id":0`) + "\n" + unknownParentDelta,
+			start("old", `,"parent_tool_use_id":""`) + "\n" + emptyParentDelta, "", false, true},
+		{"missing ID root", "", missingID(`,"parent_tool_use_id":null`), "", false, false},
+		{"missing ID untagged", "", missingID(""), "", false, false},
+		{"missing ID unknown parent", "", missingID(`,"parent_tool_use_id":0`), "", false, false},
+		{"missing ID then fresh result", "", missingID(`,"parent_tool_use_id":null`) + "\n" + successfulResult, "", true, false},
+		{"missing ID agent helper", "", missingID(`,"agent_id":"worker"`), "", false, true},
+		{"missing ID parent-tagged helper", "", missingID(`,"parent_tool_use_id":"tool"`), "", true, true},
+		{"helper", "", start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`) + "\n" + helperDelta + "\n" + helperStop, "", true, true},
+		{"parent-tagged helper", "", start("helper", `,"parent_tool_use_id":"tool"`) + "\n" + strings.ReplaceAll(helperDelta, `"agent_id":"worker",`, "") + "\n" + strings.ReplaceAll(helperStop, `"agent_id":"worker",`, ""), "", true, true},
+		{"helper delta after result", start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`), helperDelta, "", true, true},
+		{"repeated helper start then fresh delta", start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`), start("helper", `,"agent_id":"worker","parent_tool_use_id":"tool"`) + "\n" + helperDelta, "", true, true},
+		{"missing helper ID then late delta", missingID(`,"agent_id":"worker","parent_tool_use_id":"tool"`), helperDelta, "", true, true},
+		{"old helper ID with unproven content", "", start("helper", `,"parent_tool_use_id":"tool"`) + "\n" + strings.ReplaceAll(helperDelta, `"agent_id":"worker",`, ""), helperAssistant, true, true},
+		{"stream replay", start("old", `,"parent_tool_use_id":null`) + "\n" + rootDelta + "\n" + rootStop, start("old", `,"parent_tool_use_id":null`) + "\n" + rootDelta + "\n" + rootStop, "", true, false},
+		{"assistant ID without stream proof", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}`, start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, "", false, true},
+		{"resumed ID without stream proof", "", start("old", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop, rootAssistant, false, true},
+		{"resumed empty replay", "", start("old", `,"parent_tool_use_id":null`) + "\n" + stop, rootStart, true, false},
+		{"fresh result", "", start("new", `,"parent_tool_use_id":null`) + "\n" + delta + "\n" + stop + "\n" + successfulResult, "", true, false},
 	} {
 		for _, progress := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/progress=%t", tc.name, progress), func(t *testing.T) {
@@ -604,11 +1045,34 @@ func TestNewRootStreamCannotPreserveStaleResult(t *testing.T) {
 				}
 				writeChunks(t, &o, numberResultEvents(data))
 				o.finish()
-				if errors.Is(o.err, aicli.ErrOutputLimit) || (o.err == nil) != tc.want || o.completed != tc.want || (o.result.Answer == "final answer") != tc.want || o.result.UsageComplete != tc.want || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
+				if errors.Is(o.err, aicli.ErrOutputLimit) || (o.err == nil) != tc.want || o.completed != tc.want || (o.result.Answer == "final answer") != tc.want || o.result.UsageComplete != (tc.want && !tc.incomplete) || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
 					t.Fatalf("stale stream completion: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
 				}
 			})
 		}
+	}
+}
+
+func TestLateNestedUsageDoesNotAttributeOldCounters(t *testing.T) {
+	for _, nested := range []string{
+		`{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_delta","delta":{"usage":{"output_tokens":100}}}}`,
+		`{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_start","message":{"id":"old","usage":{"output_tokens":100}}}}`,
+		`{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_delta","usage":{"output_tokens":100}}}`,
+		`{"type":"stream_event","agent_id":"worker","parent_tool_use_id":"delegate","event":{"type":"message_delta","usage":{"output_tokens":9223372036854775807}}}`,
+	} {
+		o := jsonlOutput{}
+		writeChunks(t, &o, successfulResult+"\n"+nested+"\n"+nested+"\n")
+		o.finish()
+		if o.err != nil || !o.completed || o.result.Answer != "final answer" || o.result.UsageComplete || o.result.Tokens != (usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}) {
+			t.Fatalf("late nested usage was attributed to this call: result=%+v error=%v", o.result, o.err)
+		}
+	}
+	o := jsonlOutput{}
+	const root = `{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_delta","usage":{"output_tokens":12}}}`
+	writeChunks(t, &o, successfulResult+"\n"+root+"\n")
+	o.finish()
+	if o.err == nil || o.completed || o.result.Answer != "" || o.result.UsageComplete {
+		t.Fatalf("late root usage retained an old answer: result=%+v completed=%t error=%v", o.result, o.completed, o.err)
 	}
 }
 

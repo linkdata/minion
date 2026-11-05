@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -28,6 +29,11 @@ func httpBindingShape(binding httpBinding) error {
 }
 
 func httpCallShape(call CallUsage) error {
+	if !usage.ValidEstimatedCostUSD(call.EstimatedCostUSD) ||
+		(call.EstimatedCostComplete && call.EstimatedCostUSD == nil) ||
+		(call.EstimatedCostUSD != nil && call.Provider != "claude") {
+		return errHTTPShape
+	}
 	for _, value := range []string{call.Provider, call.Role, call.ReviewPhase, call.Model, call.Effort, call.UsageCoverage.Scope} {
 		if !boundedText(value, config.MaxModelSettingBytes) {
 			return errHTTPShape

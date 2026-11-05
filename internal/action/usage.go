@@ -19,7 +19,9 @@ type usageCheckpoint struct {
 func usageCall(ordinal int, call CallUsage) usage.Call {
 	return usage.Call{Ordinal: ordinal, Provider: call.Provider, Model: cmp.Or(call.Model, "default"), Effort: call.Effort,
 		Role: call.Role, Round: call.Round, ReviewPhase: call.ReviewPhase, Tokens: call.Tokens,
-		UsageCoverage: call.UsageCoverage, Complete: call.Complete}
+		EstimatedCostUSD:      call.EstimatedCostUSD,
+		EstimatedCostComplete: call.EstimatedCostComplete,
+		UsageCoverage:         call.UsageCoverage, Complete: call.Complete}
 }
 
 func (c *usageCheckpoint) beforeCall(ordinal int, call CallUsage) error {

@@ -25,10 +25,10 @@ func TestOutputRetainsDeduplicatedAssistantUsageBeforeResult(t *testing.T) {
 		fails      bool
 	}{
 		{"partial EOF", first + "\n" + later + "\n" + later + "\n" + other, usage.Tokens{Input: 20, CacheCreationInput: 5, CachedInput: 10, Output: 12}, true},
-		{"missing ID", assistantUsageEvent("", 3, 5, 7, 11), usage.Tokens{}, true},
+		{"missing ID", assistantUsageEvent("", 3, 5, 7, 11), usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}, true},
 		{"invalid counters", assistantUsageEvent("a", -1, 5, 7, 11), usage.Tokens{}, true},
 		{"sum overflow", assistantUsageEvent("a", math.MaxInt64-2, 0, 0, 1) + "\n" + assistantUsageEvent("b", 3, 0, 0, 1), usage.Tokens{Input: math.MaxInt64 - 2, Output: 1}, true},
-		{"component maxima overflow", assistantUsageEvent("a", math.MaxInt64-10, 0, 0, 1) + "\n" + assistantUsageEvent("a", 1, 0, 0, math.MaxInt64-5), usage.Tokens{Input: math.MaxInt64 - 10, Output: 1}, true},
+		{"component maxima overflow", assistantUsageEvent("a", math.MaxInt64-10, 0, 0, 1) + "\n" + assistantUsageEvent("a", 1, 0, 0, math.MaxInt64-5), usage.Tokens{Input: 1, Output: math.MaxInt64 - 5}, true},
 		{"success cannot erase known lower bound", first + "\n" + other + "\n" + successfulResult, usage.Tokens{Input: 20, CacheCreationInput: 5, CachedInput: 10, Output: 11}, false},
 		{"failed aggregate cannot erase known lower bound", first + "\n" + other + "\n" + strings.Replace(successfulResult, `"is_error":false`, `"is_error":true`, 1), usage.Tokens{Input: 20, CacheCreationInput: 5, CachedInput: 10, Output: 11}, true},
 		{"failed result lacks usage", first + "\n" + `{"type":"result","is_error":true,"subtype":"error_during_execution"}`, usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 2}, true},
@@ -105,31 +105,32 @@ func TestOutputLateInvalidUsageForCoveredAssistant(t *testing.T) {
 func TestOutputLateOverflowForCoveredAssistant(t *testing.T) {
 	for _, tc := range []struct {
 		name, initial, late string
-		output              int64
+		reported, want      usage.Tokens
 	}{
 		{
-			name:    "component maxima overflow",
-			initial: assistantUsageEvent("old", math.MaxInt64-20, 0, 0, 1),
-			late:    assistantUsageEvent("old", 1, 0, 0, math.MaxInt64-2),
-			output:  1,
+			name:     "component maxima overflow",
+			initial:  assistantUsageEvent("old", math.MaxInt64-20, 0, 0, 1),
+			late:     assistantUsageEvent("old", 1, 0, 0, math.MaxInt64-2),
+			reported: usage.Tokens{Input: math.MaxInt64 - 20, Output: 1},
+			want:     usage.Tokens{Input: 1, Output: math.MaxInt64 - 2},
 		},
 		{
-			name:    "assistant sum overflow",
-			initial: assistantUsageEvent("other", math.MaxInt64-20, 0, 0, 1) + "\n" + assistantUsageEvent("old", 0, 0, 0, 9),
-			late:    assistantUsageEvent("old", 0, 0, 0, 30),
-			output:  10,
+			name:     "assistant sum overflow",
+			initial:  assistantUsageEvent("other", math.MaxInt64-20, 0, 0, 1) + "\n" + assistantUsageEvent("old", 0, 0, 0, 9),
+			late:     assistantUsageEvent("old", 0, 0, 0, 30),
+			reported: usage.Tokens{Input: math.MaxInt64 - 20, Output: 10},
+			want:     usage.Tokens{Input: math.MaxInt64 - 20, Output: 10},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			want := usage.Tokens{Input: math.MaxInt64 - 20, Output: tc.output}
-			result := fmt.Sprintf(`{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":%d,"outputTokens":%d}}}`, want.Input, want.Output)
+			result := fmt.Sprintf(`{"type":"result","subtype":"success","result":"answer","modelUsage":{"main":{"inputTokens":%d,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":%d}}}`, tc.reported.Input, tc.reported.Output)
 			o := jsonlOutput{}
 			writeChunks(t, &o, numberResultEvents(tc.initial+"\n"+result+"\n"+tc.late+"\n"))
 			if o.result.UsageComplete || o.hasCumulative {
 				t.Fatalf("overflow retained exact coverage: %+v cumulative=%t", o.result, o.hasCumulative)
 			}
 			o.finish()
-			if o.err != nil || o.result.Answer != "answer" || o.result.Tokens != want || o.result.UsageComplete {
+			if o.err != nil || o.result.Answer != "answer" || o.result.Tokens != tc.want || o.result.UsageComplete {
 				t.Fatalf("overflow lost known usage or retained exact coverage: %+v error=%v", o.result, o.err)
 			}
 		})
@@ -159,14 +160,14 @@ func TestOutputRetainsNewCallsAfterProvisionalAggregate(t *testing.T) {
 		{"incomparable partial result preserves larger output", provisional + newCall + "\n" + strings.Replace(rootOnly, `"output_tokens":400`, `"output_tokens":2000`, 1), usage.Tokens{Input: 1015, CacheCreationInput: 5, CachedInput: 7, Output: 2000}, false, false},
 		{"stale aggregate keeps new counters", provisional + newCall + "\n" + successfulResult, usage.Tokens{Input: 1015, CacheCreationInput: 5, CachedInput: 7, Output: 511}, false, false},
 		{"later aggregate restores complete coverage", provisional + newCall + "\n" + successfulResult + "\n" + full(1015, 7, 511), usage.Tokens{Input: 1015, CacheCreationInput: 5, CachedInput: 7, Output: 511}, true, false},
-		{"late covered block is not added", assistantUsageEvent("old", 2, 0, 1, 2) + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 7, 0, 1, 5), usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}, true, false},
+		{"late regular input cannot be hidden by cache", assistantUsageEvent("old", 2, 0, 1, 2) + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 7, 0, 1, 5), usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}, false, false},
 		{"late covered block raises independent lower bound", assistantUsageEvent("old", 3, 5, 7, 2) + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 1000, 0, 0, 500), usage.Tokens{Input: 1000, CacheCreationInput: 5, CachedInput: 7, Output: 500}, false, false},
 		{"ID without initial usage remains covered", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old"}}` + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 1000, 0, 0, 500), usage.Tokens{Input: 1000, CacheCreationInput: 5, CachedInput: 7, Output: 500}, false, false},
 		{"ID with malformed initial usage remains covered", `{"type":"assistant","parent_tool_use_id":null,"message":{"id":"old","usage":{"input_tokens":"bad"}}}` + "\n" + successfulResult + "\n" + assistantUsageEvent("old", 1000, 0, 0, 500), usage.Tokens{Input: 1000, CacheCreationInput: 5, CachedInput: 7, Output: 500}, false, false},
 		{"delayed delegate overlaps prior aggregate", provisional + strings.Replace(newCall, `"parent_tool_use_id":null`, `"parent_tool_use_id":"tool"`, 1), usage.Tokens{Input: 1000, CacheCreationInput: 5, CachedInput: 7, Output: 500}, false, true},
 		{"unknown parent overlaps prior aggregate", provisional + strings.Replace(newCall, `"parent_tool_use_id":null,`, "", 1), usage.Tokens{Input: 1000, CacheCreationInput: 5, CachedInput: 7, Output: 500}, false, true},
 		{"unknown counters cannot be erased by stale aggregate", provisional + strings.Replace(newCall, `"parent_tool_use_id":null,`, "", 1) + "\n" + successfulResult, usage.Tokens{Input: 1000, CacheCreationInput: 5, CachedInput: 7, Output: 500}, false, false},
-		{"addition overflow preserves known aggregate", provisional + assistantUsageEvent("new", math.MaxInt64-2, 0, 0, 1), usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}, false, true},
+		{"addition overflow retains valid standalone receipt", provisional + assistantUsageEvent("new", math.MaxInt64-2, 0, 0, 1), usage.Tokens{Input: math.MaxInt64 - 2, Output: 1}, false, true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			o := jsonlOutput{}

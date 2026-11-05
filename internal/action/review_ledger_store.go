@@ -115,7 +115,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 			saved.CriticMaxRounds != record.CriticMaxRounds || saved.CriticNonblockingRounds != record.CriticNonblockingRounds ||
 			saved.CriticConsecutiveNoBlockerRounds != record.CriticConsecutiveNoBlockerRounds ||
 			len(saved.Calls) > len(record.Calls) || len(saved.Refutations) > len(record.Refutations) ||
-			!slices.Equal(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {
+			!equalCallUsages(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {
 			return fmt.Errorf("%w: review evidence changed or discarded a saved prefix", errPrivateRecordConflict)
 		}
 		if saved.CriticStopReason == record.CriticStopReason && len(saved.Calls) == len(record.Calls) && len(saved.Refutations) == len(record.Refutations) {

@@ -230,7 +230,12 @@ func waitLateError(t *testing.T, done <-chan error) error {
 }
 
 func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) {
-	f := newLateOutcomeFixture(t, true)
+	job := testJob(command.Comment)
+	job.Main.Provider = "claude"
+	f := newLateOutcomeFixtureForJob(t, job, true)
+	estimate := 0.25
+	f.outcome.Result.Calls[0].EstimatedCostUSD = &estimate
+	f.outcome.Result.Calls[0].EstimatedCostComplete = true
 	if err := f.finish(errors.New("lost outcome")); err == nil {
 		t.Fatal("final usage status lost action error")
 	}
@@ -246,7 +251,9 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	record, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil ||
-		record.Tokens != f.outcome.Result.Calls[0].Tokens || record.Status != "failed" {
+		record.Tokens != f.outcome.Result.Calls[0].Tokens || record.Status != "failed" ||
+		record.Calls[0].EstimatedCostUSD == nil || *record.Calls[0].EstimatedCostUSD != estimate ||
+		!record.Calls[0].EstimatedCostComplete {
 		t.Fatalf("late usage receipt missing or changed status: %+v found=%t err=%v", record, found, err)
 	}
 	if f.store.Data.Accepted != nil || f.store.Data.TerminalDecisions[f.job.Identity.JobID].Outcome != "lost" {
@@ -307,6 +314,10 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	if _, err := os.Stat(diagnosticPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired private diagnostic recreated: %v", err)
+	}
+	retained, found, err := f.owner.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || !reflect.DeepEqual(record, retained) {
+		t.Fatalf("artifact retention changed estimated cost: before=%+v after=%+v found=%t err=%v", record, retained, found, err)
 	}
 }
 

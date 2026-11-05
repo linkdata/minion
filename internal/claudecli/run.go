@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/usage"
 	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
@@ -126,11 +128,32 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if err != nil {
 		return result, err
 	}
+	baseline, baselineUnknown := s.baseline, s.usageGap
+	costBaselineUSD, costBaselineUnknown := s.costBaselineUSD, s.costGap
+	cumulative, known := claudeCumulativeResults(runCtx, binary, runtimeDir, cmd.Env)
+	perCallResults := known && !cumulative
+	if s.started {
+		// Before Claude Code 2.1.277, both result tokens and cost were
+		// per-call. A recognized older CLI can recover after a prior gap.
+		// An unrecognized version cannot prove either result's scope.
+		if !known {
+			baselineUnknown, costBaselineUnknown = true, true
+		} else if perCallResults {
+			baseline, baselineUnknown = usage.Tokens{}, false
+			costBaselineUSD, costBaselineUnknown = 0, false
+		}
+	}
+	costObservedUSD := costBaselineUSD
+	if !perCallResults {
+		costObservedUSD = max(costObservedUSD, s.costObservedUSD)
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 	var failureTimer *time.Timer
 	output := jsonlOutput{sessionID: s.id, apiKey: settings.APIKey, onEvent: s.OnEvent, onProgress: s.OnProgress, progressSeen: s.progressSeen, assistantHistory: s.assistantHistory, taskProgress: s.taskProgress,
 		runlessPending: s.runlessPending, runlessExplicit: s.runlessExplicit, runlessAmbiguous: s.runlessAmbiguous, runlessCount: s.runlessCount, anonymousPending: s.anonymousPending,
-		progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: s.baseline, baselineUnknown: s.usageGap, cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
+		progressBytes: s.progressBytes, progressEntries: s.progressEntries, baseline: baseline, baselineUnknown: baselineUnknown,
+		costBaselineUSD: costBaselineUSD, costBaselineUnknown: costBaselineUnknown, costObservedUSD: costObservedUSD, perCallResults: perCallResults, resumed: s.started,
+		cancel: cancel, structured: settings.OutputSchema != "", fatal: func() {
 			// Let the CLI flush a final result and cumulative accounting, then stop
 			// a managed retry watchdog without renewing the action deadline.
 			failureTimer = time.AfterFunc(time.Second, cancel)
@@ -178,7 +201,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	s.taskProgress = output.taskProgress
 	s.runlessPending, s.runlessExplicit, s.runlessAmbiguous = output.runlessPending, output.runlessExplicit, output.runlessAmbiguous
 	s.runlessCount, s.anonymousPending = output.runlessCount, output.anonymousPending
-	s.progressBytes, s.progressEntries = output.progressBytes, output.progressEntries
+	s.progressBytes, s.progressEntries = output.progressCheckpoint()
 	if ceilingMatched {
 		output.observe("wait_ceiling", "background tasks stopped by Claude's wait ceiling")
 	}
@@ -186,7 +209,18 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		failureTimer.Stop()
 	}
 	result = output.result
-	s.usageGap = !output.hasCumulative || output.err != nil
+	settled := output.completed && output.err == nil && err == nil && ctx.Err() == nil && !ceilingMatched && !ceilingOverflow
+	result.EstimatedCostComplete = settled && output.nativeCostUSD != nil && result.EstimatedCostUSD != nil
+	if !perCallResults {
+		// A resumed call with unknown version cannot attribute cost. Its raw
+		// high-water mark still bounds later cumulative results.
+		s.costObservedUSD = max(s.costObservedUSD, output.costObservedUSD)
+	}
+	s.costGap = !settled || output.nativeCostUSD == nil || perCallResults || !known && output.resumed
+	if settled && output.nativeCostUSD != nil {
+		s.costBaselineUSD = *output.nativeCostUSD
+	}
+	s.usageGap = !output.hasCumulative || !settled || perCallResults || !known && output.resumed
 	if output.hasCumulative {
 		s.baseline = output.cumulative
 	} else if floor, valid := s.baseline.AddChecked(result.Tokens); valid {
@@ -267,6 +301,36 @@ func credentialDenials() []map[string]string {
 		rules = append(rules, map[string]string{"name": name, "mode": "deny"})
 	}
 	return rules
+}
+
+// claudeCumulativeResults identifies the native result scope without
+// rejecting older CLIs. Unknown versions leave resumed usage unattributed.
+func claudeCumulativeResults(ctx context.Context, binary, dir string, env []string) (cumulative, known bool) {
+	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	output, err := aicli.Probe(probeCtx, binary, "", []string{"--version"}, dir, env, "", "")
+	if err != nil || len(output) > 128 {
+		return false, false
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		return false, false
+	}
+	parts := strings.Split(strings.TrimPrefix(fields[0], "v"), ".")
+	if len(parts) != 3 {
+		return false, false
+	}
+	version := [3]int{}
+	for i, part := range parts {
+		version[i], err = strconv.Atoi(part)
+		if err != nil || version[i] < 0 {
+			return false, false
+		}
+	}
+	if version[0] > 2 || version[0] == 2 && version[1] > 1 {
+		return false, false // A future version may change result scope again.
+	}
+	return version[0] == 2 && version[1] == 1 && version[2] >= 277, true
 }
 
 func childEnvironment(env []string, runtimeDir, cacheDir, authDir, configDir string, writablePaths ...string) ([]string, error) {

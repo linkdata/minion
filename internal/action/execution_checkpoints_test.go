@@ -746,6 +746,36 @@ func TestExecutionCriticRequiresInitialPrefixAndSeparateDecision(t *testing.T) {
 	}
 }
 
+func TestExecutionCostReceiptValueAcrossReviewAndOutcome(t *testing.T) {
+	f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
+	main := CallUsage{Provider: "codex", Role: roleMain, Round: 1}
+	amount := 0.25
+	critic := CallUsage{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull,
+		EstimatedCostUSD: &amount, EstimatedCostComplete: true, Approved: true, NoBlockers: true, ReviewComplete: true}
+	equivalent := func() []CallUsage {
+		separateAmount := 0.25
+		copy := critic
+		copy.EstimatedCostUSD = &separateAmount
+		return []CallUsage{main, copy}
+	}
+	f.saveReview(nil, nil, "")
+	f.ack(main)
+	f.saveReview([]CallUsage{main}, nil, "")
+	f.ack(critic)
+	amount = 9 // A local executor still owns its pointer after acknowledgment.
+	if f.sink.calls[1].EstimatedCostUSD == nil || *f.sink.calls[1].EstimatedCostUSD != 0.25 {
+		t.Fatalf("acknowledged cost receipt changed with caller pointer: %+v", f.sink.calls[1])
+	}
+	f.saveReview(equivalent(), nil, "")
+	f.saveReview(equivalent(), nil, "approved")
+	if f.sink.review.Calls[1].EstimatedCostUSD == nil || *f.sink.review.Calls[1].EstimatedCostUSD != 0.25 {
+		t.Fatalf("review retained caller-owned cost pointer: %+v", f.sink.review.Calls[1])
+	}
+	if err := f.sink.finish(f.result(equivalent(), nil, "approved"), nil); err != nil {
+		t.Fatalf("equal cost values across distinct receipts were rejected: %v", err)
+	}
+}
+
 func TestExecutionRejectsForeignAfterAndReviewBindings(t *testing.T) {
 	for _, method := range []string{"AfterCall", "Review"} {
 		for _, field := range []string{"version", "identity", "source"} {
@@ -920,14 +950,15 @@ func TestExecutionFailedBeforePreservesOrdinaryErrorButRefusesPaidContinuation(t
 }
 
 func TestExecutionFailedAfterAllowsOnlyItsExactCapturedReceipt(t *testing.T) {
-	for _, scenario := range []string{"exact", "drop", "change failed receipt", "rewrite acknowledged prefix", "extra paid receipt"} {
+	for _, scenario := range []string{"exact", "drop", "change failed receipt", "change cost", "rewrite acknowledged prefix", "extra paid receipt"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
 			store := f.startUsage()
 			original := store.Dir
+			amount := 0.25
 			calls := []CallUsage{
 				{Provider: "codex", Role: roleMain, Round: 1, Tokens: usage.Tokens{Input: 3}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true},
-				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
+				{Provider: "claude", Role: roleCritic, Round: 1, ReviewPhase: reviewFull, Tokens: usage.Tokens{Input: 7, Output: 2}, UsageCoverage: usage.Coverage{Scope: "invocation"}, Complete: true, EstimatedCostUSD: &amount, EstimatedCostComplete: true, Approved: true, NoBlockers: true, ReviewComplete: true},
 			}
 			f.saveReview(nil, nil, "")
 			f.ack(calls[0])
@@ -941,15 +972,21 @@ func TestExecutionFailedAfterAllowsOnlyItsExactCapturedReceipt(t *testing.T) {
 			}
 			store.Dir = blocked
 			afterErr := f.sink.AfterCall(f.call(calls[1]))
-			if !errors.Is(afterErr, monitor.ErrTerminalJob) || f.sink.returned == nil || *f.sink.returned != calls[1] {
+			if !errors.Is(afterErr, monitor.ErrTerminalJob) || f.sink.returned == nil ||
+				!equalCallUsages([]CallUsage{*f.sink.returned}, calls[1:2]) ||
+				f.sink.returned.EstimatedCostUSD == calls[1].EstimatedCostUSD {
 				t.Fatalf("failed After lost its actual captured receipt: returned=%+v error=%v", f.sink.returned, afterErr)
 			}
 			result := f.result(slices.Clone(calls), nil, "")
+			separateAmount := amount
+			result.Calls[1].EstimatedCostUSD = &separateAmount
 			switch scenario {
 			case "drop":
 				result.Calls = result.Calls[:1]
 			case "change failed receipt":
 				result.Calls[1].Tokens.Input++
+			case "change cost":
+				*result.Calls[1].EstimatedCostUSD = 0.5
 			case "rewrite acknowledged prefix":
 				result.Calls[0].Tokens.Input++
 			case "extra paid receipt":

@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 const defaultBaseURL = "https://api.github.com"
@@ -281,6 +283,20 @@ func validSegment(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, "/?# \\")
 }
 
+func validGitHubLogin(login string) bool {
+	if len(login) == 0 || len(login) > 39 {
+		return false
+	}
+	for i := 0; i < len(login); i++ {
+		b := login[i]
+		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '-' || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func withQuery(path string, values url.Values) string {
 	if len(values) == 0 {
 		return path
@@ -402,6 +418,20 @@ func (c *Client) Repository(ctx context.Context, repo string) (Repository, error
 	return details, err
 }
 
+// RepositoryByID resolves the current repository name after a rename or transfer.
+// GitHub serves this numeric-ID route even though its REST reference omits it.
+func (c *Client) RepositoryByID(ctx context.Context, id int64) (Repository, error) {
+	if id <= 0 {
+		return Repository{}, fmt.Errorf("invalid GitHub repository ID %d", id)
+	}
+	var details Repository
+	_, _, err := c.request(ctx, http.MethodGet, "/repositories/"+strconv.FormatInt(id, 10), nil, &details, nil, http.StatusOK)
+	if err == nil && (details.ID != id || !workspace.ValidRepository(details.FullName)) {
+		return Repository{}, fmt.Errorf("GitHub repository ID %d resolved to a different identity", id)
+	}
+	return details, err
+}
+
 // ActionsEnabled reports whether a repository can run GitHub Actions.
 func (c *Client) ActionsEnabled(ctx context.Context, repo string) (bool, error) {
 	path, err := repoPath(repo)
@@ -455,6 +485,22 @@ func (c *Client) Permission(ctx context.Context, repo, login string) (Permission
 	var permission Permission
 	_, _, err = c.request(ctx, http.MethodGet, path+"/collaborators/"+url.PathEscape(login)+"/permission", nil, &permission, nil, http.StatusOK)
 	return permission, err
+}
+
+// UserByID resolves a current login without trusting a historical username.
+func (c *Client) UserByID(ctx context.Context, id int64) (User, error) {
+	if id <= 0 {
+		return User{}, fmt.Errorf("invalid GitHub user ID %d", id)
+	}
+	var user User
+	_, _, err := c.request(ctx, http.MethodGet, "/user/"+strconv.FormatInt(id, 10), nil, &user, nil, http.StatusOK)
+	if err == nil && user.ID != id {
+		return User{}, fmt.Errorf("GitHub user ID %d resolved to a different identity", id)
+	}
+	if err == nil && !validGitHubLogin(user.Login) {
+		return User{}, fmt.Errorf("GitHub user ID %d resolved to an invalid login", id)
+	}
+	return user, err
 }
 
 func (c *Client) PullRequestDetails(ctx context.Context, repo string, number int) (PullRequest, error) {

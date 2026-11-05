@@ -197,6 +197,33 @@ func TestPrivateReviewRetainsPrefixAndRejectsRollback(t *testing.T) {
 	}
 }
 
+func TestPrivateReviewCostPrefixComparesAmount(t *testing.T) {
+	job := withClaudeCritic(testJob(command.Comment))
+	result := privateReviewResult(job)
+	amount := 0.25
+	result.Calls[1].EstimatedCostUSD, result.Calls[1].EstimatedCostComplete = &amount, true
+	orchestrator := Orchestrator{WorkRoot: t.TempDir()}
+	prefix := result
+	prefix.Calls, prefix.Refutations, prefix.CriticStopReason = result.Calls[:2], nil, ""
+	if err := orchestrator.retainReviewEvidence(job, prefix); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.retainReviewEvidence(job, result); err != nil {
+		t.Fatalf("equal cost from decoded saved prefix was rejected: %v", err)
+	}
+	changed := result
+	changed.Calls = append([]CallUsage(nil), result.Calls...)
+	changedAmount := 0.5
+	changed.Calls[1].EstimatedCostUSD = &changedAmount
+	if err := orchestrator.retainReviewEvidence(job, changed); !errors.Is(err, monitor.ErrTerminalJob) ||
+		!strings.Contains(err.Error(), "changed or discarded a saved prefix") {
+		t.Fatalf("changed cost replaced saved review prefix: %v", err)
+	}
+	if saved := readPrivateReview(t, orchestrator.WorkRoot); saved.Calls[1].EstimatedCostUSD == nil || *saved.Calls[1].EstimatedCostUSD != amount {
+		t.Fatalf("rejected cost update changed saved review prefix: %+v", saved.Calls[1])
+	}
+}
+
 func TestPrivateReviewRetrySyncsIdenticalRecord(t *testing.T) {
 	job := withClaudeCritic(testJob(command.Comment))
 	result := privateReviewResult(job)

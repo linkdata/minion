@@ -40,7 +40,9 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 		!strings.Contains(page.Body.String(), "token counts in <code>totals</code> and <code>selected_usage</code> reflect that service") ||
 		!strings.Contains(page.Body.String(), "outcome counts remain attempt-level") ||
 		!strings.Contains(page.Body.String(), "<code>tokens</code> and <code>total_tokens</code> retain all services") ||
-		!strings.Contains(page.Body.String(), "Billed credits: unknown") ||
+		!strings.Contains(page.Body.String(), "Estimated cost and currency") ||
+		strings.Count(page.Body.String(), "Unknown (calls with any reported amount: 0; calls with missing or incomplete estimates: 5)") != 2 ||
+		!strings.Contains(page.Body.String(), "Billed cost and credits: Unknown") ||
 		!strings.Contains(page.Body.String(), "Actions without usage files are excluded") ||
 		!strings.Contains(page.Body.String(), "/jaws/") ||
 		!strings.Contains(page.Body.String(), "example-owner/example-repo") ||

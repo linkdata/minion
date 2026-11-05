@@ -79,18 +79,27 @@ type Coverage struct {
 // attempt IDs with Ordinal identify the call across checkpoint replays. A nil
 // FinishedAt means no usage receipt was saved.
 type Call struct {
-	Ordinal       int        `json:"ordinal"`
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	Provider      string     `json:"provider"`
-	Model         string     `json:"model"`
-	Effort        string     `json:"reasoning_effort,omitempty"`
-	Role          string     `json:"role"`
-	Round         int        `json:"round"`
-	ReviewPhase   string     `json:"review_phase,omitempty"`
-	Tokens        Tokens     `json:"tokens"`
-	UsageCoverage Coverage   `json:"usage_coverage,omitzero"`
-	Complete      bool       `json:"usage_complete"`
+	Ordinal     int        `json:"ordinal"`
+	StartedAt   time.Time  `json:"started_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+	Provider    string     `json:"provider"`
+	Model       string     `json:"model"`
+	Effort      string     `json:"reasoning_effort,omitempty"`
+	Role        string     `json:"role"`
+	Round       int        `json:"round"`
+	ReviewPhase string     `json:"review_phase,omitempty"`
+	Tokens      Tokens     `json:"tokens"`
+	// EstimatedCostUSD is the Claude CLI's optional estimated USD charge for this call.
+	// It is not a billed amount; nil means no usable estimate was received.
+	EstimatedCostUSD      *float64 `json:"estimated_cost_usd,omitempty"`
+	EstimatedCostComplete bool     `json:"estimated_cost_complete,omitempty"` // Native final cost covered this call.
+	UsageCoverage         Coverage `json:"usage_coverage,omitzero"`
+	Complete              bool     `json:"usage_complete"`
+}
+
+// ValidEstimatedCostUSD bounds one untrusted CLI or worker estimate.
+func ValidEstimatedCostUSD(value *float64) bool {
+	return value == nil || !math.IsNaN(*value) && !math.IsInf(*value, 0) && *value >= 0 && *value <= 1e12
 }
 
 func (c Coverage) Valid() bool {
@@ -195,7 +204,8 @@ func (r Record) validate() error {
 	default:
 		return fmt.Errorf("usage record %s has invalid status %q", r.ID, r.Status)
 	}
-	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || !r.Tokens.Valid() || !r.UsageCoverage.ValidForAttempt(r.UsageComplete) {
+	if r.CodexCalls < 0 || r.ClaudeCalls < 0 || r.CodexCalls > math.MaxInt-r.ClaudeCalls ||
+		!r.Tokens.Valid() || !r.UsageCoverage.ValidForAttempt(r.UsageComplete) {
 		return fmt.Errorf("usage record %s has invalid counts", r.ID)
 	}
 	if len(r.Calls) != 0 {
@@ -232,6 +242,8 @@ func (r Record) callTotals() (codex, claude int, tokens Tokens, coverage Coverag
 			(call.Role == "main" && call.Provider != r.Provider) ||
 			(call.Role == "critic" && call.Provider != r.CriticProvider) ||
 			!call.Tokens.Valid() || !call.UsageCoverage.ValidForCall(call.Complete) ||
+			!ValidEstimatedCostUSD(call.EstimatedCostUSD) || (call.EstimatedCostUSD != nil && call.Provider != "claude") ||
+			(call.EstimatedCostComplete && call.EstimatedCostUSD == nil) ||
 			(call.Tokens != (Tokens{}) && call.UsageCoverage.Scope == "") {
 			err = fmt.Errorf("invalid call ordinal %d", i+1)
 			return
@@ -246,7 +258,8 @@ func (r Record) callTotals() (codex, claude int, tokens Tokens, coverage Coverag
 			return
 		}
 		if call.FinishedAt == nil {
-			if call.Complete || call.Tokens != (Tokens{}) || call.UsageCoverage != (Coverage{}) || i != len(r.Calls)-1 {
+			if call.Complete || call.Tokens != (Tokens{}) || call.UsageCoverage != (Coverage{}) ||
+				call.EstimatedCostUSD != nil || call.EstimatedCostComplete || i != len(r.Calls)-1 {
 				err = fmt.Errorf("invalid pending call ordinal %d", call.Ordinal)
 				return
 			}
@@ -275,11 +288,19 @@ func sameCallMetadata(a, b Call) bool {
 		a.Effort == b.Effort && a.Role == b.Role && a.Round == b.Round && a.ReviewPhase == b.ReviewPhase
 }
 
+func sameEstimatedCost(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
 // BeginCall saves an ordinal's pending metadata once. Replays with identical
 // metadata do not change its original start time or reported usage.
 func (r *Record) BeginCall(call Call) (bool, error) {
 	if call.StartedAt.IsZero() || call.FinishedAt != nil || call.Tokens != (Tokens{}) ||
-		call.UsageCoverage != (Coverage{}) || call.Complete || r.RepositoryID <= 0 || r.RequesterID <= 0 ||
+		call.UsageCoverage != (Coverage{}) || call.Complete || call.EstimatedCostUSD != nil || call.EstimatedCostComplete ||
+		r.RepositoryID <= 0 || r.RequesterID <= 0 ||
 		(len(r.Calls) == 0 && (r.CodexCalls != 0 || r.ClaudeCalls != 0)) {
 		return false, fmt.Errorf("invalid usage call start ordinal %d", call.Ordinal)
 	}
@@ -328,7 +349,9 @@ func (r *Record) FinishCall(call Call) (bool, error) {
 		return false, fmt.Errorf("conflicting usage call ordinal %d", call.Ordinal)
 	}
 	if prior.FinishedAt != nil {
-		if prior.Tokens == call.Tokens && prior.UsageCoverage == call.UsageCoverage && prior.Complete == call.Complete {
+		if prior.Tokens == call.Tokens && prior.UsageCoverage == call.UsageCoverage && prior.Complete == call.Complete &&
+			prior.EstimatedCostComplete == call.EstimatedCostComplete &&
+			sameEstimatedCost(prior.EstimatedCostUSD, call.EstimatedCostUSD) {
 			return false, nil
 		}
 		return false, fmt.Errorf("conflicting usage call receipt ordinal %d", call.Ordinal)
@@ -339,7 +362,13 @@ func (r *Record) FinishCall(call Call) (bool, error) {
 	next := *r
 	next.Calls = slices.Clone(r.Calls)
 	entry := &next.Calls[call.Ordinal-1]
-	entry.FinishedAt, entry.Tokens, entry.UsageCoverage, entry.Complete = call.FinishedAt, call.Tokens, call.UsageCoverage, call.Complete
+	finished := *call.FinishedAt
+	entry.FinishedAt, entry.Tokens, entry.UsageCoverage, entry.Complete, entry.EstimatedCostComplete =
+		&finished, call.Tokens, call.UsageCoverage, call.Complete, call.EstimatedCostComplete
+	if call.EstimatedCostUSD != nil {
+		amount := *call.EstimatedCostUSD
+		entry.EstimatedCostUSD = &amount
+	}
 	if err := next.reconcileCalls(); err != nil {
 		return false, err
 	}
@@ -494,25 +523,28 @@ func (f Filter) Match(record Record) bool {
 
 // Summary aggregates action attempts and their attributed or unallocated usage.
 type Summary struct {
-	Repo                 string `json:"repo,omitempty"`
-	User                 string `json:"user,omitempty"`
-	Action               string `json:"action,omitempty"`
-	Day                  string `json:"day,omitempty"`
-	Month                string `json:"month,omitempty"`
-	Service              string `json:"service,omitempty"`
-	RepositoryID         int64  `json:"repository_id,omitempty"`
-	RequesterID          int64  `json:"requester_id,omitempty"`
-	Attempts             int    `json:"attempts"`
-	UsageRecordedActions int    `json:"usage_recorded_actions"`
-	Succeeded            int    `json:"succeeded"`
-	Failed               int    `json:"failed"`
-	Running              int    `json:"running"`
-	CodexCalls           int    `json:"codex_calls"`
-	ClaudeCalls          int    `json:"claude_calls,omitempty"`
-	IncompleteUsage      int    `json:"incomplete_usage"`
-	Tokens               Tokens `json:"tokens"`
-	UnallocatedTokens    Tokens `json:"unallocated_tokens"`
-	TotalTokens          int64  `json:"total_tokens"`
+	Repo                      string  `json:"repo,omitempty"`
+	User                      string  `json:"user,omitempty"`
+	Action                    string  `json:"action,omitempty"`
+	Day                       string  `json:"day,omitempty"`
+	Month                     string  `json:"month,omitempty"`
+	Service                   string  `json:"service,omitempty"`
+	RepositoryID              int64   `json:"repository_id,omitempty"`
+	RequesterID               int64   `json:"requester_id,omitempty"`
+	Attempts                  int     `json:"attempts"`
+	UsageRecordedActions      int     `json:"usage_recorded_actions"`
+	Succeeded                 int     `json:"succeeded"`
+	Failed                    int     `json:"failed"`
+	Running                   int     `json:"running"`
+	CodexCalls                int     `json:"codex_calls"`
+	ClaudeCalls               int     `json:"claude_calls,omitempty"`
+	IncompleteUsage           int     `json:"incomplete_usage"`
+	Tokens                    Tokens  `json:"tokens"`
+	UnallocatedTokens         Tokens  `json:"unallocated_tokens"`
+	TotalTokens               int64   `json:"total_tokens"`
+	EstimatedCostUSD          float64 `json:"estimated_cost_usd,omitempty"`
+	EstimatedCostKnownCalls   int     `json:"estimated_cost_known_calls"`
+	EstimatedCostUnknownCalls int     `json:"estimated_cost_unknown_calls"`
 }
 
 // AttemptDetail retains the source record and separately reports the selected
@@ -624,10 +656,28 @@ func (k summaryKey) value(group string) string {
 }
 
 type serviceUsage struct {
-	service                 string
-	tokens, unallocated     Tokens
-	codexCalls, claudeCalls int
-	incomplete              bool
+	service                                            string
+	tokens, unallocated                                Tokens
+	codexCalls, claudeCalls                            int
+	estimatedCostUSD                                   float64
+	estimatedCostKnownCalls, estimatedCostUnknownCalls int
+	incomplete                                         bool
+}
+
+func recordEstimatedCost(record Record) (amount float64, known, unknown int) {
+	if len(record.Calls) == 0 {
+		return 0, 0, record.CodexCalls + record.ClaudeCalls
+	}
+	for _, call := range record.Calls {
+		if call.EstimatedCostUSD != nil {
+			amount += *call.EstimatedCostUSD
+			known++
+		}
+		if !call.EstimatedCostComplete {
+			unknown++
+		}
+	}
+	return amount, known, unknown
 }
 
 // recordServiceUsage partitions only the tokens accepted by callTotals. An
@@ -635,7 +685,8 @@ type serviceUsage struct {
 func recordServiceUsage(record Record) ([]serviceUsage, error) {
 	if len(record.Calls) == 0 {
 		return []serviceUsage{{service: "unknown", tokens: record.Tokens, unallocated: record.Tokens,
-			codexCalls: record.CodexCalls, claudeCalls: record.ClaudeCalls, incomplete: !record.UsageComplete}}, nil
+			codexCalls: record.CodexCalls, claudeCalls: record.ClaudeCalls,
+			estimatedCostUnknownCalls: record.CodexCalls + record.ClaudeCalls, incomplete: !record.UsageComplete}}, nil
 	}
 	parts := [2]serviceUsage{{service: "codex"}, {service: "claude"}}
 	var accepted Tokens
@@ -652,6 +703,13 @@ func recordServiceUsage(record Record) ([]serviceUsage, error) {
 		}
 		if call.FinishedAt == nil || !call.Complete {
 			part.incomplete = true
+		}
+		if call.EstimatedCostUSD != nil {
+			part.estimatedCostUSD += *call.EstimatedCostUSD
+			part.estimatedCostKnownCalls++
+		}
+		if !call.EstimatedCostComplete {
+			part.estimatedCostUnknownCalls++
 		}
 		if call.FinishedAt != nil {
 			var valid bool
@@ -693,16 +751,19 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 		if err := record.validate(); err != nil {
 			return nil, err
 		}
-		parts := []serviceUsage{{tokens: record.Tokens, codexCalls: record.CodexCalls,
-			claudeCalls: record.ClaudeCalls, incomplete: !record.UsageComplete}}
-		if len(record.Calls) == 0 {
-			parts[0].unallocated = record.Tokens
-		}
+		var parts []serviceUsage
 		if serviceGrouped || filter.Service != "" {
 			var err error
 			parts, err = recordServiceUsage(record)
 			if err != nil {
 				return nil, err
+			}
+		} else {
+			parts = []serviceUsage{{tokens: record.Tokens, codexCalls: record.CodexCalls,
+				claudeCalls: record.ClaudeCalls, incomplete: !record.UsageComplete}}
+			parts[0].estimatedCostUSD, parts[0].estimatedCostKnownCalls, parts[0].estimatedCostUnknownCalls = recordEstimatedCost(record)
+			if len(record.Calls) == 0 {
+				parts[0].unallocated = record.Tokens
 			}
 		}
 		for _, part := range parts {
@@ -756,6 +817,16 @@ func Summarize(records []Record, filter Filter, groupBy []string) ([]Summary, er
 			}
 			summary.CodexCalls += part.codexCalls
 			summary.ClaudeCalls += part.claudeCalls
+			if part.estimatedCostKnownCalls > math.MaxInt-summary.EstimatedCostKnownCalls ||
+				part.estimatedCostUnknownCalls > math.MaxInt-summary.EstimatedCostUnknownCalls {
+				return nil, errors.New("estimated cost coverage counts exceed integer limit")
+			}
+			summary.EstimatedCostKnownCalls += part.estimatedCostKnownCalls
+			summary.EstimatedCostUnknownCalls += part.estimatedCostUnknownCalls
+			summary.EstimatedCostUSD += part.estimatedCostUSD
+			if math.IsInf(summary.EstimatedCostUSD, 0) || summary.EstimatedCostUSD > 1e15 {
+				return nil, errors.New("estimated cost total exceeds limit")
+			}
 			if part.incomplete || record.Status == "running" {
 				summary.IncompleteUsage++
 			}

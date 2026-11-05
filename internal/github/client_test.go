@@ -218,6 +218,72 @@ func TestPermissionSurfacesForbidden(t *testing.T) {
 	}
 }
 
+func TestUserByIDResolvesCurrentLoginAndRejectsIdentityChange(t *testing.T) {
+	response := `{"id":42,"login":"new-login"}`
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodGet || r.URL.Path != "/user/42" {
+			t.Errorf("unexpected user lookup: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, response)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	if _, err := client.UserByID(t.Context(), 0); err == nil || calls != 0 {
+		t.Fatalf("invalid numeric ID reached GitHub: calls=%d error=%v", calls, err)
+	}
+	if user, err := client.UserByID(t.Context(), 42); err != nil || user.ID != 42 || user.Login != "new-login" {
+		t.Fatalf("durable ID lookup: user=%+v error=%v", user, err)
+	}
+	response = `{"id":43,"login":"new-login"}`
+	if _, err := client.UserByID(t.Context(), 42); err == nil {
+		t.Fatal("durable ID lookup accepted another user")
+	}
+	response = `{"id":42,"login":""}`
+	if _, err := client.UserByID(t.Context(), 42); err == nil {
+		t.Fatal("durable ID lookup accepted missing login")
+	}
+	response = `{"id":42,"login":"managed_short"}`
+	if _, err := client.UserByID(t.Context(), 42); err != nil {
+		t.Fatalf("managed login was rejected: %v", err)
+	}
+	for _, login := range []string{"a\n", "a/b", "ü", strings.Repeat("a", 40)} {
+		response = fmt.Sprintf(`{"id":42,"login":%q}`, login)
+		if _, err := client.UserByID(t.Context(), 42); err == nil || !strings.Contains(err.Error(), "invalid login") {
+			t.Fatalf("durable ID lookup accepted malformed login %q: %v", login, err)
+		}
+	}
+}
+
+func TestRepositoryByIDResolvesRenameAndRejectsIdentityChange(t *testing.T) {
+	response := `{"id":101,"full_name":"org/current","private":true,"visibility":"private"}`
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodGet || r.URL.Path != "/repositories/101" {
+			t.Errorf("unexpected repository lookup: %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = fmt.Fprint(w, response)
+	}))
+	defer server.Close()
+	client := testClient(server)
+	if _, err := client.RepositoryByID(t.Context(), 0); err == nil || calls != 0 {
+		t.Fatalf("invalid repository ID reached GitHub: calls=%d error=%v", calls, err)
+	}
+	if repo, err := client.RepositoryByID(t.Context(), 101); err != nil || repo.ID != 101 || repo.FullName != "org/current" {
+		t.Fatalf("renamed repository lookup: repo=%+v error=%v", repo, err)
+	}
+	response = `{"id":999,"full_name":"org/current"}`
+	if _, err := client.RepositoryByID(t.Context(), 101); err == nil {
+		t.Fatal("repository lookup accepted a reused ID")
+	}
+	response = `{"id":101,"full_name":""}`
+	if _, err := client.RepositoryByID(t.Context(), 101); err == nil {
+		t.Fatal("repository lookup accepted a missing current name")
+	}
+}
+
 func TestRepositoryNeverFollowsRedirectOutsideWhitelist(t *testing.T) {
 	redirected := false
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

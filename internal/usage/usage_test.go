@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -559,7 +560,7 @@ func TestSummarize(t *testing.T) {
 		t.Fatalf("incorrect order or grouping: %+v", groups)
 	}
 	got := groups[1]
-	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, UsageRecordedActions: 1, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 2, ClaudeCalls: 2,
+	want := Summary{Repo: first.Repo, User: first.User, Attempts: 3, UsageRecordedActions: 1, Succeeded: 1, Failed: 1, Running: 1, CodexCalls: 2, ClaudeCalls: 2, EstimatedCostUnknownCalls: 4,
 		IncompleteUsage: 2, Tokens: Tokens{Input: 300, CachedInput: 240, Output: 60},
 		UnallocatedTokens: Tokens{Input: 300, CachedInput: 240, Output: 60}, TotalTokens: 360}
 	if !reflect.DeepEqual(got, want) {
@@ -750,11 +751,102 @@ func testMixedServiceRecord(t *testing.T) Record {
 		finished := started.Add(time.Second)
 		call.FinishedAt, call.Tokens = &finished, spec.tokens
 		call.UsageCoverage, call.Complete = Coverage{Scope: "invocation"}, true
+		if spec.provider == "claude" {
+			amount := 1.25
+			call.EstimatedCostUSD = &amount
+			call.EstimatedCostComplete = true
+		}
 		if _, err := record.FinishCall(call); err != nil {
 			t.Fatal(err)
 		}
+		if spec.provider == "claude" {
+			*call.EstimatedCostUSD = 9.25
+			if *record.Calls[ordinal].EstimatedCostUSD != 1.25 {
+				t.Fatal("finished cost receipt retained caller-owned pointer")
+			}
+		}
 	}
 	return record
+}
+
+func TestEstimatedCostReceiptReplayAndValidation(t *testing.T) {
+	record := testMixedServiceRecord(t)
+	store := &Store{Dir: t.TempDir()}
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	loaded, found, err := store.Load(record.ID)
+	if err != nil || !found {
+		t.Fatalf("reload estimated-cost receipt: found=%t error=%v", found, err)
+	}
+	record = loaded
+	before := record.Calls[1]
+	replay := before
+	amount := *before.EstimatedCostUSD
+	replay.EstimatedCostUSD = &amount
+	if added, err := record.FinishCall(replay); err != nil || added {
+		t.Fatalf("identical estimated-cost receipt was not idempotent: added=%t error=%v", added, err)
+	}
+	other := before
+	changed := 2.5
+	other.EstimatedCostUSD = &changed
+	if _, err := record.FinishCall(other); err == nil || *record.Calls[1].EstimatedCostUSD != 1.25 {
+		t.Fatalf("conflicting estimate replaced the saved receipt: record=%+v error=%v", record, err)
+	}
+	other = before
+	other.EstimatedCostComplete = false
+	if _, err := record.FinishCall(other); err == nil || !record.Calls[1].EstimatedCostComplete {
+		t.Fatalf("conflicting cost coverage replaced the saved receipt: record=%+v error=%v", record, err)
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*Record)
+	}{
+		{"negative", func(r *Record) { amount := -1.0; r.Calls[1].EstimatedCostUSD = &amount }},
+		{"non-finite", func(r *Record) { amount := math.NaN(); r.Calls[1].EstimatedCostUSD = &amount }},
+		{"wrong provider", func(r *Record) { amount := 1.0; r.Calls[0].EstimatedCostUSD = &amount }},
+		{"complete without estimate", func(r *Record) { r.Calls[1].EstimatedCostUSD = nil }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			invalid := record
+			invalid.Calls = slices.Clone(record.Calls)
+			tc.edit(&invalid)
+			if err := (Store{Dir: t.TempDir()}).Save(invalid); err == nil {
+				t.Fatal("invalid cost claim was saved")
+			}
+		})
+	}
+}
+
+func TestEstimatedCostCoverageIndependentOfTokenCoverage(t *testing.T) {
+	record := testMixedServiceRecord(t)
+	record.Calls[1].EstimatedCostComplete = false // A later final result omitted cost after a known partial snapshot.
+	summaries, err := Summarize([]Record{record}, Filter{}, nil)
+	if err != nil || len(summaries) != 1 || summaries[0].EstimatedCostUSD != 1.25 ||
+		summaries[0].EstimatedCostKnownCalls != 1 || summaries[0].EstimatedCostUnknownCalls != 2 ||
+		summaries[0].IncompleteUsage != 0 {
+		t.Fatalf("partial cost was treated as complete with complete tokens: %+v, %v", summaries, err)
+	}
+	record = testMixedServiceRecord(t)
+	record.Calls[1].Complete = false // Native cost is complete even though tokens are only a known subset.
+	record.Calls[1].UsageCoverage = Coverage{Scope: "known_subset", PartialReport: true}
+	if err := record.reconcileCalls(); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err = Summarize([]Record{record}, Filter{}, nil)
+	if err != nil || len(summaries) != 1 || summaries[0].EstimatedCostKnownCalls != 1 ||
+		summaries[0].EstimatedCostUnknownCalls != 1 || summaries[0].IncompleteUsage != 1 {
+		t.Fatalf("complete cost was marked unknown with incomplete tokens: %+v, %v", summaries, err)
+	}
+}
+
+func TestLegacyEstimatedCostCoverageRejectsCallCountOverflow(t *testing.T) {
+	legacy := testRecord()
+	legacy.Status, legacy.CodexCalls, legacy.ClaudeCalls = "failed", math.MaxInt, 1
+	legacy.Tokens, legacy.UsageSource, legacy.UsageComplete = Tokens{}, "", false
+	if _, err := Summarize([]Record{legacy}, Filter{}, nil); err == nil {
+		t.Fatal("legacy call-count overflow entered estimated-cost coverage")
+	}
 }
 
 func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
@@ -774,6 +866,7 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 		t.Fatal(err)
 	}
 	if full.ActionCoverage != "unknown" || full.Totals.Attempts != 2 || full.Totals.UsageRecordedActions != 1 || full.Totals.TotalTokens != 265 ||
+		full.Totals.EstimatedCostUSD != 1.25 || full.Totals.EstimatedCostKnownCalls != 1 || full.Totals.EstimatedCostUnknownCalls != 2 ||
 		full.Totals.UnallocatedTokens != legacy.Tokens || len(full.Groups) != 3 {
 		t.Fatalf("grand totals or service groups: %+v", full)
 	}
@@ -792,6 +885,9 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 			group.UnallocatedTokens != expected.unallocated || group.CodexCalls != expected.codex || group.ClaudeCalls != expected.claude {
 			t.Fatalf("service group %q: %+v", group.Service, group)
 		}
+		if group.Service == "claude" && (group.EstimatedCostUSD != 1.25 || group.EstimatedCostKnownCalls != 1 || group.EstimatedCostUnknownCalls != 0) {
+			t.Fatalf("Claude cost estimate lost in service group: %+v", group)
+		}
 		delete(want, group.Service)
 	}
 	if len(want) != 0 {
@@ -799,6 +895,7 @@ func TestQueryPartitionsServicesAndKeepsActionsDistinct(t *testing.T) {
 	}
 	selected, err := store.Query(Filter{Service: "claude", RequesterID: 7}, nil, true)
 	if err != nil || selected.Totals.Attempts != 1 || selected.Totals.TotalTokens != 35 || selected.Totals.CodexCalls != 0 ||
+		selected.Totals.EstimatedCostUSD != 1.25 || selected.Totals.EstimatedCostKnownCalls != 1 || selected.Totals.EstimatedCostUnknownCalls != 0 ||
 		selected.Totals.ClaudeCalls != 1 || len(selected.Attempts) != 1 || selected.Attempts[0].Record.Tokens != mixed.Tokens ||
 		selected.Attempts[0].Usage.Tokens != (Tokens{Input: 30, Output: 5}) || selected.Attempts[0].Usage.Service != "claude" {
 		t.Fatalf("selected service projection: %+v, error=%v", selected, err)

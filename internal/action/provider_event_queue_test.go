@@ -119,6 +119,7 @@ func TestProviderEventQueueAcceptsCallBoundDiagnosticsAndFeedback(t *testing.T) 
 func TestProviderEventQueueRetainsPartialContentGapsWithoutCoverage(t *testing.T) {
 	for _, event := range []attemptRecord{
 		{Kind: attemptRecordDiscussion, Provider: "codex", EventSource: "codex.content_missing"},
+		{Kind: attemptRecordDiscussion, Provider: "claude", EventSource: "claude.content_missing"},
 		{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.content_missing"},
 		{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.assistant_incomplete", Text: "closed text"},
 		{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.tool_incomplete", Text: "closed tool result"},

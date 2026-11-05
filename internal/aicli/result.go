@@ -15,11 +15,13 @@ var ErrOutputLimit = errors.New("AI output limit exceeded")
 
 // Result contains the answer and accounted token usage from one invocation.
 type Result struct {
-	Answer        string
-	Tokens        usage.Tokens
-	UsageCoverage usage.Coverage
-	UsageComplete bool
-	Diagnostics   []ProviderDiagnostic
+	Answer                string
+	Tokens                usage.Tokens
+	EstimatedCostUSD      *float64 // Optional native USD estimate, never a billed charge.
+	EstimatedCostComplete bool
+	UsageCoverage         usage.Coverage
+	UsageComplete         bool
+	Diagnostics           []ProviderDiagnostic
 }
 
 // ProviderDiagnostic records a private native observation, not a completion verdict.
