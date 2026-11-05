@@ -19,8 +19,8 @@ import (
 )
 
 var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `<!doctype html>
-<html lang="en"><head>{{template "head.html" $}}<title>Minion account</title></head>
-<body data-bs-theme="dark"><main class="container py-4">
+<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion account</title></head>
+<body><main class="container py-4">
 {{if .Dot.Error}}<p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
 <h1>Signed in with {{.Dot.Provider}}</h1>
@@ -29,7 +29,7 @@ var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `<
 {{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button class="btn btn-primary">Link GitLab account</button></form>{{end}}
 {{if .Dot.Preferences}}<p><a href="/auth/preferences">Model preferences</a></p>{{end}}
 <p><a href="/auth/actions">My actions</a></p>
-<form method="post" action="/auth/logout"><button class="btn btn-outline-secondary">Sign out</button></form>
+<form method="post" action="/auth/logout"><button class="btn btn-outline-light">Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
 {{if .Dot.GitHub}}<p><a class="btn btn-primary" href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
@@ -38,8 +38,8 @@ var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `<
 </main>{{$.TailHTML}}</body></html>`))
 
 var userErrorHTML = template.Must(template.New("user error").Parse(headHTML + `<!doctype html>
-<html lang="en"><head>{{template "head.html" $}}<title>Minion request failed</title></head>
-<body data-bs-theme="dark"><main class="container py-4"><h1>Request failed</h1><p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>
+<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion request failed</title></head>
+<body><main class="container py-4"><h1>Request failed</h1><p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>
 {{if .Dot.RetryAfter}}<p role="status" class="alert alert-info">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
 
@@ -309,6 +309,9 @@ func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
 				if admin.rejectRotatedCookie(w, r) {
 					return
 				}
+				if r.URL.Path == "/auth/login" && admin.redirectClosedSession(w, r) {
+					return
+				}
 			}
 		}
 		a.mux.ServeHTTP(w, r)
@@ -319,7 +322,7 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	sess := a.jaws.GetSession(r)
 	account, provider := a.currentUser(sess)
-	if account == "" && len(sess.Requests()) >= maxGuestLoginRequests {
+	if account == "" && len(sess.Requests()) >= maxGuestPageRequests {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
@@ -351,7 +354,7 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *admi
 	sess := a.jaws.GetSession(r)
 	account, _ := a.currentUser(sess)
 	if account != "" {
-		admin.forgetRotatedCookie(sess)
+		admin.markSignedOutCookie(sess.CookieValue())
 		sess.Close()
 	}
 	a.linkMu.Unlock()

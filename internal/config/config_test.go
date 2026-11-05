@@ -40,7 +40,7 @@ func TestUserModelChoicesBoundPreferencesAndTrustedDefaults(t *testing.T) {
 		Codex:        CodexConfig{Model: "default-main", ReasoningEffort: "medium"},
 		Claude:       ClaudeConfig{Model: "default-critic", Effort: "low"},
 		MainSettings: RoleModelConfig{Model: "operator-main"},
-		Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+		Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost:8377/auth/github/callback"},
 			UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{low}, Critic: []RoleModelConfig{medium}}},
 		Commands: map[string]CommandMapping{}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
 	if err := cfg.Validate(t.TempDir()); err != nil {
@@ -76,7 +76,7 @@ func TestUserModelChoicesValidateExactPairs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{},
 				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
-				Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+				Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost:8377/auth/github/callback"},
 					UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{valid}}}}
 			tc.edit(&cfg)
 			if err := cfg.Validate(t.TempDir()); err == nil {

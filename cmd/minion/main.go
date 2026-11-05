@@ -147,7 +147,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
 	}
 	store, err = state.Open(cfg.StatePath, initial)
-	if errors.Is(err, state.ErrLocked) && !loop && !*check {
+	if errors.Is(err, state.ErrLocked) && *oneshot && !*check {
 		logger.Printf("another run is active; skipping this cron pass")
 		return 0
 	}
@@ -280,7 +280,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if failedPreflight {
 			return 1
 		}
-		if code != 0 || !loop || ctx.Err() != nil {
+		if code != 0 || *oneshot || ctx.Err() != nil {
 			return code
 		}
 		cfg = watcher.Config

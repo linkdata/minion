@@ -152,19 +152,19 @@ func (g *userUsageGate) takeGitHubCall(ctx context.Context, account string) bool
 const usageEstimatedCostTemplate = `{{define "estimatedCost"}}{{if .EstimatedCostKnownCalls}}USD {{printf "%.15g" .EstimatedCostUSD}} {{if .EstimatedCostUnknownCalls}}known estimated subtotal{{else}}reported estimated total{{end}}{{else}}Unknown{{end}}{{if or .EstimatedCostKnownCalls .EstimatedCostUnknownCalls}} (calls with any reported amount: {{.EstimatedCostKnownCalls}}; calls with missing or incomplete estimates: {{.EstimatedCostUnknownCalls}}{{if and .EstimatedCostKnownCalls .EstimatedCostUnknownCalls}}; counts may overlap{{end}}){{end}}{{end}}`
 
 var userUsageHTML = template.Must(template.New("user usage").Parse(headHTML + usageEstimatedCostTemplate + `<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
   {{template "head.html" $}}<title>Your usage · Minion</title>
 </head>
-<body data-bs-theme="dark">{{with .Dot}}
+<body>{{with .Dot}}
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
-    <div><strong>MINION</strong><span class="text-secondary"> / your usage</span></div>
+    <div><strong>MINION</strong><span class="text-body-secondary"> / your usage</span></div>
     <nav><a href="/auth/login">Account</a></nav>
-    <form method="post" action="/auth/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form>
+    <form class="ms-auto" method="post" action="/auth/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
   </header>
   <main class="container-fluid py-4">
     <div class="border-bottom mb-4">
-      <p class="text-secondary small fw-semibold">ACCOUNTING</p><h1>Your usage</h1>
+      <p class="text-body-secondary small fw-semibold">ACCOUNTING</p><h1>Your usage</h1>
       <p>Totals include usage from your linked GitHub identity. Repository filters affect the table only.</p>
     </div>
     <div class="row row-cols-1 row-cols-md-2 g-3 mb-3">
@@ -185,7 +185,7 @@ var userUsageHTML = template.Must(template.New("user usage").Parse(headHTML + us
       <dt>Estimated cost and currency</dt><dd>{{template "estimatedCost" .Total}}</dd>
       <dt>Billed cost and currency</dt><dd>Unknown</dd>
     </dl></section>
-    <p class="text-secondary small">Reported tokens are input plus output. Cache creation and cached input are included in input tokens; unallocated tokens are included in the reported total but lack call attribution. Token counts and Claude CLI USD estimates are executor-reported claims, not verified billing. They include captured main, critic, and helper usage. Call checkpoints can precede provider invocation. Estimated cost is a known subtotal when any call lacks a complete estimate. Incomplete attempts can omit unknown amounts; actions without usage records and records without a stable requester ID are excluded.</p>
+    <p class="text-body-secondary small">Reported tokens are input plus output. Cache creation and cached input are included in input tokens; unallocated tokens are included in the reported total but lack call attribution. Token counts and Claude CLI USD estimates are executor-reported claims, not verified billing. They include captured main, critic, and helper usage. Call checkpoints can precede provider invocation. Estimated cost is a known subtotal when any call lacks a complete estimate. Incomplete attempts can omit unknown amounts; actions without usage records and records without a stable requester ID are excluded.</p>
     <form class="d-flex flex-wrap align-items-end gap-3 mb-4" method="get" action="/user/usage">
       <label class="d-grid gap-1">Repository<input class="form-control" name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
       <button class="btn btn-primary" type="submit">Filter repositories</button>
@@ -205,7 +205,7 @@ var userUsageHTML = template.Must(template.New("user usage").Parse(headHTML + us
       {{if .ContinueURL}}<a href="{{.ContinueURL}}">Continue checking repositories</a>{{end}}
       {{if .RetryURL}}<a href="{{.RetryURL}}">Recheck from this position</a>{{end}}
     </section>
-    <p class="text-secondary small">Repository rows require current access and verified repository identity. Records without a stable repository ID appear only in your total. Your total remains available if repository access is lost. Totals use a short-lived snapshot and may lag recently saved usage. Continue and Recheck use positions; new usage or account-link changes can repeat or skip rows. Start over after changing linked accounts and for the latest view. Action coverage beyond saved usage records is unknown.</p>
+    <p class="text-body-secondary small">Repository rows require current access and verified repository identity. Records without a stable repository ID appear only in your total. Your total remains available if repository access is lost. Totals use a short-lived snapshot and may lag recently saved usage. Continue and Recheck use positions; new usage or account-link changes can repeat or skip rows. Start over after changing linked accounts and for the latest view. Action coverage beyond saved usage records is unknown.</p>
   </main>{{end}}{{$.TailHTML}}
 </body>
 </html>`))

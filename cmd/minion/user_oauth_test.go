@@ -233,15 +233,23 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if denied := adminResponse(handler, http.MethodGet, "/jaws/"+adminJaWSKey(t, signedPage.Body.String()), nil, signed, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("closed session retained JaWS page: %d", denied.Code)
 	}
-	if home := adminResponse(handler, http.MethodGet, "/", nil, signed, ""); home.Code != http.StatusOK ||
-		!strings.Contains(home.Body.String(), `href="/auth/login"`) || strings.Contains(home.Body.String(), "Signed in with github") {
-		t.Fatalf("OAuth home after logout: status=%d body=%q", home.Code, home.Body.String())
+	if usageReload := adminResponse(handler, http.MethodGet, "/user/usage", nil, signed, ""); usageReload.Code != http.StatusSeeOther || !strings.HasPrefix(usageReload.Header().Get("Location"), "/auth/login") {
+		t.Fatalf("closed user page reload: status=%d location=%q", usageReload.Code, usageReload.Header().Get("Location"))
+	} else if loginReload := adminResponse(handler, http.MethodGet, usageReload.Header().Get("Location"), nil, signed, ""); loginReload.Code != http.StatusSeeOther || loginReload.Header().Get("Location") != "/" {
+		t.Fatalf("closed user page sign-in detour: status=%d location=%q", loginReload.Code, loginReload.Header().Get("Location"))
 	}
-	reopened := adminResponse(handler, http.MethodGet, "/auth/login", nil, signed, "")
+	if reload := adminResponse(handler, http.MethodGet, "/auth/login", nil, signed, ""); reload.Code != http.StatusSeeOther ||
+		reload.Header().Get("Location") != "/" || len(reload.Result().Cookies()) != 0 {
+		t.Fatalf("closed OAuth page reload: status=%d location=%q cookies=%v", reload.Code, reload.Header().Get("Location"), reload.Result().Cookies())
+	}
+	reopened := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
 	if reopened.Code != http.StatusOK || len(reopened.Result().Cookies()) != 1 ||
 		reopened.Result().Cookies()[0].Value == signed.Value ||
-		!strings.Contains(reopened.Body.String(), "Sign in with GitHub") {
-		t.Fatalf("guest page after logout: status=%d cookies=%v body=%q", reopened.Code, reopened.Result().Cookies(), reopened.Body.String())
+		!strings.Contains(reopened.Body.String(), `href="/auth/login"`) || strings.Contains(reopened.Body.String(), "Signed in with github") {
+		t.Fatalf("guest home after logout: status=%d cookies=%v body=%q", reopened.Code, reopened.Result().Cookies(), reopened.Body.String())
+	}
+	if loginPage := adminResponse(handler, http.MethodGet, "/auth/login", nil, reopened.Result().Cookies()[0], ""); loginPage.Code != http.StatusOK || !strings.Contains(loginPage.Body.String(), "Sign in with GitHub") {
+		t.Fatalf("guest OAuth login after logout: status=%d body=%q", loginPage.Code, loginPage.Body.String())
 	}
 	if denied := adminResponse(handler, http.MethodPost, "/auth/logout", nil, reopened.Result().Cookies()[0], "https://admin.example"); denied.Code != http.StatusSeeOther || denied.Header().Get("Location") != "/auth/login?error=request" || denied.Body.Len() != 0 {
 		t.Fatalf("guest logout error: status=%d body=%q", denied.Code, denied.Body.String())
@@ -388,7 +396,7 @@ func TestOAuthGuestErrorsLeaveLoginRequestSlot(t *testing.T) {
 		t.Fatalf("guest page: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
 	guest := page.Result().Cookies()[0]
-	for i := range maxGuestLoginRequests + 1 {
+	for i := range maxGuestPageRequests + 1 {
 		failed := adminResponse(handler, http.MethodGet, "/auth/github/callback?state=wrong", nil, guest, "")
 		if failed.Code != http.StatusSeeOther || failed.Header().Get("Location") != "/auth/login?error=request" || failed.Body.Len() != 0 {
 			t.Fatalf("guest callback error %d: status=%d location=%q body=%q", i, failed.Code, failed.Header().Get("Location"), failed.Body.String())

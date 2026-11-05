@@ -146,7 +146,7 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	}
 	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 	body := view.Body.String()
-	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl class="text-break">`, `<textarea class="form-control font-monospace"`, "\nsecond line"} {
+	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl class="text-break">`, `<textarea class="form-control font-monospace"`, `aria-label="Received report 0:`, `aria-label="Worker diagnostic 0:`, "\nsecond line"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q: %s", want, body)
 		}

@@ -18,21 +18,21 @@ import (
 var adminDashboardDirty = new(int)
 
 const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
   {{template "head.html" $}}<title>Minion admin</title>
 </head>
-<body data-bs-theme="dark">
+<body>
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
-    <div><strong>MINION</strong><span class="text-secondary"> / operator</span></div>
+    <div><strong>MINION</strong><span class="text-body-secondary"> / operator</span></div>
     <nav><a href="/admin/usage">Usage</a></nav>
-    <form method="post" action="/admin/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form>
+    <form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
   </header>
   <main class="container-fluid py-4">
-    <div class="border-bottom mb-4"><div>
-      <p class="text-secondary small fw-semibold">ORCHESTRATOR</p><h1>Live actions</h1>
-      <p class="text-secondary">Worker and action state is checked every two seconds while this page is connected.</p>
-    </div></div>
+    <div class="border-bottom mb-4">
+      <p class="text-body-secondary small fw-semibold">ORCHESTRATOR</p><h1>Live actions</h1>
+      <p class="text-body-secondary">Worker and action state is checked every two seconds while this page is connected.</p>
+    </div>
     <form class="d-flex flex-wrap align-items-end gap-3 mb-4" method="get" action="/">
       <label class="d-grid gap-1">Repository<input class="form-control" name="repo" value="{{.Dot.Filter.Repo}}" maxlength="201" placeholder="owner/repo"></label>
       <label class="d-grid gap-1">Requester<input class="form-control" name="requester" value="{{.Dot.Filter.Requester}}" maxlength="105" placeholder="login"></label>
@@ -48,7 +48,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
     {{$.Template "p" "dashboard-status" .Dot "role=status aria-live=polite class=visually-hidden"}}
     {{$.Template "p" "dashboard-stop-status" .Dot "role=status aria-live=polite class=visually-hidden"}}
     {{$.Template "section" "dashboard-live" .Dot}}
-    {{$.Template "section" "dashboard-action" .Dot "class=\"border rounded p-3 mb-3 overflow-auto\" tabindex=\"0\""}}
+    {{$.Template "section" "dashboard-action" .Dot "class=\"border rounded p-3 mb-3 overflow-auto\" tabindex=\"0\" aria-label=\"Current action\""}}
     {{$.Template "div" "dashboard-stop-control" .Dot}}
   </main>{{$.TailHTML}}
 </body>
@@ -59,9 +59,9 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 {{if .Unavailable}}<p role="alert" class="alert alert-danger">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="row row-cols-1 row-cols-md-2 g-3 mb-3">
   <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Tracked accepted actions</h2><p class="display-6 font-monospace">{{.Snapshot.TrackedAccepted}}</p>
-    <small class="text-secondary">Counted since this dashboard counter was introduced.</small></article></div>
+    <small class="text-body-secondary">Counted since this dashboard counter was introduced.</small></article></div>
   <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">In progress</h2><p class="display-6 font-monospace">{{.Snapshot.InProgress}}</p>
-    <small class="text-secondary">Includes preparation through publication and terminal cleanup.</small></article></div>
+    <small class="text-body-secondary">Includes preparation through publication and terminal cleanup.</small></article></div>
 </div>
 <div class="row row-cols-1 row-cols-xl-2 g-3 mb-3">
   <div class="col"><section class="h-100 border rounded p-3"><h2 class="h5">Selected worker</h2><dl>
@@ -75,11 +75,11 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   <div class="col"><section class="h-100 border rounded p-3"><h2 class="h5">Configured limits</h2><dl>
     <dt>Hard action runtime</dt><dd>{{.Snapshot.MaxRuntime}}</dd>
     <dt>Executor inactivity</dt><dd>{{.Snapshot.InactivityTimeout}}</dd>
-  </dl><p class="text-secondary small">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section></div>
+  </dl><p class="text-body-secondary small">A worker status records contact; it does not reset the inactivity limit or prove readiness.</p></section></div>
 </div>
 {{if .Snapshot.LastStop}}<section class="border rounded p-3 mb-3"><h2 class="h5">Latest stop request</h2>
   <p><strong>{{.Snapshot.LastStop.Status}}</strong> · {{.Snapshot.LastStop.JobID}} / attempt {{.Snapshot.LastStop.AttemptID}}</p>
-  <p class="text-secondary small">Requested by {{.Snapshot.LastStop.RequestedBy}} at {{utc .Snapshot.LastStop.RequestedAt}}.
+  <p class="text-body-secondary small">Requested by {{.Snapshot.LastStop.RequestedBy}} at {{utc .Snapshot.LastStop.RequestedAt}}.
   {{if eq .Snapshot.LastStop.Status "requested"}}Waiting for the stop to be verified.{{else if eq .Snapshot.LastStop.Status "confirmed"}}The attempt stopped cleanly.{{else}}The stop could not be verified; inspect worker readiness before reuse.{{end}}</p>
 </section>{{end}}
 {{end}}{{end}}{{else}}<p role="alert" class="alert alert-warning">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}
@@ -92,7 +92,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
   </tr></thead><tbody><tr>
     <td>{{.Action.Repository}}</td><td>{{.Action.Requester}}</td><td>{{.Action.Action}}</td>
     <td>{{.Action.Phase}}</td><td>{{utc .Action.AcceptedAt}}</td><td>{{utc .Action.Deadline}}</td>
-  </tr></tbody></table><p class="text-secondary small"><a href="/admin/actions/{{.Action.AttemptID}}">Open attempt {{.Action.AttemptID}} details</a></p>
+  </tr></tbody></table><p class="text-body-secondary small"><a href="/admin/actions/{{.Action.AttemptID}}">Open attempt {{.Action.AttemptID}} details</a></p>
   {{else if .Snapshot.InProgress}}<p>No current action matches these filters.</p>
   {{else}}<p>No action is in progress.</p>{{end}}
 {{end}}{{end}}{{else}}<p role="alert" class="alert alert-warning">Admin session ended. Sign in again to see live state.</p>{{end}}{{end}}

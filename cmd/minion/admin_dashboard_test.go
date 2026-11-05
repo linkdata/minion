@@ -286,7 +286,7 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 		matching.Header().Get("Content-Security-Policy") == "" || !strings.Contains(matching.Body.String(), "<td>owner/repo</td>") ||
 		!strings.Contains(matching.Body.String(), "role=status aria-live=polite class=visually-hidden") ||
 		!strings.Contains(matching.Body.String(), acceptedMetric) || !strings.Contains(matching.Body.String(), inProgressMetric) ||
-		!strings.Contains(matching.Body.String(), `tabindex="0"`) ||
+		!strings.Contains(matching.Body.String(), `tabindex="0" aria-label="Current action"`) ||
 		!strings.Contains(matching.Body.String(), "<dt>Hard action runtime</dt><dd>7m0s</dd>") ||
 		!strings.Contains(matching.Body.String(), "<dt>Executor inactivity</dt><dd>1m0s</dd>") {
 		t.Fatalf("matching dashboard: status=%d body=%s", matching.Code, matching.Body.String())

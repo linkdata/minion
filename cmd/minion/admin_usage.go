@@ -18,19 +18,19 @@ import (
 )
 
 var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + usageEstimatedCostTemplate + `<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
 <head>
   {{template "head.html" $}}<title>Usage · Minion admin</title>
 </head>
-<body data-bs-theme="dark">{{with .Dot}}
+<body>{{with .Dot}}
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
-    <div><strong>MINION</strong><span class="text-secondary"> / usage</span></div>
+    <div><strong>MINION</strong><span class="text-body-secondary"> / usage</span></div>
     <nav><a href="/">Live actions</a></nav>
-    <form method="post" action="/admin/logout"><button class="btn btn-outline-secondary" type="submit">Sign out</button></form>
+    <form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
   </header>
   <main class="container-fluid py-4">
     <div class="border-bottom mb-4">
-      <p class="text-secondary small fw-semibold">ACCOUNTING</p><h1>Usage and billing</h1>
+      <p class="text-body-secondary small fw-semibold">ACCOUNTING</p><h1>Usage and billing</h1>
       <p>Date filters use attempt start times in UTC. The To boundary is exclusive.</p>
     </div>
     <form class="d-flex flex-wrap align-items-end gap-3 mb-4" method="get" action="/admin/usage">
@@ -71,7 +71,7 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + 
         <td>{{template "estimatedCost" .}}</td>
       </tr>{{end}}</tbody></table>{{else}}<p>No usage records match these filters.</p>{{end}}
     </section>
-    <p class="text-secondary small">Action coverage: {{.Report.ActionCoverage}}.
+    <p class="text-body-secondary small">Action coverage: {{.Report.ActionCoverage}}.
       Actions without usage files are excluded.
       Repository and requester ID filters exclude older usage records without the corresponding numeric IDs.
       Tokens and USD estimates are executor-reported; incomplete usage can omit unknown amounts.

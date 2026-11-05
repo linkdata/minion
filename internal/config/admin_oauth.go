@@ -3,7 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net/netip"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -28,10 +28,25 @@ func (a *AdminConfig) validateOAuth() error {
 		redirect, err := url.Parse(client.RedirectURL)
 		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != entry.callbackPath ||
 			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
-			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
+			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or localhost HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
 		}
 		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
 			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
+		}
+		if redirect.Scheme == "http" {
+			listen := a.Listen
+			if listen == "" {
+				listen = DefaultAdminListen
+			}
+			_, port, err := net.SplitHostPort(listen)
+			listenPort, listenErr := strconv.Atoi(port)
+			redirectPort := 80
+			if redirect.Port() != "" {
+				redirectPort, _ = strconv.Atoi(redirect.Port()) // validOAuthOrigin checked the port.
+			}
+			if err == nil && listenErr == nil && listenPort != redirectPort {
+				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
+			}
 		}
 		if entry.name == "github_oauth" {
 			if client.BaseURL != "" {
@@ -80,6 +95,5 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if u.Scheme != "http" || !allowLoopbackHTTP {
 		return false
 	}
-	addr, err := netip.ParseAddr(host)
-	return err == nil && addr.Unmap().IsLoopback()
+	return strings.EqualFold(host, "localhost")
 }

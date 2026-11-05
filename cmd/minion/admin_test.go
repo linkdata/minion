@@ -175,7 +175,7 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	choice := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
 	criticChoice := config.RoleModelConfig{Model: "approved-critic", Effort: "high"}
 	cfg := config.AdminConfig{Listen: "127.0.0.1:0",
-		GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
+		GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/auth/github/callback"},
 		UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}, Critic: []config.RoleModelConfig{criticChoice}}}
 	admin, err := startAdminServer(t.Context(), cfg, nil, statePath, nil)
 	if err != nil {
@@ -192,6 +192,11 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
 	if err != nil || admin.entryURL != "http://localhost:"+port {
 		t.Fatalf("OAuth home URL = %q, port=%q: %v", admin.entryURL, port, err)
+	}
+	entry, err := url.Parse(admin.entryURL)
+	redirect, redirectErr := url.Parse(cfg.GitHubOAuth.RedirectURL)
+	if err != nil || redirectErr != nil || entry.Hostname() != redirect.Hostname() {
+		t.Fatalf("OAuth callback %q does not match webserv URL %q: %v, %v", cfg.GitHubOAuth.RedirectURL, admin.entryURL, err, redirectErr)
 	}
 	base := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -342,7 +347,7 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = store.Close() })
 				admin := &config.AdminConfig{Listen: "127.0.0.1:0",
-					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"}}
+					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/auth/github/callback"}}
 				choice := config.RoleModelConfig{Model: "approved", Effort: "low"}
 				if enabled {
 					admin.UserModelChoices = &config.UserModelChoices{Main: []config.RoleModelConfig{choice}}
@@ -374,11 +379,18 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 }
 
 func TestFallbackTLSListenURL(t *testing.T) {
-	certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"admin.example"}}}
-	for _, test := range []struct{ address, listenURL, want string }{
-		{"127.0.0.1:8080", "http://localhost:8080", "https://admin.example:8080"},
-		{"192.0.2.8:8080", "http://192.0.2.8:8080", "https://192.0.2.8:8080"},
+	for _, test := range []struct {
+		address, listenURL, want string
+		certificateNames         []string
+	}{
+		{"127.0.0.1:8080", "http://localhost:8080", "https://admin.example:8080", []string{"admin.example"}},
+		{"192.0.2.8:8080", "http://192.0.2.8:8080", "https://192.0.2.8:8080", []string{"admin.example"}},
+		{"0.0.0.0:8080", "http://localhost:8080", "https://admin.example:8080", []string{"admin.example"}},
+		{"[::1]:8080", "http://localhost:8080", "https://admin.example:8080", []string{"admin.example"}},
+		{"127.0.0.1:8080", "http://localhost:8080", "https://localhost:8080", nil},
+		{"127.0.0.1:8080", "http://localhost:8080", "https://localhost:8080", []string{"*.example"}},
 	} {
+		certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: test.certificateNames}}
 		if got := fallbackTLSListenURL(test.listenURL, test.address, certificate); got != test.want {
 			t.Errorf("fallback URL for %s = %q, want %q", test.address, got, test.want)
 		}

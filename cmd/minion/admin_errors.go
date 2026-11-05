@@ -9,14 +9,13 @@ import (
 )
 
 var adminNoticeHTML = template.Must(template.New("admin notice").Parse(headHTML + `<!doctype html>
-<html lang="en"><head>{{template "head.html" $}}<title>Minion admin request error</title></head>
-<body data-bs-theme="dark"><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
-{{if .Auth.IsAdmin}}<a href="/">Dashboard</a>{{else if .Dot.AdminLogin}}<a href="/admin/login">Sign in</a>{{end}}
+<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion admin request error</title></head>
+<body><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
+<a href="/">Home</a>
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminNoticeView struct {
-	Status     string
-	AdminLogin bool
+	Status string
 }
 
 func adminBrowserRoute(r *http.Request) bool {
@@ -107,13 +106,22 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		defer a.sessionAdmissionMu.Unlock()
 		sess := a.jaws.GetSession(r)
 		// Leave one request slot for a guest to return to the sign-in page.
-		if sess == nil || (a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestLoginRequests-1) {
+		if sess == nil {
+			if a.signedOutCookie(r) && r.Method == http.MethodGet && r.URL.Path != "/" && capture.status == http.StatusForbidden {
+				w.Header().Set("Location", "/")
+				w.WriteHeader(http.StatusSeeOther)
+				return
+			}
+			w.WriteHeader(capture.status)
+			return
+		}
+		if a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests-1 {
 			w.WriteHeader(capture.status)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), AdminLogin: len(a.accounts) != 0}).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status)}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)

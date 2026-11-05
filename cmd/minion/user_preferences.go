@@ -14,8 +14,8 @@ import (
 )
 
 var userPreferencesHTML = template.Must(template.New("user preferences").Parse(headHTML + `<!doctype html>
-<html lang="en"><head>{{template "head.html" $}}<title>Model preferences</title></head>
-<body data-bs-theme="dark"><main class="container py-4"><h1>Model preferences</h1>
+<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Model preferences</title></head>
+<body><main class="container py-4"><h1>Model preferences</h1>
 {{range .Dot.Notices}}<p role="status" class="alert alert-info">{{.}}</p>{{end}}
 {{if .Dot.Fields}}
 <p>Choose administrator-approved settings for future actions.</p>
