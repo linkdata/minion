@@ -26,6 +26,7 @@ const userUsageAccountBurst = 128
 const userUsageAccountInterval = 10 * time.Second
 const userUsagePageSize = 4
 const userUsagePageCallLimit = 30
+const userAPIChecksInFlight = 4
 
 // Four-call reserve for one uncached linked identity granting private access:
 // repository by ID, user by ID, permission, repository by name for ID recheck.
@@ -39,6 +40,7 @@ type userUsageAccountBudget struct {
 
 type userUsageGate struct {
 	reports             chan struct{}
+	checks              chan struct{}
 	scanMu              sync.Mutex
 	mu                  sync.Mutex
 	records             []usage.Record
@@ -55,9 +57,28 @@ type userUsageGate struct {
 
 func newUserUsageGate() *userUsageGate {
 	return &userUsageGate{reports: make(chan struct{}, 2),
+		checks:    make(chan struct{}, userAPIChecksInFlight),
 		apiTokens: userUsageAPIBurst, apiBurst: userUsageAPIBurst,
 		accounts: make(map[string]userUsageAccountBudget), accountBurst: userUsageAccountBurst,
 		verificationTimeout: 8 * time.Second}
+}
+
+func (g *userUsageGate) enter(ctx context.Context) bool {
+	if g == nil || ctx.Err() != nil {
+		return false
+	}
+	select {
+	case g.checks <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (g *userUsageGate) leave() { <-g.checks }
+
+func (g *userUsageGate) take(ctx context.Context, requesterID int64) bool {
+	return g != nil && requesterID > 0 && g.takeGitHubCall(ctx, strconv.FormatInt(requesterID, 10))
 }
 
 func (g *userUsageGate) read(dir string) ([]usage.Record, error) {
@@ -104,13 +125,17 @@ func (g *userUsageGate) gitHubCallBudget(ctx context.Context, account string, ne
 		budget.refillAt = budget.refillAt.Add(time.Duration(elapsed) * userUsageAccountInterval)
 	}
 	budget.lastUsed = now
-	g.accounts[account] = budget
 	if g.apiTokens < need || budget.tokens < need {
+		if ok {
+			g.accounts[account] = budget
+		}
 		return false
 	}
 	if debit {
 		g.apiTokens--
 		budget.tokens--
+		g.accounts[account] = budget
+	} else if ok {
 		g.accounts[account] = budget
 	}
 	return true
@@ -308,6 +333,11 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 		if len(totals) != 0 {
 			page.Total = totals[0]
 		}
+		if !a.usageGate.enter(r.Context()) {
+			a.browserError(w, r, http.StatusServiceUnavailable)
+			return
+		}
+		defer a.usageGate.leave()
 		verifyCtx, cancel := context.WithTimeout(r.Context(), a.usageGate.verificationTimeout)
 		defer cancel()
 		var keyed []usage.Summary
@@ -317,6 +347,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			}
 		}
 		calls := 0
+		apiAccount := strconv.FormatInt(githubID, 10)
 		index := min(after, len(keyed))
 		for index < len(keyed) && len(page.Repositories) < userUsagePageSize {
 			if verifyCtx.Err() != nil {
@@ -329,7 +360,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			if calls+userUsageMinPrivateCalls > userUsagePageCallLimit {
 				break
 			}
-			if !a.usageGate.readyGitHubCalls(verifyCtx, account, userUsageMinPrivateCalls) {
+			if !a.usageGate.readyGitHubCalls(verifyCtx, apiAccount, userUsageMinPrivateCalls) {
 				page.VerificationUnavailable = true
 				if page.RetryURL == "" {
 					page.RetryURL = userUsageContinueURL(repo, index)
@@ -337,7 +368,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 				break
 			}
 			group := keyed[index]
-			check := userUsageRepositoryAllowed(verifyCtx, owner, group.RepositoryID, githubID, &currentLogin, a.usageGate, account, &calls)
+			check := userUsageRepositoryAllowed(verifyCtx, owner, group.RepositoryID, githubID, &currentLogin, a.usageGate, apiAccount, &calls)
 			page.VerificationUnavailable = page.VerificationUnavailable || check.unavailable
 			if check.unavailable {
 				if page.RetryURL == "" {

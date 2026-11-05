@@ -59,6 +59,7 @@ type loginWindow struct {
 type adminAccess struct {
 	jaws               *jaws.Jaws
 	oauth              *oauthAccess
+	actionAccess       *userActionAccess
 	accounts           map[string]config.AdminAccount
 	dummy              config.AdminAccount
 	mu                 sync.Mutex
@@ -133,6 +134,12 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.HandleFunc("GET /admin/dashboard.css", serveAdminDashboardCSS)
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
+	if oauth != nil && owner != nil {
+		access.actionAccess = &userActionAccess{oauth: oauth, owner: owner}
+		if err := oauth.actionRoutes(access.actionAccess); err != nil {
+			return nil, err
+		}
+	}
 	oauth.routes(mux)
 	if oauth != nil {
 		mux.Handle("GET /user/usage", oauth.usageHandler(owner))
@@ -275,6 +282,11 @@ func (a *adminAccess) ownsJaWSRequest(r *http.Request) bool {
 	}
 	for _, rq := range a.jaws.GetSession(r).Requests() {
 		if rq.JawsKeyString() == key {
+			if initial := rq.Initial(); initial != nil && initial.Context().Value(userErrorPageKey{}) == true {
+				return true
+			} else if initial != nil && strings.HasPrefix(initial.URL.Path, "/auth/actions") {
+				return a.actionAccess != nil && a.actionAccess.authorizeJaWSRequest(r.Context(), a.jaws.GetSession(r), initial)
+			}
 			return true
 		}
 	}

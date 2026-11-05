@@ -31,7 +31,9 @@ type DashboardDetailEntry struct {
 // DashboardDetail projects only existing saved state and private attempt records.
 type DashboardDetail struct {
 	JobID, AttemptID, Repository, Requester, Action    string
+	Summary                                            state.AcceptedSummary
 	Outcome, Publication, PushPublication              string
+	Progress                                           string
 	Deadline                                           time.Time
 	Remaining                                          time.Duration
 	Records                                            []DashboardDetailEntry
@@ -45,6 +47,18 @@ type DashboardDetail struct {
 // DashboardActionDetail resolves the selected attempt or a retained terminal decision.
 // The HTTP caller enforces administrator authorization before calling it.
 func (e *Orchestrator) DashboardActionDetail(attemptID string, now time.Time) (DashboardDetail, bool, error) {
+	return e.dashboardActionDetail(attemptID, now, nil)
+}
+
+// UserActionDetail binds the private read to the identity authorized by its HTTP caller.
+func (e *Orchestrator) UserActionDetail(attemptID string, now time.Time, authorized state.AcceptedSummary) (DashboardDetail, bool, error) {
+	if authorized == (state.AcceptedSummary{}) {
+		return DashboardDetail{}, false, errors.New("missing authorized action identity")
+	}
+	return e.dashboardActionDetail(attemptID, now, &authorized)
+}
+
+func (e *Orchestrator) dashboardActionDetail(attemptID string, now time.Time, authorized *state.AcceptedSummary) (DashboardDetail, bool, error) {
 	if e == nil || e.Store == nil {
 		return DashboardDetail{}, false, errors.New("dashboard state is unavailable")
 	}
@@ -73,6 +87,17 @@ func (e *Orchestrator) DashboardActionDetail(attemptID string, now time.Time) (D
 		}
 		jobID, decision = id, saved
 	}
+	var retry state.RetryAction
+	var retryDeadline time.Time
+	for id, failure := range data.JobFailures {
+		if failure.RetryAction.AttemptID != attemptID {
+			continue
+		}
+		if jobID != "" && jobID != id {
+			return DashboardDetail{}, false, errors.New("ambiguous saved attempt")
+		}
+		jobID, retry, retryDeadline = id, failure.RetryAction, failure.Deadline
+	}
 	if jobID == "" {
 		return DashboardDetail{}, false, nil
 	}
@@ -80,6 +105,7 @@ func (e *Orchestrator) DashboardActionDetail(attemptID string, now time.Time) (D
 		Publication: "No confirmed publication checkpoint"}
 	if accepted != nil {
 		detail.Repository, detail.Requester, detail.Action = accepted.Repository, accepted.Requester, accepted.Action
+		detail.Summary = accepted.HistorySummary()
 		detail.Deadline = accepted.Deadline
 		if !accepted.Terminal {
 			detail.Remaining = max(0, accepted.Deadline.Sub(now))
@@ -91,6 +117,24 @@ func (e *Orchestrator) DashboardActionDetail(attemptID string, now time.Time) (D
 		detail.Outcome = decision.Outcome
 		if accepted == nil {
 			detail.Deadline = decision.Deadline
+			if decision.Summary != (state.AcceptedSummary{}) {
+				detail.Repository, detail.Requester, detail.Action = decision.Summary.Repository, decision.Summary.Requester, decision.Summary.Action
+				detail.Summary = decision.Summary
+			}
+		}
+	}
+	if retry != (state.RetryAction{}) && decision.AttemptID == "" && accepted == nil {
+		detail.Outcome, detail.Deadline, detail.Summary = "Retry pending", retryDeadline, retry.Summary
+		detail.Remaining = max(0, retryDeadline.Sub(now))
+		detail.Repository, detail.Requester, detail.Action = retry.Summary.Repository, retry.Summary.Requester, retry.Summary.Action
+	}
+	if authorized != nil && detail.Summary != *authorized {
+		return DashboardDetail{}, false, errors.New("authorized action identity changed")
+	}
+	if accepted != nil && !accepted.Terminal && decision.AttemptID == "" {
+		if snapshot, err := e.DashboardSnapshot(now); err == nil && snapshot.Action != nil &&
+			snapshot.Action.JobID == jobID && snapshot.Action.AttemptID == attemptID {
+			detail.Progress = snapshot.Action.Phase
 		}
 	}
 	if write := data.PublicationWrites[jobID]; write.AttemptID == attemptID {
@@ -104,9 +148,13 @@ func (e *Orchestrator) DashboardActionDetail(attemptID string, now time.Time) (D
 		workRoot = ""
 	}
 	sourceRef := ""
-	detail.readRecords(workRoot, accepted, &sourceRef)
-	detail.readReview(workRoot, accepted, &sourceRef)
-	detail.readWorker(workRoot, accepted, &sourceRef)
+	var summary *state.AcceptedSummary
+	if detail.Summary != (state.AcceptedSummary{}) {
+		summary = &detail.Summary
+	}
+	detail.readRecords(workRoot, summary, &sourceRef)
+	detail.readReview(workRoot, summary, &sourceRef)
+	detail.readWorker(workRoot, summary, &sourceRef)
 	return detail, true, nil
 }
 
@@ -141,11 +189,12 @@ func readDetailFile(workRoot, directory, name string) ([]byte, string) {
 	return nil, "Saved record unavailable or invalid"
 }
 
-func (d *DashboardDetail) matches(id Identity, source string, accepted *state.AcceptedAction, sourceRef *string) bool {
+func (d *DashboardDetail) matches(id Identity, source string, summary *state.AcceptedSummary, sourceRef *string) bool {
 	if id.validate() != nil || id.JobID != d.JobID || id.AttemptID != d.AttemptID || !workspace.ValidSHA(source) ||
-		accepted != nil && (id.ExecutorID != accepted.ExecutorID || id.Repository != accepted.Repository ||
-			id.RepositoryID != accepted.RepositoryID || id.OwnerID != accepted.OwnerID ||
-			id.RequesterID != accepted.RequesterID || id.Number != accepted.SubjectNumber || id.SubjectType != accepted.SubjectType) ||
+		summary != nil && (id.ExecutorID != summary.ExecutorID || id.Repository != summary.Repository ||
+			id.RepositoryID != summary.RepositoryID || id.OwnerID != summary.OwnerID ||
+			id.RequesterID != summary.RequesterID || !strings.EqualFold(id.Requester, summary.Requester) ||
+			id.Number != summary.SubjectNumber || id.SubjectType != summary.SubjectType) ||
 		*sourceRef != "" && *sourceRef != source {
 		return false
 	}
@@ -178,7 +227,7 @@ func detailEntry(entries *[]DashboardDetailEntry, kind, meta, value string, rema
 	return true
 }
 
-func (d *DashboardDetail) readRecords(workRoot string, accepted *state.AcceptedAction, sourceRef *string) {
+func (d *DashboardDetail) readRecords(workRoot string, summary *state.AcceptedSummary, sourceRef *string) {
 	data, notice := readDetailFile(workRoot, "attempt-records", d.AttemptID+".jsonl")
 	if notice != "" {
 		d.RecordsNotice = notice
@@ -205,7 +254,7 @@ func (d *DashboardDetail) readRecords(workRoot string, accepted *state.AcceptedA
 		var record attemptRecord
 		if len(line) > maxAttemptRecordLineBytes || httpDecodeBytes(line, maxAttemptRecordLineBytes, &record) != nil ||
 			record.Sequence != uint64(count) || record.validateShape() != nil ||
-			!d.matches(record.Identity, record.SourceRef, accepted, sourceRef) {
+			!d.matches(record.Identity, record.SourceRef, summary, sourceRef) {
 			invalid = true
 			break
 		}
@@ -271,7 +320,7 @@ func (d *DashboardDetail) readRecords(workRoot string, accepted *state.AcceptedA
 	}
 }
 
-func (d *DashboardDetail) readReview(workRoot string, accepted *state.AcceptedAction, sourceRef *string) {
+func (d *DashboardDetail) readReview(workRoot string, summary *state.AcceptedSummary, sourceRef *string) {
 	data, notice := readDetailFile(workRoot, "reviews", d.AttemptID+".json")
 	if notice != "" {
 		d.ReviewNotice = notice
@@ -284,7 +333,7 @@ func (d *DashboardDetail) readReview(workRoot string, accepted *state.AcceptedAc
 			CriticStopReason: review.CriticStopReason}) != nil ||
 		(review.ReviewClaimOrigin != "" && review.ReviewClaimOrigin != executorClaimOrigin) ||
 		(len(review.Calls) > 0 && review.ReviewClaimOrigin != executorClaimOrigin) ||
-		!d.matches(review.Identity, review.SourceRef, accepted, sourceRef) {
+		!d.matches(review.Identity, review.SourceRef, summary, sourceRef) {
 		d.ReviewNotice = "Saved critic evidence unavailable or invalid"
 		return
 	}
@@ -378,7 +427,7 @@ func detailCriticVerdict(call CallUsage) string {
 	}
 }
 
-func (d *DashboardDetail) readWorker(workRoot string, accepted *state.AcceptedAction, sourceRef *string) {
+func (d *DashboardDetail) readWorker(workRoot string, summary *state.AcceptedSummary, sourceRef *string) {
 	data, notice := readDetailFile(workRoot, "worker-diagnostics", d.AttemptID+".json")
 	if notice != "" {
 		d.WorkerNotice = notice
@@ -387,7 +436,7 @@ func (d *DashboardDetail) readWorker(workRoot string, accepted *state.AcceptedAc
 	var worker retainedWorkerDiagnostics
 	if httpDecodeBytes(data, detailReadLimit, &worker) != nil ||
 		worker.WorkerReportedFailure.validate() != nil || validDiagnostics(worker.WorkerReportedDiagnostics) != nil ||
-		!d.matches(worker.Identity, worker.SourceRef, accepted, sourceRef) {
+		!d.matches(worker.Identity, worker.SourceRef, summary, sourceRef) {
 		d.WorkerNotice = "Saved worker diagnostics unavailable or invalid"
 		return
 	}

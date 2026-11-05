@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,6 +28,7 @@ var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype ht
 {{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button>Link GitHub account</button></form>{{end}}
 {{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button>Link GitLab account</button></form>{{end}}
 {{if .Dot.Preferences}}<p><a href="/auth/preferences">Model preferences</a></p>{{end}}
+<p><a href="/auth/actions">My actions</a></p>
 <form method="post" action="/auth/logout"><button>Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
@@ -52,6 +54,8 @@ type userLoginView struct {
 	SignInSuffix   string
 }
 
+type userErrorPageKey struct{}
+
 type oauthProvider struct {
 	name, issuer, host string
 	server             *jawsauth.Server
@@ -73,6 +77,8 @@ type oauthAccess struct {
 	mux         *http.ServeMux
 	providers   []*oauthProvider
 	choices     *config.UserModelChoices
+	detailSlots chan struct{}
+	actionReads chan struct{}
 	admissionMu sync.Mutex
 	linkMu      sync.Mutex
 	usageGate   *userUsageGate
@@ -104,7 +110,8 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	if err != nil {
 		return nil, fmt.Errorf("open user links: %w", err)
 	}
-	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux(), choices: cfg.UserModelChoices, usageGate: newUserUsageGate()}
+	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux(), choices: cfg.UserModelChoices,
+		usageGate: newUserUsageGate(), detailSlots: make(chan struct{}, 2), actionReads: make(chan struct{}, 2)}
 	if err := jw.AddTemplateLookuper(userLoginHTML); err != nil {
 		return nil, err
 	}
@@ -388,7 +395,7 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(status)
-			ui.Handler(a.jaws, "user error", view).ServeHTTP(w, r)
+			ui.Handler(a.jaws, "user error", view).ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userErrorPageKey{}, true)))
 			return
 		}
 	}

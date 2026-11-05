@@ -118,9 +118,70 @@ type TerminalDecision struct {
 	Outcome          string            `json:"outcome"`
 	DecidedAt        time.Time         `json:"decided_at"`
 	Deadline         time.Time         `json:"deadline,omitzero"`
+	Summary          AcceptedSummary   `json:"summary,omitzero"`
 	OutcomeBinding   string            `json:"outcome_binding,omitempty"`
 	UnresolvedAccess AccessDisposition `json:"unresolved_access,omitzero"`
 	StopRequest      StopRequest       `json:"stop_request,omitzero"`
+}
+
+// AcceptedSummary retains the selected identity after Accepted is cleared.
+// An empty summary belongs to an older decision and is never user-view proof.
+type AcceptedSummary struct {
+	AcceptedAt      time.Time              `json:"accepted_at"`
+	SourceKey       string                 `json:"source_key"`
+	SourceNodeID    string                 `json:"source_node_id"`
+	SourceURL       string                 `json:"source_url,omitempty"`
+	SourceUpdatedAt time.Time              `json:"source_updated_at,omitzero"`
+	CommandName     string                 `json:"command_name"`
+	Requester       string                 `json:"requester"`
+	RequesterID     int64                  `json:"requester_id"`
+	Repository      string                 `json:"repository"`
+	RepositoryID    int64                  `json:"repository_id"`
+	OwnerID         int64                  `json:"owner_id"`
+	ExecutorID      string                 `json:"executor_id"`
+	SubjectType     string                 `json:"subject_type"`
+	SubjectNumber   int                    `json:"subject_number"`
+	Action          string                 `json:"action"`
+	MainProvider    string                 `json:"main_provider,omitempty"`
+	CriticProvider  string                 `json:"critic_provider,omitempty"`
+	MainSettings    config.RoleModelConfig `json:"main_settings,omitzero"`
+	CriticSettings  config.RoleModelConfig `json:"critic_settings,omitzero"`
+}
+
+// HistorySummary carries the selected identity into a retry or first terminal decision.
+func (a AcceptedAction) HistorySummary() AcceptedSummary {
+	return AcceptedSummary{AcceptedAt: a.AcceptedAt, SourceKey: a.SourceKey, SourceNodeID: a.SourceNodeID,
+		SourceURL: a.SourceURL, SourceUpdatedAt: a.SourceUpdatedAt,
+		CommandName: a.CommandName, Requester: a.Requester, RequesterID: a.RequesterID,
+		Repository: a.Repository, RepositoryID: a.RepositoryID, OwnerID: a.OwnerID,
+		ExecutorID: a.ExecutorID, SubjectType: a.SubjectType, SubjectNumber: a.SubjectNumber,
+		Action: a.Action, MainProvider: a.MainProvider, CriticProvider: a.CriticProvider,
+		MainSettings: a.MainSettings, CriticSettings: a.CriticSettings}
+}
+
+func (s AcceptedSummary) valid() bool {
+	if s == (AcceptedSummary{}) { // Older decisions remain readable by the administrator.
+		return true
+	}
+	if s.AcceptedAt.IsZero() || s.SourceKey == "" || s.SourceNodeID == "" ||
+		!workspace.ValidIdentitySegment(s.CommandName) ||
+		!workspace.ValidIdentitySegment(s.ExecutorID) ||
+		!workspace.ValidIdentitySegment(strings.TrimSuffix(s.Requester, "[bot]")) || s.RequesterID <= 0 ||
+		!workspace.ValidRepository(s.Repository) || s.RepositoryID <= 0 || s.OwnerID <= 0 ||
+		(s.SubjectType != "Issue" && s.SubjectType != "PullRequest") || s.SubjectNumber <= 0 ||
+		!s.MainSettings.ValidChoice() ||
+		(s.CriticProvider != "" && !s.CriticSettings.ValidChoice()) ||
+		(s.MainProvider != "codex" && s.MainProvider != "claude") ||
+		(s.CriticProvider != "" && s.CriticProvider != "codex" && s.CriticProvider != "claude") ||
+		(s.CriticProvider == "" && s.CriticSettings != (config.RoleModelConfig{})) {
+		return false
+	}
+	switch s.Action {
+	case "review", "fix", "comment", "security-audit":
+		return true
+	default:
+		return false
+	}
 }
 
 // StopRequest records the first operator request and the observed cleanup result.
@@ -164,7 +225,8 @@ func validTerminalDecision(jobID string, decision TerminalDecision) bool {
 		return false
 	}
 	if !workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(decision.AttemptID) ||
-		decision.DecidedAt.IsZero() || !validOutcomeBinding(decision.OutcomeBinding) || !decision.StopRequest.valid() {
+		decision.DecidedAt.IsZero() || !validOutcomeBinding(decision.OutcomeBinding) || !decision.StopRequest.valid() ||
+		!decision.Summary.valid() || decision.Summary != (AcceptedSummary{}) && !decision.Deadline.After(decision.Summary.AcceptedAt) {
 		return false
 	}
 	access := decision.UnresolvedAccess
@@ -293,6 +355,13 @@ type JobFailure struct {
 	CriticProvider   string                 `json:"critic_provider,omitempty"`
 	MainSettings     config.RoleModelConfig `json:"main_settings,omitzero"`
 	CriticSettings   config.RoleModelConfig `json:"critic_settings,omitzero"`
+	RetryAction      RetryAction            `json:"retry_action,omitzero"`
+}
+
+// RetryAction keeps an unused accepted attempt visible until reacceptance or resolution.
+type RetryAction struct {
+	AttemptID string          `json:"attempt_id"`
+	Summary   AcceptedSummary `json:"summary"`
 }
 
 // Validate checks retry timing and frozen role settings.
@@ -305,13 +374,21 @@ func (f JobFailure) Validate() error {
 			f.MainSettings != (config.RoleModelConfig{}) || f.CriticSettings != (config.RoleModelConfig{}) {
 			return errors.New("job failure frozen role settings are invalid")
 		}
-		return nil
-	}
-	if f.MainProvider != "codex" && f.MainProvider != "claude" || !f.MainSettings.ValidChoice() ||
+	} else if f.MainProvider != "codex" && f.MainProvider != "claude" || !f.MainSettings.ValidChoice() ||
 		f.CriticProvider != "" && f.CriticProvider != "codex" && f.CriticProvider != "claude" ||
 		f.CriticProvider != "" && !f.CriticSettings.ValidChoice() ||
 		f.CriticProvider == "" && f.CriticSettings != (config.RoleModelConfig{}) {
 		return errors.New("job failure frozen role settings are invalid")
+	}
+	if f.RetryAction != (RetryAction{}) &&
+		(!workspace.ValidIdentitySegment(f.RetryAction.AttemptID) ||
+			f.RetryAction.Summary == (AcceptedSummary{}) || !f.RetryAction.Summary.valid() ||
+			!f.RetryAction.Summary.AcceptedAt.Equal(f.AcceptedAt) ||
+			f.RetryAction.Summary.MainProvider != f.MainProvider ||
+			f.RetryAction.Summary.CriticProvider != f.CriticProvider ||
+			f.RetryAction.Summary.MainSettings != f.MainSettings ||
+			f.RetryAction.Summary.CriticSettings != f.CriticSettings) {
+		return errors.New("job failure retry action is invalid")
 	}
 	return nil
 }
@@ -361,7 +438,8 @@ func (s *Store) DecideTerminalLocked(jobID, attemptID, outcome string, at time.T
 	if accepted.StopRequest != (StopRequest{}) && outcome != "lost" {
 		outcome = "canceled"
 	}
-	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), Deadline: accepted.Deadline, OutcomeBinding: accepted.OutcomeBinding, StopRequest: accepted.StopRequest}
+	decision := TerminalDecision{AttemptID: attemptID, Outcome: outcome, DecidedAt: at.UTC(), Deadline: accepted.Deadline,
+		Summary: accepted.HistorySummary(), OutcomeBinding: accepted.OutcomeBinding, StopRequest: accepted.StopRequest}
 	if !validTerminalDecision(jobID, decision) {
 		return TerminalDecision{}, errors.New("invalid terminal decision")
 	}
@@ -374,6 +452,75 @@ func (s *Store) DecideTerminalLocked(jobID, attemptID, outcome string, at time.T
 		// A directory-sync error can follow replacement of the state file.
 		// Keep the decision in memory so this process cannot overwrite it.
 		return TerminalDecision{}, fmt.Errorf("save terminal decision: %w", err)
+	}
+	return decision, nil
+}
+
+// DecideRetryTerminalLocked resolves a released, unused attempt without recreating Accepted.
+// The caller holds WithLock. The original attempt remains the history identity.
+func (s *Store) DecideRetryTerminalLocked(jobID, outcome string, at time.Time) (TerminalDecision, error) {
+	decision, err := s.retryTerminalDecision(jobID, outcome, at)
+	if err != nil {
+		return TerminalDecision{}, err
+	}
+	if s.Data.TerminalDecisions == nil {
+		s.Data.TerminalDecisions = make(map[string]TerminalDecision)
+	}
+	s.Data.TerminalDecisions[jobID] = decision
+	if err := s.Save(); err != nil {
+		return TerminalDecision{}, err
+	}
+	return decision, nil
+}
+
+// RetryTerminalRequest is one released attempt to resolve before batch retirement.
+type RetryTerminalRequest struct {
+	JobID, Outcome string
+	DecidedAt      time.Time
+}
+
+// DecideRetryTerminalsLocked persists all first decisions before callers retire retries.
+// The caller holds WithLock; a failed save leaves the decisions in memory for retry.
+func (s *Store) DecideRetryTerminalsLocked(requests []RetryTerminalRequest) error {
+	if len(requests) == 0 {
+		return nil
+	}
+	decisions := make(map[string]TerminalDecision, len(requests))
+	for _, request := range requests {
+		if _, duplicate := decisions[request.JobID]; duplicate {
+			return errors.New("duplicate retry terminal request")
+		}
+		decision, err := s.retryTerminalDecision(request.JobID, request.Outcome, request.DecidedAt)
+		if err != nil {
+			return err
+		}
+		decisions[request.JobID] = decision
+	}
+	if s.Data.TerminalDecisions == nil {
+		s.Data.TerminalDecisions = make(map[string]TerminalDecision)
+	}
+	for jobID, decision := range decisions {
+		s.Data.TerminalDecisions[jobID] = decision
+	}
+	return s.Save()
+}
+
+func (s *Store) retryTerminalDecision(jobID, outcome string, at time.Time) (TerminalDecision, error) {
+	failure, exists := s.Data.JobFailures[jobID]
+	if !exists || failure.RetryAction == (RetryAction{}) ||
+		s.Data.Accepted != nil && s.Data.Accepted.JobID == jobID {
+		return TerminalDecision{}, errors.New("no released retry attempt to resolve")
+	}
+	if decision, decided := s.Data.TerminalDecisions[jobID]; decided {
+		if decision.AttemptID != failure.RetryAction.AttemptID {
+			return TerminalDecision{}, errors.New("terminal decision belongs to another attempt")
+		}
+		return decision, nil
+	}
+	decision := TerminalDecision{AttemptID: failure.RetryAction.AttemptID, Outcome: outcome,
+		DecidedAt: at.UTC(), Deadline: failure.Deadline, Summary: failure.RetryAction.Summary}
+	if !validTerminalDecision(jobID, decision) {
+		return TerminalDecision{}, errors.New("invalid released retry terminal decision")
 	}
 	return decision, nil
 }

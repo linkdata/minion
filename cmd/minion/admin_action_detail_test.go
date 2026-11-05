@@ -324,6 +324,74 @@ func TestAdminActionDetailRetainedTerminalVerdictAndPublication(t *testing.T) {
 	}
 }
 
+func TestAdminActionDetailBindsRetainedEvidenceAfterAcceptedCleanup(t *testing.T) {
+	_, _, store, owner := dashboardTestServer(t)
+	owner.WorkRoot = t.TempDir()
+	at := time.Now().UTC().Truncate(time.Second)
+	store.Data.Accepted = dashboardTestAccepted(at)
+	if _, err := store.DecideTerminalLocked("job-1", "attempt-1", "failed", at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	writeEvidence := func(identity map[string]any) {
+		detailTestRecordFile(t, owner.WorkRoot, map[string]any{
+			"identity": identity, "source_ref": detailTestSource, "sequence": 1,
+			"kind": "report", "text": "PRIVATE_RECORD"})
+		detailTestFile(t, owner.WorkRoot, "reviews", "attempt-1.json", map[string]any{
+			"identity": identity, "source_ref": detailTestSource, "review_claim_origin": "executor_reported",
+			"critic_stop_reason": "approved", "critic_max_rounds": 3,
+			"calls": []any{detailTestMain(1), detailTestCall(true, true, false, true)}, "refutations": []any{},
+		})
+		detailTestFile(t, owner.WorkRoot, "worker-diagnostics", "attempt-1.json", map[string]any{
+			"identity": identity, "source_ref": detailTestSource,
+			"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": "PRIVATE_WORKER"}},
+		})
+	}
+	caseChanged := detailTestIdentity()
+	caseChanged["requester"] = "WRITER"
+	writeEvidence(caseChanged)
+	for _, cleared := range []bool{false, true} {
+		if cleared {
+			store.Data.Accepted = nil
+			if err := store.Save(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, found, err := owner.DashboardActionDetail("attempt-1", at)
+		if err != nil || !found || len(got.Records) != 1 || got.CriticVerdict == "" || len(got.Diagnostics) != 1 {
+			t.Fatalf("case-only requester change rejected with accepted cleared=%t: %+v found=%t err=%v", cleared, got, found, err)
+		}
+	}
+	writeEvidence(detailTestIdentity())
+	detail, found, err := owner.DashboardActionDetail("attempt-1", at)
+	if err != nil || !found || detail.JobID != "job-1" || detail.Summary.RequesterID != 3 || detail.Summary.RepositoryID != 1 ||
+		detail.Summary.OwnerID != 2 || detail.Repository != "owner/repo" || detail.Requester != "writer" ||
+		len(detail.Records) != 1 || detail.Records[0].Text != "PRIVATE_RECORD" ||
+		!strings.Contains(detail.CriticVerdict, "Critic approved") || len(detail.Diagnostics) != 1 {
+		t.Fatalf("retained summary did not bind valid evidence: %+v found=%t err=%v", detail, found, err)
+	}
+	for _, test := range []struct {
+		name  string
+		value any
+	}{
+		{"requester_id", 44}, {"repository_id", 99}, {"owner_id", 99},
+		{"requester", "other"}, {"repository", "other/repo"}, {"executor_id", "foreign"},
+		{"subject_type", "PullRequest"}, {"number", 8},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			identity := detailTestIdentity()
+			identity[test.name] = test.value
+			writeEvidence(identity)
+			got, found, err := owner.DashboardActionDetail("attempt-1", at)
+			if err != nil || !found || got.Summary.RequesterID != 3 || got.Summary.RepositoryID != 1 ||
+				len(got.Records) != 0 || got.CriticVerdict != "" || len(got.Diagnostics) != 0 ||
+				!strings.Contains(got.RecordsNotice, "invalid") ||
+				!strings.Contains(got.ReviewNotice, "invalid") || !strings.Contains(got.WorkerNotice, "invalid") {
+				t.Fatalf("mismatched retained evidence was projected: %+v found=%t err=%v", got, found, err)
+			}
+		})
+	}
+}
+
 func TestAdminActionDetailMissingPartialAndLegacyEvidence(t *testing.T) {
 	handler, _, store, owner := dashboardTestServer(t)
 	owner.WorkRoot = t.TempDir()
