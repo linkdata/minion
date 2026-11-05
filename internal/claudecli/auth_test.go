@@ -202,7 +202,7 @@ func TestAPIKeyGrantOverlap(t *testing.T) {
 		{workspace: root},
 		{workspace: filepath.Join(root, "source"), output: root},
 	} {
-		if _, err := sandboxSettings(test.workspace, test.output, filepath.Join(root, "auth"), apparmorUserNSPath); err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
+		if _, err := sandboxSettings(test.workspace, test.output, filepath.Join(root, "auth"), false); err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
 			t.Fatalf("accepted writable root containing credential directory: %+v: %v", test, err)
 		}
 	}

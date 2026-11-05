@@ -15,7 +15,8 @@
     "api_key": ""
   },
   "claude": {
-    "api_key": ""
+    "api_key": "",
+    "allow_all_unix_sockets": false
   },
   "commands": {
     "review": {

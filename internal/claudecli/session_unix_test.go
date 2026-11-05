@@ -1,3 +1,5 @@
+//go:build !windows
+
 package claudecli
 
 import (
@@ -11,11 +13,11 @@ import (
 )
 
 func TestSessionRuntimeOutsideDeepWorkspace(t *testing.T) {
-	tempRoot := testCanonicalTempDirLength(t, maxLinuxTempRootBytes)
+	tempRoot := testCanonicalTempDirLength(t, maxTempRootBytes)
 	t.Setenv("TMPDIR", tempRoot)
 	fakeExecutable(t, "claude", `cat >/dev/null
 [ "$TMPDIR" = "$PWD" ] && [ "$CLAUDE_CODE_TMPDIR" = "$PWD/tmp" ] || exit 2
-[ ${#PWD} -le `+fmt.Sprint(maxLinuxRuntimeDirBytes)+` ] || exit 3
+[ ${#PWD} -le `+fmt.Sprint(maxTempRootBytes+runtimeRootSuffixBytes)+` ] || exit 3
 printf '%s\n' '`+successfulResult+`'
 `)
 	workspace := filepath.Join(t.TempDir(), strings.Repeat("deep", 25), "source")
@@ -36,8 +38,8 @@ printf '%s\n' '`+successfulResult+`'
 func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
 	workspace := t.TempDir()
-	tempRoot := testCanonicalTempDirLength(t, maxLinuxTempRootBytes+1)
-	wantLimit := fmt.Sprintf("canonical path of at most %d bytes", maxLinuxTempRootBytes)
+	tempRoot := testCanonicalTempDirLength(t, maxTempRootBytes+1)
+	wantLimit := fmt.Sprintf("canonical path of at most %d bytes", maxTempRootBytes)
 	t.Setenv("TMPDIR", tempRoot)
 	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), wantLimit) || !strings.Contains(err.Error(), tempRoot) {
 		t.Fatalf("long temp path passed startup validation: %v", err)

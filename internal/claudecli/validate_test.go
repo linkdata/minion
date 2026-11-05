@@ -28,12 +28,13 @@ fi
 `)
 	for _, tc := range []struct {
 		name, model, effort, wantModel, wantEffort string
-		fails                                      bool
+		fails, allowAllUnixSockets                 bool
 	}{
 		{name: "defaults", wantModel: "claude-pinned"},
 		{name: "explicit default", model: "default", wantModel: "claude-pinned"},
 		{name: "alias", model: "quick", effort: "low", wantModel: "claude-small", wantEffort: "low"},
 		{name: "pinned", model: "claude-small", effort: "high", wantModel: "claude-small", wantEffort: "high"},
+		{name: "Unix socket opt-in", wantModel: "claude-pinned", allowAllUnixSockets: true},
 		{name: "unknown model", model: "missing", fails: true},
 		{name: "unresolved model", model: "unresolved", fails: true},
 		{name: "unsupported effort", effort: "max", fails: true},
@@ -42,7 +43,7 @@ fi
 			if err := os.Remove(binary + ".args"); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
-			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
+			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort, AllowAllUnixSockets: tc.allowAllUnixSockets})
 			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
 			tempRoot, rootErr := aicli.Directory(os.TempDir())
 			if rootErr != nil {
@@ -68,6 +69,11 @@ fi
 				t.Fatalf("Validate = %+v, %v", cfg, err)
 			}
 			fresh := readFile(t, binary+".fresh-args")
+			wantSocketOverride := runtime.GOOS == "linux" && tc.allowAllUnixSockets
+			gotSocketOverride := strings.Contains(fresh, `"allowAllUnixSockets":true`)
+			if gotSocketOverride != wantSocketOverride {
+				t.Fatalf("fresh capability probe Unix socket override = %t, want %t", gotSocketOverride, wantSocketOverride)
+			}
 			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") || !strings.Contains(fresh, "--include-partial-messages\n") || !strings.Contains(fresh, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("fresh capability probe used wrong arguments: %q", fresh)
 			}

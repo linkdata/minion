@@ -108,7 +108,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 				t.Fatalf("pull skipped required preflight: status=%d", response.StatusCode)
 			}
 			_ = response.Body.Close()
-			err = PreflightRemoteChoices(ctx, client, origin, "remote")
+			err = PreflightRemoteChoices(ctx, client, origin, "remote", false)
 			if tc.wantError {
 				if err == nil || err.Error() != preflightCodexInvocationUnsupported {
 					t.Fatalf("unsupported role was offered: %v", err)
@@ -175,7 +175,7 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 			Body: io.NopCloser(bytes.NewReader(data)), Request: request}, nil
 	})}
 	start := time.Now()
-	err = preflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", time.Second)
+	err = preflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", false, time.Second)
 	if !errors.Is(err, context.DeadlineExceeded) || t.Context().Err() != nil || time.Since(start) > 3*time.Second {
 		t.Fatalf("slow CLI probe escaped remote preflight deadline: elapsed=%s error=%v", time.Since(start), err)
 	}

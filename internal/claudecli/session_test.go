@@ -157,8 +157,8 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if session.runtimeRoot != "" || session.runtimeDir != "" || session.cacheDir != "" {
-		t.Fatal("closed session retained runtime paths")
+	if session.runtimeRoot != "" {
+		t.Fatal("closed session retained runtime root")
 	}
 	for _, path := range owned {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
@@ -173,10 +173,16 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 	}
 }
 
-// Keep the operator's README limit aligned with Claude's socket templates.
 func TestDocumentedTempRootLimit(t *testing.T) {
-	if maxLinuxTempRootBytes != 56 || maxDarwinTempRootBytes != 56 || maxTempRootBytes != 56 {
-		t.Fatalf("temp-root limits: Linux=%d macOS=%d combined=%d", maxLinuxTempRootBytes, maxDarwinTempRootBytes, maxTempRootBytes)
+	if maxLinuxTempRootBytes != 56 || maxDarwinTempRootBytes != 56 {
+		t.Fatalf("temp-root limits: Linux=%d macOS=%d", maxLinuxTempRootBytes, maxDarwinTempRootBytes)
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), fmt.Sprintf("canonical path of at most %d bytes", maxTempRootBytes)) {
+		t.Fatalf("README does not state the %d-byte temp-root limit", maxTempRootBytes)
 	}
 }
 

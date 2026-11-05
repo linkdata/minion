@@ -13,7 +13,7 @@ import (
 func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := []byte(`{"bot_login":"linkdataminion","main":"claude","adversarial":"codex","critic_stopping":{"max_rounds":4,"nonblocking_after_round":0,"consecutive_no_blocker_rounds":0},"codex":{"model":"user-model","reasoning_effort":"user-effort","api_key":"dummy-codex-key"},"claude":{"model":"sonnet","effort":"high","api_key":"dummy-claude-key"},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
+	data := []byte(`{"bot_login":"linkdataminion","main":"claude","adversarial":"codex","critic_stopping":{"max_rounds":4,"nonblocking_after_round":0,"consecutive_no_blocker_rounds":0},"codex":{"model":"user-model","reasoning_effort":"user-effort","api_key":"dummy-codex-key"},"claude":{"model":"sonnet","effort":"high","api_key":"dummy-claude-key","allow_all_unix_sockets":true},"state_path":"relative/state.json","repositories":[{"name":"example-owner/example-repo","id":1,"owner_id":2,"actions":["review"],"allowed_actors":["alice"],"allowed_actor_ids":{"alice":7}}]}`)
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestAddRepositoryPreservesSettingsAndExistingRestrictions(t *testing.T) {
 	if raw.Codex.Model != "user-model" || raw.Codex.ReasoningEffort != "user-effort" || raw.StatePath != "relative/state.json" || raw.WorkRoot != "" || raw.PollIntervalSeconds != 0 {
 		t.Fatalf("rewrote unrelated settings or defaults: %+v", raw)
 	}
-	if raw.Main != "claude" || raw.Adversarial != "codex" || raw.CriticStopping.MaxRounds != 4 || raw.Claude.Model != "sonnet" || raw.Claude.Effort != "high" {
+	if raw.Main != "claude" || raw.Adversarial != "codex" || raw.CriticStopping.MaxRounds != 4 || raw.Claude.Model != "sonnet" || raw.Claude.Effort != "high" || !raw.Claude.AllowAllUnixSockets {
 		t.Fatalf("changed model or critic settings: %+v", raw)
 	}
 	if raw.CriticStopping.NonblockingAfterRound == nil || *raw.CriticStopping.NonblockingAfterRound != 0 || raw.CriticStopping.ConsecutiveNoBlockerRounds == nil || *raw.CriticStopping.ConsecutiveNoBlockerRounds != 0 {

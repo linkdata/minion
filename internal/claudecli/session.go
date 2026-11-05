@@ -103,9 +103,6 @@ func (s *Session) Close() error {
 			*resource.path = ""
 		}
 	}
-	if s.runtimeRoot == "" {
-		s.runtimeDir, s.cacheDir = "", ""
-	}
 	return aicli.RedactError(err, s.settings.APIKey)
 }
 

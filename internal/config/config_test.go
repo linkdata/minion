@@ -19,7 +19,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 	if cfg.BotLogin != "example-bot" || len(cfg.InvitationOwners) != 0 ||
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
-		cfg.Claude.Model != "" || cfg.Claude.Effort != "" ||
+		cfg.Claude.Model != "" || cfg.Claude.Effort != "" || cfg.Claude.AllowAllUnixSockets ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
 		cfg.RemoteExecutor != nil || cfg.Admin == nil || cfg.Admin.Listen != DefaultAdminListen ||
 		len(cfg.Admin.Administrators) != 1 || cfg.Admin.Administrators[0] != (AdminAccount{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder}) ||

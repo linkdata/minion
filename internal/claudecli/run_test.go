@@ -136,8 +136,16 @@ func readFile(t *testing.T, path string) string {
 }
 
 func TestRun(t *testing.T) {
-	for _, writable := range []bool{false, true} {
-		t.Run(map[bool]string{false: "review", true: "fix"}[writable], func(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		writable, allowAllUnixSockets bool
+	}{
+		{name: "review"},
+		{name: "fix", writable: true},
+		{name: "Unix socket opt-in", allowAllUnixSockets: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writable := tc.writable
 			workspace := t.TempDir()
 			reports := t.TempDir()
 			output := t.TempDir()
@@ -151,7 +159,7 @@ printf '%s\n' '`+successfulResult+`'
 			t.Setenv("GITHUB_TOKEN", "dummy-token")
 			t.Setenv("NODE_OPTIONS", "dummy-option")
 			t.Setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "600000")
-			result, err := Run(t.Context(), workspace, "Handle task", writable, output, config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}})
+			result, err := Run(t.Context(), workspace, "Handle task", writable, output, config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}, AllowAllUnixSockets: tc.allowAllUnixSockets})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -231,12 +239,10 @@ printf '%s\n' '`+successfulResult+`'
 			if _, authored := nativeSandbox["filesystem"]; authored {
 				t.Fatalf("Minion authored Claude filesystem rules: %s", raw["sandbox"])
 			}
-			if runtime.GOOS == "linux" && apparmorRestrictedUserNS(apparmorUserNSPath) {
-				if string(nativeSandbox["network"]) != `{"allowAllUnixSockets":true}` {
-					t.Fatalf("Linux Claude sandbox lacks Unix socket workaround: %s", raw["sandbox"])
-				}
-			} else if _, authored := nativeSandbox["network"]; authored {
-				t.Fatalf("Minion authored Claude network rules: %s", raw["sandbox"])
+			wantSocketOverride := runtime.GOOS == "linux" && tc.allowAllUnixSockets
+			network, authored := nativeSandbox["network"]
+			if authored != wantSocketOverride || wantSocketOverride && string(network) != `{"allowAllUnixSockets":true}` {
+				t.Fatalf("Unix socket override = %s, want enabled %t", network, wantSocketOverride)
 			}
 			wantDenials := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
 			var denials []string
@@ -276,21 +282,16 @@ printf '%s\n' '`+successfulResult+`'
 	}
 }
 
-func TestSandboxUnixSocketWorkaroundUsesAppArmorRestriction(t *testing.T) {
-	for _, tc := range []struct{ name, value string }{
-		{"restricted", "1\n"},
-		{"unrestricted", "0\n"},
-		{"unexpected", "unknown"},
-		{"missing", ""},
+func TestSandboxUnixSocketWorkaroundRequiresOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		optIn bool
+	}{
+		{name: "default"},
+		{name: "enabled", optIn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "restriction")
-			if tc.value != "" {
-				if err := os.WriteFile(path, []byte(tc.value), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			raw, err := sandboxSettings(t.TempDir(), "", "", path)
+			raw, err := sandboxSettings(t.TempDir(), "", "", tc.optIn)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -304,9 +305,9 @@ func TestSandboxUnixSocketWorkaroundUsesAppArmorRestriction(t *testing.T) {
 			if err := json.Unmarshal([]byte(raw), &policy); err != nil {
 				t.Fatal(err)
 			}
-			want := runtime.GOOS == "linux" && tc.name == "restricted"
+			want := runtime.GOOS == "linux" && tc.optIn
 			if (policy.Sandbox.Network != nil) != want || want && !policy.Sandbox.Network.AllowAllUnixSockets {
-				t.Fatalf("AppArmor %q: network policy = %+v, want Unix socket workaround %t", tc.value, policy.Sandbox.Network, want)
+				t.Fatalf("opt-in %t: network policy = %+v, want Unix socket workaround %t", tc.optIn, policy.Sandbox.Network, want)
 			}
 		})
 	}

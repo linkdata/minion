@@ -94,7 +94,9 @@ func TestRemoteChoicePreflightBoundsUnresponsiveResponse(t *testing.T) {
 		})}
 		finished := make(chan error, 1)
 		started := time.Now()
-		go func() { finished <- PreflightRemoteChoices(t.Context(), client, "https://example.test", "remote") }()
+		go func() {
+			finished <- PreflightRemoteChoices(t.Context(), client, "https://example.test", "remote", false)
+		}()
 		synctest.Wait()
 		if err := <-finished; !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("unresponsive preflight error = %v, want deadline", err)

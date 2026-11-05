@@ -14,13 +14,14 @@ const workerStartupBytes = 8 << 20
 // WorkerStartup is trusted parent input to one selected local worker.
 // GitHub credentials stay with the parent.
 type WorkerStartup struct {
-	Selection         WorkerSelection     `json:"selection"`
-	WorkRoot          string              `json:"work_root"`
-	Endpoint          LocalEndpointAccess `json:"endpoint"`
-	CodexAPIKey       string              `json:"codex_api_key,omitempty"`
-	CodexNativeAPIKey string              `json:"codex_native_api_key,omitempty"`
-	CodexAccessToken  string              `json:"codex_access_token,omitempty"`
-	ClaudeAPIKey      string              `json:"claude_api_key,omitempty"`
+	Selection                 WorkerSelection     `json:"selection"`
+	WorkRoot                  string              `json:"work_root"`
+	Endpoint                  LocalEndpointAccess `json:"endpoint"`
+	CodexAPIKey               string              `json:"codex_api_key,omitempty"`
+	CodexNativeAPIKey         string              `json:"codex_native_api_key,omitempty"`
+	CodexAccessToken          string              `json:"codex_access_token,omitempty"`
+	ClaudeAPIKey              string              `json:"claude_api_key,omitempty"`
+	ClaudeAllowAllUnixSockets bool                `json:"claude_allow_all_unix_sockets,omitempty"`
 }
 
 func (s WorkerStartup) validate() error {
@@ -50,7 +51,7 @@ func (s WorkerStartup) runner(call modelCall) (*Runner, error) {
 	return NewSelectedRunner(Runner{
 		WorkRoot: s.WorkRoot,
 		Codex:    config.CodexConfig{APIKey: s.CodexAPIKey, NativeAPIKey: s.CodexNativeAPIKey, NativeAccessToken: s.CodexAccessToken},
-		Claude:   config.ClaudeConfig{APIKey: s.ClaudeAPIKey},
+		Claude:   config.ClaudeConfig{APIKey: s.ClaudeAPIKey, AllowAllUnixSockets: s.ClaudeAllowAllUnixSockets},
 		runModel: call,
 	}, s.Selection)
 }

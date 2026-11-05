@@ -65,8 +65,8 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 const remoteChoicePreflightTimeout = 90 * time.Second
 
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
-func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string) error {
-	err := preflightRemoteChoices(ctx, client, origin, executorID, remoteChoicePreflightTimeout)
+func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool) error {
+	err := preflightRemoteChoices(ctx, client, origin, executorID, allowAllUnixSockets, remoteChoicePreflightTimeout)
 	if err == nil {
 		return nil
 	}
@@ -79,7 +79,7 @@ func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	return preflightError{message: "remote selection preflight unavailable", cause: err}
 }
 
-func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, timeout time.Duration) error {
+func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool, timeout time.Duration) error {
 	preflightCtx, stop := context.WithTimeout(ctx, timeout)
 	defer stop()
 	u, err := url.Parse(origin)
@@ -107,7 +107,7 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	runner := Runner{
 		Codex: config.CodexConfig{APIKey: selection.Credentials.CodexAPIKey, NativeAPIKey: selection.Credentials.CodexNativeAPIKey,
 			NativeAccessToken: selection.Credentials.CodexAccessToken},
-		Claude: config.ClaudeConfig{APIKey: selection.Credentials.ClaudeAPIKey},
+		Claude: config.ClaudeConfig{APIKey: selection.Credentials.ClaudeAPIKey, AllowAllUnixSockets: allowAllUnixSockets},
 	}
 	if message, err := checkOfferedRolesCLI(preflightCtx, &runner, offeredPreflightRoles(selection.Main, selection.MainChoices, selection.Critic, selection.CriticChoices)); err != nil {
 		return preflightError{message: message, cause: redactActionError(err, runner.secretValues()...)}

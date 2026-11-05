@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/linkdata/minion/internal/action"
@@ -24,6 +25,9 @@ type remoteWorkerConfig struct {
 	ExecutorID string `json:"executor_id"`
 	Token      string `json:"token"`
 	WorkRoot   string `json:"work_root"`
+	Claude     struct {
+		AllowAllUnixSockets bool `json:"allow_all_unix_sockets,omitempty"`
+	} `json:"claude,omitempty"`
 }
 
 func loadRemoteWorkerConfig(path string) (remoteWorkerConfig, error) {
@@ -64,6 +68,9 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 		logger.Printf("remote worker config: %s", monitor.InertLogText(err.Error()))
 		return 2
 	}
+	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets {
+		logger.Print("Claude Unix-socket opt-in enabled by claude.allow_all_unix_sockets; sandboxed Claude commands can reach host service sockets")
+	}
 	if err := checkWorkRootPath(cfg.WorkRoot); err != nil {
 		logger.Printf("remote worker work root: %s", monitor.InertLogText(err.Error()))
 		return 1
@@ -82,7 +89,7 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 }
 
 func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
-	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID); err != nil {
+	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, cfg.Claude.AllowAllUnixSockets); err != nil {
 		logger.Printf("remote worker: selection preflight failed: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
@@ -90,7 +97,9 @@ func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig
 }
 
 func runRemoteWorkerLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
-	if err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, action.NewRemoteRunner(cfg.WorkRoot)); err != nil {
+	runner := action.NewRemoteRunner(cfg.WorkRoot)
+	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
+	if err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner); err != nil {
 		// Returned errors can contain private model text.
 		logger.Print("remote worker: execution or protocol failure")
 		return 1
