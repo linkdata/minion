@@ -95,12 +95,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			access.dummy = account
 		}
 	}
-	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth {
-		if username := access.sessionUsername(rq.Session()); username != "" {
-			return adminIdentity(username)
-		}
-		return adminIdentity("")
-	}
+	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	mux := http.NewServeMux()
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {

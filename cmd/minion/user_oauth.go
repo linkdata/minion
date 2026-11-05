@@ -175,8 +175,6 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 	p.server = srv
 	srv.SessionRotationLock = &a.linkMu
 	srv.LinkEvent = func(sess *jaws.Session, _ *http.Request, claims map[string]any) (int, error) {
-		a.linkMu.Lock()
-		defer a.linkMu.Unlock()
 		current, source := a.currentUser(sess)
 		proved, ok := p.identity(claims)
 		if current == "" || source == p || !ok {
@@ -260,16 +258,19 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	a.linkMu.Lock()
-	defer a.linkMu.Unlock()
 	sess := a.jaws.GetSession(r)
-	if account, _ := a.currentUser(sess); account == "" {
+	account, _ := a.currentUser(sess)
+	if account != "" {
+		sess.Close()
+	}
+	a.linkMu.Unlock()
+	if account == "" {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	for _, p := range a.providers {
 		p.server.Logout(sess, r)
 	}
-	sess.Close()
 	http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 }
 

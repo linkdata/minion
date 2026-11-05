@@ -546,6 +546,12 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	}
 	cookie, sess := signIn()
 	linkEvent := auth.providers[1].server.LinkEvent
+	// jawsauth invokes LinkEvent while holding SessionRotationLock.
+	callLinkEvent := func(sess *jaws.Session, cookie *http.Cookie, claims map[string]any) (int, error) {
+		auth.linkMu.Lock()
+		defer auth.linkMu.Unlock()
+		return linkEvent(sess, requestWithCookie(cookie), claims)
+	}
 	proof := map[string]any{"iss": issuer.URL, "sub": "member:42"}
 	key := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "member:42"}).key()
 
@@ -554,7 +560,7 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	linkStarted := make(chan struct{})
 	go func() {
 		close(linkStarted)
-		status, _ := linkEvent(sess, requestWithCookie(cookie), proof)
+		status, _ := callLinkEvent(sess, cookie, proof)
 		linked <- status
 	}()
 	<-linkStarted
@@ -611,7 +617,7 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatal("logout did not finish after lock released")
 			}
-			if status, _ := linkEvent(sess, requestWithCookie(cookie), map[string]any{"iss": issuer.URL, "sub": "member:43"}); status != http.StatusForbidden || auth.links.account(staleKey) != staleKey {
+			if status, _ := callLinkEvent(sess, cookie, map[string]any{"iss": issuer.URL, "sub": "member:43"}); status != http.StatusForbidden || auth.links.account(staleKey) != staleKey {
 				t.Fatalf("stale link after logout: status=%d account=%q", status, auth.links.account(staleKey))
 			}
 		})
@@ -647,14 +653,14 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	if rotated.Code != http.StatusSeeOther || len(rotated.Result().Cookies()) != 1 {
 		t.Fatalf("admin login rotation: status=%d cookies=%v", rotated.Code, rotated.Result().Cookies())
 	}
-	if status, _ := linkEvent(sess, requestWithCookie(cookie), map[string]any{"iss": issuer.URL, "sub": "member:43"}); status != http.StatusForbidden || auth.links.account(staleKey) != staleKey {
+	if status, _ := callLinkEvent(sess, cookie, map[string]any{"iss": issuer.URL, "sub": "member:43"}); status != http.StatusForbidden || auth.links.account(staleKey) != staleKey {
 		t.Fatalf("stale link after admin login: status=%d account=%q", status, auth.links.account(staleKey))
 	}
 
 	cookie, _ = signIn()
 	link := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, cookie, "https://admin.example")
 	linkURL, err := url.Parse(link.Header().Get("Location"))
-	if err != nil || link.Code != http.StatusFound || linkURL.Query().Get("state") == "" || linkURL.Query().Get("nonce") == "" {
+	if err != nil || link.Code != http.StatusSeeOther || linkURL.Query().Get("state") == "" || linkURL.Query().Get("nonce") == "" {
 		t.Fatalf("GitLab link start: status=%d location=%q error=%v", link.Code, link.Header().Get("Location"), err)
 	}
 	nonce.Store(linkURL.Query().Get("nonce"))
@@ -732,7 +738,7 @@ func TestOAuthLoginRotationCannotPersistStaleLink(t *testing.T) {
 	auth.providers[0].server.SessionRotationLock = notice
 	link := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, signed, "https://admin.example")
 	linkURL, err := url.Parse(link.Header().Get("Location"))
-	if err != nil || link.Code != http.StatusFound || linkURL.Query().Get("state") == "" {
+	if err != nil || link.Code != http.StatusSeeOther || linkURL.Query().Get("state") == "" {
 		t.Fatalf("GitLab link start: status=%d error=%v", link.Code, err)
 	}
 	nonce.Store(linkURL.Query().Get("nonce"))
@@ -996,7 +1002,7 @@ func TestGitLabOIDCSignInAndLinkGitHub(t *testing.T) {
 	}
 	link := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, signed, "https://admin.example")
 	gitlabURL, err := url.Parse(link.Header().Get("Location"))
-	if err != nil || link.Code != http.StatusFound || gitlabURL.Host != strings.TrimPrefix(issuer.URL, "https://") ||
+	if err != nil || link.Code != http.StatusSeeOther || gitlabURL.Host != strings.TrimPrefix(issuer.URL, "https://") ||
 		gitlabURL.Query().Get("state") == "" || gitlabURL.Query().Get("nonce") == "" {
 		t.Fatalf("start GitLab link: status=%d location=%q err=%v", link.Code, link.Header().Get("Location"), err)
 	}
