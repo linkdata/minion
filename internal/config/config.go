@@ -166,7 +166,7 @@ type ClaudeConfig struct {
 	Effort string `json:"effort,omitempty"`
 	// APIKey overrides environment credentials and stored login when nonempty.
 	APIKey string `json:"api_key,omitempty"`
-	// AllowAllUnixSockets disables Claude's Linux Unix-socket filter when enabled.
+	// AllowAllUnixSockets permits Unix and AF_VSOCK VM host sockets in Claude's Linux sandbox.
 	AllowAllUnixSockets bool `json:"allow_all_unix_sockets,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`

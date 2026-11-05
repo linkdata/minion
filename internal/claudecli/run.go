@@ -287,7 +287,7 @@ func sandboxSettings(workspace, outputDir, authDir string, allowAllUnixSockets b
 		"credentials":              credentials,
 	}
 	if runtime.GOOS == "linux" && allowAllUnixSockets {
-		// shortcut: Linux Bash can still reach host and Claude session sockets outside /run/user; replace the CLI sandbox for stronger isolation.
+		// shortcut: Linux Bash can still reach host, Claude session, and AF_VSOCK VM host sockets; replace the CLI sandbox for stronger isolation.
 		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
 		sandbox["filesystem"] = map[string]any{"denyRead": []string{fmt.Sprintf("/run/user/%d", os.Getuid())}}
 	}

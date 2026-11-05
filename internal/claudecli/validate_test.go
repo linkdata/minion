@@ -127,37 +127,27 @@ func TestBubblewrapOptInPrerequisite(t *testing.T) {
 			t.Fatalf("missing Bubblewrap passed: %v", err)
 		}
 	})
+	t.Run("no inherited environment", func(t *testing.T) {
+		t.Setenv("MINION_BWRAP_SENTINEL", "secret")
+		testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\n[ -z \"$MINION_BWRAP_SENTINEL\" ] || exit 1\nprintf '%s\\n' '--disable-userns'\n")
+		if err := checkBubblewrap(t.Context(), true); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestValidateRejectsUnsupportedBubblewrapBeforeClaude(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Bubblewrap opt-in applies only on Linux")
 	}
-	for _, tc := range []struct {
-		name, wantError string
-		setup           func(*testing.T, string)
-	}{
-		{name: "old", wantError: "does not support", setup: func(t *testing.T, _ string) {
-			fakeBubblewrap(t, "--unshare-user")
-		}},
-		{name: "missing", wantError: "requires non-setuid Bubblewrap", setup: func(t *testing.T, claude string) {
-			t.Setenv("PATH", filepath.Dir(claude))
-		}},
-		{name: "probe fails", wantError: "probe Bubblewrap", setup: func(t *testing.T, _ string) {
-			testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexit 1\n")
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
-			tc.setup(t, binary)
-			_, err := Validate(t.Context(), config.ClaudeConfig{AllowAllUnixSockets: true})
-			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
-				t.Fatalf("Validate passed without supported Bubblewrap: %v", err)
-			}
-			if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
-				t.Fatalf("Claude started despite Bubblewrap failure: %v", err)
-			}
-		})
+	binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
+	testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexit 1\n")
+	_, err := Validate(t.Context(), config.ClaudeConfig{AllowAllUnixSockets: true})
+	if err == nil || !strings.Contains(err.Error(), "probe Bubblewrap") {
+		t.Fatalf("Validate passed without supported Bubblewrap: %v", err)
+	}
+	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
+		t.Fatalf("Claude started despite Bubblewrap failure: %v", err)
 	}
 }
 

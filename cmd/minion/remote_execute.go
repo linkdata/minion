@@ -30,7 +30,7 @@ type remoteWorkerConfig struct {
 	} `json:"claude"`
 }
 
-const claudeUnixSocketWarning = "Claude Unix-socket opt-in enabled by claude.allow_all_unix_sockets; sandboxed Claude commands can reach host service sockets"
+const claudeUnixSocketWarning = "Claude Unix-socket opt-in enabled by claude.allow_all_unix_sockets; sandboxed Claude commands can reach host service and AF_VSOCK VM host sockets"
 
 func loadRemoteWorkerConfig(path string) (remoteWorkerConfig, error) {
 	path, err := filepath.Abs(path)
@@ -93,7 +93,7 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
 	runner := action.NewRemoteRunner(cfg.WorkRoot)
 	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
-	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner.Claude.AllowAllUnixSockets); err != nil {
+	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner); err != nil {
 		logger.Printf("remote worker: selection preflight failed: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}

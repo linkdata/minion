@@ -24,7 +24,7 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestRemoteWorkerConfigPassesSocketOptInToPreflightAndJob(t *testing.T) {
+func TestRemoteWorkerConfigPassesSocketOptInToPreflightAndJobValidation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {

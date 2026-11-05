@@ -61,6 +61,32 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsShortSymlinkToLongTempPath(t *testing.T) {
+	root := testCanonicalTempDirLength(t, maxTempRootBytes+1)
+	link, err := os.MkdirTemp("/tmp", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(link); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatal(err)
+	}
+	if len(link) >= maxTempRootBytes {
+		t.Fatalf("symlink path %q does not fit the limit", link)
+	}
+	t.Setenv("TMPDIR", link)
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), root) {
+		t.Fatalf("short symlink to long temp path passed: %v", err)
+	}
+}
+
 func testCanonicalTempDirLength(t *testing.T, length int) string {
 	t.Helper()
 	base, err := os.MkdirTemp("/tmp", "m")

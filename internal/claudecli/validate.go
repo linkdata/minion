@@ -31,11 +31,8 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
-	tempRoot, err := runtimeTempRoot()
+	tempRoot, err := CheckHost(ctx, settings.AllowAllUnixSockets)
 	if err != nil {
-		return validated, err
-	}
-	if err := checkBubblewrap(ctx, settings.AllowAllUnixSockets); err != nil {
 		return validated, err
 	}
 	dir, err := os.MkdirTemp(tempRoot, runtimePrefix)
@@ -124,6 +121,18 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	return validated, fmt.Errorf("claude model %q is absent from the installed CLI catalogue", settings.Model)
 }
 
+// CheckHost returns the canonical temp root after checking Claude's Linux sandbox opt-in.
+func CheckHost(ctx context.Context, allowAllUnixSockets bool) (string, error) {
+	root, err := runtimeTempRoot()
+	if err != nil {
+		return "", err
+	}
+	if err := checkBubblewrap(ctx, allowAllUnixSockets); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
 func checkBubblewrap(ctx context.Context, allowAllUnixSockets bool) error {
 	if runtime.GOOS != "linux" || !allowAllUnixSockets {
 		return nil
@@ -141,7 +150,7 @@ func checkBubblewrap(ctx context.Context, allowAllUnixSockets bool) error {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	output, err := aicli.Probe(probeCtx, binary, "", []string{"--help"}, "", nil, "", "")
+	output, err := aicli.Probe(probeCtx, binary, "", []string{"--help"}, "", []string{}, "", "")
 	if err != nil {
 		return fmt.Errorf("probe Bubblewrap %q --disable-userns support: %w", binary, err)
 	}
