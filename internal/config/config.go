@@ -494,6 +494,9 @@ func (c *Config) Validate(configDir string) error {
 		}
 	}
 	if remote := c.RemoteExecutor; remote != nil {
+		if c.Claude.AllowAllUnixSockets {
+			return errors.New("claude.allow_all_unix_sockets belongs in the remote worker config, not the orchestrator config")
+		}
 		if !workspace.ValidIdentitySegment(remote.ExecutorID) {
 			return errors.New("remote_executor.executor_id is invalid")
 		}

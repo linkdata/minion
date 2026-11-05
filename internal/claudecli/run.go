@@ -57,6 +57,11 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 	if err != nil {
 		return result, err
 	}
+	if runtime.GOOS == "linux" && settings.AllowAllUnixSockets {
+		if err := checkBubblewrap(ctx); err != nil {
+			return result, err
+		}
+	}
 	if outputDir != "" {
 		resolved, err := aicli.Directory(outputDir)
 		if err != nil {
@@ -287,8 +292,9 @@ func sandboxSettings(workspace, outputDir, authDir string, allowAllUnixSockets b
 		"credentials":              credentials,
 	}
 	if runtime.GOOS == "linux" && allowAllUnixSockets {
-		// shortcut: Linux Bash can reach host and Claude session sockets; replace the CLI sandbox for stronger isolation.
+		// shortcut: Linux Bash can still reach host and Claude session sockets outside /run/user; replace the CLI sandbox for stronger isolation.
 		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
+		sandbox["filesystem"] = map[string]any{"denyRead": []string{fmt.Sprintf("/run/user/%d", os.Getuid())}}
 	}
 	policy := map[string]any{
 		"disableClaudeAiConnectors": true,

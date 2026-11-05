@@ -27,8 +27,10 @@ type remoteWorkerConfig struct {
 	WorkRoot   string `json:"work_root"`
 	Claude     struct {
 		AllowAllUnixSockets bool `json:"allow_all_unix_sockets,omitempty"`
-	} `json:"claude,omitempty"`
+	} `json:"claude"`
 }
+
+const claudeUnixSocketWarning = "Claude Unix-socket opt-in enabled by claude.allow_all_unix_sockets; sandboxed Claude commands can reach host service sockets"
 
 func loadRemoteWorkerConfig(path string) (remoteWorkerConfig, error) {
 	path, err := filepath.Abs(path)
@@ -69,7 +71,7 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 		return 2
 	}
 	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets {
-		logger.Print("Claude Unix-socket opt-in enabled by claude.allow_all_unix_sockets; sandboxed Claude commands can reach host service sockets")
+		logger.Print(claudeUnixSocketWarning)
 	}
 	if err := checkWorkRootPath(cfg.WorkRoot); err != nil {
 		logger.Printf("remote worker work root: %s", monitor.InertLogText(err.Error()))
@@ -97,12 +99,17 @@ func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig
 }
 
 func runRemoteWorkerLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
-	runner := action.NewRemoteRunner(cfg.WorkRoot)
-	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
+	runner := newRemoteWorkerRunner(cfg)
 	if err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner); err != nil {
 		// Returned errors can contain private model text.
 		logger.Print("remote worker: execution or protocol failure")
 		return 1
 	}
 	return 0
+}
+
+func newRemoteWorkerRunner(cfg remoteWorkerConfig) *action.Runner {
+	runner := action.NewRemoteRunner(cfg.WorkRoot)
+	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
+	return runner
 }

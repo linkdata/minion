@@ -43,6 +43,12 @@ fi
 			if err := os.Remove(binary + ".args"); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
+			if err := os.Remove(binary + ".cwd"); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if tc.allowAllUnixSockets && runtime.GOOS == "linux" {
+				fakeBubblewrap(t, "--disable-userns")
+			}
 			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort, AllowAllUnixSockets: tc.allowAllUnixSockets})
 			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
 			tempRoot, rootErr := aicli.Directory(os.TempDir())
@@ -82,6 +88,39 @@ fi
 			}
 		})
 	}
+}
+
+func TestBubblewrapOptInPrerequisite(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	for _, tc := range []struct {
+		name, help, wantError string
+		setuid                bool
+	}{
+		{name: "supported", help: "--disable-userns"},
+		{name: "old", help: "--unshare-user", wantError: "does not support"},
+		{name: "setuid", help: "--disable-userns", setuid: true, wantError: "is setuid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := fakeBubblewrap(t, tc.help)
+			if tc.setuid {
+				if err := os.Chmod(binary, os.ModeSetuid|0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := checkBubblewrap(t.Context())
+			if tc.wantError == "" && err != nil || tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("Bubblewrap check = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+	t.Run("missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if err := checkBubblewrap(t.Context()); err == nil || !strings.Contains(err.Error(), "requires non-setuid Bubblewrap") {
+			t.Fatalf("missing Bubblewrap passed: %v", err)
+		}
+	})
 }
 
 func TestValidateRejectsPaidDiscoveryOutput(t *testing.T) {

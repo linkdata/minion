@@ -47,6 +47,7 @@ func TestInstalledNativeActions(t *testing.T) {
 				runner := NewRemoteRunner(workRoot)
 				if role.provider == "claude" {
 					runner.Claude.APIKey = os.Getenv("MINION_LIVE_CLAUDE_API_KEY")
+					runner.Claude.AllowAllUnixSockets = os.Getenv("MINION_LIVE_CLAUDE_ALLOW_ALL_UNIX_SOCKETS") == "1"
 					if runner.Claude.APIKey == "" {
 						t.Fatal("set MINION_LIVE_CLAUDE_API_KEY so native transcripts stay in test-owned scratch")
 					}

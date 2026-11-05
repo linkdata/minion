@@ -183,3 +183,98 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 		t.Fatalf("slow CLI probe was not reached: %v", err)
 	}
 }
+
+func TestRemoteClaudeSocketOptInReachesPreflightAndModel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	for _, key := range []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"} {
+		t.Setenv(key, "")
+	}
+	useShortClaudeTempDir(t, "/tmp")
+	fakeOnPath(t, "bwrap", "#!/bin/sh\ncase \"$1\" in --help) echo --disable-userns;; esac\n")
+	settingsPath := filepath.Join(t.TempDir(), "settings")
+	modelMarker := filepath.Join(t.TempDir(), "model")
+	fakeOnPath(t, "claude", `#!/bin/sh
+if [ "$1" = --version ]; then echo '2.1.318 (Claude Code)'; exit 0; fi
+previous=
+for arg do
+  if [ "$previous" = --settings ]; then printf '%s\n' "$arg" >> `+shellQuote(settingsPath)+`; fi
+  previous=$arg
+done
+case " $* " in
+  *' auth status --json '*) echo '{"loggedIn":true}'; exit 0 ;;
+  *' --minion-unsupported-capability-probe '*) echo 'unknown option --minion-unsupported-capability-probe' >&2; exit 2 ;;
+  *' --resume '*)
+    previous=
+    for arg do
+      if [ "$previous" = --resume ]; then id=$arg; break; fi
+      previous=$arg
+    done
+    echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":0,"total_cost_usd":0,"usage":{"input_tokens":0,"output_tokens":0}}'
+    echo "No conversation found with session ID: $id" >&2
+    exit 1 ;;
+esac
+cat >/dev/null
+case " $* " in
+  *' --no-session-persistence '*)
+    echo '{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low"]}]}}}' ;;
+  *)
+    printf called > `+shellQuote(modelMarker)+`
+    previous=
+    for arg do
+      if [ "$previous" = --session-id ]; then id=$arg; break; fi
+      previous=$arg
+    done
+    printf '{"type":"system","subtype":"init","session_id":"%s"}\n' "$id"
+    printf '{"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","session_id":"%s","result":"Done.","usage":{"input_tokens":3,"output_tokens":2},"modelUsage":{"fixture":{"inputTokens":3,"cacheCreationInputTokens":0,"cacheReadInputTokens":0,"outputTokens":2}}}\n' "$id" ;;
+esac
+`)
+	selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+		Main:        RoleSettings{Provider: "claude", Model: "claude-pinned", Effort: "low"},
+		Credentials: WorkerCredentials{ClaudeAPIKey: "fixture-key"}}
+	data, err := httpEncode(selection, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path != "/preflight" {
+			t.Fatalf("unexpected remote request: %s", request.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(bytes.NewReader(data)), Request: request}, nil
+	})}
+	if err := PreflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", true); err != nil {
+		t.Fatalf("remote Claude preflight: %v (%v)", err, errors.Unwrap(err))
+	}
+	preflightSettings, err := os.ReadFile(settingsPath)
+	if err != nil || len(preflightSettings) == 0 {
+		t.Fatalf("Claude preflight did not pass settings: %v", err)
+	}
+	runner := NewRemoteRunner(t.TempDir())
+	runner.Claude.APIKey, runner.Claude.AllowAllUnixSockets = selection.Credentials.ClaudeAPIKey, true
+	var session modelSession
+	t.Cleanup(func() {
+		if err := session.close(); err != nil {
+			t.Error(err)
+		}
+	})
+	_, err = runner.runNative(t.Context(), modelRun{session: &session, provider: "claude", dir: t.TempDir(), prompt: "Test model call", model: "claude-pinned", effort: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(modelMarker); err != nil {
+		t.Fatalf("Claude model was not called: %v", err)
+	}
+	content, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(content) <= len(preflightSettings) {
+		t.Fatal("Claude model did not receive settings after remote preflight")
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		if !strings.Contains(line, `"allowAllUnixSockets":true`) {
+			t.Fatalf("remote preflight or model lost Unix socket opt-in: %s", line)
+		}
+	}
+}

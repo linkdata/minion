@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/state"
 )
 
 func TestLoadRemoteWorkerConfig(t *testing.T) {
@@ -48,6 +49,41 @@ func TestLoadRemoteWorkerConfig(t *testing.T) {
 				t.Fatal("invalid remote worker config accepted")
 			}
 		})
+	}
+}
+
+func TestRemoteWorkerRunnerKeepsSocketOptIn(t *testing.T) {
+	cfg := remoteWorkerConfig{WorkRoot: t.TempDir()}
+	cfg.Claude.AllowAllUnixSockets = true
+	runner := newRemoteWorkerRunner(cfg)
+	if runner.WorkRoot != cfg.WorkRoot || !runner.Claude.AllowAllUnixSockets {
+		t.Fatal("remote worker lost its work root or Claude socket opt-in")
+	}
+}
+
+func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
+	cfg := config.Config{
+		BotLogin: "fixture", Main: "claude", Claude: config.ClaudeConfig{Effort: "high", AllowAllUnixSockets: true},
+		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+	}
+	store, err := state.Open(cfg.StatePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	code, output := runStartupFixture(t, cfg)
+	wantWarnings := 0
+	if runtime.GOOS == "linux" {
+		wantWarnings = 1
+	}
+	if code != 0 || strings.Count(output, claudeUnixSocketWarning) != wantWarnings {
+		t.Fatalf("local socket warning: exit=%d want=%d log=%q", code, wantWarnings, output)
 	}
 }
 

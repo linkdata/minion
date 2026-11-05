@@ -137,7 +137,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 0
 	}
 	if runtime.GOOS == "linux" && cfg.RemoteExecutor == nil && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
-		logger.Print("Claude Unix-socket opt-in enabled by claude.allow_all_unix_sockets; sandboxed Claude commands can reach host service sockets")
+		logger.Print(claudeUnixSocketWarning)
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
