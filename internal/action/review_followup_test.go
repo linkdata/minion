@@ -93,6 +93,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 					}
 				}
 				runner.Logger = log.New(journal, "", 0)
+				if provider == "claude" {
+					useShortClaudeTempDir(t, "/tmp")
+				}
 				result, err := runner.Run(t.Context(), job)
 				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 || result.Validate(job) != nil {
 					t.Fatalf("session cleanup discarded accepted result: %+v,%v", result, err)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/testsupport"
 )
@@ -42,8 +43,17 @@ fi
 				t.Fatal(err)
 			}
 			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
-			if cwd := strings.TrimSpace(readFile(t, binary+".cwd")); !strings.HasPrefix(filepath.Base(cwd), runtimePrefix) {
+			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
+			tempRoot, rootErr := aicli.Directory(os.TempDir())
+			if rootErr != nil {
+				t.Fatal(rootErr)
+			}
+			if filepath.Dir(cwd) != tempRoot || !strings.HasPrefix(filepath.Base(cwd), runtimePrefix) ||
+				len(cwd)-len(tempRoot) > len("/"+runtimePrefix+"4294967295") {
 				t.Fatalf("validation runtime directory = %q", cwd)
+			}
+			if _, statErr := os.Stat(cwd); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("validation runtime retained: %v", statErr)
 			}
 			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--include-partial-messages\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)

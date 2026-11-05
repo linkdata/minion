@@ -269,7 +269,7 @@ printf '%s\n' '`+successfulResult+`'
 				filepath.Base(cwd) != runtimeChild || !strings.HasPrefix(filepath.Base(filepath.Dir(cwd)), runtimePrefix) {
 				t.Fatalf("runtime directory = %q", cwd)
 			}
-			if _, err := os.Stat(cwd); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Dir(cwd)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("runtime retained: %v", err)
 			}
 		})

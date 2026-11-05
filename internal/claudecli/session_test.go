@@ -55,6 +55,9 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 				t.Fatal(err)
 			}
 			parentBefore = parent
+			if err := os.WriteFile(filepath.Join(session.runtimeRoot, "parent-marker"), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			for _, dir := range []string{session.runtimeDir, session.cacheDir} {
 				if err := os.WriteFile(filepath.Join(dir, "prior-notes"), []byte("previous critic findings"), 0600); err != nil {
 					t.Fatal(err)
@@ -71,6 +74,9 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 			parentAfter, err := os.Stat(session.runtimeRoot)
 			if err != nil || !os.SameFile(parentBefore, parentAfter) {
 				t.Fatalf("private runtime parent changed on reset: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(session.runtimeRoot, "parent-marker")); err != nil || string(got) != "keep" {
+				t.Fatalf("private runtime parent lost marker on reset: %q, %v", got, err)
 			}
 		}
 		wantCost := 0.5

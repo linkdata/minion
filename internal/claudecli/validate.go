@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -42,7 +41,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	defer func() {
 		resultErr = errors.Join(resultErr, os.RemoveAll(dir))
 	}()
-	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
+	authDir, err := authentication(tempRoot, settings.APIKey)
 	if authDir != "" {
 		defer func() {
 			resultErr = errors.Join(resultErr, os.RemoveAll(authDir))

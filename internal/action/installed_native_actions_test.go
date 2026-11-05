@@ -3,6 +3,7 @@ package action
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,6 +46,9 @@ func TestInstalledNativeActions(t *testing.T) {
 					runner.Claude.APIKey = os.Getenv("MINION_LIVE_CLAUDE_API_KEY")
 					if runner.Claude.APIKey == "" {
 						t.Fatal("set MINION_LIVE_CLAUDE_API_KEY so native transcripts stay in test-owned scratch")
+					}
+					if runtime.GOOS != "windows" {
+						useShortClaudeTempDir(t, "/var/tmp")
 					}
 				}
 				var successfulClaudeTool atomic.Bool

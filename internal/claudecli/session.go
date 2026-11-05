@@ -17,11 +17,15 @@ import (
 )
 
 const (
-	runtimePrefix           = "minion-claude-"
-	runtimeChild            = "r"
-	maxLinuxSocketPathBytes = 107
-	maxLinuxRuntimeDirBytes = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock")
-	maxLinuxTempRootBytes   = maxLinuxRuntimeDirBytes - len("/"+runtimePrefix+"4294967295/"+runtimeChild)
+	runtimePrefix            = "mc-"
+	runtimeChild             = "r"
+	runtimeRootSuffixBytes   = len("/" + runtimePrefix + "4294967295/" + runtimeChild)
+	maxLinuxSocketPathBytes  = 107
+	maxLinuxRuntimeDirBytes  = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock")
+	maxLinuxTempRootBytes    = maxLinuxRuntimeDirBytes - runtimeRootSuffixBytes
+	maxDarwinSocketPathBytes = 103
+	// Eleven base36 digits cover JavaScript's maximum safe integer mux counter.
+	maxDarwinTempRootBytes = maxDarwinSocketPathBytes - len("/srt-mux-99999-xxxxxxxxxxx.sock") - runtimeRootSuffixBytes
 )
 
 // Session owns one action role's native conversation and scratch directories.
@@ -194,13 +198,25 @@ func (s *Session) initialize() (err error) {
 }
 
 func runtimeTempRoot() (string, error) {
+	return runtimeTempRootForOS(runtime.GOOS)
+}
+
+func runtimeTempRootForOS(goos string) (string, error) {
 	tempDir := os.TempDir()
 	root, err := aicli.Directory(tempDir)
 	if err != nil {
 		return "", fmt.Errorf("claude temp root %q: %w", tempDir, err)
 	}
-	if runtime.GOOS == "linux" && len(root) > maxLinuxTempRootBytes {
-		return "", fmt.Errorf("claude temp root %q (%d bytes): Linux sandbox socket path must be at most %d bytes; set TMPDIR to a canonical path of at most %d bytes", root, len(root), maxLinuxSocketPathBytes, maxLinuxTempRootBytes)
+	var platform string
+	var socketLimit, rootLimit int
+	switch goos {
+	case "linux":
+		platform, socketLimit, rootLimit = "Linux", maxLinuxSocketPathBytes, maxLinuxTempRootBytes
+	case "darwin":
+		platform, socketLimit, rootLimit = "macOS", maxDarwinSocketPathBytes, maxDarwinTempRootBytes
+	}
+	if rootLimit > 0 && len(root) > rootLimit {
+		return "", fmt.Errorf("claude temp root %q (%d bytes): %s sandbox socket path must be at most %d bytes; set TMPDIR to a canonical path of at most %d bytes", root, len(root), platform, socketLimit, rootLimit)
 	}
 	return root, nil
 }
