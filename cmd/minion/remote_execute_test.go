@@ -85,6 +85,19 @@ func (t remoteWorkerFailureTransport) RoundTrip(*http.Request) (*http.Response, 
 	return nil, t.err
 }
 
+func TestRemoteWorkerPreflightLogsOnlySafeFailure(t *testing.T) {
+	const privateText = "private transport failure text"
+	client := &http.Client{Transport: remoteWorkerFailureTransport{err: errors.New(privateText)}}
+	var logs bytes.Buffer
+	code := runRemoteWorkerPreflightAndLoop(t.Context(), remoteWorkerConfig{
+		BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
+	}, client, log.New(&logs, "", 0))
+	if code != 1 || logs.String() != "remote worker: selection preflight failed: remote selection preflight unavailable\n" ||
+		strings.Contains(logs.String(), privateText) {
+		t.Fatalf("remote preflight exposed transport text: exit=%d logs=%q", code, logs.String())
+	}
+}
+
 func TestRemoteWorkerLoopDoesNotLogPrivateFailureText(t *testing.T) {
 	const privateText = "private model discussion returned in a worker error"
 	client := &http.Client{Transport: remoteWorkerFailureTransport{err: errors.New(privateText)}}
@@ -119,7 +132,7 @@ func TestRemoteWorkerStalledPreflightNeverPulls(t *testing.T) {
 		code := runRemoteWorkerPreflightAndLoop(t.Context(), remoteWorkerConfig{
 			BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
 		}, client, log.New(&logs, "", 0))
-		if code != 1 || !strings.Contains(logs.String(), "selection preflight failed") ||
+		if code != 1 || !strings.Contains(logs.String(), "selection preflight failed: remote selection preflight timed out") ||
 			len(paths) != 1 || paths[0] != "/preflight" || time.Since(start) > time.Minute {
 			t.Fatalf("stalled preflight reached worker pull or exceeded startup bound: code=%d paths=%v elapsed=%s logs=%q", code, paths, time.Since(start), logs.String())
 		}

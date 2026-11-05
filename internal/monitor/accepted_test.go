@@ -223,6 +223,42 @@ func TestSelectedPreparationRetryFailsWhenFrozenProviderIsUnavailable(t *testing
 	}
 }
 
+func TestSelectedPreparationRetrySkipsUnavailableCommand(t *testing.T) {
+	at := time.Now().UTC()
+	item := selectedItem(at)
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}}
+	store := openState(t, at.Add(-time.Minute))
+	preparationErr := errors.New("preparation unavailable")
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error { return preparationErr }))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, preparationErr) || store.Data.Accepted != nil {
+		t.Fatalf("first attempt did not release acceptance: error=%v state=%+v", err, store.Data)
+	}
+	id := jobID(item.Key, "review")
+	if failure := store.Data.JobFailures[id]; failure.Attempts != 1 || failure.MainProvider != "codex" {
+		t.Fatalf("first attempt was not frozen: %+v", failure)
+	}
+	m.SelectedCommands = map[string]bool{"audit": true} // The restarted worker cannot execute review.
+	audit := selectedItem(at)
+	audit.Key, audit.NodeID, audit.Body = "comment:2", "node:2", "@linkdataminion audit"
+	gh.items = append(gh.items, audit)
+	retryAt := advanceToRetry(at, store).Add(2 * time.Second)
+	m.Now = func() time.Time { return retryAt }
+	var auditRuns int
+	m.Handler = selectedHandler(func(job Job) error {
+		if job.Command.Name != "audit" {
+			t.Fatalf("unavailable command was dispatched: %s", job.Command.Name)
+		}
+		auditRuns++
+		return nil
+	})
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+		store.Data.JobFailures[id].Attempts != 1 || !store.Data.Processed[id].IsZero() ||
+		auditRuns != 1 || store.Data.Processed[jobID(audit.Key, "audit")].IsZero() {
+		t.Fatalf("unavailable retry reserved work: error=%v state=%+v", err, store.Data)
+	}
+}
+
 func TestAcceptedPreferencesRevalidatedAndFrozenAcrossRestart(t *testing.T) {
 	approved := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
 	approvedCritic := config.RoleModelConfig{Model: "approved-critic", Effort: "low"}

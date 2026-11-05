@@ -417,6 +417,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		commandSets[repo.Name] = m.availableCommands(repo)
 		parseCommands[repo.Name] = m.controlCommands(repo)
 	}
+	skipUnavailableCommand := func(repoName, itemKey, name string) bool {
+		if _, available := commandSets[repoName][name]; available {
+			return false
+		}
+		failure := store.Data.JobFailures[jobID(itemKey, name)]
+		return failure.AcceptedAt.IsZero() ||
+			failure.MainProvider == cmp.Or(m.Config.Main, "codex") && failure.CriticProvider == m.Config.Adversarial
+	}
 
 	var scans []notificationScan
 	seen := make(map[string]bool)
@@ -603,10 +611,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if _, done := store.Data.Processed[jobID(item.Key, preliminary.Name)]; done {
 				continue
 			}
-			if failure := store.Data.JobFailures[jobID(item.Key, preliminary.Name)]; failure.AcceptedAt.IsZero() {
-				if _, available := commandSets[repo.Name][preliminary.Name]; !available {
-					continue
-				}
+			if skipUnavailableCommand(repo.Name, item.Key, preliminary.Name) {
+				continue
 			}
 			current, err := m.GitHub.CurrentItem(ctx, item)
 			if ctx.Err() != nil {
@@ -643,10 +649,8 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if _, done := store.Data.Processed[job.ID]; done {
 				continue
 			}
-			if failure := store.Data.JobFailures[job.ID]; failure.AcceptedAt.IsZero() {
-				if _, available := commandSets[repo.Name][cmd.Name]; !available {
-					continue
-				}
+			if skipUnavailableCommand(repo.Name, item.Key, cmd.Name) {
+				continue
 			}
 			if item.Edited {
 				// The latest editor may not be the actor who introduced a

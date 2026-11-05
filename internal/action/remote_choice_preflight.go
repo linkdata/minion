@@ -66,7 +66,17 @@ const remoteChoicePreflightTimeout = 90 * time.Second
 
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
 func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string) error {
-	return preflightRemoteChoices(ctx, client, origin, executorID, remoteChoicePreflightTimeout)
+	err := preflightRemoteChoices(ctx, client, origin, executorID, remoteChoicePreflightTimeout)
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return preflightError{message: "remote selection preflight timed out", cause: err}
+	}
+	if _, safe := err.(preflightError); safe {
+		return err
+	}
+	return preflightError{message: "remote selection preflight unavailable", cause: err}
 }
 
 func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, timeout time.Duration) error {

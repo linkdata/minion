@@ -282,7 +282,7 @@ func TestPublishRecoveredReviewReconcilesPostedReview(t *testing.T) {
 				var nodes []map[string]any
 				if review := posted.Load(); review != nil {
 					nodes = []map[string]any{{"id": "review-node", "fullDatabaseId": "1", "body": review.body,
-						"author": map[string]any{"login": "bot", "id": 8}, "state": "COMMENTED", "submittedAt": request.Source.UpdatedAt.Add(time.Second).UTC().Format(time.RFC3339)}}
+						"author": map[string]any{"login": "bot", "id": 8}, "state": "COMMENTED", "submittedAt": time.Now().UTC().Format(time.RFC3339)}}
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"repository": map[string]any{
 					"pullRequest": map[string]any{"timelineItems": map[string]any{"nodes": nodes, "pageInfo": map[string]any{"hasNextPage": false}}}}}})
