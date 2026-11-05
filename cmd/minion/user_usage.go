@@ -333,11 +333,6 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 		if len(totals) != 0 {
 			page.Total = totals[0]
 		}
-		if !a.usageGate.enter(r.Context()) {
-			a.browserError(w, r, http.StatusServiceUnavailable)
-			return
-		}
-		defer a.usageGate.leave()
 		verifyCtx, cancel := context.WithTimeout(r.Context(), a.usageGate.verificationTimeout)
 		defer cancel()
 		var keyed []usage.Summary
@@ -349,7 +344,17 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 		calls := 0
 		apiAccount := strconv.FormatInt(githubID, 10)
 		index := min(after, len(keyed))
-		for index < len(keyed) && len(page.Repositories) < userUsagePageSize {
+		canCheck := index < len(keyed)
+		if canCheck {
+			canCheck = a.usageGate.enter(verifyCtx)
+			if canCheck {
+				defer a.usageGate.leave()
+			} else {
+				page.VerificationUnavailable = true
+				page.RetryURL = userUsageContinueURL(repo, index)
+			}
+		}
+		for canCheck && index < len(keyed) && len(page.Repositories) < userUsagePageSize {
 			if verifyCtx.Err() != nil {
 				page.VerificationUnavailable = true
 				if page.RetryURL == "" {

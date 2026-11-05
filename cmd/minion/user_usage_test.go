@@ -116,6 +116,31 @@ func TestUserUsageLinkStoreUnavailable(t *testing.T) {
 	}
 }
 
+func TestUserUsageShowsTotalsWhenRepositoryChecksAreBusy(t *testing.T) {
+	store := &usage.Store{Dir: t.TempDir()}
+	record := userUsageRecord(1, "org/private", 102, 42, "alice", "succeeded")
+	record.CodexCalls, record.Tokens, record.UsageSource, record.UsageComplete = 1,
+		usage.Tokens{Output: 7}, "executor_reported", true
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	jw, oauth, handler := userUsageTestHandler(t, &action.Orchestrator{Usage: store})
+	cookie := userUsageCookie(t, jw, (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key(), false)
+	for range cap(oauth.usageGate.checks) {
+		oauth.usageGate.checks <- struct{}{}
+	}
+	defer func() {
+		for range cap(oauth.usageGate.checks) {
+			<-oauth.usageGate.checks
+		}
+	}()
+	response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", cookie)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">7</p>`) ||
+		userUsageRetryPath(response.Body.String()) != "/user/usage" || strings.Contains(response.Body.String(), "org/private") {
+		t.Fatalf("busy repository checks hid totals or disclosed private data: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
 func userUsageRecord(id int, repo string, repoID, requesterID int64, user, status string) usage.Record {
 	started := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC).Add(time.Duration(id) * time.Minute)
 	finished := started.Add(time.Minute)
