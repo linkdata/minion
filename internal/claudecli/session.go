@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	runtimePrefix            = "mc-"
-	runtimeChild             = "r"
+	runtimePrefix = "mc-"
+	runtimeChild  = "r"
+	// MkdirTemp appends at most ten decimal digits to the prefix.
 	runtimeDirSuffixBytes    = len("/" + runtimePrefix + "4294967295/" + runtimeChild)
 	maxLinuxSocketPathBytes  = 107
 	maxLinuxTempRootBytes    = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock") - runtimeDirSuffixBytes
@@ -133,12 +134,13 @@ func (s *Session) prepare(ctx context.Context, workspace, binary string, writabl
 			return errors.New("claude session native configuration changed")
 		}
 	} else {
-		if err := checkBubblewrap(ctx, settings.AllowAllUnixSockets); err != nil {
+		tempRoot, err := CheckHost(ctx, settings.AllowAllUnixSockets)
+		if err != nil {
 			return err
 		}
 		s.workspace, s.binary, s.outputDir, s.writable, s.settings = workspace, binary, outputDir, writable, bound
 		s.settings.Skills = slices.Clone(bound.Skills)
-		s.initErr = s.initialize()
+		s.initErr = s.initialize(tempRoot)
 		if s.initErr != nil {
 			return s.initErr
 		}
@@ -170,12 +172,8 @@ func (s *Session) prepare(ctx context.Context, workspace, binary string, writabl
 	return nil
 }
 
-func (s *Session) initialize() (err error) {
+func (s *Session) initialize(tempRoot string) (err error) {
 	// Claude's sandbox creates Unix sockets directly in TMPDIR, so keep it short.
-	tempRoot, err := runtimeTempRoot()
-	if err != nil {
-		return
-	}
 	if s.runtimeRoot, err = os.MkdirTemp(tempRoot, runtimePrefix); err != nil {
 		return
 	}

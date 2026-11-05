@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -1875,6 +1876,7 @@ fi
 }
 
 func TestSessionInitializationFailureStaysBound(t *testing.T) {
+	testsupport.UseShortClaudeTempDir(t, "/tmp")
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
 	skill := filepath.Join(t.TempDir(), "SKILL.md")
 	settings := config.ClaudeConfig{Skills: []string{skill}}

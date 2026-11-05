@@ -1,6 +1,6 @@
-//go:build darwin
+//go:build linux || darwin
 
-package action
+package main
 
 import (
 	"testing"

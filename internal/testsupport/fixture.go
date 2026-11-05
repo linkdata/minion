@@ -52,6 +52,12 @@ func FakeOnPath(t *testing.T, name, script string) string {
 	return bin
 }
 
+// FakeBubblewrap installs a Bubblewrap help fixture and returns its path.
+func FakeBubblewrap(t *testing.T, help string) string {
+	t.Helper()
+	return filepath.Join(FakeOnPath(t, "bwrap", "#!/bin/sh\nprintf '%s\\n' '"+help+"'\n"), "bwrap")
+}
+
 // UseShortClaudeTempDir keeps native test sockets below Unix path limits.
 func UseShortClaudeTempDir(t *testing.T, parent string) {
 	t.Helper()

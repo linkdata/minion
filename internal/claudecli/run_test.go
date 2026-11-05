@@ -126,11 +126,6 @@ done
 	return filepath.Join(testsupport.FakeOnPath(t, name, "#!/bin/sh\n"+script), name)
 }
 
-func fakeBubblewrap(t *testing.T, help string) string {
-	t.Helper()
-	return filepath.Join(testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nprintf '%s\\n' '"+help+"'\n"), "bwrap")
-}
-
 func readFile(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -145,7 +140,7 @@ func TestRunRejectsUnsupportedBubblewrapBeforeClaude(t *testing.T) {
 		t.Skip("Bubblewrap opt-in applies only on Linux")
 	}
 	binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
-	fakeBubblewrap(t, "--unshare-user")
+	testsupport.FakeBubblewrap(t, "--unshare-user")
 	var session Session
 	t.Cleanup(func() {
 		if err := session.Close(); err != nil {
@@ -218,7 +213,7 @@ printf '%s\n' '`+successfulResult+`'
 			t.Setenv("NODE_OPTIONS", "dummy-option")
 			t.Setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "600000")
 			if tc.allowAllUnixSockets && runtime.GOOS == "linux" {
-				fakeBubblewrap(t, "--disable-userns")
+				testsupport.FakeBubblewrap(t, "--disable-userns")
 			}
 			result, err := Run(t.Context(), workspace, "Handle task", writable, output, config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}, AllowAllUnixSockets: tc.allowAllUnixSockets})
 			if err != nil {
@@ -300,8 +295,10 @@ printf '%s\n' '`+successfulResult+`'
 			wantSocketOverride := runtime.GOOS == "linux" && tc.allowAllUnixSockets
 			filesystem, authored := nativeSandbox["filesystem"]
 			wantFilesystem := fmt.Sprintf(`{"denyRead":["/run/user/%d"]}`, os.Getuid())
-			if authored != wantSocketOverride || authored && string(filesystem) != wantFilesystem {
-				t.Fatalf("Unix socket opt-in filesystem policy = %s, want %s when enabled %t", filesystem, wantFilesystem, wantSocketOverride)
+			_, runtimeErr := os.Stat(fmt.Sprintf("/run/user/%d", os.Getuid()))
+			wantReadBlock := wantSocketOverride && !errors.Is(runtimeErr, os.ErrNotExist)
+			if authored != wantReadBlock || authored && string(filesystem) != wantFilesystem {
+				t.Fatalf("Unix socket opt-in filesystem policy = %s, want %s when enabled %t", filesystem, wantFilesystem, wantReadBlock)
 			}
 			network, authored := nativeSandbox["network"]
 			if authored != wantSocketOverride || wantSocketOverride && string(network) != `{"allowAllUnixSockets":true}` {

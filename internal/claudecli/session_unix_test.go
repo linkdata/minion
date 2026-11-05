@@ -63,18 +63,16 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 
 func TestSessionRejectsShortSymlinkToLongTempPath(t *testing.T) {
 	root := testCanonicalTempDirLength(t, maxTempRootBytes+1)
-	link, err := os.MkdirTemp("/tmp", "m")
+	parent, err := os.MkdirTemp("/tmp", "m")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.RemoveAll(link); err != nil {
+		if err := os.RemoveAll(parent); err != nil {
 			t.Error(err)
 		}
 	})
-	if err := os.Remove(link); err != nil {
-		t.Fatal(err)
-	}
+	link := filepath.Join(parent, "link")
 	if err := os.Symlink(root, link); err != nil {
 		t.Fatal(err)
 	}

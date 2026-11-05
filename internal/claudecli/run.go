@@ -289,7 +289,11 @@ func sandboxSettings(workspace, outputDir, authDir string, allowAllUnixSockets b
 	if runtime.GOOS == "linux" && allowAllUnixSockets {
 		// shortcut: Linux Bash can still reach host, Claude session, and AF_VSOCK VM host sockets; replace the CLI sandbox for stronger isolation.
 		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
-		sandbox["filesystem"] = map[string]any{"denyRead": []string{fmt.Sprintf("/run/user/%d", os.Getuid())}}
+		userRuntime := fmt.Sprintf("/run/user/%d", os.Getuid())
+		// A missing target makes Claude hide its nearest existing parent instead.
+		if _, err := os.Stat(userRuntime); !errors.Is(err, os.ErrNotExist) {
+			sandbox["filesystem"] = map[string]any{"denyRead": []string{userRuntime}}
+		}
 	}
 	policy := map[string]any{
 		"disableClaudeAiConnectors": true,

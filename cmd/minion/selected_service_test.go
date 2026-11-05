@@ -728,7 +728,7 @@ func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 				t.Fatal(err)
 			}
 			if startup.CodexAPIKey != tc.want.CodexAPIKey || startup.CodexNativeAPIKey != tc.want.CodexNativeAPIKey || startup.CodexAccessToken != tc.want.CodexAccessToken || startup.ClaudeAPIKey != tc.want.ClaudeAPIKey || startup.ClaudeAllowAllUnixSockets != cfg.Claude.AllowAllUnixSockets {
-				t.Fatal("child startup did not contain exactly the selected credentials")
+				t.Fatal("child startup credentials or Claude socket opt-in mismatch")
 			}
 		})
 	}

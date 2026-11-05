@@ -114,7 +114,11 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	for _, role := range roles {
 		if role.Provider == "claude" {
 			if _, err := claudecli.CheckHost(preflightCtx, runner.Claude.AllowAllUnixSockets); err != nil {
-				return preflightError{message: "remote Claude host check failed: " + err.Error(), cause: err}
+				if preflightCtx.Err() != nil {
+					return preflightCtx.Err()
+				}
+				// The short host probe deadline must not look like the whole preflight deadline.
+				return preflightError{message: "remote Claude host check failed: " + err.Error(), cause: errors.New(err.Error())}
 			}
 			break
 		}

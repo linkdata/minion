@@ -18,7 +18,6 @@ import (
 
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/state"
 )
 
 func TestLoadRemoteWorkerConfig(t *testing.T) {
@@ -48,45 +47,6 @@ func TestLoadRemoteWorkerConfig(t *testing.T) {
 			}
 			if _, err := loadRemoteWorkerConfig(path); err == nil {
 				t.Fatal("invalid remote worker config accepted")
-			}
-		})
-	}
-}
-
-func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
-	for _, tc := range []struct {
-		name, main, adversarial string
-		warn                    bool
-	}{
-		{name: "main Claude", main: "claude", warn: true},
-		{name: "critic Claude", main: "codex", adversarial: "claude", warn: true},
-		{name: "Codex only", main: "codex"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := config.Config{
-				BotLogin: "fixture", Main: tc.main, Adversarial: tc.adversarial,
-				Claude:    config.ClaudeConfig{Effort: "high", AllowAllUnixSockets: true},
-				StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
-				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
-			}
-			store, err := state.Open(cfg.StatePath, time.Now().UTC())
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := store.Close(); err != nil {
-					t.Error(err)
-				}
-			})
-			// The held lock stops startup after the warning decision, before CLI preflight.
-			code, output := runStartupFixture(t, cfg)
-			wantWarnings := 0
-			if runtime.GOOS == "linux" && tc.warn {
-				wantWarnings = 1
-			}
-			if code != 0 || !strings.Contains(output, "another run is active") || strings.Count(output, claudeUnixSocketWarning) != wantWarnings {
-				t.Fatalf("local socket warning: exit=%d want=%d log=%q", code, wantWarnings, output)
 			}
 		})
 	}

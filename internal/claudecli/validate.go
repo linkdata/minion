@@ -121,7 +121,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	return validated, fmt.Errorf("claude model %q is absent from the installed CLI catalogue", settings.Model)
 }
 
-// CheckHost returns the canonical temp root after checking Claude's Linux sandbox opt-in.
+// CheckHost checks the canonical temp-root length and Claude's Linux sandbox opt-in.
 func CheckHost(ctx context.Context, allowAllUnixSockets bool) (string, error) {
 	root, err := runtimeTempRoot()
 	if err != nil {
@@ -148,7 +148,7 @@ func checkBubblewrap(ctx context.Context, allowAllUnixSockets bool) error {
 	if info.Mode()&os.ModeSetuid != 0 {
 		return fmt.Errorf("claude Unix-socket opt-in requires non-setuid Bubblewrap: %q is setuid", binary)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	output, err := aicli.Probe(probeCtx, binary, "", []string{"--help"}, "", []string{}, "", "")
 	if err != nil {

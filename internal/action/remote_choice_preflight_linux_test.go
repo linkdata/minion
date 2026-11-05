@@ -110,6 +110,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			}
 			_ = response.Body.Close()
 			if !tc.wantError {
+				// A Codex-only offer does not need Claude's host prerequisites.
 				root := filepath.Join(t.TempDir(), strings.Repeat("x", 60))
 				if err := os.MkdirAll(root, 0700); err != nil {
 					t.Fatal(err)
@@ -200,7 +201,7 @@ func TestRemoteClaudeSocketOptInReachesModel(t *testing.T) {
 		t.Setenv(key, "")
 	}
 	testsupport.UseShortClaudeTempDir(t, "/tmp")
-	fakeOnPath(t, "bwrap", "#!/bin/sh\ncase \"$1\" in --help) echo --disable-userns;; esac\n")
+	testsupport.FakeBubblewrap(t, "--disable-userns")
 	settingsPath := filepath.Join(t.TempDir(), "settings")
 	fakeOnPath(t, "claude", `#!/bin/sh
 if [ "$1" = --version ]; then echo '2.1.318 (Claude Code)'; exit 0; fi
@@ -265,7 +266,11 @@ func TestRemoteClaudePreflightReportsHostFailures(t *testing.T) {
 		}},
 		{name: "old Bubblewrap", want: "does not support", setup: func(t *testing.T) {
 			testsupport.UseShortClaudeTempDir(t, "/tmp")
-			fakeOnPath(t, "bwrap", "#!/bin/sh\necho --unshare-user\n")
+			testsupport.FakeBubblewrap(t, "--unshare-user")
+		}},
+		{name: "Bubblewrap probe timeout", want: "probe Bubblewrap", setup: func(t *testing.T) {
+			testsupport.UseShortClaudeTempDir(t, "/tmp")
+			testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexec /bin/sleep 30\n")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

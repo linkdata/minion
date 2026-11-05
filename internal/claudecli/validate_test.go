@@ -47,7 +47,7 @@ fi
 				t.Fatal(err)
 			}
 			if tc.allowAllUnixSockets && runtime.GOOS == "linux" {
-				fakeBubblewrap(t, "--disable-userns")
+				testsupport.FakeBubblewrap(t, "--disable-userns")
 			}
 			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort, AllowAllUnixSockets: tc.allowAllUnixSockets})
 			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
@@ -109,7 +109,7 @@ func TestBubblewrapOptInPrerequisite(t *testing.T) {
 		{name: "setuid", help: "--disable-userns", setuid: true, wantError: "is setuid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			binary := fakeBubblewrap(t, tc.help)
+			binary := testsupport.FakeBubblewrap(t, tc.help)
 			if tc.setuid {
 				if err := os.Chmod(binary, os.ModeSetuid|0755); err != nil {
 					t.Fatal(err)

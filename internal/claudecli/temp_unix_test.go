@@ -1,6 +1,6 @@
-//go:build darwin
+//go:build linux || darwin
 
-package main
+package claudecli
 
 import (
 	"testing"

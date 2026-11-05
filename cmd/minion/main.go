@@ -136,9 +136,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
 	}
-	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
-		logger.Print(claudeUnixSocketWarning)
-	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
@@ -162,6 +159,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("close state: %v", err)
 		}
 	}()
+	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+		logger.Print(claudeUnixSocketWarning)
+	}
 	if !*check {
 		defer func() {
 			if ctx.Err() != nil {

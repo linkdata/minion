@@ -31,7 +31,7 @@ func TestRemoteWorkerConfigPassesSocketOptInToPreflightAndJobValidation(t *testi
 		t.Setenv(key, "")
 	}
 	testsupport.UseShortClaudeTempDir(t, "/tmp")
-	testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\ncase \"$1\" in --help) echo --disable-userns;; esac\n")
+	testsupport.FakeBubblewrap(t, "--disable-userns")
 	settingsPath := filepath.Join(t.TempDir(), "settings")
 	testsupport.FakeOnPath(t, "claude", `#!/bin/sh
 previous=
