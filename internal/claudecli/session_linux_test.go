@@ -1,6 +1,7 @@
 package claudecli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,7 @@ import (
 func TestSessionRuntimeOutsideDeepWorkspace(t *testing.T) {
 	fakeExecutable(t, "claude", `cat >/dev/null
 [ "$TMPDIR" = "$PWD" ] && [ "$CLAUDE_CODE_TMPDIR" = "$PWD/tmp" ] || exit 2
-[ ${#PWD} -le 72 ] || exit 3
+[ ${#PWD} -le `+fmt.Sprint(maxLinuxRuntimeDirBytes)+` ] || exit 3
 printf '%s\n' '`+successfulResult+`'
 `)
 	workspace := filepath.Join(t.TempDir(), strings.Repeat("deep", 25), "source")
@@ -37,8 +38,13 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 	if err := os.MkdirAll(tempRoot, 0700); err != nil {
 		t.Fatal(err)
 	}
+	canonicalRoot, err := filepath.EvalSymlinks(tempRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLimit := fmt.Sprintf("canonical path of at most %d bytes", maxLinuxTempRootBytes)
 	t.Setenv("TMPDIR", tempRoot)
-	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "canonical path of at most 45 bytes") || !strings.Contains(err.Error(), tempRoot) {
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), wantLimit) || !strings.Contains(err.Error(), canonicalRoot) {
 		t.Fatalf("long temp path passed startup validation: %v", err)
 	}
 	var session Session
@@ -47,7 +53,7 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	if _, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "canonical path of at most 45 bytes") || !strings.Contains(err.Error(), tempRoot) {
+	if _, err := session.Run(t.Context(), workspace, "task", false, "", config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), wantLimit) || !strings.Contains(err.Error(), canonicalRoot) {
 		t.Fatalf("long temp path: %v", err)
 	}
 	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {

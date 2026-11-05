@@ -44,11 +44,17 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 		}
 	})
 	known := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
+	var parentBefore os.FileInfo
 	for call := 1; call <= 3; call++ {
 		if call == 2 {
 			settings.ReadOnlyDirs = []string{newGrant}
 		}
 		if call == 3 {
+			parent, err := os.Stat(session.runtimeRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parentBefore = parent
 			for _, dir := range []string{session.runtimeDir, session.cacheDir} {
 				if err := os.WriteFile(filepath.Join(dir, "prior-notes"), []byte("previous critic findings"), 0600); err != nil {
 					t.Fatal(err)
@@ -60,6 +66,12 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 		result, err := session.Run(t.Context(), workspace, "task", false, "", settings)
 		if err != nil || !result.UsageComplete || result.Tokens != known || result.UsageCoverage != (usage.Coverage{Scope: "invocation"}) {
 			t.Fatalf("call%d: %+v, %v", call, result, err)
+		}
+		if call == 3 {
+			parentAfter, err := os.Stat(session.runtimeRoot)
+			if err != nil || !os.SameFile(parentBefore, parentAfter) {
+				t.Fatalf("private runtime parent changed on reset: %v", err)
+			}
 		}
 		wantCost := 0.5
 		if call == 2 {

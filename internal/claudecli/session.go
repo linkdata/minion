@@ -17,8 +17,11 @@ import (
 )
 
 const (
-	runtimePrefix = "minion-claude-"
-	runtimeChild  = "r"
+	runtimePrefix           = "minion-claude-"
+	runtimeChild            = "r"
+	maxLinuxSocketPathBytes = 107
+	maxLinuxRuntimeDirBytes = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock")
+	maxLinuxTempRootBytes   = maxLinuxRuntimeDirBytes - len("/"+runtimePrefix+"4294967295/"+runtimeChild)
 )
 
 // Session owns one action role's native conversation and scratch directories.
@@ -192,12 +195,13 @@ func (s *Session) initialize() (err error) {
 }
 
 func runtimeTempRoot() (string, error) {
-	root, err := aicli.Directory(os.TempDir())
+	tempDir := os.TempDir()
+	root, err := aicli.Directory(tempDir)
 	if err != nil {
-		return "", fmt.Errorf("claude temp root %q: %w", os.TempDir(), err)
+		return "", fmt.Errorf("claude temp root %q: %w", tempDir, err)
 	}
-	if runtime.GOOS == "linux" && len(filepath.Join(root, runtimePrefix+"4294967295", runtimeChild, "claude-socks-0123456789abcdef.sock")) >= 108 {
-		return "", fmt.Errorf("claude temp root %q (%d bytes): sandbox socket path exceeds Linux's 108-byte limit; set TMPDIR to a canonical path of at most 45 bytes", root, len(root))
+	if runtime.GOOS == "linux" && len(root) > maxLinuxTempRootBytes {
+		return "", fmt.Errorf("claude temp root %q (%d bytes): Linux sandbox socket path must be at most %d bytes; set TMPDIR to a canonical path of at most %d bytes", root, len(root), maxLinuxSocketPathBytes, maxLinuxTempRootBytes)
 	}
 	return root, nil
 }

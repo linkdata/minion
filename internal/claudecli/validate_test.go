@@ -20,6 +20,7 @@ func TestValidate(t *testing.T) {
   printf '%s\n' '{"loggedIn":true}'
 else
   printf '%s\n' "$@" > "$0.args"
+  printf '%s\n' "$PWD" > "$0.cwd"
   cat > "$0.input"
   printf '%s\n' '`+modelCatalogue+`'
 fi
@@ -41,6 +42,9 @@ fi
 				t.Fatal(err)
 			}
 			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
+			if cwd := strings.TrimSpace(readFile(t, binary+".cwd")); !strings.HasPrefix(filepath.Base(cwd), runtimePrefix) {
+				t.Fatalf("validation runtime directory = %q", cwd)
+			}
 			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--include-partial-messages\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
 			}

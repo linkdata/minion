@@ -31,10 +31,11 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
-	if _, err := runtimeTempRoot(); err != nil {
+	tempRoot, err := runtimeTempRoot()
+	if err != nil {
 		return validated, err
 	}
-	dir, err := os.MkdirTemp("", "minion-claude-check-")
+	dir, err := os.MkdirTemp(tempRoot, runtimePrefix)
 	if err != nil {
 		return validated, err
 	}

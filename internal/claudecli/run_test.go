@@ -265,7 +265,8 @@ printf '%s\n' '`+successfulResult+`'
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cwd == workspace || filepath.Dir(filepath.Dir(cwd)) != tempRoot {
+			if cwd == workspace || filepath.Dir(filepath.Dir(cwd)) != tempRoot ||
+				filepath.Base(cwd) != runtimeChild || !strings.HasPrefix(filepath.Base(filepath.Dir(cwd)), runtimePrefix) {
 				t.Fatalf("runtime directory = %q", cwd)
 			}
 			if _, err := os.Stat(cwd); !errors.Is(err, os.ErrNotExist) {
