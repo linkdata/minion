@@ -179,6 +179,12 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		if access.rejectRotatedCookie(w, r) {
 			return
 		}
+		if oauth != nil && jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		home.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("HEAD /{$}", func(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +387,15 @@ func (a *adminAccess) rememberRotatedCookie(value string) bool {
 	key := sha256.Sum256([]byte(value))
 	state, known := a.rotatedCookies[key]
 	if !known && len(a.rotatedCookies) >= maxRotatedCookies {
-		return false
+		for oldKey, old := range a.rotatedCookies {
+			if old.signedOut && old.pending == 0 {
+				delete(a.rotatedCookies, oldKey)
+				break
+			}
+		}
+		if len(a.rotatedCookies) >= maxRotatedCookies {
+			return false
+		}
 	}
 	state.until = now.Add(time.Minute)
 	a.rotatedCookies[key] = state
@@ -424,20 +438,14 @@ func (a *adminAccess) redirectClosedSession(w http.ResponseWriter, r *http.Reque
 
 // markSignedOutCookie is called under sessionAdmissionMu when sign-out closes a session.
 func (a *adminAccess) markSignedOutCookie(value string) {
-	key := sha256.Sum256([]byte(value))
 	if !a.rememberRotatedCookie(value) {
-		for oldKey, state := range a.rotatedCookies {
-			if state.signedOut {
-				delete(a.rotatedCookies, oldKey)
-				break
-			}
-		}
-		if !a.rememberRotatedCookie(value) {
-			slog.Warn("sign-out page reload may not reach home: cookie marker capacity reached")
-			return
-		}
+		slog.Warn("sign-out page reload may not reach home: cookie marker capacity reached")
+		return
 	}
-	a.rotatedCookies[key] = rotatedCookie{until: time.Now().Add(time.Minute), signedOut: true}
+	key := sha256.Sum256([]byte(value))
+	state := a.rotatedCookies[key]
+	state.signedOut = true
+	a.rotatedCookies[key] = state
 }
 
 // serveOAuthCallback holds the old cookie out of guest admission until every callback using it finishes.
@@ -466,10 +474,6 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 	defer func() {
 		a.sessionAdmissionMu.Lock()
 		state := a.rotatedCookies[key]
-		if state.pending == 0 {
-			a.sessionAdmissionMu.Unlock()
-			return // sign-out canceled this cookie's callbacks
-		}
 		state.pending--
 		if state.pending == 0 {
 			if a.jaws.GetSession(original) == old {
@@ -587,7 +591,9 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := a.jaws.GetSession(r)
 	if sess != nil {
-		a.markSignedOutCookie(sess.CookieValue())
+		if a.sessionUsername(sess) != "" {
+			a.markSignedOutCookie(sess.CookieValue())
+		}
 		sess.Clear()
 		sess.Close()
 	}

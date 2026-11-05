@@ -555,7 +555,7 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
 	var guest *http.Cookie
-	for jw.SessionCount() < maxOAuthAdmissionSessions-1 {
+	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
 		w := httptest.NewRecorder()
 		if jw.NewSession(w, httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)) == nil {
 			t.Fatal("could not fill guest sessions")
@@ -563,6 +563,13 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 		if guest == nil {
 			guest = w.Result().Cookies()[0]
 		}
+	}
+	last := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+	if last.Code != http.StatusOK || len(last.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("last OAuth login page: status=%d sessions=%d cookies=%v", last.Code, jw.SessionCount(), last.Result().Cookies())
+	}
+	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, last.Result().Cookies()[0], ""); start.Code != http.StatusFound {
+		t.Fatalf("last OAuth login page cannot start OAuth: status=%d", start.Code)
 	}
 	responses := make([]*httptest.ResponseRecorder, 32)
 	start := make(chan struct{})
@@ -577,14 +584,8 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	close(start)
 	workers.Wait()
-	created := 0
 	for i, response := range responses {
 		switch response.Code {
-		case http.StatusOK:
-			created++
-			if len(response.Result().Cookies()) != 1 {
-				t.Fatalf("guest page %d: missing cookie", i)
-			}
 		case http.StatusServiceUnavailable:
 			if len(response.Result().Cookies()) != 0 {
 				t.Fatalf("guest page %d: over-limit cookie", i)
@@ -593,8 +594,8 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 			t.Fatalf("guest page %d: status=%d", i, response.Code)
 		}
 	}
-	if created != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
-		t.Fatalf("guest pages created=%d sessions=%d", created, jw.SessionCount())
+	if jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("guest pages exhausted OAuth start reserve: sessions=%d", jw.SessionCount())
 	}
 	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, guest, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 0 {
 		t.Fatalf("existing guest page at reserve: status=%d cookies=%v", page.Code, page.Result().Cookies())

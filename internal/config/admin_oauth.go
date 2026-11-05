@@ -3,13 +3,12 @@ package config
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-func (a *AdminConfig) validateOAuth() error {
+func (a *AdminConfig) validateOAuth(listenPort uint64) error {
 	for _, entry := range []struct {
 		name, callbackPath string
 		client             *OAuthClient
@@ -34,17 +33,11 @@ func (a *AdminConfig) validateOAuth() error {
 			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
 		}
 		if redirect.Scheme == "http" {
-			listen := a.Listen
-			if listen == "" {
-				listen = DefaultAdminListen
-			}
-			_, port, err := net.SplitHostPort(listen)
-			listenPort, listenErr := strconv.Atoi(port)
-			redirectPort := 80
+			redirectPort := uint64(80)
 			if redirect.Port() != "" {
-				redirectPort, _ = strconv.Atoi(redirect.Port()) // validOAuthOrigin checked the port.
+				redirectPort, _ = strconv.ParseUint(redirect.Port(), 10, 16) // validOAuthOrigin checked the port.
 			}
-			if err == nil && listenErr == nil && listenPort != redirectPort {
+			if listenPort != redirectPort {
 				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
 			}
 		}
@@ -75,7 +68,7 @@ func (a *AdminConfig) validateOAuth() error {
 	return nil
 }
 
-func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
+func validOAuthOrigin(u *url.URL, allowLocalhostHTTP bool) bool {
 	if u == nil || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil || u.Opaque != "" {
 		return false
 	}
@@ -92,7 +85,7 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if u.Scheme == "https" {
 		return true
 	}
-	if u.Scheme != "http" || !allowLoopbackHTTP {
+	if u.Scheme != "http" || !allowLocalhostHTTP {
 		return false
 	}
 	return strings.EqualFold(host, "localhost")

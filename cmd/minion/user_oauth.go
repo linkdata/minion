@@ -126,7 +126,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 		closeUnreadAdminBody(w, r)
 		a.admissionMu.Lock()
 		defer a.admissionMu.Unlock()
-		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions {
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
 			w.WriteHeader(http.StatusServiceUnavailable)

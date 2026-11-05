@@ -189,6 +189,9 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	if admin.preferences == nil {
 		t.Fatal("admin server did not share the account preference store")
 	}
+	if !admin.signInEnabled {
+		t.Fatal("OAuth-only configuration did not enable sign-in")
+	}
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
 	if err != nil || admin.entryURL != "http://localhost:"+port {
 		t.Fatalf("OAuth home URL = %q, port=%q: %v", admin.entryURL, port, err)
@@ -395,6 +398,9 @@ func TestFallbackTLSListenURL(t *testing.T) {
 			t.Errorf("fallback URL for %s = %q, want %q", test.address, got, test.want)
 		}
 	}
+	if got := fallbackTLSListenURL("http://localhost:8080", "127.0.0.1:8080", &tls.Certificate{}); got != "https://localhost:8080" {
+		t.Errorf("fallback URL without parsed certificate = %q, want https://localhost:8080", got)
+	}
 }
 
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
@@ -435,7 +441,7 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 				GotConn: func(info httptrace.GotConnInfo) { reused = info.Reused },
 			})
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+admin.listener.Addr().String()+"/download/report", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -449,8 +455,8 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 		if err := resp.Body.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if resp.StatusCode != http.StatusNoContent || resp.ProtoMajor != wantProto {
-			t.Fatalf("HTTPS response = %s %d, want HTTP/%d 204", resp.Proto, resp.StatusCode, wantProto)
+		if resp.StatusCode != http.StatusForbidden || resp.ProtoMajor != wantProto {
+			t.Fatalf("HTTPS response = %s %d, want HTTP/%d 403", resp.Proto, resp.StatusCode, wantProto)
 		}
 		if resp.Header.Get("Strict-Transport-Security") != "" {
 			t.Fatal("admin response sets host-wide HSTS")

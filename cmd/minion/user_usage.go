@@ -190,7 +190,7 @@ var userUsageHTML = template.Must(template.New("user usage").Parse(headHTML + us
       <label class="d-grid gap-1">Repository<input class="form-control" name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
       <button class="btn btn-primary" type="submit">Filter repositories</button>
     </form>
-    <section class="border rounded p-3 mb-3 overflow-auto" aria-labelledby="accessible-repositories-heading" tabindex="0"><h2 id="accessible-repositories-heading">Accessible repositories</h2>
+    <section class="border rounded p-3 mb-3 overflow-auto" aria-labelledby="accessible-repositories-heading" tabindex="0"><h2 id="accessible-repositories-heading" class="h5">Accessible repositories</h2>
       {{if .Repo}}{{if not .Repositories}}{{if .RetryURL}}<p>Repository verification is incomplete at this position. Recheck{{if .ContinueURL}} or continue to later repositories{{end}}.</p>{{else if .VerificationUnavailable}}<p>Repository verification is unavailable right now. Retry this page later.</p>{{else if .ContinueURL}}<p>No matching accessible repository on this page. Continue checking.</p>{{else}}<p>No matching accessible repository was verified. Start over to check again.</p>{{end}}{{end}}{{else if .VerificationUnavailable}}<p>Some repository usage could not be verified right now. Refresh later.</p>{{end}}
       {{if .Repositories}}<table class="table table-striped align-middle"><thead><tr>
         <th scope="col">Repository</th><th scope="col">Attempts</th><th scope="col">Reported tokens</th>

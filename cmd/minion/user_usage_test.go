@@ -583,7 +583,7 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 		!strings.Contains(body, `<th scope="col">Estimated cost and currency</th>`) ||
 		!strings.Contains(body, `<th scope="col">Billed cost and currency</th>`) ||
 		!strings.Contains(body, `aria-labelledby="accessible-repositories-heading" tabindex="0"`) ||
-		!strings.Contains(body, `<h2 id="accessible-repositories-heading">Accessible repositories</h2>`) ||
+		!strings.Contains(body, `<h2 id="accessible-repositories-heading" class="h5">Accessible repositories</h2>`) ||
 		!strings.Contains(body, "executor-reported claims") ||
 		!strings.Contains(body, "main, critic, and helper usage") {
 		t.Fatalf("owner usage page: status=%d body=%s", response.Code, body)

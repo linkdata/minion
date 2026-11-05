@@ -44,3 +44,15 @@ func TestInProcessModeRejectedBeforeStartup(t *testing.T) {
 		t.Fatalf("retired mode: exit=%d log=%q", code, output)
 	}
 }
+
+func TestOneshotAndCheckRejectedBeforeStartup(t *testing.T) {
+	code, output := runStartupFixtureWithRun(t, config.Config{}, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Fatal("conflicting flags reached Git preflight")
+			return nil
+		})
+	}, "-oneshot", "-check")
+	if code != 2 || !strings.Contains(output, "-oneshot cannot be combined with -check") {
+		t.Fatalf("conflicting flags: exit=%d log=%q", code, output)
+	}
+}

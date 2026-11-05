@@ -565,6 +565,44 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 	}
 }
 
+func TestHomeReservesSessionsForSignIn(t *testing.T) {
+	handler, jw, _ := testOAuthAdminHandler(t, config.AdminConfig{
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}, nil)
+	jw.MaxSessionsPerIP = 0
+	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
+		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
+			t.Fatal("could not fill guest session reserve")
+		}
+	}
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("last home page: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
+	}
+	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], ""); start.Code != http.StatusFound {
+		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
+	}
+	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("home exhausted sign-in reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
+	}
+}
+
+func TestHomeWithoutOAuthUsesFullSessionCapacity(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	jw.MaxSessionsPerIP = 0
+	for jw.SessionCount() < maxOAuthAdmissionSessions {
+		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
+			t.Fatal("could not fill guest sessions")
+		}
+	}
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions+1 {
+		t.Fatalf("admin-only home: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
+	}
+}
+
 func TestAdminLoginRequiresLiveSession(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
@@ -647,6 +685,55 @@ func TestAdminLogoutWaitsForSessionAdmission(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("logout did not finish after admission lock was released")
 	}
+	if len(access.rotatedCookies) != 0 {
+		t.Fatal("guest sign-out added a rotation marker")
+	}
+}
+
+func TestSignOutKeepsCallbackMarkerUntilCleanup(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(jw.Close)
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/callback", nil)
+	sess := jw.NewSession(httptest.NewRecorder(), request)
+	if sess == nil {
+		t.Fatal("could not create callback session")
+	}
+	access := &adminAccess{jaws: jw, rotatedCookies: make(map[[32]byte]rotatedCookie)}
+	key := sha256.Sum256([]byte(sess.CookieValue()))
+	access.serveOAuthCallback(httptest.NewRecorder(), request, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		access.sessionAdmissionMu.Lock()
+		access.markSignedOutCookie(sess.CookieValue())
+		sess.Close()
+		access.sessionAdmissionMu.Unlock()
+	}))
+	if marker := access.rotatedCookies[key]; !marker.signedOut || marker.pending != 0 || !time.Now().Before(marker.until) {
+		t.Fatalf("callback cleanup lost sign-out marker: %+v", marker)
+	}
+}
+
+func TestOAuthCallbackRejectsFullRotationMap(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(jw.Close)
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/callback", nil)
+	if jw.NewSession(httptest.NewRecorder(), request) == nil {
+		t.Fatal("could not create callback session")
+	}
+	access := &adminAccess{jaws: jw, rotatedCookies: make(map[[32]byte]rotatedCookie)}
+	for i := range maxRotatedCookies {
+		access.rotatedCookies[sha256.Sum256([]byte(fmt.Sprintf("guard-%d", i)))] = rotatedCookie{until: time.Now().Add(time.Minute), pending: 1}
+	}
+	called := false
+	response := httptest.NewRecorder()
+	access.serveOAuthCallback(response, request, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || called || jw.GetSession(request) == nil {
+		t.Fatalf("full rotation map admitted callback: status=%d called=%t", response.Code, called)
+	}
 }
 
 func TestAdminRotatedCookieTombstonesStayBounded(t *testing.T) {
@@ -681,12 +768,22 @@ func TestAdminRotatedCookieTombstonesStayBounded(t *testing.T) {
 	if !access.rotatedCookies[sha256.Sum256([]byte("after-expiry"))].signedOut {
 		t.Fatal("sign-out marker was not retained when a slot was available")
 	}
+	key := sha256.Sum256([]byte("after-expiry"))
+	access.rotatedCookies[key] = rotatedCookie{until: now.Add(time.Minute), pending: 1}
+	access.markSignedOutCookie("after-expiry")
+	if state := access.rotatedCookies[key]; !state.signedOut || state.pending != 1 {
+		t.Fatalf("sign-out lost in-flight callback count: %+v", state)
+	}
+	access.rotatedCookies[key] = rotatedCookie{until: now.Add(time.Minute), signedOut: true}
 	for key := range access.rotatedCookies {
 		access.rotatedCookies[key] = rotatedCookie{until: now.Add(time.Minute), signedOut: true}
 	}
 	access.markSignedOutCookie("latest-signout")
 	if len(access.rotatedCookies) != maxRotatedCookies || !access.rotatedCookies[sha256.Sum256([]byte("latest-signout"))].signedOut {
 		t.Fatal("full sign-out map did not retain the latest sign-out")
+	}
+	if !access.rememberRotatedCookie("new-login") || len(access.rotatedCookies) != maxRotatedCookies || access.rotatedCookies[sha256.Sum256([]byte("new-login"))].signedOut {
+		t.Fatal("full sign-out map blocked a new sign-in rotation")
 	}
 }
 

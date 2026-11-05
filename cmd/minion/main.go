@@ -51,7 +51,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
 	flag.Parse()
-	loop := !*oneshot
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
 	if flag.NArg() != 0 {
 		if *mode == "hash" {
@@ -106,6 +105,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("unsupported mode %q; use orchestrate, execute, remote-execute, or hash", *mode)
 		return 2
 	}
+	if *oneshot && *check {
+		logger.Print("-oneshot cannot be combined with -check")
+		return 2
+	}
 	loadedPath, err := filepath.Abs(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
@@ -147,7 +150,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
 	}
 	store, err = state.Open(cfg.StatePath, initial)
-	if errors.Is(err, state.ErrLocked) && *oneshot && !*check {
+	if errors.Is(err, state.ErrLocked) && *oneshot {
 		logger.Printf("another run is active; skipping this cron pass")
 		return 0
 	}
@@ -216,7 +219,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && (*check || loop) {
+		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && !*oneshot {
 			if _, err := loadTLSCertificate("admin", cfg.Admin.TLSCertFile, cfg.Admin.TLSKeyFile); err != nil {
 				logger.Printf("admin TLS preflight: %v", err)
 				return false
@@ -276,7 +279,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		recovery.BotID = user.ID
 		bindPublicationValidation(recovery, watcher)
 		watcher.Handler = recovery
-		code := recoverAcceptedService(ctx, watcher, store, loop && !failedPreflight, nil, logger)
+		code := recoverAcceptedService(ctx, watcher, store, !*oneshot && !failedPreflight, nil, logger)
 		if failedPreflight {
 			return 1
 		}
@@ -300,7 +303,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			return 1
 		}
 	}
-	return runOrchestrateMode(ctx, orchestrator, watcher, store, loop, logger, path, 2*time.Minute)
+	return runOrchestrateMode(ctx, orchestrator, watcher, store, !*oneshot, logger, path, 2*time.Minute)
 }
 
 func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool) int {

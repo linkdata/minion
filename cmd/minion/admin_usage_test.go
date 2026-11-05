@@ -32,7 +32,7 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	if page.Code != http.StatusOK || page.Header().Get("Cache-Control") != "no-store" ||
 		page.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
 		!strings.Contains(page.Body.String(), `aria-labelledby="usage-groups-heading" tabindex="0"`) ||
-		!strings.Contains(page.Body.String(), `<h2 id="usage-groups-heading">`) ||
+		!strings.Contains(page.Body.String(), `<h2 id="usage-groups-heading" class="h5">`) ||
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
 		!strings.Contains(page.Body.String(), "attempt start times in UTC") ||
 		!strings.Contains(page.Body.String(), `<th scope="col">Unallocated tokens</th>`) ||

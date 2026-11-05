@@ -428,9 +428,6 @@ func (c *Config) Validate(configDir string) error {
 		}
 	}
 	if admin := c.Admin; admin != nil {
-		if err := admin.validateOAuth(); err != nil {
-			return err
-		}
 		if choices := admin.UserModelChoices; choices != nil {
 			if admin.GitHubOAuth == nil {
 				return errors.New("admin.user_model_choices requires github_oauth to prove action requester identity")
@@ -479,6 +476,9 @@ func (c *Config) Validate(configDir string) error {
 		number, err := strconv.ParseUint(port, 10, 16)
 		if err != nil || number == 0 {
 			return errors.New("admin.listen requires a numeric port from 1 to 65535")
+		}
+		if err := admin.validateOAuth(number); err != nil {
+			return err
 		}
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")

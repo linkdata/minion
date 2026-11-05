@@ -56,7 +56,7 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + 
       <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Attempts with incomplete usage or still running</h2><p class="display-6 font-monospace">{{.Report.Totals.IncompleteUsage}}</p></article></div>
     </div>
     <p>Estimated cost and currency: {{template "estimatedCost" .Report.Totals}}. Billed cost and credits: Unknown.</p>
-    <section class="border rounded p-3 mb-3 overflow-auto" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading">Usage by repository, requester, and service</h2>
+    <section class="border rounded p-3 mb-3 overflow-auto" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading" class="h5">Usage by repository, requester, and service</h2>
       {{if .Report.Groups}}<table class="table table-striped align-middle"><thead><tr>
         <th scope="col">Repository</th><th scope="col">Repository ID</th>
         <th scope="col">Requester</th><th scope="col">Requester ID</th><th scope="col">Service</th>
