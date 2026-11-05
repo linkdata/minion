@@ -133,11 +133,6 @@ func userUsageRetryPath(body string) string {
 	return userUsageLinkPath(body, "Recheck from this position")
 }
 
-func userUsageSignedPath(a *oauthAccess, id int64, repo string, after int) string {
-	account := a.links.account((userIdentity{Provider: "github", Host: "github.com", Subject: strconv.FormatInt(id, 10)}).key())
-	return a.signedUserUsageURL(account, repo, after)
-}
-
 func userUsageLinkPath(body, label string) string {
 	end := strings.Index(body, `>`+label+`</a>`)
 	if end < 0 {
@@ -256,14 +251,14 @@ func TestUserUsageExpiredSessionReturnsToContinuation(t *testing.T) {
 		return oauthJSON(http.StatusNotFound, `{}`), nil
 	})}
 	owner := &action.Orchestrator{Usage: &usage.Store{Dir: t.TempDir()}}
-	jw, oauth, handler := userUsageTestHandler(t, owner, oauthClient)
+	jw, _, handler := userUsageTestHandler(t, owner, oauthClient)
 	oldCookie := userUsageCookie(t, jw, (userIdentity{Provider: "github", Host: "github.com", Subject: "99"}).key(), false)
 	request := httptest.NewRequest(http.MethodGet, "https://admin.example/user/usage", nil)
 	request.RemoteAddr = "192.0.2.7:12345"
 	request.AddCookie(oldCookie)
 	jw.GetSession(request).Close()
 
-	target := userUsageSignedPath(oauth, 99, "org/repo-31", 3)
+	target := userUsageContinueURL("org/repo-31", 3)
 	denied := userUsageRequest(handler, http.MethodGet, target, "", oldCookie)
 	if denied.Code != http.StatusSeeOther || denied.Header().Get("Location") != "/auth/login?next="+url.QueryEscape(target) {
 		t.Fatalf("expired continuation: status=%d location=%q", denied.Code, denied.Header().Get("Location"))
@@ -366,7 +361,7 @@ func finishUserUsageCall(t *testing.T, record *usage.Record, provider, role stri
 	}
 }
 
-func TestUserUsageRevokedPrivateRowsHideIdentityAndSignedCursor(t *testing.T) {
+func TestUserUsageRevokedPrivateRowsHideIdentityAtAnyPosition(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/repositories/"):
@@ -404,19 +399,30 @@ func TestUserUsageRevokedPrivateRowsHideIdentityAndSignedCursor(t *testing.T) {
 	if first.Code != http.StatusOK || continueURL == "" || !strings.Contains(first.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) || strings.Contains(first.Body.String(), "org/private-") {
 		t.Fatalf("revoked private page disclosed identity or lost total: status=%d continue=%q body=%s", first.Code, continueURL, first.Body.String())
 	}
-	for _, path := range []string{"/user/usage?after=19", continueURL + "&after=1000000", continueURL + "&repo=org%2Fprivate-01"} {
-		forged := userUsageRequest(handler, http.MethodGet, path, "", cookie)
-		if forged.Code != http.StatusBadRequest || strings.Contains(forged.Body.String(), "org/private-") || strings.Contains(forged.Body.String(), "Reported tokens") {
-			t.Fatalf("forged cursor exposed data: path=%q status=%d body=%q", path, forged.Code, forged.Body.String())
+	for _, path := range []string{"/user/usage?after=19", "/user/usage?after=1000000", "/user/usage?repo=org%2Fprivate-01&after=19"} {
+		page := userUsageRequest(handler, http.MethodGet, path, "", cookie)
+		if page.Code != http.StatusOK || strings.Contains(page.Body.String(), `<th scope="row">org/private-`) || !strings.Contains(page.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) {
+			t.Fatalf("position exposed private data or lost total: path=%q status=%d body=%q", path, page.Code, page.Body.String())
+		}
+	}
+	for _, path := range []string{continueURL + "&after=1000000", continueURL + "&sig=garbage"} {
+		invalid := userUsageRequest(handler, http.MethodGet, path, "", cookie)
+		if invalid.Code != http.StatusBadRequest || strings.Contains(invalid.Body.String(), "org/private-") {
+			t.Fatalf("invalid cursor exposed data: path=%q status=%d body=%q", path, invalid.Code, invalid.Body.String())
 		}
 	}
 	other := userUsageCookie(t, jw, (userIdentity{Provider: "github", Host: "github.com", Subject: "99"}).key(), false)
-	if cross := userUsageRequest(handler, http.MethodGet, continueURL, "", other); cross.Code != http.StatusBadRequest || strings.Contains(cross.Body.String(), "org/private-") {
-		t.Fatalf("cross-account cursor accepted: status=%d body=%s", cross.Code, cross.Body.String())
+	if cross := userUsageRequest(handler, http.MethodGet, continueURL, "", other); cross.Code != http.StatusOK || strings.Contains(cross.Body.String(), "org/private-") || strings.Contains(cross.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) {
+		t.Fatalf("cross-account position exposed private data: status=%d body=%s", cross.Code, cross.Body.String())
 	}
 	issued := userUsageRequest(handler, http.MethodGet, continueURL, "", cookie)
 	if issued.Code != http.StatusOK || strings.Contains(issued.Body.String(), "org/private-") || !strings.Contains(issued.Body.String(), `<h2>Reported tokens</h2><p class="metric">20</p>`) {
 		t.Fatalf("issued cursor failed: status=%d body=%s", issued.Code, issued.Body.String())
+	}
+	restartedJaws, _, restartedHandler := userUsageTestHandler(t, &action.Orchestrator{GitHub: githubClient, Usage: store})
+	restartedCookie := userUsageCookie(t, restartedJaws, (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key(), false)
+	if resumed := userUsageRequest(restartedHandler, http.MethodGet, continueURL, "", restartedCookie); resumed.Code != http.StatusOK || strings.Contains(resumed.Body.String(), "org/private-") {
+		t.Fatalf("restart lost continuation or disclosed private data: status=%d body=%s", resumed.Code, resumed.Body.String())
 	}
 }
 
@@ -736,9 +742,9 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	if _, err := os.Stat(artifact); !os.IsNotExist(err) {
 		t.Fatalf("private artifact remained after retention: %v", err)
 	}
-	oauth.usageGate.mu.Lock()
+	oauth.usageGate.scanMu.Lock()
 	oauth.usageGate.readAt = time.Now().Add(-userUsageSnapshotTTL)
-	oauth.usageGate.mu.Unlock()
+	oauth.usageGate.scanMu.Unlock()
 	if response := userUsageRequest(handler, http.MethodGet, "/user/usage", "", userCookie); response.Code != http.StatusOK ||
 		!strings.Contains(response.Body.String(), `<h2>Reported tokens</h2><p class="metric">53</p>`) ||
 		!strings.Contains(response.Body.String(), "Estimated cost and currency</dt><dd>USD 0.125 known estimated subtotal") {
@@ -760,8 +766,10 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	if err := usageStore.Save(legacyOnlyRecord); err != nil {
 		t.Fatal(err)
 	}
-	oauth.usageGate.mu.Lock()
+	oauth.usageGate.scanMu.Lock()
 	oauth.usageGate.readAt = time.Time{}
+	oauth.usageGate.scanMu.Unlock()
+	oauth.usageGate.mu.Lock()
 	oauth.usageGate.apiTokens = 1000
 	oauth.usageGate.mu.Unlock()
 	before = apiCalls.Load()
@@ -780,30 +788,37 @@ func TestUserUsageGateBoundsDiskAndGitHubWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	gate := newUserUsageGate()
-	records, busy, err := gate.read(store.Dir)
-	if err != nil || busy || len(records) != 1 {
-		t.Fatalf("first snapshot: records=%d busy=%t error=%v", len(records), busy, err)
+	records, err := gate.read(store.Dir)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("first snapshot: records=%d error=%v", len(records), err)
 	}
 	second := userUsageRecord(2, "org/second", 102, 42, "alice", "failed")
 	if err := store.Save(second); err != nil {
 		t.Fatal(err)
 	}
-	records, busy, err = gate.read(store.Dir)
-	if err != nil || busy || len(records) != 1 {
-		t.Fatalf("snapshot TTL did not bound disk work: records=%d busy=%t error=%v", len(records), busy, err)
+	records, err = gate.read(store.Dir)
+	if err != nil || len(records) != 1 {
+		t.Fatalf("snapshot TTL did not bound disk work: records=%d error=%v", len(records), err)
 	}
-	gate.mu.Lock()
+	gate.scanMu.Lock()
 	gate.readAt = time.Now().Add(-userUsageSnapshotTTL)
-	gate.mu.Unlock()
-	gate.scan <- struct{}{}
-	_, busy, err = gate.read(store.Dir)
-	if err != nil || !busy {
-		t.Fatalf("concurrent full scan was allowed: busy=%t error=%v", busy, err)
+	type scanResult struct {
+		records []usage.Record
+		err     error
 	}
-	<-gate.scan
-	records, busy, err = gate.read(store.Dir)
-	if err != nil || busy || len(records) != 2 {
-		t.Fatalf("expired snapshot did not refresh: records=%d busy=%t error=%v", len(records), busy, err)
+	results := make(chan scanResult, 2)
+	for range 2 {
+		go func() {
+			records, err := gate.read(store.Dir)
+			results <- scanResult{records, err}
+		}()
+	}
+	gate.scanMu.Unlock()
+	for range 2 {
+		result := <-results
+		if result.err != nil || len(result.records) != 2 {
+			t.Fatalf("concurrent readers did not share refreshed snapshot: records=%d error=%v", len(result.records), result.err)
+		}
 	}
 	for _, account := range []string{"account-a", "account-b"} {
 		for range userUsageAccountBurst {
@@ -843,27 +858,27 @@ func TestUserUsageGateBoundsDiskAndGitHubWork(t *testing.T) {
 	if before != after {
 		t.Fatalf("canceled request changed GitHub tokens from %d to %d", before, after)
 	}
-	gate.mu.Lock()
+	gate.scanMu.Lock()
 	gate.readAt = time.Now().Add(-userUsageSnapshotTTL)
-	gate.mu.Unlock()
+	gate.scanMu.Unlock()
 	badPath := filepath.Join(store.Dir, "broken.json")
 	if err := os.WriteFile(badPath, []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := gate.read(store.Dir); err == nil {
+	if _, err := gate.read(store.Dir); err == nil {
 		t.Fatal("malformed usage store was accepted")
 	}
 	if err := os.Remove(badPath); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := gate.read(store.Dir); err == nil {
+	if _, err := gate.read(store.Dir); err == nil {
 		t.Fatal("failed scan was immediately retried")
 	}
-	gate.mu.Lock()
+	gate.scanMu.Lock()
 	gate.readAt = time.Now().Add(-userUsageSnapshotTTL)
-	gate.mu.Unlock()
-	if records, busy, err := gate.read(store.Dir); err != nil || busy || len(records) != 2 {
-		t.Fatalf("failed scan did not recover after TTL: records=%d busy=%t error=%v", len(records), busy, err)
+	gate.scanMu.Unlock()
+	if records, err := gate.read(store.Dir); err != nil || len(records) != 2 {
+		t.Fatalf("failed scan did not recover after TTL: records=%d error=%v", len(records), err)
 	}
 }
 
@@ -991,10 +1006,10 @@ func TestUserUsageFilteredAndPagedRowsStayReachable(t *testing.T) {
 		t.Fatal("filtered scan did not end with neutral result")
 	}
 	first := userUsageRequest(handler, http.MethodGet, "/user/usage", "", cookie)
-	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "org/repo-01") || strings.Contains(first.Body.String(), "org/repo-31") || userUsageContinuePath(first.Body.String()) != userUsageSignedPath(oauth, 42, "", 4) {
+	if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "org/repo-01") || strings.Contains(first.Body.String(), "org/repo-31") || userUsageContinuePath(first.Body.String()) != userUsageContinueURL("", 4) {
 		t.Fatalf("first repository page: %d/%s", first.Code, first.Body.String())
 	}
-	last := userUsageRequest(handler, http.MethodGet, userUsageSignedPath(oauth, 42, "", 30), "", cookie)
+	last := userUsageRequest(handler, http.MethodGet, userUsageContinueURL("", 30), "", cookie)
 	if last.Code != http.StatusOK || !strings.Contains(last.Body.String(), "org/repo-31") || strings.Contains(last.Body.String(), "org/repo-01") || userUsageContinuePath(last.Body.String()) != "" {
 		t.Fatalf("last repository page: %d/%s", last.Code, last.Body.String())
 	}
@@ -1018,24 +1033,24 @@ func TestUserUsageFilteredAndPagedRowsStayReachable(t *testing.T) {
 	oauth.usageGate.verificationTimeout = 500 * time.Millisecond
 	beforeSlow := slowRepositoryCalls.Load()
 	started := time.Now()
-	timed := userUsageRequest(handler, http.MethodGet, userUsageSignedPath(oauth, 42, "", 30), "", cookie)
-	if time.Since(started) > 2*time.Second || timed.Code != http.StatusOK || slowRepositoryCalls.Load() <= beforeSlow || userUsageRetryPath(timed.Body.String()) != userUsageSignedPath(oauth, 42, "", 30) || strings.Contains(timed.Body.String(), "org/repo-31") {
+	timed := userUsageRequest(handler, http.MethodGet, userUsageContinueURL("", 30), "", cookie)
+	if time.Since(started) > 2*time.Second || timed.Code != http.StatusOK || slowRepositoryCalls.Load() <= beforeSlow || userUsageRetryPath(timed.Body.String()) != userUsageContinueURL("", 30) || strings.Contains(timed.Body.String(), "org/repo-31") {
 		t.Fatalf("deadline lost retry or exposed row: status=%d body=%s", timed.Code, timed.Body.String())
 	}
 	slow.Store(false)
 	oauth.usageGate.verificationTimeout = 8 * time.Second
 	lastRepositoryFailure.Store(true)
-	filteredFailed := userUsageRequest(handler, http.MethodGet, userUsageSignedPath(oauth, 42, "org/repo-31", 30), "", cookie)
+	filteredFailed := userUsageRequest(handler, http.MethodGet, userUsageContinueURL("org/repo-31", 30), "", cookie)
 	lastRepositoryFailure.Store(false)
-	if filteredFailed.Code != http.StatusOK || userUsageRetryPath(filteredFailed.Body.String()) != userUsageSignedPath(oauth, 42, "org/repo-31", 30) || strings.Contains(filteredFailed.Body.String(), "No matching accessible repository was verified") {
+	if filteredFailed.Code != http.StatusOK || userUsageRetryPath(filteredFailed.Body.String()) != userUsageContinueURL("org/repo-31", 30) || strings.Contains(filteredFailed.Body.String(), "No matching accessible repository was verified") {
 		t.Fatalf("last filtered failure sounded final: %d/%s", filteredFailed.Code, filteredFailed.Body.String())
 	}
 	if err := store.Save(userUsageRecord(32, "org/repo-00", 200, 42, "old-login", "failed")); err != nil {
 		t.Fatal(err)
 	}
-	oauth.usageGate.mu.Lock()
+	oauth.usageGate.scanMu.Lock()
 	oauth.usageGate.readAt = time.Now().Add(-userUsageSnapshotTTL)
-	oauth.usageGate.mu.Unlock()
+	oauth.usageGate.scanMu.Unlock()
 	shifted := userUsageRequest(handler, http.MethodGet, userUsageContinuePath(first.Body.String()), "", cookie)
 	if shifted.Code != http.StatusOK || !strings.Contains(shifted.Body.String(), `<th scope="row">org/repo-04</th>`) || !strings.Contains(shifted.Body.String(), `<th scope="row">org/repo-05</th>`) || !strings.Contains(shifted.Body.String(), "new usage or account-link changes can repeat or skip rows") {
 		t.Fatalf("new lower repository ID skipped later groups: %d/%s", shifted.Code, shifted.Body.String())

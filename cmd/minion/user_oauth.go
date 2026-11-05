@@ -1,10 +1,6 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,15 +68,14 @@ func (p *oauthProvider) identity(claims map[string]any) (id userIdentity, ok boo
 }
 
 type oauthAccess struct {
-	jaws           *jaws.Jaws
-	links          *userLinks
-	mux            *http.ServeMux
-	providers      []*oauthProvider
-	choices        *config.UserModelChoices
-	admissionMu    sync.Mutex
-	linkMu         sync.Mutex
-	usageGate      *userUsageGate
-	usageCursorKey [32]byte
+	jaws        *jaws.Jaws
+	links       *userLinks
+	mux         *http.ServeMux
+	providers   []*oauthProvider
+	choices     *config.UserModelChoices
+	admissionMu sync.Mutex
+	linkMu      sync.Mutex
+	usageGate   *userUsageGate
 }
 
 // Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
@@ -110,7 +105,6 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 		return nil, fmt.Errorf("open user links: %w", err)
 	}
 	a := &oauthAccess{jaws: jw, links: links, mux: http.NewServeMux(), choices: cfg.UserModelChoices, usageGate: newUserUsageGate()}
-	rand.Read(a.usageCursorKey[:])
 	if err := jw.AddTemplateLookuper(userLoginHTML); err != nil {
 		return nil, err
 	}
@@ -279,39 +273,11 @@ func userUsageReturnTarget(raw string) string {
 		target.Opaque != "" || target.Fragment != "" || target.Path != "/user/usage" {
 		return ""
 	}
-	repo, after, signature, ok := parseUserUsageQuery(target.RawQuery)
+	repo, after, ok := parseUserUsageQuery(target.RawQuery)
 	if !ok {
 		return ""
 	}
-	if after != 0 {
-		decoded, err := base64.RawURLEncoding.DecodeString(signature)
-		if err != nil || len(decoded) != sha256.Size {
-			return ""
-		}
-	}
-	return userUsageContinueURL(repo, after, signature)
-}
-
-func (a *oauthAccess) usageCursorMAC(account, repo string, after int) []byte {
-	mac := hmac.New(sha256.New, a.usageCursorKey[:])
-	_, _ = fmt.Fprintf(mac, "%q\n%q\n%d", account, repo, after)
-	return mac.Sum(nil)
-}
-
-func (a *oauthAccess) signedUserUsageURL(account, repo string, after int) string {
-	if after == 0 {
-		return userUsageContinueURL(repo, after, "")
-	}
-	signature := base64.RawURLEncoding.EncodeToString(a.usageCursorMAC(account, repo, after))
-	return userUsageContinueURL(repo, after, signature)
-}
-
-func (a *oauthAccess) validUsageCursor(account, repo string, after int, signature string) bool {
-	if after == 0 {
-		return signature == ""
-	}
-	decoded, err := base64.RawURLEncoding.DecodeString(signature)
-	return err == nil && hmac.Equal(decoded, a.usageCursorMAC(account, repo, after))
+	return userUsageContinueURL(repo, after)
 }
 
 func (a *oauthAccess) routes(mux *http.ServeMux) {

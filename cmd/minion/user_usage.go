@@ -39,7 +39,7 @@ type userUsageAccountBudget struct {
 
 type userUsageGate struct {
 	reports             chan struct{}
-	scan                chan struct{}
+	scanMu              sync.Mutex
 	mu                  sync.Mutex
 	records             []usage.Record
 	readAt              time.Time
@@ -54,42 +54,23 @@ type userUsageGate struct {
 }
 
 func newUserUsageGate() *userUsageGate {
-	return &userUsageGate{reports: make(chan struct{}, 2), scan: make(chan struct{}, 1),
+	return &userUsageGate{reports: make(chan struct{}, 2),
 		apiTokens: userUsageAPIBurst, apiBurst: userUsageAPIBurst,
 		accounts: make(map[string]userUsageAccountBudget), accountBurst: userUsageAccountBurst,
 		verificationTimeout: 8 * time.Second}
 }
 
-func (g *userUsageGate) read(dir string) ([]usage.Record, bool, error) {
-	g.mu.Lock()
+func (g *userUsageGate) read(dir string) ([]usage.Record, error) {
+	g.scanMu.Lock()
+	defer g.scanMu.Unlock()
 	if !g.readAt.IsZero() && time.Since(g.readAt) < userUsageSnapshotTTL {
-		records := g.records
-		err := g.readErr
-		g.mu.Unlock()
-		return records, false, err
+		return g.records, g.readErr
 	}
-	g.mu.Unlock()
-	select {
-	case g.scan <- struct{}{}:
-		defer func() { <-g.scan }()
-	default:
-		return nil, true, nil
-	}
-	g.mu.Lock()
-	if !g.readAt.IsZero() && time.Since(g.readAt) < userUsageSnapshotTTL {
-		records := g.records
-		err := g.readErr
-		g.mu.Unlock()
-		return records, false, err
-	}
-	g.mu.Unlock()
 	// shortcut: this snapshot caps scan frequency, not per-scan work. Add a
 	// durable requester index if history outgrows memory or scans delay reports.
 	records, err := usage.ReadAll(dir)
-	g.mu.Lock()
 	g.records, g.readAt, g.readErr = records, time.Now(), err
-	g.mu.Unlock()
-	return records, false, err
+	return records, err
 }
 
 func (g *userUsageGate) gitHubCallBudget(ctx context.Context, account string, need int, debit bool) bool {
@@ -214,47 +195,40 @@ type userUsagePage struct {
 	RetryURL                string
 }
 
-func parseUserUsageQuery(raw string) (string, int, string, bool) {
+func parseUserUsageQuery(raw string) (string, int, bool) {
 	if len(raw) > 512 {
-		return "", 0, "", false
+		return "", 0, false
 	}
 	values, err := url.ParseQuery(raw)
 	if err != nil {
-		return "", 0, "", false
+		return "", 0, false
 	}
 	for key, items := range values {
-		if key != "repo" && key != "after" && key != "sig" || len(items) != 1 {
-			return "", 0, "", false
+		if key != "repo" && key != "after" || len(items) != 1 {
+			return "", 0, false
 		}
 	}
 	repo := strings.TrimSpace(values.Get("repo"))
 	if repo != "" && !workspace.ValidRepository(repo) {
-		return "", 0, "", false
+		return "", 0, false
 	}
 	after := 0
 	if rawAfter, ok := values["after"]; ok {
 		after, err = strconv.Atoi(rawAfter[0])
 		if err != nil || after < 0 || after > 1000000 {
-			return "", 0, "", false
+			return "", 0, false
 		}
 	}
-	signature := values.Get("sig")
-	if after == 0 && signature != "" {
-		return "", 0, "", false
-	}
-	return repo, after, signature, true
+	return repo, after, true
 }
 
-func userUsageContinueURL(repo string, after int, signature string) string {
+func userUsageContinueURL(repo string, after int) string {
 	values := url.Values{}
 	if repo != "" {
 		values.Set("repo", repo)
 	}
 	if after > 0 {
 		values.Set("after", strconv.Itoa(after))
-	}
-	if signature != "" {
-		values.Set("sig", signature)
 	}
 	if len(values) == 0 {
 		return "/user/usage"
@@ -279,12 +253,8 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			http.Redirect(w, r, target, http.StatusSeeOther)
 			return
 		}
-		repo, after, signature, ok := parseUserUsageQuery(r.URL.RawQuery)
+		repo, after, ok := parseUserUsageQuery(r.URL.RawQuery)
 		if !ok {
-			a.browserError(w, r, http.StatusBadRequest)
-			return
-		}
-		if !a.validUsageCursor(account, repo, after, signature) {
 			a.browserError(w, r, http.StatusBadRequest)
 			return
 		}
@@ -307,13 +277,8 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 		}
 		var records []usage.Record
 		if githubID != 0 {
-			var busy bool
 			var err error
-			records, busy, err = a.usageGate.read(owner.Usage.Dir)
-			if busy {
-				a.browserError(w, r, http.StatusServiceUnavailable)
-				return
-			}
+			records, err = a.usageGate.read(owner.Usage.Dir)
 			if err != nil {
 				slog.Error("user usage query", "error", err)
 				a.browserError(w, r, http.StatusInternalServerError)
@@ -357,7 +322,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			if verifyCtx.Err() != nil {
 				page.VerificationUnavailable = true
 				if page.RetryURL == "" {
-					page.RetryURL = a.signedUserUsageURL(account, repo, index)
+					page.RetryURL = userUsageContinueURL(repo, index)
 				}
 				break
 			}
@@ -367,7 +332,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			if !a.usageGate.readyGitHubCalls(verifyCtx, account, userUsageMinPrivateCalls) {
 				page.VerificationUnavailable = true
 				if page.RetryURL == "" {
-					page.RetryURL = a.signedUserUsageURL(account, repo, index)
+					page.RetryURL = userUsageContinueURL(repo, index)
 				}
 				break
 			}
@@ -376,7 +341,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			page.VerificationUnavailable = page.VerificationUnavailable || check.unavailable
 			if check.unavailable {
 				if page.RetryURL == "" {
-					page.RetryURL = a.signedUserUsageURL(account, repo, index)
+					page.RetryURL = userUsageContinueURL(repo, index)
 				}
 			}
 			index++
@@ -389,7 +354,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 			}
 		}
 		if index < len(keyed) && (repo == "" || len(page.Repositories) == 0) {
-			next := a.signedUserUsageURL(account, repo, index)
+			next := userUsageContinueURL(repo, index)
 			if page.RetryURL != next {
 				page.ContinueURL = next
 			}
