@@ -122,12 +122,23 @@ func TestAdminLiveConfigRejectsRemoteSkillChanges(t *testing.T) {
 }
 
 func TestAdminLiveConfigRejectsRemoteCommandExpansion(t *testing.T) {
-	live, _ := liveConfigFixture(t, true)
+	live, path := liveConfigFixture(t, true)
+	if selected := live.snapshot().RemoteCommands; !selected["review"] || selected["fix"] {
+		t.Fatalf("remote selection = %v", selected)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := live.save(func(cfg *config.Config) error {
 		cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "owner/second", ID: 12, OwnerID: 22, Actions: []string{"fix"}})
 		return nil
-	}); err == nil {
-		t.Fatal("remote worker gained a command without re-selection")
+	}); err == nil || !strings.Contains(err.Error(), "editing the configuration file") {
+		t.Fatalf("remote worker gained a command without re-selection: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("rejected remote command changed disk: %v", err)
 	}
 }
 

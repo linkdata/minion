@@ -118,3 +118,58 @@ func TestConfigUpdateRefreshesNewerPendingNotification(t *testing.T) {
 		t.Fatalf("refreshed notification did not replay: executions=%d state=%+v", executions, store.Data)
 	}
 }
+
+func TestConfigUpdatePreservesCommandDeniedByOldRequesterPolicy(t *testing.T) {
+	now := time.Now().UTC()
+	initial := now.Add(-time.Minute)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, initial)
+	item := selectedItem(now)
+	updatePending := false
+	gh := &fakeGitHub{
+		notifications: []github.Notification{testNotification(now)},
+		items:         []github.Item{item},
+		permission:    github.Permission{Permission: "write"},
+		currentItem: func(item github.Item) (github.Item, error) {
+			updatePending = true // Simulate an admin save while the scan uses its old policy.
+			return item, nil
+		},
+	}
+	var executed, decisions int
+	m := selectedMonitor(t, now, gh, selectedHandler(func(Job) error {
+		executed++
+		return nil
+	}))
+	m.Config.Repositories[0].DenyAllActors = true
+	m.BeforeAccept = func(decide func() error) error {
+		decisions++
+		if updatePending {
+			return ErrConfigUpdatePending
+		}
+		return decide()
+	}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrConfigUpdatePending) {
+		t.Fatalf("saved grant did not stop old-policy denial: %v", err)
+	}
+	key := notificationKey(testNotification(now))
+	if decisions != 1 || executed != 0 || !store.Data.Processed[jobID(item.Key, "review")].IsZero() ||
+		store.Data.PendingNotifications[key].Repository == "" || !store.Data.RepositoryCursors["example-owner/example-repo"].Equal(initial) {
+		t.Fatalf("old policy consumed newly granted command: decisions=%d executed=%d state=%+v", decisions, executed, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, initial)
+	m.Config.Repositories[0].DenyAllActors = false
+	m.Config.Repositories[0].AllowedActors = []string{"writer"}
+	m.Config.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+	updatePending = false
+	gh.notifications, gh.currentItem = nil, nil
+	m.Now = func() time.Time { return store.Data.NextPollAt.Add(time.Second) }
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatalf("replay with granted requester: %v", err)
+	}
+	if decisions != 2 || executed != 1 || store.Data.Processed[jobID(item.Key, "review")].IsZero() || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("granted command did not replay: decisions=%d executed=%d state=%+v", decisions, executed, store.Data)
+	}
+}

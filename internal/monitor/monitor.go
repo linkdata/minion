@@ -132,7 +132,7 @@ type Monitor struct {
 	SelectedCommands       map[string]bool                                  // Non-nil freezes discovery to the selected worker's commands.
 	SelectedExecutorID     string                                           // Nonempty only while a selected worker owns actions.
 	ConfigUpdates          <-chan struct{}                                  // Optional signal to leave an idle capacity wait.
-	BeforeAccept           func(func() error) error                         // Invokes the durable acceptance once, or returns ErrConfigUpdatePending before invoking it.
+	BeforeAccept           func(func() error) error                         // Fences durable acceptance and policy denial against saved config updates.
 	UserPreferences        func(int64) (config.UserModelPreferences, error) // Optional proven GitHub requester lookup.
 	AfterAcceptedCleanup   func()                                           // Called after an accepted reservation is durably released.
 	afterSelectedRunReturn func()                                           // Test seam after the worker's terminal decision.
@@ -590,6 +590,24 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			entryDeferred = true
 			return nil
 		}
+		rememberUnaccepted := func() {
+			for _, unaccepted := range scans[scanIndex:] {
+				if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
+					unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
+					pending.UpdatedAt = unaccepted.notification.UpdatedAt
+					pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
+					store.Data.PendingNotifications[unaccepted.key] = pending
+				}
+				rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
+			}
+		}
+		stopForConfigUpdate := func(err error) (time.Time, error) {
+			rememberUnaccepted()
+			if saveErr := store.Save(); saveErr != nil {
+				return stop(fmt.Errorf("%w: preserve pending notifications: %w", ErrAcceptanceState, saveErr))
+			}
+			return stop(err)
+		}
 		items, err := m.GitHub.ThreadItems(ctx, repo.Name, notification.Subject.Type, number, entry.since)
 		if ctx.Err() != nil {
 			return stopAt(fmt.Sprintf("%s %s #%d", repo.Name, notification.Subject.Type, number), err)
@@ -667,10 +685,22 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if !repo.AllowsAction(cmd.Name) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
-				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
-				if err := retireIgnoredJob(store, job.ID, started); err != nil {
+				if m.takeConfigUpdate(store) {
+					return stopForConfigUpdate(ErrConfigUpdatePending)
+				}
+				retire := func() error { return retireIgnoredJob(store, job.ID, started) }
+				if m.BeforeAccept != nil {
+					err = m.BeforeAccept(retire)
+				} else {
+					err = retire()
+				}
+				if errors.Is(err, ErrConfigUpdatePending) {
+					return stopForConfigUpdate(err)
+				}
+				if err != nil {
 					return stop(err)
 				}
+				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				continue
 			}
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
@@ -787,24 +817,6 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				if err := deferEntry(); err != nil {
 					return stop(err)
 				}
-			}
-			rememberUnaccepted := func() {
-				for _, unaccepted := range scans[scanIndex:] {
-					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
-						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
-						pending.UpdatedAt = unaccepted.notification.UpdatedAt
-						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
-						store.Data.PendingNotifications[unaccepted.key] = pending
-					}
-					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
-				}
-			}
-			stopForConfigUpdate := func(err error) (time.Time, error) {
-				rememberUnaccepted()
-				if saveErr := store.Save(); saveErr != nil {
-					return stop(fmt.Errorf("%w: preserve pending notifications: %w", ErrAcceptanceState, saveErr))
-				}
-				return stop(err)
 			}
 			if m.takeConfigUpdate(store) {
 				return stopForConfigUpdate(ErrConfigUpdatePending)

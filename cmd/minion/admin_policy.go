@@ -74,7 +74,7 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
   <section class="border rounded p-3 mb-3"><h2 class="h5">Requester defaults</h2>
     {{if .Requesters}}<div class="table-responsive"><table class="table align-middle"><thead><tr><th scope="col">GitHub requester</th><th scope="col">Required reviews</th><th scope="col">Override</th></tr></thead><tbody>
       {{range .Requesters}}<tr><td>@{{.Name}} <small class="text-body-secondary">(ID {{.ID}})</small></td><td>{{.Value}}</td><td>
-        <form method="post" action="/admin/policy/requester/remove"><input type="hidden" name="id" value="{{.ID}}"><button class="btn btn-sm btn-outline-danger" type="submit">Use global default</button></form>
+        <form method="post" action="/admin/policy/requester/remove"><input type="hidden" name="id" value="{{.ID}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Use global default for @{{.Name}}">Use global default</button></form>
       </td></tr>{{end}}</tbody></table></div>{{else}}<p>No requester overrides. Requesters follow the global default.</p>{{end}}
     <form method="post" action="/admin/policy/requester" class="d-flex flex-wrap align-items-end gap-2">
       <label class="d-grid gap-1">Repository to verify access<select class="form-select" name="repository">{{range .Repositories}}<option value="{{.Name}}">{{.Name}}</option>{{end}}</select></label>
@@ -87,7 +87,7 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
     {{range .Repositories}}<form method="post" action="/admin/policy/repository" class="d-flex flex-wrap align-items-end gap-2 border-top py-3">
       <input type="hidden" name="repository" value="{{.Name}}"><strong class="me-auto">{{.Name}}</strong>
       <label class="d-grid gap-1">Required reviews<input class="form-control" type="number" name="rounds" min="0" max="{{$.Dot.Max}}" {{if .Set}}value="{{.Value}}"{{end}} placeholder="Inherit"></label>
-      <button class="btn btn-outline-light" type="submit">Save</button>
+      <button class="btn btn-outline-light" type="submit" aria-label="Save required reviews for {{.Name}}">Save</button>
     </form>{{end}}
   </section>
   <section class="border rounded p-3"><h2 class="h5">Global AI instructions</h2><p class="small text-body-secondary">This text replaces Minion's editable built-in working guidance for new actions. Fixed action limits and output rules still apply.</p>

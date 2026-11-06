@@ -37,9 +37,9 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 		name  string
 		wants []string
 	}{
-		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any", "/admin/users/deny-all", "Allow nobody"}},
-		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters"}},
-		{"admin skills", []string{"anti-prompt-injection", "review command", `value="command:review"`, "/admin/skills/add", "/admin/skills/remove"}},
+		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any", "/admin/users/deny-all", "Allow nobody", `aria-label="Remove @alice from owner/limited"`, `aria-label="Add requester to owner/open"`}},
+		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`}},
+		{"admin skills", []string{"anti-prompt-injection", "review command", `value="command:review"`, "/admin/skills/add", "/admin/skills/remove", `aria-label="Remove anti-prompt-injection skill from always"`, "To replace a required skill", "-install-skills"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var body bytes.Buffer
@@ -71,5 +71,27 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 	}
 	if strings.Count(remote.String(), "Skill edits require restarting the remote worker") != 1 || strings.Contains(remote.String(), "Remote worker restart required") || strings.Contains(remote.String(), "/admin/skills/add") || strings.Contains(remote.String(), "/admin/skills/remove") {
 		t.Fatalf("remote worker skills page offered live edits: %s", remote.String())
+	}
+}
+
+func TestAdminRemoteRepositoryFormOnlyOffersSelectedCommands(t *testing.T) {
+	cfg := config.Config{Main: "codex", Repositories: []config.Repository{{Name: "owner/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}}}, Commands: map[string]config.CommandMapping{
+		"review": {Action: "review"}, "audit": {Action: "comment"},
+	}}
+	view := configurationView(adminConfigSnapshot{Config: cfg, Remote: true, RemoteCommands: map[string]bool{"review": true}})
+	if len(view.Commands) != 1 || view.Commands[0] != "review" {
+		t.Fatalf("remote form commands = %v", view.Commands)
+	}
+	page := struct {
+		Dot                adminConfigurationView
+		HeadHTML, TailHTML template.HTML
+	}{Dot: view}
+	var body bytes.Buffer
+	if err := adminConfigurationHTML.ExecuteTemplate(&body, "admin repositories", page); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.String(), `value="audit" disabled`) || strings.Count(body.String(), `value="audit"`) != 1 ||
+		!strings.Contains(body.String(), "edit the Minion configuration file and restart Minion and the remote worker") {
+		t.Fatalf("remote form offered a restart-only command: %s", body.String())
 	}
 }

@@ -44,6 +44,8 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 	}
 	if !strings.Contains(body.String(), "&lt;script&gt;") || strings.Contains(body.String(), "<script>alert") ||
 		strings.Contains(body.String(), "@inherited") || !strings.Contains(body.String(), "@custom") ||
+		!strings.Contains(body.String(), `aria-label="Use global default for @custom"`) ||
+		!strings.Contains(body.String(), `aria-label="Save required reviews for owner/repo"`) ||
 		!strings.Contains(body.String(), "/admin/policy/instructions/reset") ||
 		!strings.Contains(body.String(), "16,384 UTF-8 bytes") {
 		t.Fatalf("instructions page is unsafe or lacks reset/limit guidance: %s", body.String())

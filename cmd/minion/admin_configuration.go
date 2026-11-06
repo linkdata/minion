@@ -12,10 +12,11 @@ import (
 )
 
 type adminConfigSnapshot struct {
-	Config  config.Config
-	Pending bool
-	Error   string
-	Remote  bool
+	Config         config.Config
+	Pending        bool
+	Error          string
+	Remote         bool
+	RemoteCommands map[string]bool
 }
 
 type adminRequester struct {
@@ -63,7 +64,7 @@ func configurationView(snapshot adminConfigSnapshot) adminConfigurationView {
 	view := adminConfigurationView{Pending: snapshot.Pending, Error: snapshot.Error, Remote: snapshot.Remote}
 	view.AllCommands = cfg.CommandNames()
 	for _, name := range view.AllCommands {
-		if cfg.Commands[name].SupportsProvider(cfg.Main) {
+		if cfg.Commands[name].SupportsProvider(cfg.Main) && (!snapshot.Remote || snapshot.RemoteCommands[name]) {
 			view.Commands = append(view.Commands, name)
 		}
 	}
@@ -125,27 +126,27 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
     {{if .AnyWriter}}<p><strong>Any writer</strong> may request actions. Adding a named requester narrows access to the named list.</p>
     {{else if .Users}}<p>Only these named requesters may request actions:</p>
       <ul class="list-group mb-3">{{range .Users}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><span class="me-auto">@{{.Login}} <small class="text-body-secondary">(ID {{.ID}})</small></span>
-        <form method="post" action="/admin/users/remove"><input type="hidden" name="repository" value="{{$repoName}}"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit">Remove</button></form></li>{{end}}</ul>
+        <form method="post" action="/admin/users/remove"><input type="hidden" name="repository" value="{{$repoName}}"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove @{{.Login}} from {{$repoName}}">Remove</button></form></li>{{end}}</ul>
     {{else}}<p><strong>Nobody</strong> may request actions. Add a requester or allow any writer.</p>{{end}}
     <form class="d-flex flex-wrap align-items-end gap-2" method="post" action="/admin/users/add">
       <input type="hidden" name="repository" value="{{.Name}}"><label class="d-grid gap-1">GitHub login<input class="form-control" name="login" maxlength="39" required></label>
-      <button class="btn btn-primary" type="submit">Add requester</button>
+      <button class="btn btn-primary" type="submit" aria-label="Add requester to {{.Name}}">Add requester</button>
     </form>
-    {{if .AnyWriter}}<form class="mt-3" method="post" action="/admin/users/deny-all"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit">Allow nobody</button></form>
-    {{else}}<form class="mt-3" method="post" action="/admin/users/allow-any"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit">Allow any writer</button><small class="d-block text-body-secondary">Any GitHub account with write, maintain, or admin permission will be able to request actions.</small></form>{{end}}
+    {{if .AnyWriter}}<form class="mt-3" method="post" action="/admin/users/deny-all"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit" aria-label="Allow nobody in {{.Name}}">Allow nobody</button></form>
+    {{else}}<form class="mt-3" method="post" action="/admin/users/allow-any"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit" aria-label="Allow any writer in {{.Name}}">Allow any writer</button><small class="d-block text-body-secondary">Any GitHub account with write, maintain, or admin permission will be able to request actions.</small></form>{{end}}
     {{if eq (len .Users) 1}}<small class="d-block text-body-secondary mt-2">Removing the last named requester allows nobody.</small>{{end}}
   </section>{{else}}<p>No repositories are configured.</p>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin repositories"}}{{template "head.html" $}}<title>Repositories · Minion admin</title></head>
 <body>{{template "admin-nav" $}}<main class="container py-4">
   <div class="border-bottom mb-4"><h1>Repositories</h1><p class="text-body-secondary">Monitored GitHub repositories and the commands each accepts.</p></div>
-  {{with .Dot}}{{template "admin-config-notice" .}}
+  {{with .Dot}}{{template "admin-config-notice" .}}{{if .Remote}}<p class="text-body-secondary">Only commands selected by the remote worker can be changed here. To add another command, edit the Minion configuration file and restart Minion and the remote worker.</p>{{end}}
   {{range .Repositories}}<section class="border rounded p-3 mb-3"><div class="d-flex flex-wrap align-items-start gap-2"><div class="me-auto"><h2 class="h5 mb-1">{{.Name}}</h2><p class="text-body-secondary small mb-2">Repository ID {{.ID}} · owner ID {{.OwnerID}} · requesters: {{.Policy}}</p></div>
-    {{if .CanRemove}}<form method="post" action="/admin/repositories/remove"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-sm btn-outline-danger" type="submit">Remove repository</button></form>{{end}}</div>
+    {{if .CanRemove}}<form method="post" action="/admin/repositories/remove"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove repository {{.Name}}">Remove repository</button></form>{{end}}</div>
     <p>Commands: {{range $i, $name := .Actions}}{{if $i}}, {{end}}<code>{{$name}}</code>{{else}}None{{end}}</p>
-    <details><summary>Edit commands</summary><form method="post" action="/admin/repositories/actions" class="mt-3">
-      <input type="hidden" name="name" value="{{.Name}}"><fieldset><legend class="fs-6">Allowed commands</legend>{{$selected := .Actions}}{{range $.Dot.AllCommands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}" {{if hasAction $selected .}}checked{{else if not (hasAction $.Dot.Commands .)}}disabled{{end}}><span class="form-check-label">{{.}}{{if not (hasAction $.Dot.Commands .)}} (unavailable with the current main AI){{end}}</span></label>{{end}}</fieldset>
-      <button class="btn btn-outline-light mt-2" type="submit">Save commands</button>
+    <details><summary aria-label="Edit commands for {{.Name}}">Edit commands</summary><form method="post" action="/admin/repositories/actions" class="mt-3">
+      <input type="hidden" name="name" value="{{.Name}}"><fieldset><legend class="fs-6">Allowed commands</legend>{{$selected := .Actions}}{{range $.Dot.AllCommands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}" {{if hasAction $selected .}}checked{{else if not (hasAction $.Dot.Commands .)}}disabled{{end}}><span class="form-check-label">{{.}}{{if not (hasAction $.Dot.Commands .)}} {{if $.Dot.Remote}}(not selected by the remote worker){{else}}(unavailable with the current main AI){{end}}{{end}}</span></label>{{end}}</fieldset>
+      <button class="btn btn-outline-light mt-2" type="submit" aria-label="Save commands for {{.Name}}">Save commands</button>
     </form></details>
     {{if not .CanRemove}}<small class="text-body-secondary">At least one repository is required.</small>{{end}}
   </section>{{else}}<p>No repositories are configured.</p>{{end}}
@@ -161,6 +162,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
 <body>{{template "admin-nav" $}}<main class="container py-4">
   <div class="border-bottom mb-4"><h1>Skills</h1><p class="text-body-secondary">Sources used for every action or for a selected command.</p></div>
   {{with .Dot}}{{template "admin-config-notice" .}}{{if .Remote}}<p class="text-body-secondary">Skill edits require restarting the remote worker. Installed skill status is checked on that worker.</p>{{end}}
+  <p class="text-body-secondary small">To replace a required skill, stop Minion, update its configuration and any remote worker skill config, run <code>-install-skills</code> on the worker and, for remote security audits, on Minion's host too, then restart.</p>
   <section class="border rounded p-3 mb-3"><h2 class="h5">Every action</h2>{{template "admin-skill-list" .AlwaysOnSkills}}</section>
   {{range .CommandSkills}}<section class="border rounded p-3 mb-3"><h2 class="h5">{{.Name}} command</h2>{{template "admin-skill-list" .Skills}}</section>{{else}}<p>No commands are configured.</p>{{end}}
   {{if not .Remote}}<section class="border rounded p-3"><h2 class="h5">Add skill</h2><form method="post" action="/admin/skills/add" class="vstack gap-3">
@@ -170,7 +172,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
   </form></section>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin-skill-list"}}{{if .}}<ul class="list-group">{{range .}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><div class="me-auto"><strong>{{.Name}}</strong><small class="d-block text-body-secondary text-break">{{.URL}}</small></div>
-  {{if not .Remote}}{{if .CanRemove}}<form method="post" action="/admin/skills/remove"><input type="hidden" name="target" value="{{.Target}}"><input type="hidden" name="url" value="{{.URL}}"><button class="btn btn-sm btn-outline-danger" type="submit">Remove</button></form>{{else}}<small class="text-body-secondary">Required</small>{{end}}{{end}}
+  {{if not .Remote}}{{if .CanRemove}}<form method="post" action="/admin/skills/remove"><input type="hidden" name="target" value="{{.Target}}"><input type="hidden" name="url" value="{{.URL}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove {{.Name}} skill from {{.Target}}">Remove</button></form>{{else}}<small class="text-body-secondary">Required</small>{{end}}{{end}}
 </li>{{end}}</ul>{{else}}<p class="mb-0 text-body-secondary">No skills configured.</p>{{end}}{{end}}
 `))
 

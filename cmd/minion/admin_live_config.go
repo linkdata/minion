@@ -62,7 +62,7 @@ func (a *adminLiveConfig) current() config.Config {
 }
 
 func (a *adminLiveConfig) admit(accept func() error) error {
-	// A completed save must not be followed by an acceptance under the old policy.
+	// A completed save must not be followed by a durable decision under the old policy.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.pending {
@@ -74,7 +74,7 @@ func (a *adminLiveConfig) admit(accept func() error) error {
 func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil}
+	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
 }
 
 func sameFixedConfig(a, b config.Config) bool {
@@ -190,7 +190,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
 		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate)) {
-			return errors.New("this change requires restarting the remote worker")
+			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}
 		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
 			return errors.New("at least one enabled command must have its required skills installed")

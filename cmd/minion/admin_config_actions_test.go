@@ -379,6 +379,43 @@ func TestAdminRepositoryActionsRejectStalePreflight(t *testing.T) {
 	}
 }
 
+func TestAdminRepositoryActionsRejectChangedIdentityDuringPreflight(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		id      int64
+		ownerID int64
+	}{
+		{name: "repository ID", id: 12, ownerID: 22},
+		{name: "owner ID", id: 11, ownerID: 23},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			live, path := liveConfigFixture(t, false)
+			owner := adminPreflightOwner(t, false, func() {
+				if err := live.save(func(cfg *config.Config) error {
+					cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = test.id, test.ownerID
+					return nil
+				}); err != nil {
+					t.Errorf("concurrent repository replacement: %v", err)
+				}
+			})
+			mux := http.NewServeMux()
+			registerAdminConfigActions(mux, live, owner)
+			form := url.Values{"name": {"owner/repo"}, "actions": {"review", "audit"}}
+			r := httptest.NewRequest(http.MethodPost, "/admin/repositories/actions", strings.NewReader(form.Encode()))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "Repository identity changed; reload and try again") {
+				t.Fatalf("stale repository identity: status=%d body=%q", w.Code, w.Body.String())
+			}
+			saved, _ := configForAdminTest(t, path).Repository("owner/repo")
+			if !saved.MatchesIdentity(test.id, test.ownerID) || len(saved.Actions) != 1 || saved.Actions[0] != "review" {
+				t.Fatalf("stale edit changed replacement repository: %+v", saved)
+			}
+		})
+	}
+}
+
 func adminPreflightOwner(t *testing.T, archived bool, onNotifications ...func()) *action.Orchestrator {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -339,6 +339,7 @@ func runMonitorLoopWithConfigUpdates(ctx context.Context, watcher *monitor.Monit
 			if ctx.Err() != nil {
 				return 0
 			}
+			logger.Printf("poll before config update: %s", monitor.InertLogText(err.Error()))
 			select {
 			case <-configUpdates:
 			default:

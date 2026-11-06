@@ -195,6 +195,9 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		return live.save(func(cfg *config.Config) error {
 			for i := range cfg.Repositories {
 				if strings.EqualFold(cfg.Repositories[i].Name, name) {
+					if !cfg.Repositories[i].MatchesIdentity(repo.ID, repo.OwnerID) {
+						return errors.New("Repository identity changed; reload and try again")
+					}
 					if !slices.Equal(cfg.Repositories[i].Actions, originalActions) {
 						return errors.New("Repository commands changed; reload and try again")
 					}

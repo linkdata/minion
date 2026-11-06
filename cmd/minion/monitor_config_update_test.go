@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,10 +21,10 @@ type blockedConfigUpdateHandler struct {
 	release chan struct{}
 }
 
-type joinedConfigUpdateHandler struct{}
+type joinedConfigUpdateHandler struct{ failure error }
 
-func (*joinedConfigUpdateHandler) WaitCapacity(context.Context) error {
-	return errors.Join(monitor.ErrAcceptanceState, monitor.ErrConfigUpdatePending)
+func (h *joinedConfigUpdateHandler) WaitCapacity(context.Context) error {
+	return errors.Join(h.failure, monitor.ErrConfigUpdatePending)
 }
 
 func (*joinedConfigUpdateHandler) Execute(context.Context, monitor.Job) error {
@@ -96,9 +98,22 @@ func TestRunMonitorLoopConfigUpdatePrecedesFirstPoll(t *testing.T) {
 func TestRunMonitorLoopAcceptanceStateWinsConfigUpdate(t *testing.T) {
 	now := time.Now().UTC()
 	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
-	watcher := &monitor.Monitor{Handler: &joinedConfigUpdateHandler{}, SelectedExecutorID: "local"}
+	watcher := &monitor.Monitor{Handler: &joinedConfigUpdateHandler{failure: monitor.ErrAcceptanceState}, SelectedExecutorID: "local"}
 	if code := runMonitorLoopWithConfigUpdates(t.Context(), watcher, store, true, nil, log.New(io.Discard, "", 0), false, nil); code != 1 {
 		t.Fatalf("uncertain acceptance with queued update returned %d, want fatal exit", code)
+	}
+}
+
+func TestRunMonitorLoopLogsPollFailureBeforeConfigUpdate(t *testing.T) {
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	watcher := &monitor.Monitor{Handler: &joinedConfigUpdateHandler{failure: errors.New("earlier poll failure")}, SelectedExecutorID: "local"}
+	var logs bytes.Buffer
+	if code := runMonitorLoopWithConfigUpdates(t.Context(), watcher, store, true, nil, log.New(&logs, "", 0), false, nil); code != monitorConfigChanged {
+		t.Fatalf("config update with prior poll failure returned %d, want config change", code)
+	}
+	if !strings.Contains(logs.String(), "earlier poll failure") {
+		t.Fatalf("prior poll failure was hidden: %q", logs.String())
 	}
 }
 
