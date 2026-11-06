@@ -55,7 +55,7 @@ func FakeOnPath(t *testing.T, name, script string) string {
 // FakeBubblewrap installs a Bubblewrap help fixture and returns its path.
 func FakeBubblewrap(t *testing.T, help string) string {
 	t.Helper()
-	return filepath.Join(FakeOnPath(t, "bwrap", "#!/bin/sh\nprintf '%s\\n' '"+help+"'\n"), "bwrap")
+	return filepath.Join(FakeOnPath(t, "bwrap", "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = --help ] || exit 2\nprintf '%s\\n' '"+help+"'\n"), "bwrap")
 }
 
 // UseShortClaudeTempDir isolates a short temp root and checks Claude scratch cleanup.

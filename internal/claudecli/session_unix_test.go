@@ -61,6 +61,53 @@ func TestSessionRejectsLongTempPathBeforeClaude(t *testing.T) {
 	}
 }
 
+func TestSessionRejectsWritableTempRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		asWork bool
+	}{
+		{name: "source", asWork: true},
+		{name: "report"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testCanonicalTempDirLength(t, 40)
+			binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
+			workspace, output := t.TempDir(), root
+			if tc.asWork {
+				workspace, output = root, ""
+			}
+			t.Setenv("TMPDIR", root)
+			var session Session
+			if _, err := session.Run(t.Context(), workspace, "task", true, output, config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "writable by sandboxed Bash") {
+				t.Fatalf("writable temp root accepted: %v", err)
+			}
+			if session.runtimeRoot != "" {
+				t.Fatal("writable temp root created Claude scratch")
+			}
+			if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
+				t.Fatalf("Claude started despite writable temp root: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckHostRejectsImplicitWritableTempRoot(t *testing.T) {
+	home := testCanonicalTempDirLength(t, 30)
+	t.Setenv("HOME", home)
+	for _, relative := range []string{filepath.Join(".npm", "_logs"), filepath.Join(".claude", "debug")} {
+		t.Run(relative, func(t *testing.T) {
+			root := filepath.Join(home, relative)
+			if err := os.MkdirAll(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TMPDIR", root)
+			if _, err := CheckHost(t.Context(), false); err == nil || !strings.Contains(err.Error(), "writable by sandboxed Bash") {
+				t.Fatalf("implicit writable temp root accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateRejectsShortSymlinkToLongTempPath(t *testing.T) {
 	root := testCanonicalTempDirLength(t, maxTempRootBytes+1)
 	parent, err := os.MkdirTemp("/tmp", "m")

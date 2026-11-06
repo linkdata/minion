@@ -128,6 +128,13 @@ func CheckHost(ctx context.Context, allowAllUnixSockets bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	paths := []string{"/tmp/claude"}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".npm", "_logs"), filepath.Join(home, ".claude", "debug"))
+	}
+	if err := checkTempRootWritable(root, paths...); err != nil {
+		return "", err
+	}
 	if err := checkBubblewrap(ctx, allowAllUnixSockets); err != nil {
 		return "", err
 	}

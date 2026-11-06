@@ -15,6 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
+	workspacefs "github.com/linkdata/minion/internal/workspace"
 )
 
 const (
@@ -138,6 +139,9 @@ func (s *Session) prepare(ctx context.Context, workspace, binary string, writabl
 		if err != nil {
 			return err
 		}
+		if err := checkTempRootWritable(tempRoot, workspace, outputDir); err != nil {
+			return err
+		}
 		s.workspace, s.binary, s.outputDir, s.writable, s.settings = workspace, binary, outputDir, writable, bound
 		s.settings.Skills = slices.Clone(bound.Skills)
 		s.initErr = s.initialize(tempRoot)
@@ -209,6 +213,19 @@ func runtimeTempRoot() (string, error) {
 		return "", fmt.Errorf("claude temp root %q (%d bytes): sandbox socket path is too long; set TMPDIR to a canonical path of at most %d bytes", root, len(root), maxTempRootBytes)
 	}
 	return root, nil
+}
+
+func checkTempRootWritable(root string, paths ...string) error {
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		resolved, err := aicli.ResolvePath(path)
+		if err == nil && workspacefs.Within(resolved, root) {
+			return fmt.Errorf("claude temp root %q is writable by sandboxed Bash; choose another TMPDIR", root)
+		}
+	}
+	return nil
 }
 
 func conversationID() (string, error) {
