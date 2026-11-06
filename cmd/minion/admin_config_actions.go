@@ -26,21 +26,9 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 	var skillMu sync.Mutex
 	mux.Handle("POST /admin/users/add", adminConfigPost("/admin/users", []string{"repository", "login"}, "", func(ctx context.Context, values url.Values) error {
 		repoName, login := strings.ToLower(values.Get("repository")), strings.ToLower(values.Get("login"))
-		if !workspace.ValidRepository(repoName) || !validAdminGitHubLogin(login) {
-			return errors.New("Enter a configured repository and valid GitHub login")
-		}
-		if _, ok := live.snapshot().Config.Repository(repoName); !ok {
-			return errors.New("Repository is not configured")
-		}
-		if owner == nil || owner.GitHub == nil {
-			return errors.New("GitHub client is unavailable")
-		}
-		permission, err := owner.GitHub.Permission(ctx, repoName, login)
+		requesterID, err := validateAdminRequester(ctx, live, owner, repoName, login)
 		if err != nil {
-			return fmt.Errorf("Check requester permission: %w", err)
-		}
-		if permission.User.ID <= 0 || !strings.EqualFold(permission.User.Login, login) || !adminCanWrite(permission.Permission) {
-			return errors.New("Requester must have write, maintain, or admin permission on this repository")
+			return err
 		}
 		return live.save(func(cfg *config.Config) error {
 			for i := range cfg.Repositories {
@@ -58,7 +46,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 				if repo.AllowedActorIDs == nil {
 					repo.AllowedActorIDs = make(map[string]int64)
 				}
-				repo.AllowedActorIDs[login] = permission.User.ID
+				repo.AllowedActorIDs[login] = requesterID
 				return nil
 			}
 			return errors.New("Repository is no longer configured")
@@ -164,21 +152,18 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if err := validateAdminActions(current, actions, repo.Actions); err != nil {
 			return err
 		}
-		workerRestart := current.RemoteExecutor != nil && hasNewCommand(current, config.Config{Repositories: []config.Repository{{Actions: actions}}})
 		for _, action := range actions {
 			if slices.Contains(repo.Actions, action) {
 				continue
 			}
-			if !workerRestart {
-				if owner == nil || owner.GitHub == nil {
-					return errors.New("GitHub client is unavailable")
-				}
-				repo.Actions = actions
-				probe := current
-				probe.Repositories = []config.Repository{repo}
-				if err := checkRepositories(ctx, owner.GitHub, probe, log.New(io.Discard, "", 0)); err != nil {
-					return fmt.Errorf("Repository is not ready: %w", err)
-				}
+			if owner == nil || owner.GitHub == nil {
+				return errors.New("GitHub client is unavailable")
+			}
+			repo.Actions = actions
+			probe := current
+			probe.Repositories = []config.Repository{repo}
+			if err := checkRepositories(ctx, owner.GitHub, probe, log.New(io.Discard, "", 0)); err != nil {
+				return fmt.Errorf("Repository is not ready: %w", err)
 			}
 			break
 		}
@@ -294,6 +279,26 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			})
 		})
 	}))
+}
+
+func validateAdminRequester(ctx context.Context, live *adminLiveConfig, owner *action.Orchestrator, repoName, login string) (int64, error) {
+	if !workspace.ValidRepository(repoName) || !validAdminGitHubLogin(login) {
+		return 0, errors.New("Enter a configured repository and valid GitHub login")
+	}
+	if _, ok := live.snapshot().Config.Repository(repoName); !ok {
+		return 0, errors.New("Repository is not configured")
+	}
+	if owner == nil || owner.GitHub == nil {
+		return 0, errors.New("GitHub client is unavailable")
+	}
+	permission, err := owner.GitHub.Permission(ctx, repoName, login)
+	if err != nil {
+		return 0, fmt.Errorf("Check requester permission: %w", err)
+	}
+	if permission.User.ID <= 0 || !strings.EqualFold(permission.User.Login, login) || !adminCanWrite(permission.Permission) {
+		return 0, errors.New("Requester must have write, maintain, or admin permission on this repository")
+	}
+	return permission.User.ID, nil
 }
 
 func adminConfigPost(back string, fields []string, repeated string, action func(context.Context, url.Values) error) http.Handler {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -43,8 +44,9 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 	}
 	if !strings.Contains(body.String(), "&lt;script&gt;") || strings.Contains(body.String(), "<script>alert") ||
 		strings.Contains(body.String(), "@inherited") || !strings.Contains(body.String(), "@custom") ||
-		!strings.Contains(body.String(), "/admin/policy/instructions/reset") {
-		t.Fatalf("instructions page is unsafe or lacks reset: %s", body.String())
+		!strings.Contains(body.String(), "/admin/policy/instructions/reset") ||
+		!strings.Contains(body.String(), "16,384 UTF-8 bytes") {
+		t.Fatalf("instructions page is unsafe or lacks reset/limit guidance: %s", body.String())
 	}
 }
 
@@ -82,6 +84,58 @@ func TestAdminPolicyRequesterPinsGitHubIdentity(t *testing.T) {
 	saved = configForAdminTest(t, path)
 	if len(saved.RequesterPolicies) != 0 || saved.RequiredCleanRounds(11, 77) != 1 {
 		t.Fatalf("requester override was not cleared: %+v", saved.RequesterPolicies)
+	}
+}
+
+func TestAdminRequesterRoutesRequireVerifiedWriteAccess(t *testing.T) {
+	for _, route := range []string{"/admin/users/add", "/admin/policy/requester"} {
+		for _, tc := range []struct {
+			name, repository, login, permission, identity, want string
+		}{
+			{name: "invalid login", repository: "owner/repo", login: "old_user", want: "valid GitHub login"},
+			{name: "unconfigured repository", repository: "owner/other", login: "writer", want: "Repository is not configured"},
+			{name: "wrong identity", repository: "owner/repo", login: "writer", permission: "write", identity: "different", want: "Requester must have write"},
+			{name: "read only", repository: "owner/repo", login: "writer", permission: "read", identity: "writer", want: "Requester must have write"},
+			{name: "missing ID", repository: "owner/repo", login: "writer", permission: "write", identity: "writer", want: "Requester must have write"},
+		} {
+			t.Run(route+"/"+tc.name, func(t *testing.T) {
+				live, path := liveConfigFixture(t, false)
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/repos/owner/repo/collaborators/writer/permission" {
+						t.Errorf("unexpected GitHub requester check: %s", r.URL.Path)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					id := 77
+					if tc.name == "missing ID" {
+						id = 0
+					}
+					_, _ = w.Write([]byte(`{"permission":"` + tc.permission + `","user":{"login":"` + tc.identity + `","id":` + strconv.Itoa(id) + `}}`))
+				}))
+				t.Cleanup(server.Close)
+				client := github.New("fixture-token")
+				client.BaseURL = server.URL
+				mux := http.NewServeMux()
+				owner := &action.Orchestrator{GitHub: client}
+				registerAdminConfigActions(mux, live, owner)
+				registerAdminPolicyActions(mux, live, owner)
+				form := url.Values{"repository": {tc.repository}, "login": {tc.login}}
+				if route == "/admin/policy/requester" {
+					form.Set("rounds", "2")
+				}
+				r := httptest.NewRequest(http.MethodPost, route, strings.NewReader(form.Encode()))
+				r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				response := httptest.NewRecorder()
+				mux.ServeHTTP(response, r)
+				if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), tc.want) {
+					t.Fatalf("POST %s: status=%d body=%q", route, response.Code, response.Body.String())
+				}
+				saved := configForAdminTest(t, path)
+				if len(saved.Repositories[0].AllowedActors) != 0 || len(saved.RequesterPolicies) != 0 {
+					t.Fatalf("rejected requester was saved: repo=%+v policies=%+v", saved.Repositories[0], saved.RequesterPolicies)
+				}
+			})
+		}
 	}
 }
 

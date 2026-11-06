@@ -239,8 +239,8 @@ func TestAdminRemovesConfiguredLegacyRequester(t *testing.T) {
 func TestAdminRepositoryActionExpansionRequiresRemoteRestart(t *testing.T) {
 	live, _ := liveConfigFixture(t, true)
 	mux := http.NewServeMux()
-	registerAdminConfigActions(mux, live, nil)
-	form := url.Values{"name": {"owner/repo"}, "actions": {"review", "fix"}}
+	registerAdminConfigActions(mux, live, adminPreflightOwner(t, false))
+	form := url.Values{"name": {"owner/repo"}, "actions": {"review", "audit"}}
 	r := httptest.NewRequest(http.MethodPost, "/admin/repositories/actions", strings.NewReader(form.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -248,6 +248,74 @@ func TestAdminRepositoryActionExpansionRequiresRemoteRestart(t *testing.T) {
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "restarting the remote worker") {
 		t.Fatalf("remote action expansion: status=%d body=%q", w.Code, w.Body.String())
 	}
+}
+
+func TestAdminRepositoryActionReenablePreflightsRemote(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Repositories[0].Actions = []string{"review", "audit"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.Repositories[0].Actions = []string{"review"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !live.remoteSelected["audit"] {
+		t.Fatal("test setup did not freeze audit in the remote selection")
+	}
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, adminPreflightOwner(t, true))
+	form := url.Values{"name": {"owner/repo"}, "actions": {"review", "audit"}}
+	r := httptest.NewRequest(http.MethodPost, "/admin/repositories/actions", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "Repository is not ready") || !strings.Contains(w.Body.String(), "archived") {
+		t.Fatalf("remote reenable skipped repository preflight: status=%d body=%q", w.Code, w.Body.String())
+	}
+	saved, _ := configForAdminTest(t, path).Repository("owner/repo")
+	if len(saved.Actions) != 1 || saved.Actions[0] != "review" {
+		t.Fatalf("failed preflight changed actions: %v", saved.Actions)
+	}
+}
+
+func adminPreflightOwner(t *testing.T, archived bool) *action.Orchestrator {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer fixture-token" {
+			t.Errorf("GitHub authorization was absent")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/owner/repo/notifications":
+			_, _ = w.Write([]byte(`[]`))
+		case "/repos/owner/repo":
+			if archived {
+				_, _ = w.Write([]byte(`{"id":11,"full_name":"owner/repo","owner":{"id":22},"default_branch":"main","archived":true}`))
+			} else {
+				_, _ = w.Write([]byte(`{"id":11,"full_name":"owner/repo","owner":{"id":22},"default_branch":"main"}`))
+			}
+		case "/repos/owner/repo/collaborators/bot/permission":
+			_, _ = w.Write([]byte(`{"permission":"write","user":{"id":9,"login":"bot"}}`))
+		default:
+			t.Errorf("unexpected GitHub preflight path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := github.New("fixture-token")
+	client.BaseURL = server.URL
+	return &action.Orchestrator{GitHub: client, BotLogin: "bot", BotID: 9}
 }
 
 func TestAdminSkillTrailingSlashDoesNotReinstallActiveSource(t *testing.T) {

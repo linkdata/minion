@@ -88,7 +88,7 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
   </section>
   <section class="border rounded p-3"><h2 class="h5">Global AI instructions</h2><p class="small text-body-secondary">This text replaces Minion's editable built-in working guidance for new actions. Fixed action limits and output rules still apply.</p>
     <p>{{if .Custom}}Custom instructions are active.{{else}}Using the built-in default.{{end}}</p>
-    <form method="post" action="/admin/policy/instructions"><label class="d-grid gap-1">Instructions<textarea class="form-control font-monospace" name="instructions" rows="12" maxlength="16384" required>{{.Instructions}}</textarea></label><button class="btn btn-primary mt-3" type="submit">Save instructions</button></form>
+    <form method="post" action="/admin/policy/instructions"><label class="d-grid gap-1">Instructions<textarea class="form-control font-monospace" name="instructions" rows="12" maxlength="16384" required>{{.Instructions}}</textarea><small class="text-body-secondary">Limit: 16,384 UTF-8 bytes. Some characters use more than one byte.</small></label><button class="btn btn-primary mt-3" type="submit">Save instructions</button></form>
     <form method="post" action="/admin/policy/instructions/reset" class="mt-2"><button class="btn btn-outline-light" type="submit">Reset to built-in default</button></form>
   </section>{{end}}
 </main>{{$.TailHTML}}</body></html>`))

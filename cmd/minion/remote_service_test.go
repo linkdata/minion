@@ -37,7 +37,7 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 	selected := map[string]bool{"comment": true, "review": true}
 	reenabled := current
 	reenabled.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "review"}}}
-	if !sameSkillConfig(current, reenabled) || !hasNewCommand(current, reenabled) || hasUnselectedCommand(selected, reenabled) {
+	if !sameSkillConfig(current, reenabled) || hasUnselectedCommand(selected, reenabled) {
 		t.Fatal("re-enabling a frozen command incorrectly requires remote restart")
 	}
 	newCommand := current

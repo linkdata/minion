@@ -79,23 +79,6 @@ func sameSkillConfig(a, b config.Config) bool {
 	return reflect.DeepEqual(a.Commands, b.Commands) && reflect.DeepEqual(a.AlwaysOnSkills, b.AlwaysOnSkills)
 }
 
-func hasNewCommand(before, after config.Config) bool {
-	known := make(map[string]bool)
-	for _, repo := range before.Repositories {
-		for _, name := range repo.Actions {
-			known[name] = true
-		}
-	}
-	for _, repo := range after.Repositories {
-		for _, name := range repo.Actions {
-			if !known[name] {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func cloneConfig(cfg config.Config) (config.Config, error) {
 	data, err := json.Marshal(cfg)
 	if err != nil {

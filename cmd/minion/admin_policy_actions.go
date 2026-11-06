@@ -43,18 +43,9 @@ func registerAdminPolicyActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if err != nil {
 			return err
 		}
-		if !workspace.ValidRepository(repo) || !validAdminGitHubLogin(login) {
-			return errors.New("enter a configured repository and valid GitHub login")
-		}
-		if _, ok := live.snapshot().Config.Repository(repo); !ok || owner == nil || owner.GitHub == nil {
-			return errors.New("repository or GitHub client is unavailable")
-		}
-		permission, err := owner.GitHub.Permission(ctx, repo, login)
+		requesterID, err := validateAdminRequester(ctx, live, owner, repo, login)
 		if err != nil {
-			return fmt.Errorf("check requester permission: %w", err)
-		}
-		if permission.User.ID <= 0 || !strings.EqualFold(permission.User.Login, login) || !adminCanWrite(permission.Permission) {
-			return errors.New("requester must have write, maintain, or admin permission")
+			return err
 		}
 		return live.save(func(cfg *config.Config) error {
 			if _, ok := cfg.Repository(repo); !ok {
@@ -62,12 +53,12 @@ func registerAdminPolicyActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			}
 			for i := range cfg.RequesterPolicies {
 				policy := &cfg.RequesterPolicies[i]
-				if policy.ID == permission.User.ID {
+				if policy.ID == requesterID {
 					policy.Login, policy.RequiredCleanRounds = login, rounds
 					return nil
 				}
 			}
-			cfg.RequesterPolicies = append(cfg.RequesterPolicies, config.RequesterPolicy{Login: login, ID: permission.User.ID, RequiredCleanRounds: rounds})
+			cfg.RequesterPolicies = append(cfg.RequesterPolicies, config.RequesterPolicy{Login: login, ID: requesterID, RequiredCleanRounds: rounds})
 			return nil
 		})
 	}))
