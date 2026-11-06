@@ -490,7 +490,7 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{Codex: config.CodexConfig{APIKey: "configured-secret"}, runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
-		!strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+		!strings.Contains(err.Error(), "configured credential") || writes.Load() != 0 {
 		t.Fatalf("invalid no-change result was published: writes=%d error=%v", writes.Load(), err)
 	}
 }

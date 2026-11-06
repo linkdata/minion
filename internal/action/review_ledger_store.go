@@ -79,7 +79,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 	for _, refutation := range result.Refutations {
 		for _, key := range keys {
 			if key != "" && containsConfiguredKey([]byte(refutation.Text), key) {
-				return errors.New("review refutation contains a configured provider key")
+				return errors.New("review refutation contains a configured credential")
 			}
 		}
 	}

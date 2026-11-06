@@ -446,7 +446,7 @@ func TestFixChangesRejectConfiguredKeysWithoutRejectingBinary(t *testing.T) {
 					return aicli.Result{Answer: proposalJSON("Done", "")}, nil
 				}}
 				result, err := runner.Run(t.Context(), job)
-				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
+				if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured credential") || calls != 1 || result.Answer != "" || len(result.Changes) != 0 {
 					t.Fatalf("configured key reached fix result: calls=%d result=%+v error=%v", calls, result, err)
 				}
 			})

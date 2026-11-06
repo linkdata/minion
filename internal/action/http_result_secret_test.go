@@ -172,7 +172,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			request.Repository.Actions = []string{name}
 			selectFixtureRequest(t, e, &request, false)
 			err := e.Execute(t.Context(), request)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured credential") || writes.Load() != 0 {
 				t.Fatalf("hostile result crossed publication boundary: error=%v writes=%d", err, writes.Load())
 			}
 			records, err := usage.ReadAll(usageDir)
@@ -264,7 +264,7 @@ func TestHostileHTTPFixEntityBotTokenCannotPublish(t *testing.T) {
 	request.Repository.Actions = []string{"fix"}
 	selectFixtureRequest(t, e, &request, false)
 	err := e.Execute(testActionContext(t), request)
-	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured credential") || writes.Load() != 0 {
 		t.Fatalf("entity-encoded key crossed publication boundary: error=%v writes=%d", err, writes.Load())
 	}
 	refs, refErr := exec.Command("git", "--git-dir", remote, "for-each-ref", "--format=%(refname)", "refs/heads/minion/").Output()
@@ -379,7 +379,7 @@ func TestRejectConfiguredKeyPublicationFields(t *testing.T) {
 		{name: "audit JSON data", result: Result{Artifacts: []workspace.File{{Path: "findings.json", Mode: workspace.Regular, Data: []byte(`{"value":"fixture-\u0073ecret"}`)}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := rejectConfiguredKeyPublication(publication{artifacts: tc.result.Artifacts}, tc.result.Changes, "", key); err == nil || !strings.Contains(err.Error(), "configured provider key") {
+			if err := rejectConfiguredKeyPublication(publication{artifacts: tc.result.Artifacts}, tc.result.Changes, "", key); err == nil || !strings.Contains(err.Error(), "configured credential") {
 				t.Fatalf("secret reached publication boundary: %v", err)
 			}
 		})

@@ -436,12 +436,12 @@ func rejectConfiguredKeyPublication(published publication, changes []workspace.C
 			continue
 		}
 		if containsConfiguredKey([]byte(published.answer), key) {
-			return errors.New("answer contains a configured provider key")
+			return errors.New("answer contains a configured credential")
 		}
 	}
 	for _, file := range published.artifacts {
 		if artifactContainsConfiguredKey(file, keys...) {
-			return errors.New("audit artifact contains a configured provider key")
+			return errors.New("audit artifact contains a configured credential")
 		}
 	}
 	return nil

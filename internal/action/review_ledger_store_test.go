@@ -288,7 +288,7 @@ func TestPrivateReviewRetentionRejectsCurrentConfiguredKeys(t *testing.T) {
 			result.Refutations[0].Text = test.text
 			err = e.retainReviewEvidence(job, result)
 			after, readErr := os.ReadFile(path)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || strings.Contains(err.Error(), codexKey) || strings.Contains(err.Error(), claudeKey) || strings.Contains(err.Error(), botKey) || strings.Contains(err.Error(), "&#x73;ecret") || readErr != nil || !bytes.Equal(before, after) {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured credential") || strings.Contains(err.Error(), codexKey) || strings.Contains(err.Error(), claudeKey) || strings.Contains(err.Error(), botKey) || strings.Contains(err.Error(), "&#x73;ecret") || readErr != nil || !bytes.Equal(before, after) {
 				t.Fatalf("key-bearing final review changed accepted prefix: error=%v read=%v", err, readErr)
 			}
 			writes := 0
