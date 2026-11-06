@@ -271,6 +271,9 @@ func arguments(policy string) []string {
 	}
 }
 
+// Tests replace this path to cover hosts without a user runtime directory.
+var userRuntimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+
 func sandboxSettings(workspace, outputDir, authDir string, allowAllUnixSockets bool) (string, error) {
 	if authDir != "" && (workspacefs.Within(workspace, authDir) || workspacefs.Within(authDir, workspace) ||
 		outputDir != "" && (workspacefs.Within(outputDir, authDir) || workspacefs.Within(authDir, outputDir))) {
@@ -289,10 +292,9 @@ func sandboxSettings(workspace, outputDir, authDir string, allowAllUnixSockets b
 	if runtime.GOOS == "linux" && allowAllUnixSockets {
 		// shortcut: Linux Bash can still reach host, Claude session, and AF_VSOCK VM host sockets; replace the CLI sandbox for stronger isolation.
 		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
-		userRuntime := fmt.Sprintf("/run/user/%d", os.Getuid())
 		// A missing target makes Claude hide its nearest existing parent instead.
-		if _, err := os.Stat(userRuntime); !errors.Is(err, os.ErrNotExist) {
-			sandbox["filesystem"] = map[string]any{"denyRead": []string{userRuntime}}
+		if _, err := os.Stat(userRuntimeDir); !errors.Is(err, os.ErrNotExist) {
+			sandbox["filesystem"] = map[string]any{"denyRead": []string{userRuntimeDir}}
 		}
 	}
 	policy := map[string]any{

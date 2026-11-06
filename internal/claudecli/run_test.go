@@ -188,6 +188,60 @@ printf '%s\n' '--disable-userns'
 	}
 }
 
+func TestSandboxSettingsUserRuntimeDirectory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Unix socket opt-in applies only on Linux")
+	}
+	previous := userRuntimeDir
+	t.Cleanup(func() { userRuntimeDir = previous })
+	existing := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notDirectory := filepath.Join(file, "child")
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing fixture: %v", err)
+	}
+	if _, err := os.Stat(notDirectory); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("non-directory fixture: %v", err)
+	}
+	for _, tc := range []struct {
+		name, path string
+		deny       bool
+	}{
+		{name: "existing", path: existing, deny: true},
+		{name: "missing", path: missing},
+		{name: "non-directory error", path: notDirectory, deny: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userRuntimeDir = tc.path
+			policy, err := sandboxSettings(t.TempDir(), "", "", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings struct {
+				Sandbox struct {
+					Filesystem *struct {
+						DenyRead []string `json:"denyRead"`
+					} `json:"filesystem"`
+				} `json:"sandbox"`
+			}
+			if err := json.Unmarshal([]byte(policy), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if tc.deny {
+				if settings.Sandbox.Filesystem == nil || !slices.Equal(settings.Sandbox.Filesystem.DenyRead, []string{tc.path}) {
+					t.Fatalf("missing denyRead for %q: %s", tc.path, policy)
+				}
+			} else if settings.Sandbox.Filesystem != nil {
+				t.Fatalf("missing path denied: %s", policy)
+			}
+		})
+	}
+}
+
 func TestRun(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string

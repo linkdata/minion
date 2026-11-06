@@ -58,7 +58,7 @@ func FakeBubblewrap(t *testing.T, help string) string {
 	return filepath.Join(FakeOnPath(t, "bwrap", "#!/bin/sh\nprintf '%s\\n' '"+help+"'\n"), "bwrap")
 }
 
-// UseShortClaudeTempDir keeps native test sockets below Unix path limits.
+// UseShortClaudeTempDir isolates a short temp root and checks Claude scratch cleanup.
 func UseShortClaudeTempDir(t *testing.T, parent string) {
 	t.Helper()
 	root, err := os.MkdirTemp(parent, "mc-test-")
