@@ -46,11 +46,11 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `<!docty
 <html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion</title></head>
 <body><main class="container py-5"><h1>Minion</h1>
 {{if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
-{{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">User sign in</a>{{end}}
+{{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not (or .Dot.Admin .Dot.User)}}<p>Sign-in is not configured.</p><button class="btn btn-primary" disabled>Sign in</button>{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
-type adminHomeView struct{ Admin, User bool }
+type adminHomeView struct{ Admin, User, SignedUser bool }
 
 const (
 	maxAdminSessions          = 512
@@ -155,6 +155,10 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	})
 	dashboard := adminDashboardHandler(jw, owner)
 	home := jw.SessionMiddleware(http.HandlerFunc(access.homePage))
+	guestMu := new(sync.Mutex)
+	if oauth != nil {
+		guestMu = &oauth.admissionMu
+	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		sess := jw.GetSession(r)
@@ -162,6 +166,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			dashboard.ServeHTTP(w, r)
 			return
 		}
+		guestMu.Lock()
+		defer guestMu.Unlock()
+		sess = jw.GetSession(r)
 		if sess == nil && jw.SessionCount() >= maxGuestPageSessions {
 			guestAdmissionUnavailable(w)
 			return
@@ -322,12 +329,14 @@ func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
-	a.publicPage(w, r, "home", adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil})
+	account, _ := a.oauth.currentUser(a.jaws.GetSession(r))
+	a.publicPage(w, r, "home", adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil, SignedUser: account != ""})
 }
 
 func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name string, view any) {
 	sess := a.jaws.GetSession(r)
-	if a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests {
+	account, _ := a.oauth.currentUser(sess)
+	if a.sessionUsername(sess) == "" && account == "" && len(sess.Requests()) >= maxGuestPageRequests {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}

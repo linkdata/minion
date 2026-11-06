@@ -79,6 +79,7 @@ type oauthAccess struct {
 	choices     *config.UserModelChoices
 	detailSlots chan struct{}
 	actionReads chan struct{}
+	admissionMu sync.Mutex
 	linkMu      sync.Mutex
 	usageGate   *userUsageGate
 }
@@ -120,6 +121,8 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
+		a.admissionMu.Lock()
+		defer a.admissionMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
 			guestAdmissionUnavailable(w)
 			return
@@ -171,6 +174,8 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 			if strings.HasSuffix(path, "/login") {
 				login := handler
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					a.admissionMu.Lock()
+					defer a.admissionMu.Unlock()
 					if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
 						guestAdmissionUnavailable(w)
 						return

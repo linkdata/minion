@@ -489,6 +489,50 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 	}
 }
 
+func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	for jw.SessionCount() < maxGuestPageSessions-1 {
+		w := httptest.NewRecorder()
+		if jw.NewSession(w, httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)) == nil {
+			t.Fatal("could not fill guest sessions")
+		}
+	}
+	paths := []string{"/", "/auth/login", "/auth/github/login"}
+	responses := make([]*httptest.ResponseRecorder, 128)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := range responses {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			responses[i] = adminResponse(handler, http.MethodGet, paths[i%len(paths)], nil, nil, "")
+		}()
+	}
+	close(start)
+	workers.Wait()
+	if count := jw.SessionCount(); count > maxGuestAdmissionSessions {
+		t.Fatalf("concurrent guests consumed admin reserve: sessions=%d", count)
+	}
+	for i, response := range responses {
+		want := http.StatusOK
+		if paths[i%len(paths)] == "/auth/github/login" {
+			want = http.StatusFound
+		}
+		if response.Code != want && response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent guest %d (%s): status=%d", i, paths[i%len(paths)], response.Code)
+		}
+	}
+	if admin := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); admin.Code != http.StatusOK {
+		t.Fatalf("admin login after guest burst: status=%d sessions=%d", admin.Code, jw.SessionCount())
+	}
+}
+
 func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	cfg := config.AdminConfig{
 		Administrators: []config.AdminAccount{testAdminAccount()},

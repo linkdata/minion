@@ -527,6 +527,41 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 	}
 }
 
+func TestSignedInOAuthPublicPagesAreNotGuestLimited(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	key := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	cookie := userUsageCookie(t, jw, key, false)
+	for range maxGuestPageRequests {
+		page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie)
+		if page.Code != http.StatusOK {
+			t.Fatalf("OAuth account page status=%d", page.Code)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	r.RemoteAddr = "192.0.2.7:12345"
+	r.AddCookie(cookie)
+	sess := jw.GetSession(r)
+	if sess == nil {
+		t.Fatal("signed-in OAuth session missing")
+	}
+	if len(sess.Requests()) < maxGuestPageRequests {
+		t.Fatalf("signed-in OAuth pages=%d, want at least %d", len(sess.Requests()), maxGuestPageRequests)
+	}
+	home := userUsageRequest(handler, http.MethodGet, "/", "", cookie)
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		!strings.Contains(home.Body.String(), `href="/auth/login">Your account</a>`) {
+		t.Fatalf("signed-in OAuth home: status=%d body=%q", home.Code, home.Body.String())
+	}
+	if login := userUsageRequest(handler, http.MethodGet, "/admin/login", "", cookie); login.Code != http.StatusOK {
+		t.Fatalf("admin login for OAuth user: status=%d body=%q", login.Code, login.Body.String())
+	}
+}
+
 func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	for jw.SessionCount() < maxGuestPageSessions-1 {
