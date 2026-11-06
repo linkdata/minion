@@ -70,7 +70,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	}
 	var entryURL string
 	if cfg.TLSCertFile != "" {
-		entryURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate, cfg)
+		entryURL = certifiedListenURL(listener.Addr().String(), &certificate, cfg)
 	} else {
 		entryURL = plainAdminListenURL(listener.Addr().String(), cfg)
 	}
@@ -142,11 +142,9 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	return a, nil
 }
 
-func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cfg config.AdminConfig) string {
-	rawURL = strings.Replace(rawURL, "http://", "https://", 1)
-	parsed, parseErr := url.Parse(rawURL)
+func certifiedListenURL(address string, certificate *tls.Certificate, cfg config.AdminConfig) string {
 	host, port, err := net.SplitHostPort(address)
-	if parseErr != nil || err != nil || certificate.Leaf == nil {
+	if err != nil || certificate.Leaf == nil {
 		return ""
 	}
 	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
@@ -170,16 +168,15 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 			return candidate
 		}
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+	if ip := net.ParseIP(host); ip != nil && !ip.IsUnspecified() {
 		if candidate := covered(host); candidate != "" {
 			return candidate
 		}
-		if candidate := covered("localhost"); candidate != "" {
-			return candidate
+		if ip.IsLoopback() {
+			if candidate := covered("localhost"); candidate != "" {
+				return candidate
+			}
 		}
-	}
-	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
-		return rawURL
 	}
 	for _, name := range certificate.Leaf.DNSNames {
 		if candidate := covered(name); candidate != "" {

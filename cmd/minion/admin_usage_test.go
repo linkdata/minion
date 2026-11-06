@@ -32,11 +32,11 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	if page.Code != http.StatusOK || page.Header().Get("Cache-Control") != "no-store" ||
 		page.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
 		!strings.Contains(page.Body.String(), `aria-labelledby="usage-groups-heading" tabindex="0"`) ||
-		!strings.Contains(page.Body.String(), `<h2 id="usage-groups-heading" class="h5">`) ||
+		!strings.Contains(page.Body.String(), `id="usage-groups-heading"`) ||
 		!strings.Contains(page.Body.String(), "To, exclusive (UTC)") ||
 		!strings.Contains(page.Body.String(), "attempt start times in UTC") ||
 		!strings.Contains(page.Body.String(), `<th scope="col">Unallocated tokens</th>`) ||
-		!strings.Contains(page.Body.String(), `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Attempts with incomplete usage or still running</h2>`) ||
+		!hasMetric(page.Body.String(), "Attempts with incomplete usage or still running", "1") ||
 		!strings.Contains(page.Body.String(), "token counts in <code>totals</code> and <code>selected_usage</code> reflect that service") ||
 		!strings.Contains(page.Body.String(), "outcome counts remain attempt-level") ||
 		!strings.Contains(page.Body.String(), "<code>tokens</code> and <code>total_tokens</code> retain all services") ||

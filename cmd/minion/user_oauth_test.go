@@ -205,8 +205,10 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if denied := adminResponse(handler, http.MethodPost, "/auth/link/github", nil, signed, "https://admin.example"); denied.Code != http.StatusForbidden || denied.Header().Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(denied.Body.String(), `name="jawsKey"`) {
 		t.Fatalf("same-provider JaWS error: status=%d content-type=%q body=%q", denied.Code, denied.Header().Get("Content-Type"), denied.Body.String())
 	}
-	if home := adminResponse(handler, http.MethodGet, "/", nil, signed, ""); home.Code != http.StatusSeeOther || home.Header().Get("Location") != "/auth/login" {
-		t.Fatalf("signed-in OAuth home: status=%d location=%q", home.Code, home.Header().Get("Location"))
+	if home := adminResponse(handler, http.MethodGet, "/", nil, signed, ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), `href="/auth/login"`) ||
+		strings.Contains(home.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("signed-in OAuth home: status=%d body=%q", home.Code, home.Body.String())
 	}
 	for _, path := range []string{"/admin/usage", "/admin/stop"} {
 		method := http.MethodGet
@@ -244,6 +246,26 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	}
 	if _, err := os.Stat(auth.links.path); !os.IsNotExist(err) {
 		t.Fatalf("unlinked login wrote durable links: %v", err)
+	}
+}
+
+func TestOAuthSignedInHomeOffersAdminSignIn(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	key := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	cookie := userUsageCookie(t, jw, key, false)
+	if account := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie); account.Code != http.StatusOK ||
+		!strings.Contains(account.Body.String(), "Signed in with github") {
+		t.Fatalf("OAuth account page: status=%d body=%q", account.Code, account.Body.String())
+	}
+	home := userUsageRequest(handler, http.MethodGet, "/", "", cookie)
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		!strings.Contains(home.Body.String(), `href="/auth/login"`) {
+		t.Fatalf("signed-in combined home: status=%d body=%q", home.Code, home.Body.String())
 	}
 }
 

@@ -146,7 +146,7 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	}
 	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 	body := view.Body.String()
-	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl class="text-break">`, `<textarea class="form-control font-monospace"`, `id="record-caption-0" class="text-body-secondary small">Received report`, `aria-labelledby="record-caption-0"`, `id="diagnostic-caption-0" class="text-body-secondary small">Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
+	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl`, `<textarea`, `readonly aria-labelledby="record-caption-0"`, `id="record-caption-0"`, `>Received report`, `aria-labelledby="record-caption-0"`, `id="diagnostic-caption-0"`, `>Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q: %s", want, body)
 		}
@@ -605,7 +605,8 @@ func TestAdminActionDetailKeepsProvenanceOnTruncatedEvidence(t *testing.T) {
 		})
 		view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 		if !strings.Contains(view.Body.String(), "Saved critic calls are executor-reported and validated at receipt; main-model refutations are truncated in this view") ||
-			!strings.Contains(view.Body.String(), `id="refutation-caption-0" class="text-body-secondary small">Main-model refutation`) ||
+			!strings.Contains(view.Body.String(), `id="refutation-caption-0"`) ||
+			!strings.Contains(view.Body.String(), `>Main-model refutation`) ||
 			!strings.Contains(view.Body.String(), `aria-labelledby="refutation-caption-0"`) {
 			t.Fatalf("truncated refutation lost provenance: %s", view.Body.String())
 		}

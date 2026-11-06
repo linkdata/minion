@@ -243,11 +243,6 @@ func (a *oauthAccess) allowed(r *http.Request) bool {
 	return pattern != ""
 }
 
-func (a *oauthAccess) sessionAccount(r *http.Request) string {
-	account, _ := a.currentUser(a.jaws.GetSession(r))
-	return account
-}
-
 // Only a canonical usage URL may survive an unauthenticated sign-in detour.
 func userUsageReturnTarget(raw string) string {
 	if len(raw) == 0 || len(raw) > 1024 {

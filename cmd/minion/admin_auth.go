@@ -162,10 +162,6 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			dashboard.ServeHTTP(w, r)
 			return
 		}
-		if account, _ := oauth.currentUser(sess); account != "" {
-			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
-			return
-		}
 		if sess == nil && jw.SessionCount() >= maxGuestPageSessions {
 			guestAdmissionUnavailable(w)
 			return

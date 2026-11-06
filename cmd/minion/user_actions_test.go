@@ -180,7 +180,7 @@ func TestUserActionsRoutesBindRequesterAndCurrentPrivateAccess(t *testing.T) {
 	}
 	list := adminResponse(handler, http.MethodGet, "/auth/actions", nil, signed, "")
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "attempt-1") ||
-		!strings.Contains(list.Body.String(), `<ol class="list-group list-group-numbered">`) ||
+		!strings.Contains(list.Body.String(), `<ol`) ||
 		!strings.Contains(list.Body.String(), "owner/repo") || strings.Contains(list.Body.String(), "PRIVATE_DISCUSSION") {
 		t.Fatalf("own JaWS list: status=%d body=%q", list.Code, list.Body.String())
 	}

@@ -264,7 +264,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
-		account := a.sessionAccount(r)
+		account, _ := a.currentUser(a.jaws.GetSession(r))
 		if account == "" {
 			if a.links.storageError() != nil {
 				a.browserError(w, r, http.StatusServiceUnavailable)
