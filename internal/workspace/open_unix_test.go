@@ -55,13 +55,13 @@ func TestReadRegularRefusesFIFOWithoutBlocking(t *testing.T) {
 		if err != nil {
 			t.Errorf("release FIFO reader: %v", err)
 		} else {
-			if err := writer.Close(); err != nil {
-				t.Error(err)
-			}
 			select {
 			case <-done:
 			case <-time.After(time.Second):
 				t.Error("FIFO reader did not stop")
+			}
+			if err := writer.Close(); err != nil {
+				t.Error(err)
 			}
 		}
 		t.Fatal("opening FIFO blocked waiting for a writer")
