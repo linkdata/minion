@@ -47,9 +47,8 @@ func TestGitDeadlineStopsDirectProcess(t *testing.T) {
 func TestGitTruncationRejectsPipeDrainOverrun(t *testing.T) {
 	dir := t.TempDir()
 	pidFile := filepath.Join(dir, "holder.pid")
-	stopFile := pidFile + ".stop"
-	testsupport.StopOnCleanup(t, stopFile)
-	script := "#!/bin/sh\n(sleep 1; printf overflow-output; while [ ! -f " + shellQuote(stopFile) + " ]; do sleep .05; done) &\nprintf '%s' $! > " + shellQuote(pidFile) + "\nexit 0\n"
+	stopFile := gitFixtureStopFile(t, pidFile)
+	script := "#!/bin/sh\n(sleep 1; printf overflow-output; i=0; while [ ! -f " + shellQuote(stopFile) + " ] && [ \"$i\" -lt 600 ]; do sleep .05; i=$((i+1)); done) &\nprintf '%s' $! > " + shellQuote(pidFile) + "\nexit 0\n"
 	fakeOnPath(t, "git", script)
 	output, truncated, err := (&Checkout{path: dir}).boundedGit(t.Context(), nil, 4, true, "status")
 	process, pinErr := testsupport.PinProcess(pidFile)
