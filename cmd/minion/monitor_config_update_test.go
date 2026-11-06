@@ -18,6 +18,25 @@ type blockedConfigUpdateHandler struct {
 	release chan struct{}
 }
 
+// clearAcceptedOnRetryContext models recovery clearing the accepted action on
+// the monitor goroutine before it handles the pending configuration update.
+type clearAcceptedOnRetryContext struct {
+	context.Context
+	store        *state.Store
+	retryAt      time.Time
+	retryReached chan<- struct{}
+	clear        <-chan struct{}
+}
+
+func (c clearAcceptedOnRetryContext) Err() error {
+	if !time.Now().Before(c.retryAt) && c.store.Data.Accepted != nil {
+		c.retryReached <- struct{}{}
+		<-c.clear
+		c.store.Data.Accepted = nil
+	}
+	return c.Context.Err()
+}
+
 func (h *blockedConfigUpdateHandler) WaitCapacity(ctx context.Context) error {
 	close(h.entered)
 	select {
@@ -143,6 +162,44 @@ func TestRunMonitorLoopConfigUpdateWaitsForIteration(t *testing.T) {
 			}
 		default:
 			t.Fatal("config update was not observed after iteration")
+		}
+	})
+}
+
+func TestRunMonitorLoopConfigUpdateWaitsForAcceptedAction(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		accepted := dashboardTestAccepted(now)
+		accepted.RetryAt = now.Add(5 * time.Minute)
+		store := serviceStore(t, state.Data{Accepted: accepted, NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+		updates := make(chan struct{}, 1)
+		updates <- struct{}{}
+		base, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		retryReached, clear := make(chan struct{}), make(chan struct{}, 1)
+		defer close(clear)
+		ctx := clearAcceptedOnRetryContext{Context: base, store: store, retryAt: accepted.RetryAt, retryReached: retryReached, clear: clear}
+		result := make(chan int, 1)
+		go func() {
+			result <- runMonitorLoopWithConfigUpdates(ctx, &monitor.Monitor{}, store, true, nil, log.New(io.Discard, "", 0), false, updates)
+		}()
+		select {
+		case <-retryReached: // The accepted action survived the first monitor iteration.
+		case code := <-result:
+			t.Fatalf("config update interrupted accepted action: code=%d", code)
+		}
+		if store.Data.Accepted == nil {
+			t.Fatal("accepted action cleared before its retry")
+		}
+		clear <- struct{}{}
+		synctest.Wait()
+		select {
+		case code := <-result:
+			if code != monitorConfigChanged {
+				t.Fatalf("completed accepted action returned %d, want config update", code)
+			}
+		default:
+			t.Fatal("pending config update was not applied after accepted action cleared")
 		}
 	})
 }
