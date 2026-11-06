@@ -387,6 +387,7 @@ func TestCertifiedListenURL(t *testing.T) {
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
 		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
 		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
+		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateNames: []string{"other.example"}, certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080"},
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", certificateNames: []string{"*.example"}},
 	} {

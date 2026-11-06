@@ -269,12 +269,14 @@ func TestOAuthLogoutClosesSessionAfterLinkStoreWriteFailure(t *testing.T) {
 	if account, _ := auth.currentUser(sess); account != "" {
 		t.Fatalf("fault-injected link store resolved account %q", account)
 	}
+	var logoutEvents int
+	provider.LogoutEvent = func(*jaws.Session, *http.Request) { logoutEvents++ }
 	cookie := response.Result().Cookies()[0]
 	logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, cookie, "https://admin.example")
 	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 ||
-		jw.GetSession(requestWithCookie(cookie)) != nil || sess.Get(provider.SessionKey) != nil {
-		t.Fatalf("storage-failure logout: status=%d location=%q cookies=%v session=%v claims=%v",
-			logout.Code, logout.Header().Get("Location"), logout.Result().Cookies(), jw.GetSession(requestWithCookie(cookie)), sess.Get(provider.SessionKey))
+		jw.GetSession(requestWithCookie(cookie)) != nil || sess.Get(provider.SessionKey) != nil || logoutEvents != 1 {
+		t.Fatalf("storage-failure logout: status=%d location=%q cookies=%v session=%v claims=%v provider logout events=%d",
+			logout.Code, logout.Header().Get("Location"), logout.Result().Cookies(), jw.GetSession(requestWithCookie(cookie)), sess.Get(provider.SessionKey), logoutEvents)
 	}
 	missing := adminResponse(handler, http.MethodPost, "/auth/logout", nil, nil, "https://admin.example")
 	if missing.Code != http.StatusSeeOther || missing.Header().Get("Location") != "/" || len(missing.Result().Cookies()) != 0 {
