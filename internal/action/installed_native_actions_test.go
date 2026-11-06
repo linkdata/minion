@@ -46,7 +46,13 @@ func TestInstalledNativeActions(t *testing.T) {
 				workRoot := t.TempDir()
 				t.Cleanup(func() { assertEmptyDir(t, workRoot) })
 				runner := NewRemoteRunner(workRoot)
-				if role.provider == "claude" {
+				if role.provider == "codex" {
+					runner.Codex.APIKey = os.Getenv("MINION_LIVE_CODEX_API_KEY")
+					if runner.Codex.APIKey == "" {
+						t.Fatal("set MINION_LIVE_CODEX_API_KEY so native transcripts stay in test-owned scratch")
+					}
+					t.Setenv("CODEX_HOME", t.TempDir())
+				} else {
 					runner.Claude.APIKey = os.Getenv("MINION_LIVE_CLAUDE_API_KEY")
 					runner.Claude.AllowAllUnixSockets = os.Getenv("MINION_LIVE_CLAUDE_ALLOW_ALL_UNIX_SOCKETS") == "1"
 					if runner.Claude.APIKey == "" {
@@ -62,10 +68,11 @@ func TestInstalledNativeActions(t *testing.T) {
 						}
 						// Claude permits only Bash here; successful results may omit is_error.
 						var toolResult struct {
-							Type    string `json:"type"`
-							IsError bool   `json:"is_error"`
+							Type    string          `json:"type"`
+							IsError bool            `json:"is_error"`
+							Content json.RawMessage `json:"content"`
 						}
-						if json.Unmarshal([]byte(record.Text), &toolResult) == nil && toolResult.Type == "tool_result" && !toolResult.IsError {
+						if json.Unmarshal([]byte(record.Text), &toolResult) == nil && toolResult.Type == "tool_result" && !toolResult.IsError && strings.Contains(string(toolResult.Content), `source\n`) {
 							successfulClaudeTool.Store(true)
 						}
 					}
@@ -92,7 +99,7 @@ func TestInstalledNativeActions(t *testing.T) {
 						t.Fatal("read-only review returned changes or artifacts")
 					}
 					if role.provider == "claude" && !successfulClaudeTool.Load() {
-						t.Fatal("Claude review completed without a successful sandboxed Bash result")
+						t.Fatal("Claude review completed without a successful sandboxed Bash result containing source.txt")
 					}
 					return
 				}

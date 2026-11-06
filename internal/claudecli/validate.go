@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -41,7 +42,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, os.RemoveAll(parent))
+		resultErr = errors.Join(resultErr, cleanup.RemoveAll(parent))
 	}()
 	dir := filepath.Join(parent, runtimeChild)
 	if err := os.Mkdir(dir, 0o700); err != nil {

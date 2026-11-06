@@ -11,10 +11,34 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 )
 
 const dummyAPIKey = "minion-dummy-config-api-key"
+
+func TestValidateCleansLockedCredentialDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions are unavailable on native Windows")
+	}
+	binary := fakeExecutable(t, "claude", `printf '%s\n' "$CLAUDE_CONFIG_DIR" > "$0.authdir"
+chmod 000 "$CLAUDE_CONFIG_DIR"
+exit 9
+`)
+	if _, err := Validate(t.Context(), config.ClaudeConfig{APIKey: dummyAPIKey}); err == nil {
+		t.Fatal("accepted failed authentication probe")
+	}
+	dir := strings.TrimSpace(readFile(t, binary+".authdir"))
+	parent := filepath.Dir(dir)
+	t.Cleanup(func() {
+		if err := cleanup.RemoveAll(parent); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.Stat(parent); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("locked credential directory retained: %v", err)
+	}
+}
 
 func TestAuthentication(t *testing.T) {
 	if runtime.GOOS == "windows" {

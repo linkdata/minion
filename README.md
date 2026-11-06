@@ -399,7 +399,7 @@ The journal records role, round, phase, model settings, accounting completeness,
 
 `MINION_LIVE_CODEX_BOUNDARY=1 go test ./internal/codexcli -run '^TestInstalledCodexInstructionBoundary$' -count=1` opts into an installed-Codex check that renders local inert prompts without inference and skips if the CLI is absent.
 
-For paid authenticated CLI review and fix checks, set `MINION_LIVE_NATIVE_ACTIONS=1` and set `MINION_LIVE_CODEX_MODEL`, `MINION_LIVE_CODEX_EFFORT`, `MINION_LIVE_CLAUDE_MODEL` and `MINION_LIVE_CLAUDE_EFFORT` to resolved installed choices. Set `MINION_LIVE_CLAUDE_API_KEY` so Claude transcripts stay in test-owned scratch, and use an instruction-free authenticated `CODEX_HOME`. Set `MINION_LIVE_CLAUDE_ALLOW_ALL_UNIX_SOCKETS=1` to test the Linux workaround. Run `go test ./internal/action -run '^TestInstalledNativeActions$' -count=1 -timeout 30m`.
+For paid authenticated CLI review and fix checks, set `MINION_LIVE_NATIVE_ACTIONS=1` and set `MINION_LIVE_CODEX_MODEL`, `MINION_LIVE_CODEX_EFFORT`, `MINION_LIVE_CLAUDE_MODEL` and `MINION_LIVE_CLAUDE_EFFORT` to resolved installed choices. Set `MINION_LIVE_CODEX_API_KEY` and `MINION_LIVE_CLAUDE_API_KEY` so native transcripts stay in test-owned scratch. Set `MINION_LIVE_CLAUDE_ALLOW_ALL_UNIX_SOCKETS=1` to test the Linux workaround. Run `go test ./internal/action -run '^TestInstalledNativeActions$' -count=1 -timeout 30m`.
 
 Create the ignored `live-tests.local.json` in the repository root to enable the GitHub live tests. Without it, they skip:
 

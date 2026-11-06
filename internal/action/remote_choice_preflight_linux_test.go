@@ -257,7 +257,7 @@ func TestRemoteClaudePreflightReportsHostFailures(t *testing.T) {
 		setup      func(*testing.T)
 	}{
 		{name: "long temp path", want: "56 bytes", setup: func(t *testing.T) {
-			root := filepath.Join(t.TempDir(), strings.Repeat("x", 60))
+			root := filepath.Join(t.TempDir(), secret, strings.Repeat("x", 60))
 			if err := os.MkdirAll(root, 0700); err != nil {
 				t.Fatal(err)
 			}
