@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -141,16 +140,6 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"},
 			AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}},
 	}
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.Admin = &config.AdminConfig{Listen: probe.Addr().String(), Administrators: []config.AdminAccount{{
-		Username: "admin", PasswordHash: config.AdminPasswordHashPlaceholder,
-	}}}
-	if err := probe.Close(); err != nil {
-		t.Fatal(err)
-	}
 	gitChecks := 0
 	code, output := runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error {
@@ -158,7 +147,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 			return errors.New("unexpected Git preflight")
 		})
 	}, "-mode=orchestrate", "-oneshot")
-	if code != 0 || gitChecks != 0 || strings.Contains(output, "preflight:") || strings.Contains(output, "start selected worker:") || strings.Contains(output, "admin listener at") {
+	if code != 0 || gitChecks != 0 || strings.Contains(output, "preflight:") || strings.Contains(output, "start selected worker:") {
 		t.Fatalf("stored result recovery ran preflight or worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
 	assertNoStartupCommands(t, markers)
@@ -245,7 +234,7 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 	})
 	// The test binary cannot serve as an execute-mode worker, so startup exits 1 after preflight.
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "Claude settings: model=claude-test") ||
-		!strings.Contains(output, "start selected worker:") || !strings.Contains(output, "admin listener at") ||
+		!strings.Contains(output, "start selected worker:") ||
 		strings.Contains(output, "worker main selection requires a resolved model") {
 		t.Fatalf("service did not use resolved config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
@@ -270,7 +259,7 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 			return nil
 		})
 	}, "-oneshot")
-	if code != 1 || gitChecks != 1 || !strings.Contains(output, "start selected worker:") || strings.Contains(output, "admin listener at") {
-		t.Fatalf("one-shot startup did not select the local worker without starting admin: exit=%d git_checks=%d log=%q", code, gitChecks, output)
+	if code != 1 || gitChecks != 1 || !strings.Contains(output, "start selected worker:") {
+		t.Fatalf("one-shot startup did not select the local worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
 }

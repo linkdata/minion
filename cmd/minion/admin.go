@@ -152,10 +152,7 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 		if client == nil {
 			continue
 		}
-		callback, err := url.Parse(client.RedirectURL)
-		if err != nil {
-			continue
-		}
+		callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
 		if certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
 			return ""
 		}

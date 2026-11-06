@@ -103,10 +103,7 @@ func dashboardReadPatch(t *testing.T, tr *jawstest.TestRequest, want string, tim
 }
 
 func TestAdminDashboardRendersWorkerTelemetry(t *testing.T) {
-	pages, err := parseAdminDashboard()
-	if err != nil {
-		t.Fatal(err)
-	}
+	pages := adminDashboardTemplate
 	var page struct {
 		Auth struct{ IsAdmin bool }
 		Dot  struct{ View adminDashboardView }
@@ -279,13 +276,11 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 		t.Fatalf("anonymous home HEAD: status=%d cookies=%v body=%q", head.Code, head.Result().Cookies(), head.Body.String())
 	}
 	cookie := dashboardTestCookie(t, handler)
-	acceptedMetric := `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Tracked accepted actions</h2><p class="display-6 font-monospace">3</p>`
-	inProgressMetric := `<div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">In progress</h2><p class="display-6 font-monospace">1</p>`
 	matching := adminResponse(handler, http.MethodGet, "/?repo=OWNER&requester=writ&action=comment", nil, cookie, "")
 	if matching.Code != http.StatusOK || matching.Header().Get("Cache-Control") != "no-store" ||
 		matching.Header().Get("Content-Security-Policy") == "" || !strings.Contains(matching.Body.String(), "<td>owner/repo</td>") ||
 		!strings.Contains(matching.Body.String(), "role=status aria-live=polite class=visually-hidden") ||
-		!strings.Contains(matching.Body.String(), acceptedMetric) || !strings.Contains(matching.Body.String(), inProgressMetric) ||
+		!hasMetric(matching.Body.String(), "Tracked accepted actions", "3") || !hasMetric(matching.Body.String(), "In progress", "1") ||
 		!strings.Contains(matching.Body.String(), `tabindex="0" aria-label="Current action"`) ||
 		!strings.Contains(matching.Body.String(), "<dt>Hard action runtime</dt><dd>7m0s</dd>") ||
 		!strings.Contains(matching.Body.String(), "<dt>Executor inactivity</dt><dd>1m0s</dd>") {
@@ -297,7 +292,7 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 	filtered := adminResponse(handler, http.MethodGet, "/?repo=other", nil, cookie, "")
 	if filtered.Code != http.StatusOK || strings.Contains(filtered.Body.String(), "<td>owner/repo</td>") ||
 		!strings.Contains(filtered.Body.String(), "No current action matches these filters.") ||
-		!strings.Contains(filtered.Body.String(), acceptedMetric) || !strings.Contains(filtered.Body.String(), inProgressMetric) ||
+		!hasMetric(filtered.Body.String(), "Tracked accepted actions", "3") || !hasMetric(filtered.Body.String(), "In progress", "1") ||
 		!strings.Contains(filtered.Body.String(), `name="repo" value="other"`) {
 		t.Fatalf("request-local filter failed: status=%d body=%s", filtered.Code, filtered.Body.String())
 	}
@@ -305,7 +300,7 @@ func TestAdminDashboardRequiresSessionAndKeepsFiltersPerRequest(t *testing.T) {
 		mismatch := adminResponse(handler, http.MethodGet, path, nil, cookie, "")
 		if mismatch.Code != http.StatusOK || strings.Contains(mismatch.Body.String(), "<td>owner/repo</td>") ||
 			!strings.Contains(mismatch.Body.String(), "No current action matches these filters.") ||
-			!strings.Contains(mismatch.Body.String(), acceptedMetric) || !strings.Contains(mismatch.Body.String(), inProgressMetric) {
+			!hasMetric(mismatch.Body.String(), "Tracked accepted actions", "3") || !hasMetric(mismatch.Body.String(), "In progress", "1") {
 			t.Fatalf("filter %s did not preserve global counts: status=%d body=%s", path, mismatch.Code, mismatch.Body.String())
 		}
 	}
@@ -644,8 +639,8 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 			t.Fatalf("ticker did not patch matching WebSocket: %v", err)
 		}
 		body := string(patch)
-		if strings.Contains(body, `<h2 class=\"h5\">Tracked accepted actions</h2><p class=\"display-6 font-monospace\">1</p>`) {
-			if !strings.Contains(body, `<h2 class=\"h5\">In progress</h2><p class=\"display-6 font-monospace\">1</p>`) {
+		if hasMetric(body, "Tracked accepted actions", "1") {
+			if !hasMetric(body, "In progress", "1") {
 				t.Fatalf("ticker patch omitted updated metrics: %s", body)
 			}
 			seenMetrics = true

@@ -156,22 +156,9 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	return view
 }
 
-func parseAdminDashboard() (*template.Template, error) {
-	return template.New("dashboard").Funcs(template.FuncMap{
-		"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-	}).Parse(headHTML + adminDashboardHTML)
-}
-
-func registerAdminDashboard(jw *jaws.Jaws) error {
-	pages, err := parseAdminDashboard()
-	if err != nil {
-		return fmt.Errorf("parse admin dashboard: %w", err)
-	}
-	if err := jw.AddTemplateLookuper(pages); err != nil {
-		return fmt.Errorf("register admin dashboard: %w", err)
-	}
-	return nil
-}
+var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
+	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
+}).Parse(headHTML + adminDashboardHTML))
 
 func adminDashboardHandler(jw *jaws.Jaws, owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -96,7 +96,7 @@ type adminAccess struct {
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess) (http.Handler, error) {
 	jw.MaxSessions = maxAdminSessions
-	if err := registerAdminDashboard(jw); err != nil {
+	if err := jw.AddTemplateLookuper(adminDashboardTemplate); err != nil {
 		return nil, err
 	}
 	if err := jw.AddTemplateLookuper(adminActionDetailTemplate); err != nil {
@@ -182,8 +182,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			return nil, err
 		}
 	}
-	oauth.routes(mux, access)
 	if oauth != nil {
+		oauth.mux.HandleFunc("POST /auth/logout", access.logout)
+		mux.Handle("/auth/", oauth.mux)
 		mux.Handle("GET /user/usage", oauth.usageHandler(owner))
 	}
 	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
@@ -405,13 +406,11 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	previous.Clear()
 	previous.Close()
 	sess := a.jaws.NewSession(w, r)
-	if sess != nil {
-		sess.Set(adminSessionKey, username)
-	}
 	if sess == nil {
 		http.Error(w, "Session unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	sess.Set(adminSessionKey, username)
 	a.mu.Lock()
 	delete(a.attempts, username)
 	a.mu.Unlock()
@@ -425,19 +424,13 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 		a.oauth.linkMu.Lock()
 	}
 	sess := a.jaws.GetSession(r)
-	if sess != nil {
-		sess.Close()
-	}
+	sess.Close()
 	if a.oauth != nil {
 		a.oauth.linkMu.Unlock()
-	}
-	if sess != nil {
-		if a.oauth != nil {
-			for _, provider := range a.oauth.providers {
-				provider.server.Logout(sess, r)
-			}
+		for _, provider := range a.oauth.providers {
+			provider.server.Logout(sess, r)
 		}
-		sess.Clear()
 	}
+	sess.Clear()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

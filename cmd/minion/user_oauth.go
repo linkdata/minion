@@ -265,14 +265,6 @@ func userUsageReturnTarget(raw string) string {
 	return userUsageContinueURL(repo, after)
 }
 
-func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
-	if a == nil {
-		return
-	}
-	a.mux.HandleFunc("POST /auth/logout", admin.logout)
-	mux.Handle("/auth/", a.mux)
-}
-
 func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	sess := a.jaws.GetSession(r)

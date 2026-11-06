@@ -63,11 +63,11 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		if entry == "" {
 			entry = admin.listener.Addr().String() + " (no certificate-valid URL could be inferred)"
 		}
-		if admin.signInEnabled {
-			logger.Printf("Minion UI listening on %s", entry)
-		} else {
-			logger.Printf("admin listener at %s (sign-in disabled until password_hash or OAuth is configured)", entry)
+		suffix := ""
+		if !admin.signInEnabled {
+			suffix = " (sign-in disabled until password_hash or OAuth is configured)"
 		}
+		logger.Printf("Minion UI listening on %s%s", entry, suffix)
 	} else if watcher.Config.Admin != nil && watcher.Config.Admin.UserModelChoices != nil {
 		links, err := openUserLinks(watcher.Config.StatePath + ".link")
 		if err != nil {

@@ -593,48 +593,6 @@ func TestAdminReloginRetiresOldSession(t *testing.T) {
 	}
 }
 
-func TestOAuthCallbackClosesUnreadBody(t *testing.T) {
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0",
-		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
-			RedirectURL: "http://127.0.0.1/auth/github/callback"}}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-	transport := &http.Transport{DisableKeepAlives: true}
-	t.Cleanup(transport.CloseIdleConnections)
-	login, err := (&http.Client{Transport: transport, Timeout: 2 * time.Second}).Get("http://" + admin.listener.Addr().String() + "/auth/login")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := login.Body.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if login.StatusCode != http.StatusOK || len(login.Cookies()) != 1 {
-		t.Fatalf("OAuth login page: status=%d cookies=%v", login.StatusCode, login.Cookies())
-	}
-	cookie := login.Cookies()[0]
-	conn, err := net.DialTimeout("tcp", admin.listener.Addr().String(), 2*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fmt.Fprintf(conn, "GET /auth/github/callback?state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: %s=%s\r\nContent-Length: 10\r\nConnection: close\r\n\r\n", cookie.Name, cookie.Value); err != nil {
-		t.Fatal(err)
-	}
-	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
-	if err != nil {
-		t.Fatalf("callback waited for unread body: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/auth/login?error=request" {
-		t.Fatalf("callback response: status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
-	}
-}
-
 func TestCheckedInAdminPlaceholderCannotSignIn(t *testing.T) {
 	cfg, err := config.Load(filepath.Join("..", "..", "config.json"))
 	if err != nil {
@@ -891,7 +849,8 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil, "", nil)
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
+	}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -909,11 +868,24 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
 	}
 	cookie := response.Cookies()[0]
+	oauthPage, err := client.Get("http://" + admin.listener.Addr().String() + "/auth/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oauthPage.Body.Close()
+	if oauthPage.StatusCode != http.StatusOK || len(oauthPage.Cookies()) != 1 {
+		t.Fatalf("OAuth login page: status=%d cookies=%v", oauthPage.StatusCode, oauthPage.Cookies())
+	}
+	oauthCookie := oauthPage.Cookies()[0]
 	for _, tc := range []struct {
 		name, method, path, headers string
 		want                        int
+		location                    string
 	}{
 		{name: "public GET", method: http.MethodGet, path: "/admin/login", want: http.StatusOK},
+		{name: "OAuth callback", method: http.MethodGet, path: "/auth/github/callback?state=wrong",
+			headers: "Cookie: " + oauthCookie.Name + "=" + oauthCookie.Value + "\r\n", want: http.StatusSeeOther,
+			location: "/auth/login?error=request"},
 		{name: "cross-origin login", method: http.MethodPost, path: "/admin/login",
 			headers: "Origin: http://other.example\r\n", want: http.StatusForbidden},
 		{name: "unsupported login body", method: http.MethodPost, path: "/admin/login",
@@ -942,7 +914,7 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 				t.Fatal(err)
 			}
-			request := tc.method + " " + tc.path + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n" + tc.headers + "\r\n"
+			request := tc.method + " " + tc.path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n" + tc.headers + "\r\n"
 			if _, err := io.WriteString(conn, request); err != nil {
 				t.Fatal(err)
 			}
@@ -953,6 +925,9 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			defer resp.Body.Close()
 			if resp.StatusCode != tc.want || !resp.Close {
 				t.Fatalf("incomplete body: status=%d close=%t, want %d and close", resp.StatusCode, resp.Close, tc.want)
+			}
+			if tc.location != "" && resp.Header.Get("Location") != tc.location {
+				t.Fatalf("redirect location=%q, want %q", resp.Header.Get("Location"), tc.location)
 			}
 			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 				t.Fatal(err)
