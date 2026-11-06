@@ -269,6 +269,18 @@ func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
 	}
 	cfg.Repositories[0].Actions = []string{"fix"}
 	cfg.Codex.APIKey = ""
+	t.Cleanup(func() {
+		entries, err := os.ReadDir(cfg.WorkRoot)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "minion-") || strings.HasPrefix(entry.Name(), ".minion-") {
+				t.Errorf("selected worker left action scratch %q", entry.Name())
+			}
+		}
+	})
 	var logs bytes.Buffer
 	logger := log.New(&logs, "", 0)
 	owner := newOrchestrator(cfg, nil, nil, logger, nil)
@@ -277,7 +289,11 @@ func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("selected worker startup: %v; logs=%s", err, logs.String())
 	}
-	t.Cleanup(func() { _ = closeWorker() })
+	t.Cleanup(func() {
+		if err := closeWorker(); err != nil {
+			t.Errorf("close selected worker: %v", err)
+		}
+	})
 	if watcher.Handler != owner || !watcher.SelectedCommands["fix"] || watcher.SelectedCommands["comment"] {
 		t.Fatalf("selected fix child did not hold an authenticated pull: handler=%v commands=%v", watcher.Handler, watcher.SelectedCommands)
 	}
@@ -316,14 +332,5 @@ func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
 	}
 	if err := closeWorker(); err != nil {
 		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(cfg.WorkRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "minion-") || strings.HasPrefix(entry.Name(), ".minion-") {
-			t.Fatalf("selected worker left action scratch %q", entry.Name())
-		}
 	}
 }
