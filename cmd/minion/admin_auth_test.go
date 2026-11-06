@@ -378,11 +378,13 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 		t.Fatal("stale-response regression needs spare guest session capacity")
 	}
 	postLoginGET := adminResponse(handler, http.MethodGet, "/admin/login", nil, firstCookie, "")
-	if postLoginGET.Code != http.StatusConflict || len(postLoginGET.Result().Cookies()) != 0 {
+	if postLoginGET.Code != http.StatusConflict || len(postLoginGET.Result().Cookies()) != 0 ||
+		postLoginGET.Header().Get("Refresh") != "3; url=/" {
 		t.Fatalf("rotated guest GET changed cookie: status=%d cookies=%v", postLoginGET.Code, postLoginGET.Result().Cookies())
 	}
 	postLoginHome := adminResponse(handler, http.MethodGet, "/", nil, firstCookie, "")
-	if postLoginHome.Code != http.StatusConflict || len(postLoginHome.Result().Cookies()) != 0 {
+	if postLoginHome.Code != http.StatusConflict || len(postLoginHome.Result().Cookies()) != 0 ||
+		postLoginHome.Header().Get("Refresh") != "3; url=/" {
 		t.Fatalf("rotated guest home changed cookie: status=%d cookies=%v", postLoginHome.Code, postLoginHome.Result().Cookies())
 	}
 	for _, order := range [][]*httptest.ResponseRecorder{
@@ -892,6 +894,67 @@ func TestSignOutKeepsCallbackMarkerUntilCleanup(t *testing.T) {
 	}))
 	if marker := access.rotatedCookies[key]; !marker.signedOut || marker.pending != 0 || !time.Now().Before(marker.until) {
 		t.Fatalf("callback cleanup lost sign-out marker: %+v", marker)
+	}
+}
+
+func TestAbandonedOAuthCallbackReleasesMarker(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(jw.Close)
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/callback", nil)
+	sess := jw.NewSession(httptest.NewRecorder(), request)
+	if sess == nil {
+		t.Fatal("could not create callback session")
+	}
+	access := &adminAccess{jaws: jw, rotatedCookies: make(map[[32]byte]rotatedCookie)}
+	key := sha256.Sum256([]byte(sess.CookieValue()))
+	response := httptest.NewRecorder()
+	access.serveOAuthCallback(response, request, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		sess.Close()
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("abandoned callback: status=%d", response.Code)
+	}
+	if _, retained := access.rotatedCookies[key]; retained {
+		t.Fatal("abandoned callback retained an unneeded rotation marker")
+	}
+}
+
+func TestAdminLoginKeepsOAuthRotationReserve(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(jw.Close)
+	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
+	request := httptest.NewRequest(http.MethodPost, "https://admin.example/admin/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	previous := jw.NewSession(httptest.NewRecorder(), request)
+	if previous == nil {
+		t.Fatal("could not create admin login session")
+	}
+	account := testAdminAccount()
+	access := &adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account},
+		dummy: account, attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2),
+		rotatedCookies: make(map[[32]byte]rotatedCookie)}
+	for i := range maxOAuthRotations {
+		access.rotatedCookies[sha256.Sum256([]byte(fmt.Sprintf("oauth-%d", i)))] = rotatedCookie{until: time.Now().Add(time.Minute)}
+	}
+	callback := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/callback", nil)
+	callback.AddCookie(previous.Cookie())
+	called := false
+	blocked := httptest.NewRecorder()
+	access.serveOAuthCallback(blocked, callback, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	if blocked.Code != http.StatusServiceUnavailable || called || jw.GetSession(request) == nil {
+		t.Fatalf("OAuth reserve: status=%d called=%t session=%v", blocked.Code, called, jw.GetSession(request))
+	}
+	login := httptest.NewRecorder()
+	access.login(login, request)
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login at OAuth reserve: status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
 }
 

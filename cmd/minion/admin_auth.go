@@ -60,11 +60,19 @@ const (
 	maxAdminSessions     = 512
 	maxGuestPageRequests = 4
 	maxRotatedCookies    = 2048
+	adminSignInReserve   = 32
 	// One sign-out marker may be needed for each live JaWS session.
 	maxSignInRotations = maxRotatedCookies - maxAdminSessions
+	maxOAuthRotations  = maxSignInRotations - adminSignInReserve
 )
 
 type adminIdentity string
+
+func headPublicPage(w http.ResponseWriter, r *http.Request) {
+	closeUnreadAdminBody(w, r)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+}
 
 func (adminIdentity) Data() map[string]any { return nil }
 func (adminIdentity) Email() string        { return "" }
@@ -150,11 +158,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		}
 		loginPage.ServeHTTP(w, r)
 	})
-	mux.HandleFunc("HEAD /admin/login", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	})
+	mux.HandleFunc("HEAD /admin/login", headPublicPage)
 	mux.HandleFunc("GET /admin/login.js", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
@@ -215,11 +219,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			access.rotatedCookies[signedOutKey] = state
 		}
 	})
-	mux.HandleFunc("HEAD /{$}", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	})
+	mux.HandleFunc("HEAD /{$}", headPublicPage)
 	mux.Handle("GET /admin/actions/{attempt}", adminActionDetailHandler(jw, owner))
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
@@ -429,6 +429,7 @@ func (a *adminAccess) rejectRotatedCookie(w http.ResponseWriter, r *http.Request
 		state := a.rotatedCookies[key]
 		if !state.signedOut && (state.pending > 0 || time.Now().Before(state.until)) {
 			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Refresh", "3; url=/")
 			http.Error(w, "Sign-in session changed; reload. If this continues, retry in one minute", http.StatusConflict)
 			return true
 		}
@@ -604,7 +605,7 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	value := old.CookieValue()
-	if !a.rememberRotatedCookie(value, maxSignInRotations) {
+	if !a.rememberRotatedCookie(value, maxOAuthRotations) {
 		a.sessionAdmissionMu.Unlock()
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Retry-After", "60")
@@ -620,17 +621,9 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 	defer func() {
 		a.sessionAdmissionMu.Lock()
 		state := a.rotatedCookies[key]
-		if current := a.jaws.GetSession(r); current != nil && current != old {
-			if state.signedOut {
-				current.Clear()
-				current.Close()
-			} else {
-				state.replacement = current
-			}
-		}
 		state.pending--
 		if state.pending == 0 {
-			if a.jaws.GetSession(original) == old {
+			if state.replacement == nil && !state.signedOut {
 				delete(a.rotatedCookies, key)
 			} else {
 				state.until = time.Now().Add(time.Minute)

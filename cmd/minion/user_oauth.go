@@ -83,8 +83,8 @@ type oauthAccess struct {
 	usageGate   *userUsageGate
 }
 
-// Keep 32 slots for admin sign-in and session rotation after guest pages.
-const maxGuestAdmissionSessions = maxAdminSessions - 32
+// Keep slots for admin sign-in and session rotation after guest pages.
+const maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve
 
 func githubProfileSubject(claims map[string]any) (string, error) {
 	raw, ok := claims["id"].(json.Number)
@@ -131,11 +131,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 		}
 		page.ServeHTTP(&oauthErrorWriter{ResponseWriter: w}, r)
 	}))
-	a.mux.HandleFunc("HEAD /auth/login", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	})
+	a.mux.HandleFunc("HEAD /auth/login", headPublicPage)
 	if a.choices != nil {
 		if err := jw.AddTemplateLookuper(userPreferencesHTML); err != nil {
 			return nil, err
