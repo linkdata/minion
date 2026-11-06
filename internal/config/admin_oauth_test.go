@@ -27,6 +27,20 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if err := localhost.Validate(t.TempDir()); err != nil {
 		t.Fatalf("webserv localhost HTTP OAuth: %v", err)
 	}
+	for _, tc := range []struct{ listen, host string }{
+		{"127.0.0.1:8377", "127.0.0.1"},
+		{"127.0.0.2:8377", "127.0.0.2"},
+		{"[::1]:8377", "[::1]"},
+	} {
+		loopback := valid()
+		loopback.Admin.Listen = tc.listen
+		loopback.Admin.TLSCertFile, loopback.Admin.TLSKeyFile = "", ""
+		loopback.Admin.GitHubOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/github/callback"
+		loopback.Admin.GitLabOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/gitlab/callback"
+		if err := loopback.Validate(t.TempDir()); err != nil {
+			t.Errorf("loopback HTTP OAuth on %s: %v", tc.listen, err)
+		}
+	}
 	defaultHTTPPort := valid()
 	defaultHTTPPort.Admin.Listen = "127.0.0.1:80"
 	defaultHTTPPort.Admin.TLSCertFile, defaultHTTPPort.Admin.TLSKeyFile = "", ""
@@ -73,10 +87,11 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"scoped IPv6 callback host", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://[fe80::1%25Eth0]/auth/github/callback" }, "redirect_url"},
 		{"empty callback port", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://minion.example:/auth/github/callback" }, "redirect_url"},
 		{"public HTTP callback", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "http://minion.example/auth/github/callback" }, "redirect_url"},
-		{"IP callback differs from webserv URL", func(c *Config) {
+		{"loopback IP callback wrong port", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
-			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
-		}, "redirect_url"},
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8378/auth/github/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback"
+		}, "port must match"},
 		{"localhost callback wrong port", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://localhost:8378/auth/github/callback"

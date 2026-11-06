@@ -82,6 +82,27 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 	}
 }
 
+func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
+	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 {
+		t.Fatalf("guest home: status=%d cookies=%v", home.Code, home.Result().Cookies())
+	}
+	guest := home.Result().Cookies()[0]
+	if login := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); login.Code != http.StatusOK {
+		t.Fatalf("guest login page: status=%d", login.Code)
+	}
+	failed := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"wrong-password"}}, guest, "")
+	if failed.Code != http.StatusUnauthorized || !strings.Contains(failed.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("failed login has no direct retry: status=%d body=%q", failed.Code, failed.Body.String())
+	}
+	if retry := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); retry.Code != http.StatusOK ||
+		!strings.Contains(retry.Body.String(), `name="password"`) {
+		t.Fatalf("reserved retry page unavailable: status=%d body=%q", retry.Code, retry.Body.String())
+	}
+}
+
 func TestOAuthOnlyHomeOmitsAdminLogin(t *testing.T) {
 	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}

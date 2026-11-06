@@ -118,6 +118,23 @@ func adminGuestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	return response.Result().Cookies()[0]
 }
 
+func TestAdminOldCookieLogoutRevokesPasswordSession(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	guest := adminGuestCookie(t, handler)
+	login := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "https://admin.example")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
+	}
+	rotated := login.Result().Cookies()[0]
+	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, guest, "https://admin.example"); logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 {
+		t.Fatalf("old-cookie admin logout: status=%d cookies=%v", logout.Code, logout.Result().Cookies())
+	}
+	if jw.GetSession(requestWithCookie(rotated)) != nil {
+		t.Fatal("old-cookie admin logout left the rotated session alive")
+	}
+}
+
 func adminNetworkLogin(t *testing.T, client *http.Client, baseURL string, form url.Values) (*http.Response, *http.Cookie) {
 	t.Helper()
 	page, err := client.Get(baseURL + "/admin/login")

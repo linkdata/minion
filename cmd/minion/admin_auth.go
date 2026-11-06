@@ -72,9 +72,10 @@ type loginWindow struct {
 }
 
 type rotatedCookie struct {
-	until     time.Time
-	pending   int
-	signedOut bool
+	until       time.Time
+	pending     int
+	signedOut   bool
+	replacement *jaws.Session
 }
 
 type adminAccess struct {
@@ -448,6 +449,42 @@ func (a *adminAccess) markSignedOutCookie(value string) {
 	a.rotatedCookies[key] = state
 }
 
+// rotatedSessionForLogout is called under sessionAdmissionMu after the old cookie stopped resolving.
+func (a *adminAccess) rotatedSessionForLogout(r *http.Request) (*jaws.Session, bool) {
+	cookie, err := r.Cookie(a.jaws.CookieName)
+	if err != nil {
+		return nil, false
+	}
+	state, known := a.rotatedCookies[sha256.Sum256([]byte(cookie.Value))]
+	if !known || state.pending == 0 && !time.Now().Before(state.until) {
+		return nil, false
+	}
+	a.markSignedOutCookie(cookie.Value)
+	return state.replacement, true
+}
+
+func (a *adminAccess) recordOAuthRotation(sess *jaws.Session, r *http.Request) {
+	a.sessionAdmissionMu.Lock()
+	defer a.sessionAdmissionMu.Unlock()
+	for _, cookie := range r.Cookies() {
+		if cookie.Name != a.jaws.CookieName {
+			continue
+		}
+		key := sha256.Sum256([]byte(cookie.Value))
+		state := a.rotatedCookies[key]
+		if state.pending == 0 {
+			continue
+		}
+		state.replacement = sess
+		a.rotatedCookies[key] = state
+		if state.signedOut {
+			sess.Clear()
+			sess.Close()
+		}
+		return
+	}
+}
+
 // serveOAuthCallback holds the old cookie out of guest admission until every callback using it finishes.
 func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	original := r.Clone(r.Context()) // JaWS adds the rotated cookie to r during the callback.
@@ -474,6 +511,14 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 	defer func() {
 		a.sessionAdmissionMu.Lock()
 		state := a.rotatedCookies[key]
+		if current := a.jaws.GetSession(r); current != nil && current != old {
+			if state.signedOut {
+				current.Clear()
+				current.Close()
+			} else {
+				state.replacement = current
+			}
+		}
 		state.pending--
 		if state.pending == 0 {
 			if a.jaws.GetSession(original) == old {
@@ -567,6 +612,10 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	sess := a.jaws.NewSession(w, r)
 	if sess != nil {
 		sess.Set(adminSessionKey, username)
+		key := sha256.Sum256([]byte(previousCookie))
+		state := a.rotatedCookies[key]
+		state.replacement = sess
+		a.rotatedCookies[key] = state
 	} else {
 		delete(a.rotatedCookies, sha256.Sum256([]byte(previousCookie)))
 	}
@@ -590,8 +639,15 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 		defer a.oauth.linkMu.Unlock()
 	}
 	sess := a.jaws.GetSession(r)
+	if sess == nil {
+		sess, _ = a.rotatedSessionForLogout(r)
+	}
 	if sess != nil {
-		if a.sessionUsername(sess) != "" {
+		account := ""
+		if a.oauth != nil {
+			account, _ = a.oauth.currentUser(sess)
+		}
+		if a.sessionUsername(sess) != "" || account != "" {
 			a.markSignedOutCookie(sess.CookieValue())
 		}
 		sess.Clear()

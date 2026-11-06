@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -483,8 +484,9 @@ func (c *Config) Validate(configDir string) error {
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
-		if host != "127.0.0.1" && admin.TLSCertFile == "" {
-			return errors.New("admin.listen without TLS must use 127.0.0.1")
+		addr, err := netip.ParseAddr(host)
+		if admin.TLSCertFile == "" && (err != nil || !addr.Unmap().IsLoopback()) {
+			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
 		}
 		if admin.TLSCertFile != "" {
 			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)

@@ -265,6 +265,94 @@ func requestWithCookie(cookie *http.Cookie) *http.Request {
 	return r
 }
 
+func TestOAuthOldCookieLogoutRevokesRotatedSession(t *testing.T) {
+	for _, path := range []string{"/admin/logout", "/auth/logout"} {
+		for _, callbackFirst := range []bool{false, true} {
+			name := path + "/logout-first"
+			if callbackFirst {
+				name = path + "/callback-first"
+			}
+			t.Run(name, func(t *testing.T) {
+				client := &http.Client{Transport: oauthRoundTrip(func(r *http.Request) (*http.Response, error) {
+					switch r.URL.String() {
+					case "https://github.com/login/oauth/access_token":
+						return oauthJSON(http.StatusOK, `{"access_token":"secret","token_type":"Bearer","expires_in":3600}`), nil
+					case "https://api.github.com/user":
+						return oauthJSON(http.StatusOK, `{"id":42}`), nil
+					default:
+						t.Errorf("unexpected OAuth request: %s", r.URL)
+						return oauthJSON(http.StatusNotFound, `{}`), nil
+					}
+				})}
+				cfg := config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}, GitHubOAuth: &config.OAuthClient{
+					ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
+				handler, jw, auth := testOAuthAdminHandler(t, cfg, client)
+				ready := make(chan *http.Cookie, 1)
+				release := make(chan struct{})
+				var releaseOnce sync.Once
+				recordRotation := auth.providers[0].server.LoginEvent
+				auth.providers[0].server.LoginEvent = func(sess *jaws.Session, r *http.Request) {
+					recordRotation(sess, r)
+					ready <- sess.Cookie()
+					<-release
+				}
+				page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+				if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
+					t.Fatalf("guest page: status=%d cookies=%v", page.Code, page.Result().Cookies())
+				}
+				guest := page.Result().Cookies()[0]
+				start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, guest, "")
+				location, err := url.Parse(start.Header().Get("Location"))
+				if start.Code != http.StatusFound || err != nil || location.Query().Get("state") == "" {
+					t.Fatalf("OAuth start: status=%d location=%q error=%v", start.Code, start.Header().Get("Location"), err)
+				}
+				done := make(chan *httptest.ResponseRecorder, 1)
+				finished := make(chan struct{})
+				go func() {
+					defer close(finished)
+					done <- adminResponse(handler, http.MethodGet,
+						"/auth/github/callback?code=proof&state="+url.QueryEscape(location.Query().Get("state")), nil, guest, "")
+				}()
+				t.Cleanup(func() {
+					releaseOnce.Do(func() { close(release) })
+					<-finished
+				})
+				var rotated *http.Cookie
+				select {
+				case rotated = <-ready:
+				case <-time.After(5 * time.Second):
+					t.Fatal("OAuth callback did not rotate the session")
+				}
+				if jw.GetSession(requestWithCookie(guest)) != nil {
+					t.Fatal("old cookie still resolves after rotation")
+				}
+				var callback *httptest.ResponseRecorder
+				if callbackFirst {
+					releaseOnce.Do(func() { close(release) })
+					callback = <-done
+				}
+				logout := adminResponse(handler, http.MethodPost, path, nil, guest, "https://admin.example")
+				if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 {
+					t.Fatalf("old-cookie logout: status=%d location=%q cookies=%v", logout.Code, logout.Header().Get("Location"), logout.Result().Cookies())
+				}
+				if jw.GetSession(requestWithCookie(rotated)) != nil {
+					t.Fatal("logout returned before closing the rotated session")
+				}
+				if !callbackFirst {
+					releaseOnce.Do(func() { close(release) })
+					callback = <-done
+				}
+				if callback.Code != http.StatusFound && callback.Code != http.StatusSeeOther || len(callback.Result().Cookies()) == 0 {
+					t.Fatalf("OAuth callback: status=%d cookies=%v", callback.Code, callback.Result().Cookies())
+				}
+				if jw.GetSession(requestWithCookie(rotated)) != nil {
+					t.Fatal("old-cookie logout left the rotated session alive")
+				}
+			})
+		}
+	}
+}
+
 func TestOAuthCallbackMarksCookieDuringProviderWork(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

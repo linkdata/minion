@@ -11,11 +11,13 @@ import (
 var adminNoticeHTML = template.Must(template.New("admin notice").Parse(headHTML + `<!doctype html>
 <html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion admin request error</title></head>
 <body><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
+{{if .Dot.RetryLogin}}<a href="/admin/login">Try sign-in again</a>{{end}}
 <a href="/">Home</a>
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminNoticeView struct {
-	Status string
+	Status     string
+	RetryLogin bool
 }
 
 func adminBrowserRoute(r *http.Request) bool {
@@ -121,7 +123,7 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status)}).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), RetryLogin: r.URL.Path == "/admin/login"}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)

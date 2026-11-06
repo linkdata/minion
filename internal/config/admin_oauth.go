@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ func (a *AdminConfig) validateOAuth(listenPort uint64) error {
 		redirect, err := url.Parse(client.RedirectURL)
 		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != entry.callbackPath ||
 			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
-			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or localhost HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
+			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
 		}
 		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
 			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
@@ -68,7 +69,7 @@ func (a *AdminConfig) validateOAuth(listenPort uint64) error {
 	return nil
 }
 
-func validOAuthOrigin(u *url.URL, allowLocalhostHTTP bool) bool {
+func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if u == nil || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil || u.Opaque != "" {
 		return false
 	}
@@ -85,8 +86,12 @@ func validOAuthOrigin(u *url.URL, allowLocalhostHTTP bool) bool {
 	if u.Scheme == "https" {
 		return true
 	}
-	if u.Scheme != "http" || !allowLocalhostHTTP {
+	if u.Scheme != "http" || !allowLoopbackHTTP {
 		return false
 	}
-	return strings.EqualFold(host, "localhost")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.Unmap().IsLoopback()
 }

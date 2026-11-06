@@ -381,25 +381,50 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestFallbackTLSListenURL(t *testing.T) {
+func TestCertifiedListenURL(t *testing.T) {
 	for _, test := range []struct {
 		address, listenURL, want string
 		certificateNames         []string
+		certificateIPs           []net.IP
 	}{
-		{"127.0.0.1:8080", "http://localhost:8080", "https://admin.example:8080", []string{"admin.example"}},
-		{"192.0.2.8:8080", "http://192.0.2.8:8080", "https://192.0.2.8:8080", []string{"admin.example"}},
-		{"0.0.0.0:8080", "http://localhost:8080", "https://admin.example:8080", []string{"admin.example"}},
-		{"[::1]:8080", "http://localhost:8080", "https://admin.example:8080", []string{"admin.example"}},
-		{"127.0.0.1:8080", "http://localhost:8080", "https://localhost:8080", nil},
-		{"127.0.0.1:8080", "http://localhost:8080", "https://localhost:8080", []string{"*.example"}},
+		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
+		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
+		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
+		{address: "[::1]:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
+		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
+		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
+		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
+		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080"},
+		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", certificateNames: []string{"*.example"}},
 	} {
-		certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: test.certificateNames}}
-		if got := fallbackTLSListenURL(test.listenURL, test.address, certificate); got != test.want {
-			t.Errorf("fallback URL for %s = %q, want %q", test.address, got, test.want)
+		certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: test.certificateNames, IPAddresses: test.certificateIPs}}
+		if got := certifiedListenURL(test.listenURL, test.address, certificate); got != test.want {
+			t.Errorf("TLS URL for %s = %q, want %q", test.address, got, test.want)
 		}
 	}
-	if got := fallbackTLSListenURL("http://localhost:8080", "127.0.0.1:8080", &tls.Certificate{}); got != "https://localhost:8080" {
-		t.Errorf("fallback URL without parsed certificate = %q, want https://localhost:8080", got)
+	if got := certifiedListenURL("http://localhost:8080", "127.0.0.1:8080", &tls.Certificate{}); got != "" {
+		t.Errorf("URL without parsed certificate = %q, want none", got)
+	}
+}
+
+func TestPlainAdminListenURL(t *testing.T) {
+	for _, tc := range []struct {
+		address, callback, want string
+	}{
+		{address: "127.0.0.1:8080", want: "http://localhost:8080"},
+		{address: "127.0.0.2:8080", want: "http://127.0.0.2:8080"},
+		{address: "[::1]:8080", want: "http://[::1]:8080"},
+		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8080/auth/github/callback", want: "http://127.0.0.1:8080"},
+		{address: "127.0.0.1:8080", callback: "http://localhost:8080/auth/github/callback", want: "http://localhost:8080"},
+		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8081/auth/github/callback", want: "http://localhost:8080"},
+	} {
+		cfg := config.AdminConfig{}
+		if tc.callback != "" {
+			cfg.GitHubOAuth = &config.OAuthClient{RedirectURL: tc.callback}
+		}
+		if got := plainAdminListenURL("http://localhost:8080", tc.address, cfg); got != tc.want {
+			t.Errorf("plain URL for %s and %s = %q, want %q", tc.address, tc.callback, got, tc.want)
+		}
 	}
 }
 

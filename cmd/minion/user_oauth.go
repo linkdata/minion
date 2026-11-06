@@ -288,6 +288,9 @@ func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
 	if a == nil {
 		return
 	}
+	for _, provider := range a.providers {
+		provider.server.LoginEvent = admin.recordOAuthRotation
+	}
 	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a.logout(w, r, admin)
 	})))
@@ -353,18 +356,27 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *admi
 	a.linkMu.Lock()
 	sess := a.jaws.GetSession(r)
 	account, _ := a.currentUser(sess)
-	if account != "" {
+	rotated := false
+	if sess == nil {
+		sess, rotated = admin.rotatedSessionForLogout(r)
+		if sess != nil {
+			account, _ = a.currentUser(sess)
+		}
+	}
+	if account != "" || rotated && sess != nil {
 		admin.markSignedOutCookie(sess.CookieValue())
 		sess.Close()
 	}
 	a.linkMu.Unlock()
 	admin.sessionAdmissionMu.Unlock()
-	if account == "" {
+	if account == "" && !rotated {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	for _, p := range a.providers {
-		p.server.Logout(sess, r)
+	if sess != nil {
+		for _, p := range a.providers {
+			p.server.Logout(sess, r)
+		}
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

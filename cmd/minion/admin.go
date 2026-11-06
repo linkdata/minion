@@ -37,16 +37,18 @@ type adminServer struct {
 func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func()) (*adminServer, error) {
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
+	var certificate tls.Certificate
 	if cfg.TLSCertFile != "" {
+		var err error
+		certificate, err = loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
 		certDir := filepath.Dir(cfg.TLSCertFile)
 		relKey, err := filepath.Rel(certDir, cfg.TLSKeyFile)
 		// webserv expands CertDir and cleans paths; Windows volumes may differ.
 		if err != nil || strings.Contains(certDir, "$") ||
 			filepath.Clean(cfg.TLSCertFile) != cfg.TLSCertFile || filepath.Clean(cfg.TLSKeyFile) != cfg.TLSKeyFile {
-			certificate, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
-			if err != nil {
-				return nil, err
-			}
 			fallbackTLS = &tls.Config{
 				MinVersion:   tls.VersionTLS13,
 				Certificates: []tls.Certificate{certificate},
@@ -65,8 +67,11 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	}
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
-		// webserv saw the plaintext listener before the manual TLS wrap.
-		service.ListenURL = fallbackTLSListenURL(service.ListenURL, listener.Addr().String(), &fallbackTLS.Certificates[0])
+	}
+	if cfg.TLSCertFile != "" {
+		service.ListenURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate)
+	} else {
+		service.ListenURL = plainAdminListenURL(service.ListenURL, listener.Addr().String(), cfg)
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -136,22 +141,66 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	return a, nil
 }
 
-func fallbackTLSListenURL(rawURL, address string, certificate *tls.Certificate) string {
+func certifiedListenURL(rawURL, address string, certificate *tls.Certificate) string {
 	rawURL = strings.Replace(rawURL, "http://", "https://", 1)
+	parsed, parseErr := url.Parse(rawURL)
 	host, port, err := net.SplitHostPort(address)
-	if err != nil || certificate.Leaf == nil || len(certificate.Leaf.DNSNames) == 0 {
+	if parseErr != nil || err != nil || certificate.Leaf == nil {
+		return ""
+	}
+	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
 		return rawURL
+	}
+	covered := func(name string) string {
+		if name == "" || strings.Contains(name, "*") || certificate.Leaf.VerifyHostname(name) != nil {
+			return ""
+		}
+		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
+	}
+	for _, name := range certificate.Leaf.DNSNames {
+		if candidate := covered(name); candidate != "" {
+			return candidate
+		}
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || !(ip.IsLoopback() || ip.IsUnspecified()) {
+	if ip != nil && !ip.IsUnspecified() {
+		if candidate := covered(host); candidate != "" {
+			return candidate
+		}
+	}
+	if ip != nil && ip.IsUnspecified() {
+		for _, address := range certificate.Leaf.IPAddresses {
+			if candidate := covered(address.String()); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func plainAdminListenURL(rawURL, address string, cfg config.AdminConfig) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
 		return rawURL
 	}
-	name := certificate.Leaf.DNSNames[0]
-	if host, _, err := net.SplitHostPort(name); err == nil {
-		name = host
+	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
+		if client == nil {
+			continue
+		}
+		callback, err := url.Parse(client.RedirectURL)
+		if err != nil || callback.Scheme != "http" {
+			continue
+		}
+		callbackPort := callback.Port()
+		if callbackPort == "" {
+			callbackPort = "80"
+		}
+		if callbackPort == port {
+			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
+		}
 	}
-	if name != "" && !strings.Contains(name, "*") {
-		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() && host != "127.0.0.1" {
+		return "http://" + address
 	}
 	return rawURL
 }

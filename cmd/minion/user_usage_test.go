@@ -715,8 +715,19 @@ func TestUserUsageOwnTotalsPrivateAccessAndRetention(t *testing.T) {
 	unownedName := userUsageRequest(handler, http.MethodGet, "/user/usage?repo=org%2Fmissing", "", userCookie)
 	unownedCalls := apiCalls.Load() - before
 	normalizeFilter := func(body string) string {
-		_, body, _ = strings.Cut(body, "<main>")
-		body, _, _ = strings.Cut(body, "</main>")
+		var ok bool
+		_, body, ok = strings.Cut(body, "<main")
+		if !ok {
+			t.Fatal("usage page lacks main content")
+		}
+		_, body, ok = strings.Cut(body, ">")
+		if !ok {
+			t.Fatal("usage page has no opening main tag")
+		}
+		body, _, ok = strings.Cut(body, "</main>")
+		if !ok || body == "" {
+			t.Fatal("usage page has no main body")
+		}
 		return strings.ReplaceAll(strings.ReplaceAll(body, "org/accessible", "org/checked"), "org/missing", "org/checked")
 	}
 	if revokedOwned.Code != http.StatusOK || unownedName.Code != http.StatusOK ||
