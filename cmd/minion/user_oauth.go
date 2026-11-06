@@ -269,32 +269,11 @@ func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
 	if a == nil {
 		return
 	}
-	for _, provider := range a.providers {
-		provider.server.LoginEvent = admin.recordOAuthRotation
-	}
 	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(admin.logout)))
 	mux.Handle("/auth/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			guestPage, callback := r.URL.Path == "/auth/login", false
-			for _, provider := range a.providers {
-				path := "/auth/" + provider.name
-				guestPage = guestPage || r.URL.Path == path+"/login"
-				callback = callback || r.URL.Path == path+"/callback"
-			}
-			if callback {
-				admin.serveOAuthCallback(w, r, a.mux)
-				return
-			}
-			if guestPage {
-				admin.sessionAdmissionMu.Lock()
-				defer admin.sessionAdmissionMu.Unlock()
-				if admin.rejectRotatedCookie(w, r) {
-					return
-				}
-				if admin.redirectClosedSession(w, r) {
-					return
-				}
-			}
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/login") {
+			admin.sessionAdmissionMu.Lock()
+			defer admin.sessionAdmissionMu.Unlock()
 		}
 		a.mux.ServeHTTP(w, r)
 	}))

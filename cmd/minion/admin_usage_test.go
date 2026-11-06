@@ -91,7 +91,7 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	for _, test := range []struct {
 		path string
 		want int
-	}{{"/admin/usage", http.StatusSeeOther}, {"/admin/usage.json", http.StatusForbidden}} {
+	}{{"/admin/usage", http.StatusForbidden}, {"/admin/usage.json", http.StatusForbidden}} {
 		if denied := adminResponse(handler, http.MethodGet, test.path, nil, cookie, ""); denied.Code != test.want {
 			t.Fatalf("revoked %s status=%d", test.path, denied.Code)
 		}

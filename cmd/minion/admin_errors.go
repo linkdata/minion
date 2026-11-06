@@ -108,11 +108,6 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		defer a.sessionAdmissionMu.Unlock()
 		sess := a.jaws.GetSession(r)
 		if sess == nil {
-			if a.signedOutCookie(r) && r.Method == http.MethodGet && r.URL.Path != "/" && capture.status == http.StatusForbidden {
-				w.Header().Set("Location", "/")
-				w.WriteHeader(http.StatusSeeOther)
-				return
-			}
 			w.WriteHeader(capture.status)
 			return
 		}

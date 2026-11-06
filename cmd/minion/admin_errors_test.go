@@ -77,9 +77,6 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, admin, "https://admin.example"); logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" {
 		t.Fatalf("sign-out redirect: status=%d location=%q", logout.Code, logout.Header().Get("Location"))
 	}
-	if reload := adminResponse(handler, http.MethodGet, "/admin/usage", nil, admin, ""); reload.Code != http.StatusSeeOther || reload.Header().Get("Location") != "/" || len(reload.Result().Cookies()) != 0 {
-		t.Fatalf("signed-out page reload: status=%d location=%q cookies=%v", reload.Code, reload.Header().Get("Location"), reload.Result().Cookies())
-	}
 }
 
 func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
