@@ -65,9 +65,9 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		})
 	}))
 	mux.Handle("POST /admin/users/remove", adminConfigPost("/admin/users", []string{"repository", "login"}, "", func(_ context.Context, values url.Values) error {
-		repoName, login := strings.ToLower(values.Get("repository")), strings.ToLower(values.Get("login"))
-		if !workspace.ValidRepository(repoName) || !validAdminGitHubLogin(login) {
-			return errors.New("Enter a configured repository and valid GitHub login")
+		repoName, login := strings.ToLower(values.Get("repository")), values.Get("login")
+		if !workspace.ValidRepository(repoName) || login == "" {
+			return errors.New("Enter a configured repository and requester")
 		}
 		return live.save(func(cfg *config.Config) error {
 			for i := range cfg.Repositories {
@@ -251,7 +251,11 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			}
 			_, installed, err := skills.InstalledPathFor(source, provider)
 			if err != nil {
-				return fmt.Errorf("Check installed skill: %w", err)
+				if !errors.Is(err, skills.ErrSourceMismatch) {
+					return fmt.Errorf("Check installed skill: %w", err)
+				}
+				needsInstall = true
+				continue
 			}
 			needsInstall = needsInstall || !installed
 		}

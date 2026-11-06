@@ -22,7 +22,7 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 		Codex:          config.CodexConfig{Model: "gpt-test", ReasoningEffort: "medium", APIKey: "secret-codex-key"},
 		Claude:         config.ClaudeConfig{Model: "sonnet-test", Effort: "high", APIKey: "secret-claude-key"},
 		Admin:          &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
-		Repositories:   []config.Repository{{Name: "owner/repo", AllowedActors: []string{"alice"}}},
+		Repositories:   []config.Repository{{Name: "owner/repo", AllowedActors: []string{"alice"}, AllowedActorIDs: map[string]int64{"alice": 7}}},
 		AlwaysOnSkills: []string{"builtin://anti-prompt-injection", "https://github.com/a/b/tree/main/skills/caveman"},
 		Commands:       map[string]config.CommandMapping{"review": {Skills: []string{"https://github.com/a/b/tree/main/skills/caveman", "https://github.com/a/b/tree/main/skills/review"}}},
 	}
@@ -60,6 +60,17 @@ func TestAdminStatusCountsOpenRepositories(t *testing.T) {
 	view := statusView(&action.Orchestrator{}, cfg)
 	if view.OpenRepositories != 2 || view.Repositories != 3 {
 		t.Fatalf("open repository count = %+v", view)
+	}
+}
+
+func TestAdminStatusCountsRequestersByGitHubID(t *testing.T) {
+	cfg := config.Config{Repositories: []config.Repository{
+		{Name: "owner/first", AllowedActors: []string{"old-login"}, AllowedActorIDs: map[string]int64{"old-login": 7}},
+		{Name: "owner/second", AllowedActors: []string{"new-login", "other"}, AllowedActorIDs: map[string]int64{"new-login": 7, "other": 8}},
+	}}
+	view := statusView(&action.Orchestrator{}, cfg)
+	if view.Requesters != 2 || view.OpenRepositories != 0 {
+		t.Fatalf("named requester count = %+v", view)
 	}
 }
 

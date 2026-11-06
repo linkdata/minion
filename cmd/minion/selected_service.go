@@ -30,6 +30,27 @@ func selectedSkillConfigChanged(before, after config.Config, selected map[string
 	return false
 }
 
+func selectedCommandsChanged(cfg config.Config, selected map[string]bool) bool {
+	enabled := make(map[string]bool)
+	for _, repo := range cfg.Repositories {
+		for _, name := range repo.Actions {
+			enabled[name] = true
+			if !selected[name] {
+				installed, err := cfg.CommandInstalled(name)
+				if err == nil && installed {
+					return true
+				}
+			}
+		}
+	}
+	for name := range selected {
+		if !enabled[name] {
+			return true
+		}
+	}
+	return false
+}
+
 // attachSelectedLocalWorker prepares one selected child before the monitor can
 // discover work. Public service mode selection remains with the CLI switch.
 func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, path string, args []string, readyTimeout time.Duration) (<-chan struct{}, func() error, error) {
@@ -106,19 +127,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			return code
 		}
 		cfg, generation := live.next()
-		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || hasNewCommand(watcher.Config, cfg) || hasNewCommand(cfg, watcher.Config)
-		if !refresh {
-			for _, repo := range cfg.Repositories {
-				for _, name := range repo.Actions {
-					if !watcher.SelectedCommands[name] {
-						installed, err := cfg.CommandInstalled(name)
-						if installed && err == nil {
-							refresh = true
-						}
-					}
-				}
-			}
-		}
+		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || selectedCommandsChanged(cfg, watcher.SelectedCommands)
 		if !refresh {
 			owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 			owner.AIInstructions = cfg.AIInstructions

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"net/http"
 	"net/http/httptest"
@@ -206,6 +207,35 @@ func TestAdminRepositoryCommandsRejectUnsupportedMainAI(t *testing.T) {
 	post("owner/new", http.StatusConflict)
 }
 
+func TestAdminRemovesConfiguredLegacyRequester(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.Repositories[0].AllowedActors = []string{"old_user"}
+		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"old_user": 77}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, nil)
+	form := url.Values{"repository": {"owner/repo"}, "login": {"old_user"}}
+	add := httptest.NewRequest(http.MethodPost, "/admin/users/add", strings.NewReader(form.Encode()))
+	add.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	addResponse := httptest.NewRecorder()
+	mux.ServeHTTP(addResponse, add)
+	if addResponse.Code != http.StatusConflict || !strings.Contains(addResponse.Body.String(), "valid GitHub login") {
+		t.Fatalf("legacy login was accepted for a new requester: status=%d body=%q", addResponse.Code, addResponse.Body.String())
+	}
+	r := httptest.NewRequest(http.MethodPost, "/admin/users/remove", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	repo, _ := configForAdminTest(t, path).Repository("owner/repo")
+	if w.Code != http.StatusSeeOther || !repo.DenyAllActors || len(repo.AllowedActors) != 0 {
+		t.Fatalf("legacy requester removal: status=%d repo=%+v body=%q", w.Code, repo, w.Body.String())
+	}
+}
+
 func TestAdminRepositoryActionExpansionRequiresRemoteRestart(t *testing.T) {
 	live, _ := liveConfigFixture(t, true)
 	mux := http.NewServeMux()
@@ -276,6 +306,8 @@ func TestAdminSkillAddWaitsForActiveSameNameSource(t *testing.T) {
 	t.Setenv("HOMEPATH", "")
 	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
 	t.Setenv("https_proxy", "http://127.0.0.1:1")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
 	const oldSource = "https://github.com/old/project/tree/main/skills/shared"
 	const newSource = "https://github.com/new/project/tree/main/skills/shared"
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -317,12 +349,16 @@ func TestAdminSkillAddWaitsForActiveSameNameSource(t *testing.T) {
 	mux := http.NewServeMux()
 	registerAdminConfigActions(mux, live, nil)
 	form := url.Values{"target": {"command:review"}, "url": {newSource}}
-	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
-	defer cancel()
-	r := httptest.NewRequest(http.MethodPost, "/admin/skills/add", strings.NewReader(form.Encode())).WithContext(ctx)
-	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
+	post := func() *httptest.ResponseRecorder {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		r := httptest.NewRequest(http.MethodPost, "/admin/skills/add", strings.NewReader(form.Encode())).WithContext(ctx)
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		return w
+	}
+	w := post()
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "still active from another source") {
 		t.Fatalf("pending same-name replacement: status=%d body=%q", w.Code, w.Body.String())
 	}
@@ -331,6 +367,35 @@ func TestAdminSkillAddWaitsForActiveSameNameSource(t *testing.T) {
 	}
 	if got := configForAdminTest(t, path).Commands["review"].Skills; len(got) != 1 || got[0] != "builtin://anti-prompt-injection" {
 		t.Fatalf("rejected replacement was saved: %v", got)
+	}
+	codexInstall := filepath.Join(home, ".agents", "skills", "shared")
+	if err := os.MkdirAll(codexInstall, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexInstall, "SKILL.md"), []byte("---\nname: shared\n---\nOld instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexInstall, ".minion-install.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := skills.InstalledPathFor(newSource, "codex"); !errors.Is(err, skills.ErrSourceMismatch) {
+		t.Fatalf("old installed source should be a safe mismatch: %v", err)
+	}
+	next, generation := live.next()
+	live.applied(next, generation, nil)
+	if len(live.current().AlwaysOnSkills) != 0 {
+		t.Fatal("old skill is still active after the monitor boundary")
+	}
+	w = post()
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "Install skill:") {
+		t.Fatalf("safe replacement did not reach installer: status=%d body=%q", w.Code, w.Body.String())
+	}
+	if err := os.WriteFile(filepath.Join(codexInstall, ".minion-install.json"), []byte("not JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w = post()
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "Check installed skill:") || strings.Contains(w.Body.String(), "Install skill:") {
+		t.Fatalf("invalid metadata reached installer: status=%d body=%q", w.Code, w.Body.String())
 	}
 }
 

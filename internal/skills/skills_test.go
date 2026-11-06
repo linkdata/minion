@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -119,8 +120,19 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(canonicalHome, tt.parent, "skills", "review", "SKILL.md") {
 				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
 			}
-			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
+			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); !errors.Is(err, ErrSourceMismatch) || installed {
 				t.Fatalf("mismatched source = %t, %v", installed, err)
+			}
+			for _, bad := range []string{`not JSON`, `{"url":"not a skill URL","commit":"` + testSHA + `"}`, `{"url":"https://github.com/other/skills/tree/main/skills/review","commit":"bad"}`} {
+				if err := os.WriteFile(filepath.Join(dir, installMetadataName), []byte(bad), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, installed, err := tt.lookup(testURL); err == nil || errors.Is(err, ErrSourceMismatch) || installed {
+					t.Fatalf("invalid metadata = %t, %v", installed, err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, installMetadataName), metadata, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			t.Run("symlinked directory", func(t *testing.T) {
 				realDir := dir + "-installed"
@@ -254,6 +266,15 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(old, "stale.txt"), []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(old, "SKILL.md"), []byte("Old review skill."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, installMetadataName), []byte(`{"url":"https://github.com/other/skills/tree/main/skills/review","commit":"`+testSHA+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := InstalledPathFor(testURL, "codex"); !errors.Is(err, ErrSourceMismatch) {
+		t.Fatalf("old review skill should be a safe source mismatch: %v", err)
+	}
 	archive := tarball(t, []archiveEntry{
 		{name: "prefix/skills/review/SKILL.md", body: "Review code."},
 		{name: "prefix/skills/audit/SKILL.md", body: "Audit code."},
@@ -278,7 +299,7 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 				t.Fatalf("%s/%s = %q, %v", root, name, data, err)
 			}
 			metadata, err := os.ReadFile(filepath.Join(root, name, installMetadataName))
-			if err != nil || !strings.Contains(string(metadata), testSHA) {
+			if err != nil || !strings.Contains(string(metadata), testSHA) || !strings.Contains(string(metadata), `"url": "https://github.com/example/skills/tree/main/skills/`+name+`"`) {
 				t.Fatalf("install metadata = %q, %v", metadata, err)
 			}
 		}

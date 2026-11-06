@@ -344,6 +344,26 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 		t.Fatal("unused command skill edit restarted the selected worker or left stale configuration")
 	}
 	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = next.Repositories[0].Actions[:2]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != initialWorker || len(watcher.Config.Repositories[0].Actions) != 2 {
+		t.Fatal("removing an unavailable command restarted the selected worker or left stale actions")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "unavailable")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != initialWorker || len(watcher.Config.Repositories[0].Actions) != 3 {
+		t.Fatal("enabling an unavailable command restarted the selected worker or left stale actions")
+	}
+	if err := live.save(func(next *config.Config) error {
 		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
 		next.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection}
 		return nil

@@ -3,6 +3,7 @@ package skills
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -17,6 +18,9 @@ type source struct {
 	url, owner, repo, ref, path, name string
 	builtin                           bool
 }
+
+// ErrSourceMismatch reports valid installed metadata for another source URL.
+var ErrSourceMismatch = errors.New("installed skill has a different source")
 
 func parse(rawURL string) (source, error) {
 	if rawURL == BuiltinAntiPromptInjection {
@@ -125,8 +129,15 @@ func InstalledPathFor(rawURL, provider string) (path string, installed bool, err
 		URL    string `json:"url"`
 		Commit string `json:"commit"`
 	}
-	if err := json.Unmarshal(metadata, &recorded); err != nil || recorded.URL != src.url || !validSHA(recorded.Commit) {
-		return "", false, fmt.Errorf("skill %q has invalid or mismatched install metadata", src.name)
+	if err := json.Unmarshal(metadata, &recorded); err != nil || !validSHA(recorded.Commit) {
+		return "", false, fmt.Errorf("skill %q has invalid install metadata", src.name)
+	}
+	prior, err := parse(recorded.URL)
+	if err != nil || prior.url != recorded.URL || prior.name != src.name {
+		return "", false, fmt.Errorf("skill %q has invalid install metadata", src.name)
+	}
+	if recorded.URL != src.url {
+		return "", false, fmt.Errorf("skill %q: %w", src.name, ErrSourceMismatch)
 	}
 	return filepath.Join(dir, "SKILL.md"), true, nil
 }

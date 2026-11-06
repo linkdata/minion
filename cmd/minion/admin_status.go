@@ -68,13 +68,15 @@ func statusView(owner *action.Orchestrator, cfg config.Config) adminStatusView {
 		Critic:       adminStatusRole{Provider: cfg.Adversarial, Settings: cfg.RoleModelSettings(true)},
 		Repositories: len(cfg.Repositories),
 	}
-	requesters := make(map[string]struct{})
+	requesters := make(map[int64]struct{})
 	for _, repo := range cfg.Repositories {
 		if !repo.DenyAllActors && len(repo.AllowedActors) == 0 {
 			view.OpenRepositories++
 		}
-		for _, login := range repo.AllowedActors {
-			requesters[strings.ToLower(login)] = struct{}{}
+		for _, id := range repo.AllowedActorIDs {
+			if id > 0 {
+				requesters[id] = struct{}{}
+			}
 		}
 	}
 	view.Requesters = len(requesters)
