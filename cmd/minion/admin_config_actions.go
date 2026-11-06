@@ -99,6 +99,23 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			return errors.New("Repository is not configured")
 		})
 	}))
+	mux.Handle("POST /admin/users/deny-all", adminConfigPost("/admin/users", []string{"repository"}, "", func(_ context.Context, values url.Values) error {
+		repoName := strings.ToLower(values.Get("repository"))
+		if !workspace.ValidRepository(repoName) {
+			return errors.New("Enter a configured repository")
+		}
+		return live.save(func(cfg *config.Config) error {
+			for i := range cfg.Repositories {
+				repo := &cfg.Repositories[i]
+				if strings.EqualFold(repo.Name, repoName) {
+					repo.AllowedActors, repo.AllowedActorIDs = nil, nil
+					repo.DenyAllActors = true
+					return nil
+				}
+			}
+			return errors.New("Repository is not configured")
+		})
+	}))
 	mux.Handle("POST /admin/repositories/add", adminConfigPost("/admin/repositories", []string{"name"}, "actions", func(ctx context.Context, values url.Values) error {
 		name := strings.ToLower(values.Get("name"))
 		if !workspace.ValidRepository(name) {

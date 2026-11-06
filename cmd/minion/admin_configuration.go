@@ -131,7 +131,8 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
       <input type="hidden" name="repository" value="{{.Name}}"><label class="d-grid gap-1">GitHub login<input class="form-control" name="login" maxlength="39" required></label>
       <button class="btn btn-primary" type="submit">Add requester</button>
     </form>
-    {{if not .AnyWriter}}<form class="mt-3" method="post" action="/admin/users/allow-any"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit">Allow any writer</button><small class="d-block text-body-secondary">Any GitHub account with write, maintain, or admin permission will be able to request actions.</small></form>{{end}}
+    {{if .AnyWriter}}<form class="mt-3" method="post" action="/admin/users/deny-all"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit">Allow nobody</button></form>
+    {{else}}<form class="mt-3" method="post" action="/admin/users/allow-any"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit">Allow any writer</button><small class="d-block text-body-secondary">Any GitHub account with write, maintain, or admin permission will be able to request actions.</small></form>{{end}}
     {{if eq (len .Users) 1}}<small class="d-block text-body-secondary mt-2">Removing the last named requester allows nobody.</small>{{end}}
   </section>{{else}}<p>No repositories are configured.</p>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}

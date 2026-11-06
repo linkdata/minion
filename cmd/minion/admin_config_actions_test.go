@@ -118,6 +118,11 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 		t.Fatalf("edited repository commands or access changed: %+v", repo)
 	}
 	owner.GitHub = nil
+	post("/admin/users/deny-all", url.Values{"repository": {"owner/existing"}}, http.StatusSeeOther)
+	repo, _ = configForAdminTest(t, path).Repository("owner/existing")
+	if !repo.DenyAllActors || len(repo.AllowedActors) != 0 || len(repo.AllowedActorIDs) != 0 || repo.AllowsActor("another", 88) {
+		t.Fatalf("offline deny-all did not revoke any-writer access: %+v", repo)
+	}
 	post("/admin/repositories/actions", url.Values{"name": {"owner/existing"}, "actions": {"review"}}, http.StatusSeeOther)
 	repo, _ = live.snapshot().Config.Repository("owner/existing")
 	if len(repo.Actions) != 1 || repo.Actions[0] != "review" {

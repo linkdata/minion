@@ -37,7 +37,7 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 		name  string
 		wants []string
 	}{
-		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any"}},
+		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any", "/admin/users/deny-all", "Allow nobody"}},
 		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters"}},
 		{"admin skills", []string{"anti-prompt-injection", "review command", `value="command:review"`, "/admin/skills/add", "/admin/skills/remove"}},
 	} {
@@ -50,6 +50,9 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 				if !strings.Contains(body.String(), want) {
 					t.Fatalf("%s missing %q: %s", tc.name, want, body.String())
 				}
+			}
+			if tc.name == "admin users" && strings.Count(body.String(), `action="/admin/users/deny-all"`) != 2 {
+				t.Fatalf("deny-all button must appear only for the two any-writer repositories: %s", body.String())
 			}
 			for _, secret := range []string{"secret-model-key", "secret-password-hash", "<script>alert(1)</script>"} {
 				if strings.Contains(body.String(), secret) {
