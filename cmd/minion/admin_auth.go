@@ -332,8 +332,7 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name string, view any) {
 	sess := a.jaws.GetSession(r)
 	if a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests {
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "Too many public pages", http.StatusTooManyRequests)
+		w.WriteHeader(http.StatusTooManyRequests)
 		return
 	}
 	ui.Handler(a.jaws, name, view).ServeHTTP(w, r)

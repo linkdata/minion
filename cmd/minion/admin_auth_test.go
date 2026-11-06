@@ -859,14 +859,14 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	response, _ := adminNetworkLogin(t, client, "http://"+admin.listener.Addr().String(),
 		url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
+		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
+	}
 	page := adminResponse(admin.server.Handler, http.MethodGet, "/admin/login", nil, nil, "")
 	if page.Code != http.StatusOK {
 		t.Fatalf("Bootstrap entry page: status=%d", page.Code)
 	}
 	cssPath := bootstrapAssetPath(t, page.Body.String(), ".css")
-	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
-		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
-	}
 	cookie := response.Cookies()[0]
 	oauthPage, err := client.Get("http://" + admin.listener.Addr().String() + "/auth/login")
 	if err != nil {

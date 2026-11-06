@@ -68,10 +68,11 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
+	var entryURL string
 	if cfg.TLSCertFile != "" {
-		service.ListenURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate, cfg)
+		entryURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate, cfg)
 	} else {
-		service.ListenURL = plainAdminListenURL(listener.Addr().String(), cfg)
+		entryURL = plainAdminListenURL(listener.Addr().String(), cfg)
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -107,7 +108,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 			break
 		}
 	}
-	a := &adminServer{listener: listener, entryURL: service.ListenURL, signInEnabled: signInEnabled, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	a := &adminServer{listener: listener, entryURL: entryURL, signInEnabled: signInEnabled, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
 	if oauth != nil {
 		a.preferences = oauth.links
 	}
@@ -173,6 +174,9 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 		if candidate := covered(host); candidate != "" {
 			return candidate
 		}
+		if candidate := covered("localhost"); candidate != "" {
+			return candidate
+		}
 	}
 	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
 		return rawURL
@@ -182,15 +186,11 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 			return candidate
 		}
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsUnspecified() {
-			for _, address := range certificate.Leaf.IPAddresses {
-				if candidate := covered(address.String()); candidate != "" {
-					return candidate
-				}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		for _, address := range certificate.Leaf.IPAddresses {
+			if candidate := covered(address.String()); candidate != "" {
+				return candidate
 			}
-		} else if candidate := covered(host); candidate != "" {
-			return candidate
 		}
 	}
 	return ""
