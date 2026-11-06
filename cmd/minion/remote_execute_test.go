@@ -16,7 +16,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -117,7 +116,7 @@ func TestRemoteWorkerLoopDoesNotLogPrivateFailureText(t *testing.T) {
 	cfg := remoteWorkerConfig{
 		BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
 	}
-	code := runRemoteWorkerLoop(t.Context(), cfg, client, action.NewRemoteRunner(cfg.WorkRoot), log.New(&logs, "", 0))
+	code := runRemoteWorkerLoop(t.Context(), cfg, client, log.New(&logs, "", 0))
 	if code != 1 || logs.String() != "remote worker: execution or protocol failure\n" || strings.Contains(logs.String(), privateText) {
 		t.Fatalf("remote worker exposed untrusted error text: exit=%d logs=%q", code, logs.String())
 	}
