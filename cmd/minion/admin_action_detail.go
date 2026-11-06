@@ -4,6 +4,7 @@ import (
 	"context"
 	"html/template"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/linkdata/jaws"
@@ -12,13 +13,15 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-var adminActionDetailTemplate = template.Must(template.New("admin action detail").Funcs(template.FuncMap{
-	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-}).Parse(headHTML + `<!doctype html>
-<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion action detail</title></head><body>{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
-{{if .AllowUser}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-body-secondary"> / my actions</span></div><form class="ms-auto" method="post" action="/auth/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form></header>
-<main class="container py-4"><p><a href="/auth/actions">← My actions</a></p>{{else}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-body-secondary"> / operator</span></div><form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form></header>
-<main class="container py-4"><p><a href="/">← Live actions</a></p>{{end}}<div class="border-bottom mb-4"><p class="text-body-secondary small fw-semibold">ACTION DETAIL</p><h1>{{.AttemptID}}</h1></div>
+func evidenceRows(text string) int {
+	return min(8, max(2, strings.Count(text, "\n")+1))
+}
+
+var adminActionDetailTemplate = template.Must(template.New("admin action detail").Funcs(utcTemplateFuncs).Funcs(template.FuncMap{
+	"evidenceRows": evidenceRows,
+}).Parse(headHTML + `{{template "head.html" $}}<title>Minion action detail</title></head><body>{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
+<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-body-secondary"> / {{if .AllowUser}}my actions{{else}}operator{{end}}</span></div><form class="ms-auto" method="post" action="{{if .AllowUser}}/auth/logout{{else}}/admin/logout{{end}}"><button class="btn btn-outline-light" type="submit">Sign out</button></form></header>
+<main class="container py-4"><p><a href="{{if .AllowUser}}/auth/actions{{else}}/{{end}}">← {{if .AllowUser}}My actions{{else}}Live actions{{end}}</a></p><div class="border-bottom mb-4"><p class="text-body-secondary small fw-semibold">ACTION DETAIL</p><h1>{{.AttemptID}}</h1></div>
 <section class="border rounded p-3 mb-3"><h2 class="h5">Action and deadline</h2><dl class="text-break">
 <dt>Repository</dt><dd>{{if .Repository}}{{.Repository}}{{else}}Unavailable in retained records{{end}}</dd>
 <dt>Requester</dt><dd>{{if .Requester}}{{.Requester}}{{else}}Unavailable in retained records{{end}}</dd>
@@ -35,15 +38,15 @@ var adminActionDetailTemplate = template.Must(template.New("admin action detail"
 </dl>{{if and .AllowUser .Stoppable}}<form method="post" action="/auth/actions/{{.AttemptID}}/abort"><button class="btn btn-warning" type="submit">Abort this action</button></form>{{end}}</section>
 <section class="border rounded p-3 mb-3"><h2 class="h5">Critic evidence</h2><dl class="text-break"><dt>Actual full-review verdict</dt><dd>{{if .CriticVerdict}}{{.CriticVerdict}}{{else}}Unavailable{{end}}</dd>
 <dt>Stopping reason</dt><dd>{{if .CriticStop}}{{.CriticStop}}{{else}}Unavailable{{end}}</dd></dl><p class="text-body-secondary small">{{.ReviewNotice}}</p>
-{{if .Refutations}}<h3 class="h6">Main-model refutations</h3>{{range $index, $item := .Refutations}}<article class="border-top pt-2 mt-2"><p id="refutation-caption-{{$index}}" class="text-body-secondary small">Main-model refutation{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="8" readonly aria-labelledby="refutation-caption-{{$index}}">
+{{if .Refutations}}<h3 class="h6">Main-model refutations</h3>{{range $index, $item := .Refutations}}<article class="border-top pt-2 mt-2"><p id="refutation-caption-{{$index}}" class="text-body-secondary small">{{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="{{evidenceRows .Text}}" readonly aria-labelledby="refutation-caption-{{$index}}">
 {{.Text}}</textarea></article>{{end}}{{end}}</section>
 <section class="border rounded p-3 mb-3"><h2 class="h5">Received private discussion, reports and diagnostics</h2><p class="text-body-secondary small">{{.RecordsNotice}}</p>
-{{if .Records}}{{range $index, $item := .Records}}<article class="border-top pt-2 mt-2"><p id="record-caption-{{$index}}" class="text-body-secondary small">Received {{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="8" readonly aria-labelledby="record-caption-{{$index}}">
+{{if .Records}}{{range $index, $item := .Records}}<article class="border-top pt-2 mt-2"><p id="record-caption-{{$index}}" class="text-body-secondary small">Received {{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="{{evidenceRows .Text}}" readonly aria-labelledby="record-caption-{{$index}}">
 {{.Text}}</textarea></article>{{end}}{{else}}<p>No received text shown.</p>{{end}}</section>
-<section class="border rounded p-3 mb-3"><h2 class="h5">Worker diagnostics</h2><p class="text-body-secondary small">{{.WorkerNotice}}</p>{{if .WorkerFailure}}<article class="border-top pt-2 mt-2"><p class="text-body-secondary small">Worker-reported failure</p><textarea class="form-control font-monospace" rows="8" readonly aria-label="Worker-reported failure">
-{{.WorkerFailure}}</textarea></article>{{end}}{{if .WorkerObservedFailure}}<article class="border-top pt-2 mt-2"><p class="text-body-secondary small">Worker-observed failure</p><textarea class="form-control font-monospace" rows="8" readonly aria-label="Worker-observed failure">
+<section class="border rounded p-3 mb-3"><h2 class="h5">Worker diagnostics</h2><p class="text-body-secondary small">{{.WorkerNotice}}</p>{{if .WorkerFailure}}<article class="border-top pt-2 mt-2"><p class="text-body-secondary small">Worker-reported failure</p><textarea class="form-control font-monospace" rows="{{evidenceRows .WorkerFailure}}" readonly aria-label="Worker-reported failure">
+{{.WorkerFailure}}</textarea></article>{{end}}{{if .WorkerObservedFailure}}<article class="border-top pt-2 mt-2"><p class="text-body-secondary small">Worker-observed failure</p><textarea class="form-control font-monospace" rows="{{evidenceRows .WorkerObservedFailure}}" readonly aria-label="Worker-observed failure">
 {{.WorkerObservedFailure}}</textarea></article>{{end}}
-{{range $index, $item := .Diagnostics}}<article class="border-top pt-2 mt-2"><p id="diagnostic-caption-{{$index}}" class="text-body-secondary small">Worker diagnostic · {{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="8" readonly aria-labelledby="diagnostic-caption-{{$index}}">
+{{range $index, $item := .Diagnostics}}<article class="border-top pt-2 mt-2"><p id="diagnostic-caption-{{$index}}" class="text-body-secondary small">Worker diagnostic · {{.Kind}}{{if .Meta}} · {{.Meta}}{{end}}{{if .Truncated}} · text truncated{{end}}</p><textarea class="form-control font-monospace" rows="{{evidenceRows .Text}}" readonly aria-labelledby="diagnostic-caption-{{$index}}">
 {{.Text}}</textarea></article>{{end}}</section>
 </main>{{end}}{{else}}<p role="alert" class="alert alert-warning">Admin session ended.</p>{{end}}{{$.TailHTML}}</body></html>`))
 

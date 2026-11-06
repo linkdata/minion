@@ -16,11 +16,9 @@ import (
 )
 
 var adminDashboardDirty = new(int)
+var utcTemplateFuncs = template.FuncMap{"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) }}
 
-const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
-<html lang="en" data-bs-theme="dark">
-<head>
-  {{template "head.html" $}}<title>Minion admin</title>
+const adminDashboardHTML = `{{define "dashboard"}}{{template "head.html" $}}<title>Minion admin</title>
 </head>
 <body>
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
@@ -156,9 +154,7 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	return view
 }
 
-var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(template.FuncMap{
-	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-}).Parse(headHTML + adminDashboardHTML))
+var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(utcTemplateFuncs).Parse(headHTML + adminDashboardHTML))
 
 func adminDashboardHandler(jw *jaws.Jaws, owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -8,16 +8,15 @@ import (
 	"github.com/linkdata/jaws/lib/ui"
 )
 
-var adminNoticeHTML = template.Must(template.New("admin notice").Parse(headHTML + `<!doctype html>
-<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion admin request error</title></head>
+var adminNoticeHTML = template.Must(template.New("admin notice").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin request error</title></head>
 <body><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
-{{if .Dot.RetryLogin}}<a href="/admin/login">Try sign-in again</a>{{end}}
+{{if .Dot.AdminLogin}}<a href="/admin/login">Admin sign in</a>{{end}}
 <a href="/">Home</a>
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminNoticeView struct {
 	Status     string
-	RetryLogin bool
+	AdminLogin bool
 }
 
 func adminBrowserRoute(r *http.Request) bool {
@@ -104,14 +103,25 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		w.Header().Del("Content-Length")
 		w.Header().Set("Cache-Control", "no-store")
 		sess := a.jaws.GetSession(r)
-		// Leave one request slot for a guest to return to the sign-in page.
-		if sess == nil || (a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests-1) {
+		if sess == nil {
 			w.WriteHeader(capture.status)
 			return
 		}
+		// Leave one request slot for a guest to return to the sign-in page.
+		if a.sessionUsername(sess) == "" {
+			if account, _ := a.oauth.currentUser(sess); account == "" {
+				// Keep guest admission and JaWS registration in one critical section.
+				a.noticeMu.Lock()
+				defer a.noticeMu.Unlock()
+				if len(sess.Requests()) >= maxGuestPageRequests-1 {
+					w.WriteHeader(capture.status)
+					return
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), RetryLogin: len(a.accounts) != 0 && r.URL.Path == "/admin/login"}).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), AdminLogin: len(a.accounts) != 0 && a.sessionUsername(sess) == ""}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)

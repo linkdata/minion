@@ -17,10 +17,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + usageEstimatedCostTemplate + `<!doctype html>
-<html lang="en" data-bs-theme="dark">
-<head>
-  {{template "head.html" $}}<title>Usage · Minion admin</title>
+var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + usageEstimatedCostTemplate + `{{template "head.html" $}}<title>Usage · Minion admin</title>
 </head>
 <body>{{with .Dot}}
   <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">

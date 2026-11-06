@@ -109,6 +109,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("-oneshot cannot be combined with -check")
 		return 2
 	}
+	if *installSkills && (*oneshot || *check) {
+		logger.Print("-install-skills cannot be combined with -oneshot or -check")
+		return 2
+	}
 	loadedPath, err := filepath.Abs(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
@@ -124,10 +128,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	context.AfterFunc(ctx, stop)
 	defer stop()
 	if *installSkills {
-		if *oneshot || *check {
-			logger.Printf("-install-skills cannot be combined with -oneshot or -check")
-			return 2
-		}
 		var urls []string
 		for _, mapping := range cfg.Commands {
 			urls = append(urls, mapping.Skills...)

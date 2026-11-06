@@ -56,3 +56,14 @@ func TestOneShotAndCheckRejectedBeforeStartup(t *testing.T) {
 		t.Fatalf("conflicting flags: exit=%d log=%q", code, output)
 	}
 }
+
+func TestInstallSkillsConflictRejectedBeforeConfigLoad(t *testing.T) {
+	for _, other := range []string{"-oneshot", "-check"} {
+		t.Run(other, func(t *testing.T) {
+			code, output := runStartupFixture(t, config.Config{}, "-install-skills", other)
+			if code != 2 || !strings.Contains(output, "-install-skills cannot be combined with -oneshot or -check") {
+				t.Fatalf("conflicting flags: exit=%d log=%q", code, output)
+			}
+		})
+	}
+}

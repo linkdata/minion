@@ -412,6 +412,10 @@ func TestCertifiedListenURL(t *testing.T) {
 	if got := certifiedListenURL("127.0.0.1:8080", certificate, callback); got != "https://login.example:8443" {
 		t.Errorf("OAuth URL = %q, want callback origin", got)
 	}
+	gitlab := config.AdminConfig{GitLabOAuth: &config.OAuthClient{RedirectURL: "https://login.example:8443/auth/gitlab/callback"}}
+	if got := certifiedListenURL("127.0.0.1:8080", certificate, gitlab); got != "https://login.example:8443" {
+		t.Errorf("GitLab OAuth URL = %q, want callback origin", got)
+	}
 	certificate.Leaf.DNSNames = []string{"first.example"}
 	if got := certifiedListenURL("127.0.0.1:8080", certificate, callback); got != "" {
 		t.Errorf("uncovered OAuth URL = %q, want none", got)
@@ -435,6 +439,10 @@ func TestPlainAdminListenURL(t *testing.T) {
 		if got := plainAdminListenURL(tc.address, cfg); got != tc.want {
 			t.Errorf("plain URL for %s and %s = %q, want %q", tc.address, tc.callback, got, tc.want)
 		}
+	}
+	gitlab := config.AdminConfig{GitLabOAuth: &config.OAuthClient{RedirectURL: "http://127.0.0.1:8080/auth/gitlab/callback"}}
+	if got := plainAdminListenURL("127.0.0.1:8080", gitlab); got != "http://127.0.0.1:8080" {
+		t.Errorf("GitLab plain URL = %q, want callback origin", got)
 	}
 }
 

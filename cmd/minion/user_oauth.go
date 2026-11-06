@@ -18,8 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `<!doctype html>
-<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion account</title></head>
+var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `{{template "head.html" $}}<title>Minion account</title></head>
 <body><main class="container py-4">
 {{if .Dot.Error}}<p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
@@ -37,8 +36,7 @@ var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `<
 {{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
-var userErrorHTML = template.Must(template.New("user error").Parse(headHTML + `<!doctype html>
-<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion request failed</title></head>
+var userErrorHTML = template.Must(template.New("user error").Parse(headHTML + `{{template "head.html" $}}<title>Minion request failed</title></head>
 <body><main class="container py-4"><h1>Request failed</h1><p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>
 {{if .Dot.RetryAfter}}<p role="status" class="alert alert-info">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))

@@ -24,8 +24,7 @@ const adminSessionKey = "minion.admin.username"
 //go:embed head.html
 var headHTML string
 
-var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `<!doctype html>
-<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion admin</title></head>
+var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin</title></head>
 <body><main class="container py-5">
 {{if .Dot}}
 <h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open dashboard</a></p>
@@ -42,8 +41,7 @@ var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + 
 //go:embed admin_login.js
 var adminLoginJS []byte
 
-var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `<!doctype html>
-<html lang="en" data-bs-theme="dark"><head>{{template "head.html" $}}<title>Minion</title></head>
+var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{template "head.html" $}}<title>Minion</title></head>
 <body><main class="container py-5"><h1>Minion</h1>
 {{if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
@@ -90,6 +88,7 @@ type adminAccess struct {
 	accounts     map[string]config.AdminAccount
 	dummy        config.AdminAccount
 	mu           sync.Mutex
+	noticeMu     sync.Mutex
 	attempts     map[string]loginWindow
 	hashSlots    chan struct{}
 }

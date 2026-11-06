@@ -183,12 +183,15 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		if !found {
 			t.Fatalf("admin listener did not start after reconciliation: log=%q", output.String())
 		}
-		homeURL, _, _ := strings.Cut(addressLine, "\n")
+		homeURL, bound, _ := strings.Cut(addressLine, " (bound to ")
 		parsed, err := url.Parse(homeURL)
 		if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Path != "" || parsed.Port() == "" {
 			t.Fatalf("admin home URL is not clickable: %q: %v", homeURL, err)
 		}
 		address := net.JoinHostPort("127.0.0.1", parsed.Port())
+		if !strings.HasPrefix(bound, address+")") {
+			t.Fatalf("admin listener log omitted bound address %s: %q", address, addressLine)
+		}
 		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			t.Fatalf("admin listener still holds %s after return: %v", address, err)

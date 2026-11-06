@@ -20,6 +20,22 @@ import (
 
 var detailTestSource = strings.Repeat("a", 40)
 
+func TestEvidenceRows(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want int
+	}{
+		{"short", 2},
+		{"\nleading line", 2},
+		{"one\ntwo\nthree", 3},
+		{strings.Repeat("line\n", 8) + "last", 8},
+	} {
+		if got := evidenceRows(tc.text); got != tc.want {
+			t.Errorf("evidenceRows(%q) = %d, want %d", tc.text, got, tc.want)
+		}
+	}
+}
+
 func detailTestIdentity() map[string]any {
 	return map[string]any{"job_id": "job-1", "attempt_id": "attempt-1", "executor_id": "local",
 		"repository": "owner/repo", "repository_id": 1, "owner_id": 2, "requester": "writer",
@@ -146,7 +162,7 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	}
 	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 	body := view.Body.String()
-	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl`, `<textarea`, `readonly aria-labelledby="record-caption-0"`, `id="record-caption-0"`, `>Received report`, `id="diagnostic-caption-0"`, `>Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
+	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl`, `<textarea`, `action="/admin/logout"`, `href="/">← Live actions`, `readonly aria-labelledby="record-caption-0"`, `id="record-caption-0"`, `>Received report`, `id="diagnostic-caption-0"`, `>Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q: %s", want, body)
 		}
@@ -182,7 +198,7 @@ func TestAdminActionDetailPreservesInitialEvidenceNewline(t *testing.T) {
 		`aria-label="Worker-reported failure"`, `aria-label="Worker-observed failure"`,
 		`aria-labelledby="diagnostic-caption-0"`,
 	} {
-		if want := label + ">\n\nleading line</textarea>"; !strings.Contains(view.Body.String(), want) {
+		if want := `rows="2" readonly ` + label + ">\n\nleading line</textarea>"; !strings.Contains(view.Body.String(), want) {
 			t.Errorf("detail missing initial evidence newline after %s: %s", label, view.Body.String())
 		}
 	}
