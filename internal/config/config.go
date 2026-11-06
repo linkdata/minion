@@ -478,15 +478,15 @@ func (c *Config) Validate(configDir string) error {
 		if err != nil || number == 0 {
 			return errors.New("admin.listen requires a numeric port from 1 to 65535")
 		}
-		if err := admin.validateOAuth(host, number); err != nil {
-			return err
-		}
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
 		addr, err := netip.ParseAddr(host)
 		if admin.TLSCertFile == "" && (err != nil || !addr.Unmap().IsLoopback()) {
 			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+		}
+		if err := admin.validateOAuth(host, number); err != nil {
+			return err
 		}
 		if admin.TLSCertFile != "" {
 			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)

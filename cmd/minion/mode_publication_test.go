@@ -179,7 +179,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		t.Fatalf("worker startup preceded reconciliation: lookups=%d write=%+v", lookups.Load(), store.Data.PublicationWrites[jobID])
 	}
 	if adminSetup == "active" {
-		_, addressLine, found := strings.Cut(output.String(), "admin dashboard listening on ")
+		_, addressLine, found := strings.Cut(output.String(), "Minion UI listening on ")
 		if !found {
 			t.Fatalf("admin listener did not start after reconciliation: log=%q", output.String())
 		}

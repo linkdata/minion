@@ -60,6 +60,8 @@ const (
 	maxAdminSessions     = 512
 	maxGuestPageRequests = 4
 	maxRotatedCookies    = 2048
+	// One sign-out marker may be needed for each live JaWS session.
+	maxSignInRotations = maxRotatedCookies - maxAdminSessions
 )
 
 type adminIdentity string
@@ -200,7 +202,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 				signedOutHome = true
 			}
 		}
-		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions-1 {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -403,7 +405,7 @@ func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name st
 }
 
 // rememberRotatedCookie is called under sessionAdmissionMu before closing the old session.
-func (a *adminAccess) rememberRotatedCookie(value string) bool {
+func (a *adminAccess) rememberRotatedCookie(value string, limit int) bool {
 	now := time.Now()
 	for key, state := range a.rotatedCookies {
 		if state.pending == 0 && !now.Before(state.until) {
@@ -412,16 +414,8 @@ func (a *adminAccess) rememberRotatedCookie(value string) bool {
 	}
 	key := sha256.Sum256([]byte(value))
 	state, known := a.rotatedCookies[key]
-	if !known && len(a.rotatedCookies) >= maxRotatedCookies {
-		for oldKey, old := range a.rotatedCookies {
-			if old.signedOut && old.pending == 0 {
-				delete(a.rotatedCookies, oldKey)
-				break
-			}
-		}
-		if len(a.rotatedCookies) >= maxRotatedCookies {
-			return false
-		}
+	if !known && len(a.rotatedCookies) >= limit {
+		return false
 	}
 	state.until = now.Add(time.Minute)
 	a.rotatedCookies[key] = state
@@ -464,7 +458,7 @@ func (a *adminAccess) redirectClosedSession(w http.ResponseWriter, r *http.Reque
 
 // markSignedOutCookie is called under sessionAdmissionMu when sign-out closes a session.
 func (a *adminAccess) markSignedOutCookie(value string) {
-	if !a.rememberRotatedCookie(value) {
+	if !a.rememberRotatedCookie(value, maxRotatedCookies) {
 		slog.Warn("sign-out page reload may not reach home: cookie marker capacity reached")
 		return
 	}
@@ -475,10 +469,10 @@ func (a *adminAccess) markSignedOutCookie(value string) {
 }
 
 // rotatedSessionForLogout is called under sessionAdmissionMu after the old cookie stopped resolving.
-func (a *adminAccess) rotatedSessionForLogout(r *http.Request) (*jaws.Session, bool) {
+func (a *adminAccess) rotatedSessionForLogout(r *http.Request) *jaws.Session {
 	cookie, err := r.Cookie(a.jaws.CookieName)
 	if err != nil {
-		return nil, false
+		return nil
 	}
 	value := cookie.Value
 	var chain []string
@@ -500,29 +494,29 @@ func (a *adminAccess) rotatedSessionForLogout(r *http.Request) (*jaws.Session, b
 		value = sess.CookieValue()
 	}
 	if len(chain) == 0 {
-		return nil, false
+		return nil
 	}
 	if pending {
 		// A callback can be between closing its old session and publishing the new one.
 		// shortcut: pending logout cannot validate forwarded IPs; revisit if Minion enables trusted proxy headers.
 		if a.jaws.TrustForwardedHeaders || !samePeerIP(pendingIP, r.RemoteAddr) {
-			return nil, false
+			return nil
 		}
 	} else {
 		if sess == nil {
-			return nil, false
+			return nil
 		}
 		probe := r.Clone(r.Context())
 		probe.Header.Del("Cookie")
 		probe.AddCookie(&http.Cookie{Name: a.jaws.CookieName, Value: sess.CookieValue()})
 		if a.jaws.GetSession(probe) != sess {
-			return nil, false
+			return nil
 		}
 	}
 	for _, value := range chain {
 		a.markSignedOutCookie(value)
 	}
-	return sess, true
+	return sess
 }
 
 // samePeerIP matches JaWS peer binding when forwarded headers are not trusted.
@@ -600,6 +594,7 @@ func (w *oauthCallbackWriter) Write(body []byte) (int, error) {
 
 // serveOAuthCallback holds the old cookie out of guest admission until every callback using it finishes.
 func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	closeUnreadAdminBody(w, r)
 	original := r.Clone(r.Context()) // JaWS adds the rotated cookie to r during the callback.
 	a.sessionAdmissionMu.Lock()
 	old := a.jaws.GetSession(original)
@@ -609,7 +604,7 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	value := old.CookieValue()
-	if !a.rememberRotatedCookie(value) {
+	if !a.rememberRotatedCookie(value, maxSignInRotations) {
 		a.sessionAdmissionMu.Unlock()
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Retry-After", "60")
@@ -720,7 +715,7 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	previousCookie := previous.CookieValue()
-	if !a.rememberRotatedCookie(previousCookie) {
+	if !a.rememberRotatedCookie(previousCookie, maxSignInRotations) {
 		a.sessionAdmissionMu.Unlock()
 		http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
 		return
@@ -734,7 +729,7 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		state := a.rotatedCookies[key]
 		state.replacement = sess
 		a.rotatedCookies[key] = state
-	} else {
+	} else if a.rotatedCookies[key].pending == 0 {
 		delete(a.rotatedCookies, key)
 	}
 	a.sessionAdmissionMu.Unlock()
@@ -758,7 +753,7 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		sess, _ = a.rotatedSessionForLogout(r)
+		sess = a.rotatedSessionForLogout(r)
 	}
 	if sess != nil {
 		account := ""

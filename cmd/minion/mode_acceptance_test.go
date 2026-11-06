@@ -232,7 +232,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	first := &monitor.Monitor{Config: cfg, GitHub: cancelAfterReactionGitHub{GitHub: client, cancel: cancel},
 		Handler: firstOwner, Now: func() time.Time { return now }}
 	if code := runOrchestrateMode(ctx, firstOwner, first, store, false, firstLogger, worker, 40*time.Second); code != 1 ||
-		strings.Contains(firstLogs.String(), "admin dashboard listening") || first.UserPreferences == nil {
+		strings.Contains(firstLogs.String(), "Minion UI listening") || first.UserPreferences == nil {
 		t.Fatalf("cron acceptance did not use saved preferences without listener: code=%d lookup=%t logs=%s",
 			code, first.UserPreferences != nil, firstLogs.String())
 	}

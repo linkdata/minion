@@ -720,44 +720,66 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}, nil)
-	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
+	for jw.SessionCount() < maxGuestAdmissionSessions-2 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest session reserve")
 		}
 	}
-	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
-		t.Fatalf("last home page: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
+	responses := make(chan *httptest.ResponseRecorder, 16)
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for range cap(responses) {
+		group.Go(func() {
+			<-start
+			responses <- adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+		})
+	}
+	close(start)
+	group.Wait()
+	close(responses)
+	var home *httptest.ResponseRecorder
+	for response := range responses {
+		if response.Code == http.StatusOK {
+			if home != nil || len(response.Result().Cookies()) != 1 {
+				t.Fatalf("concurrent home admission: status=%d cookies=%v", response.Code, response.Result().Cookies())
+			}
+			home = response
+		} else if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("concurrent home rejection: status=%d cookies=%v", response.Code, response.Result().Cookies())
+		}
+	}
+	if home == nil || jw.SessionCount() != maxGuestAdmissionSessions-1 {
+		t.Fatalf("concurrent home admission: sessions=%d admitted=%t", jw.SessionCount(), home != nil)
 	}
 	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], ""); start.Code != http.StatusFound {
 		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
 	}
 	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
 		t.Fatalf("home exhausted sign-in reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
 	}
 }
 
 func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
+	for jw.SessionCount() < maxGuestAdmissionSessions-2 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest sessions")
 		}
 	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
 		t.Fatalf("admin-only home: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
 	}
-	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
 		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
 	}
 	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
 		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
-	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
+	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("admin sign-in at home reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
 	}
 }
@@ -873,6 +895,35 @@ func TestSignOutKeepsCallbackMarkerUntilCleanup(t *testing.T) {
 	}
 }
 
+func TestFailedAdminLoginRotationKeepsPendingCallbackMarker(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(jw.Close)
+	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
+	request := httptest.NewRequest(http.MethodPost, "https://admin.example/admin/login", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	previous := jw.NewSession(httptest.NewRecorder(), request)
+	if previous == nil || jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
+		t.Fatal("could not create competing session")
+	}
+	jw.MaxSessions = 1 // Closing the login session still leaves the competing session at capacity.
+	account := testAdminAccount()
+	access := &adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account},
+		dummy: account, attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2),
+		rotatedCookies: make(map[[32]byte]rotatedCookie)}
+	key := sha256.Sum256([]byte(previous.CookieValue()))
+	access.rotatedCookies[key] = rotatedCookie{pending: 1, until: time.Now().Add(time.Minute)}
+	response := httptest.NewRecorder()
+	access.login(response, request)
+	if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 ||
+		access.rotatedCookies[key].pending != 1 || jw.GetSession(request) != nil {
+		t.Fatalf("failed login lost callback guard: status=%d cookies=%v marker=%+v",
+			response.Code, response.Result().Cookies(), access.rotatedCookies[key])
+	}
+}
+
 func TestOAuthCallbackRejectsFullRotationMap(t *testing.T) {
 	jw, err := jaws.New()
 	if err != nil {
@@ -895,37 +946,71 @@ func TestOAuthCallbackRejectsFullRotationMap(t *testing.T) {
 	}
 }
 
+func TestOAuthCallbackClosesUnreadBody(t *testing.T) {
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0",
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "http://localhost/auth/github/callback"}}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	transport := &http.Transport{DisableKeepAlives: true}
+	t.Cleanup(transport.CloseIdleConnections)
+	login, err := (&http.Client{Transport: transport, Timeout: 2 * time.Second}).Get("http://" + admin.listener.Addr().String() + "/auth/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := login.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if login.StatusCode != http.StatusOK || len(login.Cookies()) != 1 {
+		t.Fatalf("OAuth login page: status=%d cookies=%v", login.StatusCode, login.Cookies())
+	}
+	cookie := login.Cookies()[0]
+	conn, err := net.DialTimeout("tcp", admin.listener.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintf(conn, "GET /auth/github/callback?state=wrong HTTP/1.1\r\nHost: localhost\r\nCookie: %s=%s\r\nContent-Length: 10\r\nConnection: close\r\n\r\n", cookie.Name, cookie.Value); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("callback waited for unread body: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusSeeOther || response.Header.Get("Location") != "/auth/login?error=request" {
+		t.Fatalf("callback response: status=%d location=%q", response.StatusCode, response.Header.Get("Location"))
+	}
+}
+
 func TestAdminRotatedCookieTombstonesStayBounded(t *testing.T) {
 	access := &adminAccess{rotatedCookies: make(map[[32]byte]rotatedCookie)}
 	now := time.Now()
-	for i := range maxRotatedCookies {
+	for i := range maxSignInRotations {
 		access.rotatedCookies[sha256.Sum256([]byte(fmt.Sprintf("guest-%d", i)))] = rotatedCookie{until: now.Add(time.Minute)}
 	}
 	oldest := sha256.Sum256([]byte("guest-0"))
-	if access.rememberRotatedCookie("overflow") || len(access.rotatedCookies) != maxRotatedCookies {
+	if access.rememberRotatedCookie("overflow", maxSignInRotations) || len(access.rotatedCookies) != maxSignInRotations {
 		t.Fatalf("full tombstone map admitted another rotation: entries=%d", len(access.rotatedCookies))
 	}
 	if _, retained := access.rotatedCookies[oldest]; !retained {
 		t.Fatal("full tombstone map evicted a live rotated cookie")
 	}
-	access.markSignedOutCookie("overflow")
-	if _, admitted := access.rotatedCookies[sha256.Sum256([]byte("overflow"))]; admitted {
-		t.Fatal("sign-out marker evicted a live rotation guard")
-	}
-	if !access.rememberRotatedCookie("guest-1") || len(access.rotatedCookies) != maxRotatedCookies {
+	if !access.rememberRotatedCookie("guest-1", maxSignInRotations) || len(access.rotatedCookies) != maxSignInRotations {
 		t.Fatal("full tombstone map rejected an existing cookie")
 	}
 	access.rotatedCookies[oldest] = rotatedCookie{until: now.Add(-time.Second), pending: 1}
-	if access.rememberRotatedCookie("overflow") || len(access.rotatedCookies) != maxRotatedCookies {
+	if access.rememberRotatedCookie("overflow", maxSignInRotations) || len(access.rotatedCookies) != maxSignInRotations {
 		t.Fatal("expired in-flight cookie released its tombstone slot")
 	}
 	access.rotatedCookies[oldest] = rotatedCookie{until: now.Add(-time.Second)}
-	if !access.rememberRotatedCookie("after-expiry") || len(access.rotatedCookies) != maxRotatedCookies {
+	if !access.rememberRotatedCookie("after-expiry", maxSignInRotations) || len(access.rotatedCookies) != maxSignInRotations {
 		t.Fatalf("expired tombstone did not release capacity: entries=%d", len(access.rotatedCookies))
-	}
-	access.markSignedOutCookie("after-expiry")
-	if !access.rotatedCookies[sha256.Sum256([]byte("after-expiry"))].signedOut {
-		t.Fatal("sign-out marker was not retained when a slot was available")
 	}
 	key := sha256.Sum256([]byte("after-expiry"))
 	access.rotatedCookies[key] = rotatedCookie{until: now.Add(time.Minute), pending: 1}
@@ -933,16 +1018,19 @@ func TestAdminRotatedCookieTombstonesStayBounded(t *testing.T) {
 	if state := access.rotatedCookies[key]; !state.signedOut || state.pending != 1 {
 		t.Fatalf("sign-out lost in-flight callback count: %+v", state)
 	}
-	access.rotatedCookies[key] = rotatedCookie{until: now.Add(time.Minute), signedOut: true}
-	for key := range access.rotatedCookies {
-		access.rotatedCookies[key] = rotatedCookie{until: now.Add(time.Minute), signedOut: true}
+	for i := range maxAdminSessions {
+		access.markSignedOutCookie(fmt.Sprintf("signed-%d", i))
 	}
-	access.markSignedOutCookie("latest-signout")
-	if len(access.rotatedCookies) != maxRotatedCookies || !access.rotatedCookies[sha256.Sum256([]byte("latest-signout"))].signedOut {
-		t.Fatal("full sign-out map did not retain the latest sign-out")
+	firstSignOut := sha256.Sum256([]byte("signed-0"))
+	if len(access.rotatedCookies) != maxRotatedCookies || !access.rotatedCookies[firstSignOut].signedOut {
+		t.Fatalf("sign-out reserve exhausted early: entries=%d first=%+v", len(access.rotatedCookies), access.rotatedCookies[firstSignOut])
 	}
-	if !access.rememberRotatedCookie("new-login") || len(access.rotatedCookies) != maxRotatedCookies || access.rotatedCookies[sha256.Sum256([]byte("new-login"))].signedOut {
-		t.Fatal("full sign-out map blocked a new sign-in rotation")
+	access.markSignedOutCookie("overflow")
+	if _, admitted := access.rotatedCookies[sha256.Sum256([]byte("overflow"))]; admitted || !access.rotatedCookies[firstSignOut].signedOut {
+		t.Fatal("full sign-out map evicted a live marker")
+	}
+	if access.rememberRotatedCookie("new-login", maxSignInRotations) {
+		t.Fatal("full sign-out map admitted another sign-in rotation")
 	}
 }
 

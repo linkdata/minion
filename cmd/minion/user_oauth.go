@@ -83,8 +83,8 @@ type oauthAccess struct {
 	usageGate   *userUsageGate
 }
 
-// Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
-const maxOAuthAdmissionSessions = maxAdminSessions - 32
+// Keep 32 slots for admin sign-in and session rotation after guest pages.
+const maxGuestAdmissionSessions = maxAdminSessions - 32
 
 func githubProfileSubject(claims map[string]any) (string, error) {
 	raw, ok := claims["id"].(json.Number)
@@ -123,7 +123,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions-1 {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -180,7 +180,7 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 			if strings.HasSuffix(path, "/login") {
 				login := handler
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
+					if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
 						w.Header().Set("Cache-Control", "no-store")
 						w.Header().Set("Retry-After", "60")
 						w.WriteHeader(http.StatusServiceUnavailable)
@@ -351,7 +351,7 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *admi
 	a.linkMu.Lock()
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		sess, _ = admin.rotatedSessionForLogout(r)
+		sess = admin.rotatedSessionForLogout(r)
 	}
 	if sess != nil {
 		account, _ := a.currentUser(sess)
@@ -407,7 +407,7 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	w.Header().Set("Cache-Control", "no-store")
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
+		if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
 			w.Header().Set("Retry-After", "60")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return

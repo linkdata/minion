@@ -36,6 +36,8 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"127.0.0.1:8377", "127.0.0.1"},
 		{"127.0.0.2:8377", "127.0.0.2"},
 		{"[::1]:8377", "[::1]"},
+		{"[::ffff:127.0.0.1]:8377", "127.0.0.1"},
+		{"[::ffff:127.0.0.1]:8377", "localhost"},
 	} {
 		loopback := valid()
 		loopback.Admin.Listen = tc.listen
@@ -51,6 +53,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"127.0.0.1:8377", "[::1]"},
 		{"127.0.0.2:8377", "localhost"},
 		{"[::1]:8377", "localhost"},
+		{"[::ffff:127.0.0.1]:8377", "127.0.0.2"},
 	} {
 		unbound := valid()
 		unbound.Admin.Listen = tc.listen
@@ -136,6 +139,11 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		}, "redirect_url"},
 		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback" }, "admin TLS"},
 		{"plain listener with HTTPS callback", func(c *Config) { c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", "" }, "admin TLS"},
+		{"public listener without TLS", func(c *Config) {
+			c.Admin.Listen = "0.0.0.0:8377"
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
+		}, "outside literal loopback"},
 		{"GitHub endpoint override", func(c *Config) { c.Admin.GitHubOAuth.BaseURL = "https://github.example" }, "base_url"},
 		{"GitLab HTTP origin", func(c *Config) { c.Admin.GitLabOAuth.BaseURL = "http://gitlab.example" }, "base_url"},
 		{"GitLab path origin", func(c *Config) { c.Admin.GitLabOAuth.BaseURL = "https://gitlab.example/subpath" }, "base_url"},

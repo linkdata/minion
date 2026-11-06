@@ -775,7 +775,7 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 		!strings.Contains(home.Body.String(), `href="/auth/login"`) {
 		t.Fatalf("combined sign-in home: status=%d body=%q", home.Code, home.Body.String())
 	}
-	for jw.SessionCount() < maxOAuthAdmissionSessions-17 {
+	for jw.SessionCount() < maxGuestAdmissionSessions-17 {
 		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
 		if response.Code != http.StatusFound || len(response.Result().Cookies()) != 1 {
 			t.Fatalf("OAuth start before limit: status=%d cookies=%v", response.Code, response.Result().Cookies())
@@ -789,7 +789,7 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 		}
 		guests[i] = response.Result().Cookies()[0]
 	}
-	if got := jw.SessionCount(); got != maxOAuthAdmissionSessions-1 {
+	if got := jw.SessionCount(); got != maxGuestAdmissionSessions-1 {
 		t.Fatalf("sessions before concurrent starts=%d", got)
 	}
 
@@ -819,7 +819,7 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 			cookieFreeStarts++
 		}
 	}
-	if cookieFreeStarts != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
+	if cookieFreeStarts != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("cookie-free starts=%d sessions=%d", cookieFreeStarts, jw.SessionCount())
 	}
 	for _, cookie := range []*http.Cookie{nil, guests[0]} {
@@ -850,7 +850,7 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
 	var guest *http.Cookie
-	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
+	for jw.SessionCount() < maxGuestAdmissionSessions-2 {
 		w := httptest.NewRecorder()
 		if jw.NewSession(w, httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)) == nil {
 			t.Fatal("could not fill guest sessions")
@@ -858,13 +858,6 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 		if guest == nil {
 			guest = w.Result().Cookies()[0]
 		}
-	}
-	last := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
-	if last.Code != http.StatusOK || len(last.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
-		t.Fatalf("last OAuth login page: status=%d sessions=%d cookies=%v", last.Code, jw.SessionCount(), last.Result().Cookies())
-	}
-	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, last.Result().Cookies()[0], ""); start.Code != http.StatusFound {
-		t.Fatalf("last OAuth login page cannot start OAuth: status=%d", start.Code)
 	}
 	responses := make([]*httptest.ResponseRecorder, 32)
 	start := make(chan struct{})
@@ -879,8 +872,14 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	close(start)
 	workers.Wait()
+	var last *http.Cookie
 	for i, response := range responses {
 		switch response.Code {
+		case http.StatusOK:
+			if len(response.Result().Cookies()) != 1 || last != nil {
+				t.Fatalf("guest page %d: unexpected successful admission: cookies=%v", i, response.Result().Cookies())
+			}
+			last = response.Result().Cookies()[0]
 		case http.StatusServiceUnavailable:
 			if len(response.Result().Cookies()) != 0 {
 				t.Fatalf("guest page %d: over-limit cookie", i)
@@ -889,8 +888,11 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 			t.Fatalf("guest page %d: status=%d", i, response.Code)
 		}
 	}
-	if jw.SessionCount() != maxOAuthAdmissionSessions-1 {
-		t.Fatalf("guest pages exhausted OAuth start reserve: sessions=%d", jw.SessionCount())
+	if last == nil || jw.SessionCount() != maxGuestAdmissionSessions-1 {
+		t.Fatalf("guest page burst: one admitted=%t sessions=%d", last != nil, jw.SessionCount())
+	}
+	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, last, ""); start.Code != http.StatusFound {
+		t.Fatalf("last OAuth login page cannot start OAuth: status=%d", start.Code)
 	}
 	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, guest, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 0 {
 		t.Fatalf("existing guest page at reserve: status=%d cookies=%v", page.Code, page.Result().Cookies())
