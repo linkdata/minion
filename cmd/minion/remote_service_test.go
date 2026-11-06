@@ -6,10 +6,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,14 +27,67 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
+func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
+	current := config.Config{
+		Commands: map[string]config.CommandMapping{
+			"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"review":  {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"fix":     {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		},
+		Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}},
+	}
+	selected := map[string]bool{"comment": true, "review": true}
+	reenabled := current
+	reenabled.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "review"}}}
+	if !sameSkillConfig(current, reenabled) || hasUnselectedCommand(selected, reenabled) {
+		t.Fatal("re-enabling a frozen command incorrectly requires remote restart")
+	}
+	newCommand := current
+	newCommand.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "fix"}}}
+	if !sameSkillConfig(current, newCommand) || !hasUnselectedCommand(selected, newCommand) {
+		t.Fatal("unselected command bypassed remote restart")
+	}
+	unsupported := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
+		"comment":        {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
+	if hasUnselectedCommand(map[string]bool{"comment": true}, unsupported) {
+		t.Fatal("unchanged provider-unsupported command incorrectly requires remote restart")
+	}
+}
+
 func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testing.T) {
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
-	cfg := config.Config{Main: "codex", Commands: commands,
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Commands: commands, AlwaysOnSkills: []string{},
 		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
-		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}},
-		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile, Token: token}}
+		Repositories:   []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: listen, TLSCertFile: certFile, TLSKeyFile: keyFile, Token: token}}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	owner := &action.Orchestrator{Main: "codex", Commands: commands, CodexModel: "main-1", CodexEffort: "high"}
 	watcher := &monitor.Monitor{Config: cfg}
 	endpoint, err := attachSelectedRemoteWorker(owner, watcher)
@@ -79,11 +134,28 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if err := owner.WaitCapacity(ctx); err != nil {
 		t.Fatalf("authenticated pull did not provide capacity: %v", err)
 	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].AllowedActors = []string{"writer"}
+		next.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+		next.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
+		next.AIInstructions = "Read the selected task carefully."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().Pending || len(watcher.Config.Repositories[0].AllowedActors) != 0 {
+		t.Fatal("saved remote policy was active before the service boundary")
+	}
 	now := time.Now().UTC()
 	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 	var logs bytes.Buffer
-	if code := runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second); code != 0 {
+	if code := runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second, live); code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
+	}
+	if live.snapshot().Pending || live.current().AIInstructions != "Read the selected task carefully." ||
+		owner.AIInstructions != "Read the selected task carefully." || len(watcher.Config.Repositories[0].AllowedActors) != 1 ||
+		watcher.Config.Repositories[0].AllowedActors[0] != "writer" || owner.CleanCriticRounds == nil || owner.CleanCriticRounds(1, 7) != 2 {
+		t.Fatalf("remote policy was not activated: current=%+v worker=%+v owner=%+v", live.current(), watcher.Config, owner)
 	}
 	<-endpoint.Done()
 	got := <-pullDone

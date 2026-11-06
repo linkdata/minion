@@ -19,8 +19,8 @@ func evidenceRows(text string) int {
 
 var adminActionDetailTemplate = template.Must(template.New("admin action detail").Funcs(utcTemplateFuncs).Funcs(template.FuncMap{
 	"evidenceRows": evidenceRows,
-}).Parse(headHTML + `{{template "head.html" $}}<title>Minion action detail</title></head><body>{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
-<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-body-secondary"> / {{if .AllowUser}}my actions{{else}}operator{{end}}</span></div><form class="ms-auto" method="post" action="{{if .AllowUser}}/auth/logout{{else}}/admin/logout{{end}}"><button class="btn btn-outline-light" type="submit">Sign out</button></form></header>
+}).Parse(headHTML + adminNavHTML + `{{template "head.html" $}}<title>Minion action detail</title></head><body>{{if or .Auth.IsAdmin .Dot.AllowUser}}{{with .Dot}}
+{{if .AllowUser}}<header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary"><div><strong>MINION</strong><span class="text-body-secondary"> / my actions</span></div><form class="ms-auto" method="post" action="/auth/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form></header>{{else}}{{template "admin-nav" $}}{{end}}
 <main class="container py-4"><p><a href="{{if .AllowUser}}/auth/actions{{else}}/{{end}}">← {{if .AllowUser}}My actions{{else}}Live actions{{end}}</a></p><div class="border-bottom mb-4"><p class="text-body-secondary small fw-semibold">ACTION DETAIL</p><h1>{{.AttemptID}}</h1></div>
 <section class="border rounded p-3 mb-3"><h2 class="h5">Action and deadline</h2><dl class="text-break">
 <dt>Repository</dt><dd>{{if .Repository}}{{.Repository}}{{else}}Unavailable in retained records{{end}}</dd>

@@ -250,6 +250,292 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 	}
 }
 
+func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
+	home := t.TempDir()
+	isolateHostPaths(t, home)
+	availableSkill := "https://github.com/example/skills/tree/main/skills/newly-installed"
+	unavailableSkill := "https://github.com/example/skills/tree/main/skills/still-missing"
+	cfg := selectedServiceTestConfig(t)
+	cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = 1, 2
+	cfg.Repositories[0].Actions = []string{"comment", "available", "unavailable"}
+	cfg.Commands["available"] = config.CommandMapping{Action: "comment", Skills: []string{availableSkill}}
+	cfg.Commands["unavailable"] = config.CommandMapping{Action: "comment", Skills: []string{unavailableSkill}}
+	cfg.Commands["unused"] = config.CommandMapping{Action: "comment", Skills: []string{unavailableSkill}}
+	cfg.AlwaysOnSkills = []string{}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MINION_SELECTED_SERVICE_HELPER", "ready")
+	report := filepath.Join(t.TempDir(), "startup.json")
+	t.Setenv("MINION_SELECTED_SERVICE_REPORT", report)
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	logger := log.New(io.Discard, "", 0)
+	owner := newOrchestrator(cfg, nil, store, logger, nil)
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: configPath, Logger: logger}
+	args := []string{"-test.run=^TestSelectedLocalServiceChild$"}
+	done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, os.Args[0], args, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeWorker() })
+	initialWorker := owner.Executor
+	if !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] || watcher.SelectedCommands["available"] || watcher.SelectedCommands["unavailable"] {
+		t.Fatalf("initial commands = %v", watcher.SelectedCommands)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	finished := make(chan struct{})
+	var code int
+	go func() {
+		code = runSelectedLocalServiceLive(ctx, owner, watcher, store, true, done, logger, closeWorker, os.Args[0], args, 5*time.Second, live)
+		close(finished)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("selected service did not stop")
+		}
+	})
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	waitApplied := func() {
+		t.Helper()
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		for live.snapshot().Pending {
+			select {
+			case <-ticker.C:
+			case <-finished:
+				t.Fatalf("selected service exited before activating config: code=%d", code)
+			case <-deadline.C:
+				t.Fatal("selected service did not activate config")
+			}
+		}
+		if got := live.snapshot().Error; got != "" {
+			t.Fatal(got)
+		}
+	}
+	unusedSkill := "https://github.com/example/skills/tree/main/skills/unused-other"
+	if err := live.save(func(next *config.Config) error {
+		mapping := next.Commands["unused"]
+		mapping.Skills = []string{unusedSkill}
+		next.Commands["unused"] = mapping
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != initialWorker || watcher.Config.Commands["unused"].Skills[0] != unusedSkill || owner.Commands["unused"].Skills[0] != unusedSkill {
+		t.Fatal("unused command skill edit restarted the selected worker or left stale configuration")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = next.Repositories[0].Actions[:2]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != initialWorker || len(watcher.Config.Repositories[0].Actions) != 2 {
+		t.Fatal("removing an unavailable command restarted the selected worker or left stale actions")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "unavailable")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != initialWorker || len(watcher.Config.Repositories[0].Actions) != 3 {
+		t.Fatal("enabling an unavailable command restarted the selected worker or left stale actions")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
+		next.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor == initialWorker || !watcher.SelectedCommands["review"] || !watcher.SelectedCommands["comment"] ||
+		len(watcher.Config.Repositories[0].Actions) != 4 || len(live.current().Repositories[0].Actions) != 4 {
+		t.Fatalf("replacement selection was not applied: worker=%v commands=%v", owner.Executor != initialWorker, watcher.SelectedCommands)
+	}
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startup action.WorkerStartup
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if len(startup.Selection.Commands) != 2 || len(startup.Selection.Main.AlwaysOnSkills) != 1 ||
+		startup.Selection.Main.AlwaysOnSkills[0] != skills.BuiltinAntiPromptInjection {
+		t.Fatalf("replacement child received commands=%v always-on=%v", startup.Selection.Commands, startup.Selection.Main.AlwaysOnSkills)
+	}
+	firstReplacement := owner.Executor
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = next.Repositories[0].Actions[:3]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != firstReplacement || len(watcher.Config.Repositories[0].Actions) != 3 {
+		t.Fatal("disabling a selected command restarted the worker or left stale actions")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != firstReplacement || len(watcher.Config.Repositories[0].Actions) != 4 {
+		t.Fatal("reenabling a previously selected command restarted the worker or left stale actions")
+	}
+	skillDir := filepath.Join(home, ".agents", "skills", "newly-installed")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: newly-installed\n---\nReview code.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"url":"` + availableSkill + `","commit":"` + strings.Repeat("a", 40) + `"}`)
+	if err := os.WriteFile(filepath.Join(skillDir, ".minion-install.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, installed, err := skills.InstalledPathFor(availableSkill, "codex"); err != nil || !installed {
+		t.Fatalf("new skill was not installed: installed=%t error=%v", installed, err)
+	}
+	if _, installed, err := skills.InstalledPathFor(unavailableSkill, "codex"); err != nil || installed {
+		t.Fatalf("later skill must remain unavailable: installed=%t error=%v", installed, err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.AIInstructions = "Use the newly installed skill."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor == firstReplacement || !watcher.SelectedCommands["available"] || watcher.SelectedCommands["unavailable"] ||
+		owner.AIInstructions != "Use the newly installed skill." || live.current().AIInstructions != owner.AIInstructions {
+		t.Fatalf("later unavailable command suppressed refresh: worker=%v commands=%v", owner.Executor != firstReplacement, watcher.SelectedCommands)
+	}
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup = action.WorkerStartup{}
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if len(startup.Selection.Commands) != 3 || len(startup.Selection.Commands["available"].Skills) != 1 ||
+		startup.Selection.Commands["available"].Skills[0] != availableSkill {
+		t.Fatalf("new child did not receive installed skill: commands=%v", startup.Selection.Commands)
+	}
+	cancel()
+	<-finished
+	if code != 0 {
+		t.Fatalf("selected service exited %d", code)
+	}
+}
+
+func TestSelectedLocalServiceFailedActivationBlocksOldPolicy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		live, _ := liveConfigFixture(t, false)
+		initial := live.current()
+		if err := live.save(func(cfg *config.Config) error {
+			cfg.Repositories[0].DenyAllActors = true
+			cfg.AlwaysOnSkills = []string{}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+		logger := log.New(io.Discard, "", 0)
+		owner := newOrchestrator(initial, nil, store, logger, nil)
+		owner.Main = "claude" // Force WorkerSelection to reject the saved Codex configuration.
+		handler := &blockedConfigUpdateHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		watcher := &monitor.Monitor{Config: initial, Handler: handler, SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}, BeforeAccept: live.admit}
+		done := make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		finished := make(chan int, 1)
+		go func() {
+			finished <- runSelectedLocalServiceLive(ctx, owner, watcher, store, true, done, logger, func() error { return nil }, "", nil, 0, live)
+		}()
+		stopped, releaseClosed := false, false
+		defer func() {
+			cancel()
+			if !releaseClosed {
+				close(handler.release)
+			}
+			if !stopped {
+				<-finished
+			}
+		}()
+		synctest.Wait()
+		if live.snapshot().Error == "" {
+			t.Fatal("failed activation was not reported")
+		}
+		select {
+		case <-handler.entered:
+			t.Fatal("monitor reentered under the old requester policy")
+		default:
+		}
+		select {
+		case code := <-finished:
+			stopped = true
+			t.Fatalf("service exited instead of waiting for a new edit: %d", code)
+		default:
+		}
+		owner.Main = "codex"
+		if err := live.save(func(cfg *config.Config) error {
+			cfg.AlwaysOnSkills = initial.AlwaysOnSkills
+			cfg.AIInstructions = "Apply the saved requester restriction."
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case <-handler.entered:
+		case code := <-finished:
+			stopped = true
+			t.Fatalf("service exited before retrying the saved edit: %d", code)
+		default:
+			t.Fatal("new admin edit did not resume monitor discovery")
+		}
+		if !watcher.Config.Repositories[0].DenyAllActors || live.snapshot().Pending || live.snapshot().Error != "" {
+			t.Fatalf("old requester policy resumed after retry: active=%+v snapshot=%+v", watcher.Config.Repositories[0], live.snapshot())
+		}
+		cancel()
+		close(handler.release)
+		releaseClosed = true
+		synctest.Wait()
+		code := <-finished
+		stopped = true
+		if code != 0 {
+			t.Fatalf("canceling failed activation returned %d", code)
+		}
+	})
+}
+
 func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	cfg := selectedServiceTestConfig(t)

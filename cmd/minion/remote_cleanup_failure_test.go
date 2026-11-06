@@ -88,7 +88,7 @@ func TestRemoteAcceptedCleanupFailureClosesHeldPull(t *testing.T) {
 	fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token)
 	serviceDone := make(chan int, 1)
 	go func() {
-		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, true, logger, endpoint, 5*time.Second)
+		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, true, logger, endpoint, 5*time.Second, nil)
 	}()
 	select {
 	case <-gh.replyEntered:

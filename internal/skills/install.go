@@ -61,6 +61,16 @@ type stagedInstall struct {
 // GitHub source is resolved to one commit before downloading. Embedded skills
 // need no network access. No skill source code is run.
 func Install(ctx context.Context, urls []string) error {
+	return installSources(ctx, urls)
+}
+
+// InstallFor installs one skill for one provider without replacing the other
+// provider's copy. The provider must be "codex" or "claude".
+func InstallFor(ctx context.Context, rawURL, provider string) error {
+	return installSources(ctx, []string{rawURL}, provider)
+}
+
+func installSources(ctx context.Context, urls []string, providers ...string) error {
 	home, err := userHome()
 	if err != nil {
 		return err
@@ -74,10 +84,24 @@ func Install(ctx context.Context, urls []string) error {
 			return nil
 		},
 	}
-	return (&installer{client: client, apiURL: "https://api.github.com", home: home}).install(ctx, urls)
+	return (&installer{client: client, apiURL: "https://api.github.com", home: home}).install(ctx, urls, providers...)
 }
 
-func (i *installer) install(ctx context.Context, urls []string) (err error) {
+func (i *installer) install(ctx context.Context, urls []string, providers ...string) (err error) {
+	parents := []string{".agents", ".claude"}
+	if len(providers) != 0 {
+		if len(providers) != 1 {
+			return errors.New("install one skill provider at a time")
+		}
+		switch providers[0] {
+		case "codex":
+			parents = []string{".agents"}
+		case "claude":
+			parents = []string{".claude"}
+		default:
+			return fmt.Errorf("unsupported skill provider %q", providers[0])
+		}
+	}
 	byName := make(map[string]*skillBundle)
 	caseNames := make(map[string]string)
 	groups := make(map[string][]*skillBundle)
@@ -157,7 +181,8 @@ func (i *installer) install(ctx context.Context, urls []string) (err error) {
 			err = errors.Join(err, os.RemoveAll(dir))
 		}
 	}()
-	for _, root := range []string{filepath.Join(i.home, ".agents", "skills"), filepath.Join(i.home, ".claude", "skills")} {
+	for _, parent := range parents {
+		root := filepath.Join(i.home, parent, "skills")
 		if err := ensureRoot(i.home, root); err != nil {
 			return err
 		}

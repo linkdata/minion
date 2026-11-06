@@ -162,7 +162,7 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 	defer cancel()
 	serviceDone := make(chan int, 1)
 	go func() {
-		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, false, logger, endpoint, 10*time.Second)
+		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, false, logger, endpoint, 10*time.Second, nil)
 	}()
 	noPull, stopNoPull := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer stopNoPull()

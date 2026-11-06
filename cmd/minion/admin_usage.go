@@ -17,14 +17,10 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + usageEstimatedCostTemplate + `{{template "head.html" $}}<title>Usage · Minion admin</title>
+var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + adminNavHTML + usageEstimatedCostTemplate + `{{template "head.html" $}}<title>Usage · Minion admin</title>
 </head>
 <body>{{with .Dot}}
-  <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
-    <div><strong>MINION</strong><span class="text-body-secondary"> / usage</span></div>
-    <nav><a href="/">Live actions</a></nav>
-    <form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
-  </header>
+  {{template "admin-nav" $}}
   <main class="container-fluid py-4">
     <div class="border-bottom mb-4">
       <p class="text-body-secondary small fw-semibold">ACCOUNTING</p><h1>Usage and billing</h1>

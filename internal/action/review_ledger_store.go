@@ -21,6 +21,7 @@ type retainedReview struct {
 	CriticMaxRounds                  int          `json:"critic_max_rounds"`
 	CriticNonblockingRounds          int          `json:"critic_nonblocking_rounds"`
 	CriticConsecutiveNoBlockerRounds int          `json:"critic_consecutive_no_blocker_rounds"`
+	RequiredCleanCriticRounds        int          `json:"required_clean_critic_rounds,omitempty"`
 	Calls                            []CallUsage  `json:"calls"`
 	Refutations                      []Refutation `json:"refutations"`
 }
@@ -87,6 +88,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 		Identity:         job.Identity, SourceRef: job.Source.Head,
 		CriticMaxRounds: job.CriticMaxRounds, CriticNonblockingRounds: job.CriticNonblockingRounds,
 		CriticConsecutiveNoBlockerRounds: job.CriticConsecutiveNoBlockerRounds,
+		RequiredCleanCriticRounds:        job.RequiredCleanCriticRounds,
 		Calls:                            result.Calls, Refutations: result.Refutations,
 	}
 	if len(record.Calls) != 0 {
@@ -114,6 +116,7 @@ func saveReviewEvidence(workRoot string, job Job, result Result, logger *log.Log
 			saved.Identity != record.Identity || saved.SourceRef != record.SourceRef ||
 			saved.CriticMaxRounds != record.CriticMaxRounds || saved.CriticNonblockingRounds != record.CriticNonblockingRounds ||
 			saved.CriticConsecutiveNoBlockerRounds != record.CriticConsecutiveNoBlockerRounds ||
+			saved.RequiredCleanCriticRounds != record.RequiredCleanCriticRounds ||
 			len(saved.Calls) > len(record.Calls) || len(saved.Refutations) > len(record.Refutations) ||
 			!equalCallUsages(saved.Calls, record.Calls[:len(saved.Calls)]) || !slices.Equal(saved.Refutations, record.Refutations[:len(saved.Refutations)]) {
 			return fmt.Errorf("%w: review evidence changed or discarded a saved prefix", errPrivateRecordConflict)

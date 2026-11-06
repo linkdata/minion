@@ -76,6 +76,9 @@ var ErrAcceptedDiscarded = errors.New("accepted action discarded")
 // ErrAcceptedRetry means final assignment validation could not establish current validity.
 var ErrAcceptedRetry = errors.New("accepted action assignment validation deferred")
 
+// ErrConfigUpdatePending stops an idle scan so the caller can activate saved configuration.
+var ErrConfigUpdatePending = errors.New("configuration update pending")
+
 const (
 	maxJobAttempts        = 3
 	siblingReplyBudget    = 3 * time.Minute
@@ -128,6 +131,8 @@ type Monitor struct {
 	Now                    func() time.Time
 	SelectedCommands       map[string]bool                                  // Non-nil freezes discovery to the selected worker's commands.
 	SelectedExecutorID     string                                           // Nonempty only while a selected worker owns actions.
+	ConfigUpdates          <-chan struct{}                                  // Optional signal to leave an idle capacity wait.
+	BeforeAccept           func(func() error) error                         // Fences durable decisions and cursor advancement against saved config updates.
 	UserPreferences        func(int64) (config.UserModelPreferences, error) // Optional proven GitHub requester lookup.
 	AfterAcceptedCleanup   func()                                           // Called after an accepted reservation is durably released.
 	afterSelectedRunReturn func()                                           // Test seam after the worker's terminal decision.
@@ -523,6 +528,24 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return scans[i].notification.UpdatedAt.Before(scans[j].notification.UpdatedAt)
 	})
+	rememberUnaccepted := func(first int) {
+		for _, unaccepted := range scans[first:] {
+			if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
+				unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
+				pending.UpdatedAt = unaccepted.notification.UpdatedAt
+				pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
+				store.Data.PendingNotifications[unaccepted.key] = pending
+			}
+			rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
+		}
+	}
+	stopForConfigUpdate := func(first int, err error) (time.Time, error) {
+		rememberUnaccepted(first)
+		if saveErr := store.Save(); saveErr != nil {
+			return stop(fmt.Errorf("%w: preserve pending notifications: %w", ErrAcceptanceState, saveErr))
+		}
+		return stop(err)
+	}
 	for scanIndex, entry := range scans {
 		if ctx.Err() != nil {
 			return stop()
@@ -662,10 +685,22 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 				continue
 			}
 			if !repo.AllowsAction(cmd.Name) || !repo.AllowsActor(item.Author.Login, item.Author.ID) {
-				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
-				if err := retireIgnoredJob(store, job.ID, started); err != nil {
+				if m.takeConfigUpdate(store) {
+					return stopForConfigUpdate(scanIndex, ErrConfigUpdatePending)
+				}
+				retire := func() error { return retireIgnoredJob(store, job.ID, started) }
+				if m.BeforeAccept != nil {
+					err = m.BeforeAccept(retire)
+				} else {
+					err = retire()
+				}
+				if errors.Is(err, ErrConfigUpdatePending) {
+					return stopForConfigUpdate(scanIndex, err)
+				}
+				if err != nil {
 					return stop(err)
 				}
+				m.logf("ignore %s from @%s in %s: disabled action or actor", cmd.Action, item.Author.Login, repo.Name)
 				continue
 			}
 			permission, err := m.GitHub.Permission(ctx, repo.Name, item.Author.Login)
@@ -783,31 +818,37 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stop(err)
 				}
 			}
+			if m.takeConfigUpdate(store) {
+				return stopForConfigUpdate(scanIndex, ErrConfigUpdatePending)
+			}
 			prepCtx, cancelPrep := context.WithDeadline(ctx, job.Deadline)
 			var unregisterPrep func() bool
-			if err := store.WithLock(func() error {
-				jobFailure.Attempts++
-				store.Data.JobFailures[job.ID] = jobFailure
-				store.Data.Accepted = accepted
-				if firstAcceptance {
-					store.Data.AcceptedTotal++
-				}
-				for _, unaccepted := range scans[scanIndex:] {
-					if pending, exists := store.Data.PendingNotifications[unaccepted.key]; exists &&
-						unaccepted.notification.UpdatedAt.After(pending.UpdatedAt) {
-						pending.UpdatedAt = unaccepted.notification.UpdatedAt
-						pending.RetryAt = time.Time{} // A new thread update supersedes the old retry delay.
-						store.Data.PendingNotifications[unaccepted.key] = pending
+			accept := func() error {
+				return store.WithLock(func() error {
+					jobFailure.Attempts++
+					store.Data.JobFailures[job.ID] = jobFailure
+					store.Data.Accepted = accepted
+					if firstAcceptance {
+						store.Data.AcceptedTotal++
 					}
-					rememberNotification(store, unaccepted.key, unaccepted.notification, unaccepted.since)
-				}
-				if err := saveAcceptanceState(store); err != nil {
-					return err
-				}
-				unregisterPrep = store.RegisterSelectedStopLocked(job.ID, job.AttemptID, cancelPrep)
-				return nil
-			}); err != nil {
+					rememberUnaccepted(scanIndex)
+					if err := saveAcceptanceState(store); err != nil {
+						return err
+					}
+					unregisterPrep = store.RegisterSelectedStopLocked(job.ID, job.AttemptID, cancelPrep)
+					return nil
+				})
+			}
+			if m.BeforeAccept != nil {
+				err = m.BeforeAccept(accept)
+			} else {
+				err = accept()
+			}
+			if err != nil {
 				cancelPrep()
+				if errors.Is(err, ErrConfigUpdatePending) {
+					return stopForConfigUpdate(scanIndex, err)
+				}
 				return stop(err)
 			}
 			releasePrep := func() bool {
@@ -887,18 +928,33 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	if ctx.Err() != nil {
 		return stop()
 	}
+	if m.takeConfigUpdate(store) {
+		return stopForConfigUpdate(0, ErrConfigUpdatePending)
+	}
 	// GitHub timestamps have second precision. Keep a two-second overlap so an
 	// update racing with this poll cannot fall on the exclusive since boundary.
 	newCursor := started.Add(-2 * time.Second)
-	for _, repo := range polled {
-		if newCursor.After(store.Data.RepositoryCursors[repo]) {
-			store.Data.RepositoryCursors[repo] = newCursor
+	advanceCursor := func() error {
+		for _, repo := range polled {
+			if newCursor.After(store.Data.RepositoryCursors[repo]) {
+				store.Data.RepositoryCursors[repo] = newCursor
+			}
 		}
+		if newCursor.After(store.Data.Cursor) {
+			store.Data.Cursor = newCursor
+		}
+		return store.Save()
 	}
-	if newCursor.After(store.Data.Cursor) {
-		store.Data.Cursor = newCursor
+	var err error
+	if m.BeforeAccept != nil {
+		err = m.BeforeAccept(advanceCursor)
+	} else {
+		err = advanceCursor()
 	}
-	if err := store.Save(); err != nil {
+	if errors.Is(err, ErrConfigUpdatePending) {
+		return stopForConfigUpdate(0, err)
+	}
+	if err != nil {
 		return stop(err)
 	}
 	return stop()
@@ -979,8 +1035,24 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 	})
 }
 
+// Consume an update only while no action is accepted.
+func (m *Monitor) takeConfigUpdate(store *state.Store) bool {
+	if store.Data.Accepted != nil {
+		return false
+	}
+	select {
+	case <-m.ConfigUpdates:
+		return true
+	default:
+		return false
+	}
+}
+
 // Keep the one capacity wait live while the monitor services invitation deadlines.
 func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.Store, precheckedTerminal *time.Time) error {
+	if m.takeConfigUpdate(store) {
+		return ErrConfigUpdatePending
+	}
 	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
 		return err
 	}
@@ -992,6 +1064,9 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		nextTerminal = *precheckedTerminal
 	} else {
 		nextTerminal = m.serviceTerminalControls(ctx, store)
+	}
+	if m.takeConfigUpdate(store) {
+		return ErrConfigUpdatePending
 	}
 	waitCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
@@ -1012,12 +1087,25 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		}
 		return ctx.Err()
 	}
+	finishCapacity := func(err error) error {
+		if err := finish(err); err != nil {
+			return err
+		}
+		if m.takeConfigUpdate(store) {
+			return ErrConfigUpdatePending
+		}
+		return nil
+	}
 	defer func() {
 		cancel()
 		if waiting {
 			<-done
 		}
 	}()
+	updates := m.ConfigUpdates
+	if m.Config.RemoteExecutor == nil || store.Data.Accepted != nil {
+		updates = nil
+	}
 	for {
 		due := withPublicationWriteWake(earlierWake(store.Data.NextInviteCheckAt, nextTerminal), store, m.now().UTC())
 		timer := time.NewTimer(due.Sub(m.now().UTC()))
@@ -1025,12 +1113,12 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		case err := <-done:
 			timer.Stop()
 			waiting = false
-			return finish(err)
+			return finishCapacity(err)
 		case <-timer.C:
 			select {
 			case err := <-done:
 				waiting = false
-				return finish(err)
+				return finishCapacity(err)
 			default:
 			}
 			at := m.now().UTC()
@@ -1045,6 +1133,12 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 			}
 			nextTerminal = m.serviceTerminalControls(ctx, store)
 			m.prunePrivateRecords(ctx, store)
+		case <-updates:
+			timer.Stop()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return ErrConfigUpdatePending
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()

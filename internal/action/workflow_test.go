@@ -256,6 +256,38 @@ func TestPortableJobRequiresExistingActionDeadline(t *testing.T) {
 	}
 }
 
+func TestPortableJobCarriesSelectedCleanGateAndAIInstructions(t *testing.T) {
+	gitFixtureRemote(t)
+	checkout := cloneFixture(t, t.TempDir())
+	request := usageJob()
+	request.Command = command.Command{Name: "fix", Action: command.Fix}
+	selected := 0
+	orchestrator := attemptFixture(&Orchestrator{
+		Adversarial: "claude", AIInstructions: "Operator guidance.",
+		CleanCriticRounds: func(repoID, requesterID int64) int {
+			if repoID != request.Repository.ID || requesterID != request.Source.Author.ID {
+				t.Fatalf("clean gate selected for wrong repository/requester: %d/%d", repoID, requesterID)
+			}
+			selected++
+			return 2
+		},
+		Commands: map[string]config.CommandMapping{
+			"fix":     {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		},
+	})
+	prepared := &preparedAction{checkout: checkout, request: request}
+	fix, err := orchestrator.portableJob(testActionContext(t), prepared, "title", "description")
+	if err != nil || fix.RequiredCleanCriticRounds != 2 || fix.AIInstructions != "Operator guidance." || selected != 1 {
+		t.Fatalf("fix lost selected policy or guidance: job=%+v selected=%d err=%v", fix, selected, err)
+	}
+	prepared.request.Command = command.Command{Name: "comment", Action: command.Comment}
+	comment, err := orchestrator.portableJob(testActionContext(t), prepared, "title", "description")
+	if err != nil || comment.RequiredCleanCriticRounds != 0 || comment.AIInstructions != "Operator guidance." || selected != 1 {
+		t.Fatalf("non-fix inherited clean gate: job=%+v selected=%d err=%v", comment, selected, err)
+	}
+}
+
 type expiredPreparationContext struct {
 	context.Context
 	deadline time.Time

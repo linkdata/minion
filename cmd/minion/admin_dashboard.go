@@ -21,11 +21,7 @@ var utcTemplateFuncs = template.FuncMap{"utc": func(at time.Time) string { retur
 const adminDashboardHTML = `{{define "dashboard"}}{{template "head.html" $}}<title>Minion admin</title>
 </head>
 <body>
-  <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
-    <div><strong>MINION</strong><span class="text-body-secondary"> / operator</span></div>
-    <nav><a href="/admin/usage">Usage</a></nav>
-    <form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
-  </header>
+  {{template "admin-nav" $}}
   <main class="container-fluid py-4">
     <div class="border-bottom mb-4">
       <p class="text-body-secondary small fw-semibold">ORCHESTRATOR</p><h1>Live actions</h1>
@@ -154,7 +150,7 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	return view
 }
 
-var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(utcTemplateFuncs).Parse(headHTML + adminDashboardHTML))
+var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(utcTemplateFuncs).Parse(headHTML + adminNavHTML + adminDashboardHTML))
 
 func adminDashboardHandler(jw *jaws.Jaws, owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

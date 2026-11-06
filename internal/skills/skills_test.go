@@ -2,8 +2,10 @@ package skills
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -119,8 +121,19 @@ func TestInstalledPathRequiresMatchingSafeInstallation(t *testing.T) {
 			if path, installed, err := tt.lookup(testURL); err != nil || !installed || path != filepath.Join(canonicalHome, tt.parent, "skills", "review", "SKILL.md") {
 				t.Fatalf("installed skill = %q, %t, %v", path, installed, err)
 			}
-			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); err == nil || installed {
+			if _, installed, err := tt.lookup("https://github.com/other/skills/tree/main/skills/review"); !errors.Is(err, ErrSourceMismatch) || installed {
 				t.Fatalf("mismatched source = %t, %v", installed, err)
+			}
+			for _, bad := range []string{`not JSON`, `{"url":"not a skill URL","commit":"` + testSHA + `"}`, `{"url":"https://github.com/other/skills/tree/main/skills/review","commit":"bad"}`} {
+				if err := os.WriteFile(filepath.Join(dir, installMetadataName), []byte(bad), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if _, installed, err := tt.lookup(testURL); err == nil || errors.Is(err, ErrSourceMismatch) || installed {
+					t.Fatalf("invalid metadata = %t, %v", installed, err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, installMetadataName), metadata, 0o600); err != nil {
+				t.Fatal(err)
 			}
 			t.Run("symlinked directory", func(t *testing.T) {
 				realDir := dir + "-installed"
@@ -254,6 +267,15 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(old, "stale.txt"), []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(old, "SKILL.md"), []byte("Old review skill."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, installMetadataName), []byte(`{"url":"https://github.com/other/skills/tree/main/skills/review","commit":"`+testSHA+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := InstalledPathFor(testURL, "codex"); !errors.Is(err, ErrSourceMismatch) {
+		t.Fatalf("old review skill should be a safe source mismatch: %v", err)
+	}
 	archive := tarball(t, []archiveEntry{
 		{name: "prefix/skills/review/SKILL.md", body: "Review code."},
 		{name: "prefix/skills/audit/SKILL.md", body: "Audit code."},
@@ -278,7 +300,7 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 				t.Fatalf("%s/%s = %q, %v", root, name, data, err)
 			}
 			metadata, err := os.ReadFile(filepath.Join(root, name, installMetadataName))
-			if err != nil || !strings.Contains(string(metadata), testSHA) {
+			if err != nil || !strings.Contains(string(metadata), testSHA) || !strings.Contains(string(metadata), `"url": "https://github.com/example/skills/tree/main/skills/`+name+`"`) {
 				t.Fatalf("install metadata = %q, %v", metadata, err)
 			}
 		}
@@ -292,6 +314,51 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 	}
 	if _, installed, err := InstalledPath(testURL); err != nil || !installed {
 		t.Fatalf("installed skill unavailable: %t, %v", installed, err)
+	}
+}
+
+func TestInstallForLeavesOtherProviderUntouched(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	codexDir := filepath.Join(home, ".agents", "skills", "review")
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldSkill := []byte("Existing Codex skill.\n")
+	oldMetadata := []byte(`{"url":"` + testURL + `","commit":"` + testSHA + `"}`)
+	if err := os.WriteFile(filepath.Join(codexDir, "SKILL.md"), oldSkill, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, installMetadataName), oldMetadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive := tarball(t, []archiveEntry{{name: "prefix/skills/review/SKILL.md", body: "New Claude skill."}})
+	i, commits, archives := testInstaller(t, home, archive)
+	if err := i.install(t.Context(), []string{testURL}, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if *commits != 1 || *archives != 1 {
+		t.Fatalf("downloads = %d commits, %d archives; want one each", *commits, *archives)
+	}
+	for name, want := range map[string][]byte{"SKILL.md": oldSkill, installMetadataName: oldMetadata} {
+		got, err := os.ReadFile(filepath.Join(codexDir, name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("Codex %s changed: %q, %v", name, got, err)
+		}
+	}
+	claudePath, installed, err := InstalledPathFor(testURL, "claude")
+	if err != nil || !installed {
+		t.Fatalf("Claude skill was not installed: %q, %t, %v", claudePath, installed, err)
+	}
+	got, err := os.ReadFile(claudePath)
+	if err != nil || string(got) != "New Claude skill." {
+		t.Fatalf("Claude skill content = %q, %v", got, err)
+	}
+	for _, parent := range []string{".agents", ".claude"} {
+		entries, err := os.ReadDir(filepath.Join(home, parent))
+		if err != nil || len(entries) != 1 || entries[0].Name() != "skills" {
+			t.Fatalf("%s left staging files: %v, %v", parent, entries, err)
+		}
 	}
 }
 

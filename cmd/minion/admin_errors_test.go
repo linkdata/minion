@@ -8,8 +8,55 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/linkdata/jaws"
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 )
+
+func TestAdminConfigConflictNoticeShowsReason(t *testing.T) {
+	live, _ := liveConfigFixture(t, false)
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, &action.Orchestrator{}, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	cookie := dashboardTestCookie(t, handler)
+	response := adminResponse(handler, http.MethodPost, "/admin/repositories/remove", url.Values{"name": {"owner/repo"}}, cookie, "https://admin.example")
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "At least one repository is required") {
+		t.Fatalf("admin conflict notice: status=%d body=%q", response.Code, response.Body.String())
+	}
+}
+
+func TestAdminConflictReasonIsBoundedAndPrivate(t *testing.T) {
+	account := testAdminAccount()
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{account})
+	admin := dashboardTestCookie(t, handler)
+	guest := adminGuestCookie(t, handler)
+	failure := (&adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account}}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, strings.Repeat("x", 1024), http.StatusConflict)
+	}))
+	for _, test := range []struct {
+		name   string
+		cookie *http.Cookie
+		show   bool
+	}{
+		{"admin", admin, true},
+		{"guest", guest, false},
+	} {
+		response := adminResponse(failure, http.MethodPost, "/admin/stop", nil, test.cookie, "")
+		body := response.Body.String()
+		if response.Code != http.StatusConflict || strings.Contains(body, strings.Repeat("x", 513)) || strings.Contains(body, strings.Repeat("x", 512)) != test.show {
+			t.Fatalf("%s conflict reason: status=%d body=%q", test.name, response.Code, body)
+		}
+	}
+}
 
 func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})

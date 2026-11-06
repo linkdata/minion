@@ -58,6 +58,11 @@ func (e *Orchestrator) setSelectedExecutor(worker Executor) {
 	})
 }
 
+// ClearSelectedExecutor is called after the selected worker closes between monitor iterations.
+func (e *Orchestrator) ClearSelectedExecutor() {
+	e.setSelectedExecutor(nil)
+}
+
 type workerObservation struct {
 	kind, readiness string
 	status          Status

@@ -214,13 +214,17 @@ func (e *Orchestrator) portableJob(ctx context.Context, p *preparedAction, title
 		},
 		Command: request.Command.Name, Action: request.Command.Action,
 		Title: title, Description: description, Notes: requestNotes(request), Source: source,
-		Main: e.mainRoleSettings(e.Commands[request.Command.Name].Skills), RuntimeBudget: budget,
+		AIInstructions: e.AIInstructions,
+		Main:           e.mainRoleSettings(e.Commands[request.Command.Name].Skills), RuntimeBudget: budget,
 		InactivityTimeout: cmp.Or(e.InactivityTimeout, config.DefaultInactivityTimeout),
 	}
 	if e.Adversarial != "" {
 		critic := e.criticRoleSettings()
 		job.Critic = &critic
 		job.CriticMaxRounds, job.CriticNonblockingRounds, job.CriticConsecutiveNoBlockerRounds = e.CriticStopping.Resolve()
+		if job.Action == command.Fix && e.CleanCriticRounds != nil {
+			job.RequiredCleanCriticRounds = e.CleanCriticRounds(request.Repository.ID, request.Source.Author.ID)
+		}
 	}
 	if err := job.Validate(); err != nil {
 		return Job{}, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)

@@ -103,6 +103,9 @@ func fixtureRepository(repo github.Repository) github.Repository {
 	}
 	if repo.ID == 0 {
 		repo.ID = 1
+		if repo.FullName == "example-owner/new-repo" || repo.FullName == "example-owner/second-repo" {
+			repo.ID = 2
+		}
 	}
 	if repo.Owner.ID == 0 {
 		owner := repo.Owner.Login

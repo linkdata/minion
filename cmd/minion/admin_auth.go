@@ -93,7 +93,7 @@ type adminAccess struct {
 	hashSlots    chan struct{}
 }
 
-func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess) (http.Handler, error) {
+func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
 	jw.MaxSessions = maxAdminSessions
 	if err := jw.AddTemplateLookuper(adminDashboardTemplate); err != nil {
 		return nil, err
@@ -111,6 +111,15 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		return nil, err
 	}
 	if err := jw.AddTemplateLookuper(adminNoticeHTML); err != nil {
+		return nil, err
+	}
+	if err := jw.AddTemplateLookuper(adminStatusHTML); err != nil {
+		return nil, err
+	}
+	if err := jw.AddTemplateLookuper(adminConfigurationHTML); err != nil {
+		return nil, err
+	}
+	if err := jw.AddTemplateLookuper(adminPolicyHTML); err != nil {
 		return nil, err
 	}
 	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
@@ -177,6 +186,17 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	mux.Handle("GET /admin/actions/{attempt}", adminActionDetailHandler(jw, owner))
 	mux.Handle("GET /admin/usage", adminUsageHandler(jw, owner, false))
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
+	if len(liveConfigs) != 0 && liveConfigs[0] != nil {
+		live := liveConfigs[0]
+		mux.Handle("GET /admin/status", adminStatusHandler(jw, owner, live.current, false))
+		mux.Handle("GET /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
+		for _, page := range []string{"users", "repositories", "skills"} {
+			mux.Handle("GET /admin/"+page, adminConfigurationHandler(jw, live.snapshot, page))
+		}
+		mux.Handle("GET /admin/policy", adminPolicyHandler(jw, live.snapshot))
+		registerAdminConfigActions(mux, live, owner)
+		registerAdminPolicyActions(mux, live, owner)
+	}
 	if oauth != nil && owner != nil {
 		access.actionAccess = &userActionAccess{oauth: oauth, owner: owner}
 		if err := oauth.actionRoutes(access.actionAccess); err != nil {

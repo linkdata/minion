@@ -69,7 +69,7 @@ func TestHTTPCallCheckpointOrdinalBounds(t *testing.T) {
 	for _, test := range []struct {
 		ordinal int
 		valid   bool
-	}{{0, false}, {1, true}, {3*config.MaxCriticMaxRounds - 1, true}, {3 * config.MaxCriticMaxRounds, false}} {
+	}{{0, false}, {1, true}, {maxCriticCalls, true}, {maxCriticCalls + 1, false}} {
 		err := httpCallCheckpointShape(CallCheckpoint{Ordinal: test.ordinal})
 		if (err == nil) != test.valid || err != nil && !errors.Is(err, errHTTPShape) {
 			t.Fatalf("ordinal %d: valid=%t error=%v", test.ordinal, test.valid, err)
@@ -149,10 +149,10 @@ func TestHTTPShapeCountAndDataBounds(t *testing.T) {
 		validate func() error
 	}{
 		{"calls at limit", true, func() error {
-			return httpReviewShape(ReviewCheckpoint{Calls: make([]CallUsage, 3*config.MaxCriticMaxRounds-1)})
+			return httpReviewShape(ReviewCheckpoint{Calls: make([]CallUsage, maxCriticCalls)})
 		}},
 		{"calls over limit", false, func() error {
-			return httpReviewShape(ReviewCheckpoint{Calls: make([]CallUsage, 3*config.MaxCriticMaxRounds)})
+			return httpReviewShape(ReviewCheckpoint{Calls: make([]CallUsage, maxCriticCalls+1)})
 		}},
 		{"refutations at limit", true, func() error {
 			return httpReviewShape(ReviewCheckpoint{Refutations: make([]Refutation, config.MaxCriticMaxRounds-1)})
@@ -194,7 +194,7 @@ func TestHTTPShapeCountAndDataBounds(t *testing.T) {
 		{"nested binding bound", false, func() error {
 			return httpReviewShape(ReviewCheckpoint{Identity: Identity{JobID: strings.Repeat("x", 101)}})
 		}},
-		{"result nested review bound", false, func() error { return httpResultShape(Result{Calls: make([]CallUsage, 3*config.MaxCriticMaxRounds)}) }},
+		{"result nested review bound", false, func() error { return httpResultShape(Result{Calls: make([]CallUsage, maxCriticCalls+1)}) }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.validate()

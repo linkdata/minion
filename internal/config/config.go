@@ -59,6 +59,7 @@ const (
 	// MaxModelSettingBytes is the portable limit for each model and effort setting.
 	MaxModelSettingBytes       = 128
 	MaxUserModelChoicesPerRole = 16
+	MaxAIInstructionsBytes     = 16 << 10
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -93,12 +94,21 @@ func defaultCommands() map[string]CommandMapping {
 
 // Repository is an explicit boundary for both observation and actions.
 type Repository struct {
-	Name            string           `json:"name"`
-	ID              int64            `json:"id"`
-	OwnerID         int64            `json:"owner_id"`
-	Actions         []string         `json:"actions"`
-	AllowedActors   []string         `json:"allowed_actors,omitempty"`
-	AllowedActorIDs map[string]int64 `json:"allowed_actor_ids,omitempty"`
+	Name                string           `json:"name"`
+	ID                  int64            `json:"id"`
+	OwnerID             int64            `json:"owner_id"`
+	Actions             []string         `json:"actions"`
+	AllowedActors       []string         `json:"allowed_actors,omitzero"`
+	AllowedActorIDs     map[string]int64 `json:"allowed_actor_ids,omitempty"`
+	DenyAllActors       bool             `json:"deny_all_actors,omitempty"`
+	RequiredCleanRounds *int             `json:"required_clean_rounds,omitempty"`
+}
+
+// RequesterPolicy identifies one GitHub requester by immutable account ID.
+type RequesterPolicy struct {
+	Login               string `json:"login"`
+	ID                  int64  `json:"id"`
+	RequiredCleanRounds *int   `json:"required_clean_rounds,omitempty"`
 }
 
 // RemoteExecutorConfig serves one configured worker over authenticated HTTPS.
@@ -210,6 +220,8 @@ type CriticStopping struct {
 	NonblockingAfterRound *int `json:"nonblocking_after_round,omitempty"`
 	// ConsecutiveNoBlockerRounds defaults to two; zero disables the streak requirement.
 	ConsecutiveNoBlockerRounds *int `json:"consecutive_no_blocker_rounds,omitempty"`
+	// RequiredCleanRounds defaults to one when a critic is configured; zero disables this gate.
+	RequiredCleanRounds *int `json:"required_clean_rounds,omitempty"`
 }
 
 // Resolve returns effective stopping settings without replacing omitted values.
@@ -239,6 +251,7 @@ type Config struct {
 	MainSettings   RoleModelConfig       `json:"main_settings,omitzero"`
 	CriticSettings RoleModelConfig       `json:"critic_settings,omitzero"`
 	CriticStopping CriticStopping        `json:"critic_stopping"`
+	AIInstructions string                `json:"ai_instructions,omitempty"`
 	Codex          CodexConfig           `json:"codex,omitempty"`
 	Claude         ClaudeConfig          `json:"claude,omitempty"`
 	RemoteExecutor *RemoteExecutorConfig `json:"remote_executor,omitempty"`
@@ -254,13 +267,35 @@ type Config struct {
 	// MaxGitHubContextBytes limits the combined UTF-8 bytes of trimmed GitHub text in one action.
 	//
 	// Zero selects [DefaultMaxGitHubContextBytes].
-	MaxGitHubContextBytes int              `json:"max_github_context_bytes,omitempty"`
-	StatePath             string           `json:"state_path,omitempty"`
-	WorkRoot              string           `json:"work_root,omitempty"`
-	StartAt               string           `json:"start_at,omitempty"`
-	InvitationOwners      []string         `json:"invitation_owners,omitempty"`
-	InvitationOwnerIDs    map[string]int64 `json:"invitation_owner_ids,omitempty"`
-	Repositories          []Repository     `json:"repositories"`
+	MaxGitHubContextBytes int               `json:"max_github_context_bytes,omitempty"`
+	StatePath             string            `json:"state_path,omitempty"`
+	WorkRoot              string            `json:"work_root,omitempty"`
+	StartAt               string            `json:"start_at,omitempty"`
+	InvitationOwners      []string          `json:"invitation_owners,omitempty"`
+	InvitationOwnerIDs    map[string]int64  `json:"invitation_owner_ids,omitempty"`
+	RequesterPolicies     []RequesterPolicy `json:"requester_policies,omitempty"`
+	Repositories          []Repository      `json:"repositories"`
+}
+
+// RequiredCleanRounds resolves the most specific configured critic gate.
+func (c Config) RequiredCleanRounds(repoID, requesterID int64) int {
+	for _, repo := range c.Repositories {
+		if repoID > 0 && repo.ID == repoID && repo.RequiredCleanRounds != nil {
+			return *repo.RequiredCleanRounds
+		}
+	}
+	for _, requester := range c.RequesterPolicies {
+		if requesterID > 0 && requester.ID == requesterID && requester.RequiredCleanRounds != nil {
+			return *requester.RequiredCleanRounds
+		}
+	}
+	if c.CriticStopping.RequiredCleanRounds != nil {
+		return *c.CriticStopping.RequiredCleanRounds
+	}
+	if c.Adversarial != "" {
+		return 1
+	}
+	return 0
 }
 
 // RoleModelSettings applies optional role overrides to provider defaults.
@@ -406,6 +441,18 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if consecutiveNoBlockerRounds < 0 || consecutiveNoBlockerRounds > MaxCriticConsecutiveNoBlockerRounds {
 		return fmt.Errorf("critic_stopping.consecutive_no_blocker_rounds must be between 0 and %d", MaxCriticConsecutiveNoBlockerRounds)
+	}
+	checkCleanRounds := func(name string, value *int) error {
+		if value != nil && (*value < 0 || *value > MaxCriticMaxRounds) {
+			return fmt.Errorf("%s must be between 0 and %d", name, MaxCriticMaxRounds)
+		}
+		return nil
+	}
+	if err := checkCleanRounds("critic_stopping.required_clean_rounds", c.CriticStopping.RequiredCleanRounds); err != nil {
+		return err
+	}
+	if len(c.AIInstructions) > MaxAIInstructionsBytes || !utf8.ValidString(c.AIInstructions) || strings.ContainsRune(c.AIInstructions, 0) {
+		return fmt.Errorf("ai_instructions must be at most %d UTF-8 bytes without NUL", MaxAIInstructionsBytes)
 	}
 	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
 		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
@@ -672,7 +719,25 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.InvitationOwnerIDs) != len(c.InvitationOwners) {
 		return fmt.Errorf("invitation_owner_ids must match invitation_owners exactly")
 	}
+	seenRequesters := map[string]bool{}
+	seenRequesterIDs := map[int64]bool{}
+	for i := range c.RequesterPolicies {
+		requester := &c.RequesterPolicies[i]
+		if len(requester.Login) > 39 || !ownerNamePattern.MatchString(requester.Login) || requester.ID <= 0 {
+			return fmt.Errorf("requester_policies requires a valid GitHub login and positive ID")
+		}
+		requester.Login = strings.ToLower(requester.Login)
+		if seenRequesters[requester.Login] || seenRequesterIDs[requester.ID] {
+			return fmt.Errorf("requester_policies contains a duplicate login or ID")
+		}
+		seenRequesters[requester.Login] = true
+		seenRequesterIDs[requester.ID] = true
+		if err := checkCleanRounds("requester_policies.required_clean_rounds", requester.RequiredCleanRounds); err != nil {
+			return err
+		}
+	}
 	seen := map[string]bool{}
+	seenRepositoryIDs := map[int64]bool{}
 	for i := range c.Repositories {
 		repo := &c.Repositories[i]
 		if !workspace.ValidRepository(repo.Name) {
@@ -682,6 +747,9 @@ func (c *Config) Validate(configDir string) error {
 		if repo.ID <= 0 || repo.OwnerID <= 0 {
 			return fmt.Errorf("%s: id and owner_id must be positive GitHub IDs", repo.Name)
 		}
+		if err := checkCleanRounds(repo.Name+".required_clean_rounds", repo.RequiredCleanRounds); err != nil {
+			return err
+		}
 		owner, _, _ := strings.Cut(repo.Name, "/")
 		if pinned, ok := c.InvitationOwnerIDs[owner]; ok && pinned != repo.OwnerID {
 			return fmt.Errorf("%s: owner_id conflicts with invitation_owner_ids pin for %s", repo.Name, owner)
@@ -689,7 +757,11 @@ func (c *Config) Validate(configDir string) error {
 		if seen[repo.Name] {
 			return fmt.Errorf("duplicate repository %q", repo.Name)
 		}
+		if seenRepositoryIDs[repo.ID] {
+			return fmt.Errorf("duplicate repository ID %d", repo.ID)
+		}
 		seen[repo.Name] = true
+		seenRepositoryIDs[repo.ID] = true
 		actorIDs, err := normalizeIDPins(repo.AllowedActorIDs)
 		if err != nil {
 			return fmt.Errorf("%s: allowed_actor_ids: %w", repo.Name, err)
@@ -704,6 +776,9 @@ func (c *Config) Validate(configDir string) error {
 			if repo.AllowedActorIDs[actor] <= 0 {
 				return fmt.Errorf("%s: allowed actor %q requires a positive allowed_actor_ids pin", repo.Name, actor)
 			}
+		}
+		if repo.DenyAllActors && (len(repo.AllowedActors) != 0 || len(repo.AllowedActorIDs) != 0) {
+			return fmt.Errorf("%s: deny_all_actors cannot be combined with named allowed actors", repo.Name)
 		}
 		if len(repo.AllowedActorIDs) != len(repo.AllowedActors) {
 			return fmt.Errorf("%s: allowed_actor_ids must match allowed_actors exactly", repo.Name)
@@ -815,8 +890,9 @@ func (r Repository) MatchesIdentity(id, ownerID int64) bool {
 // AllowsActor reports whether a GitHub account is allowed to run commands.
 //
 // An empty AllowedActors list permits any account with a positive ID.
+// DenyAllActors permits nobody.
 func (r Repository) AllowsActor(login string, id int64) bool {
-	if id <= 0 {
+	if id <= 0 || r.DenyAllActors {
 		return false
 	}
 	if len(r.AllowedActors) == 0 {
