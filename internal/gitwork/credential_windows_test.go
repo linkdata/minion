@@ -2,7 +2,6 @@ package gitwork
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,9 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/testsupport"
 )
 
@@ -30,20 +27,9 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(1)
 	}
-	if marker := os.Getenv("MINION_TEST_CREDENTIAL_PROBE_PATH"); marker != "" && strings.EqualFold(filepath.Base(os.Args[0]), "credential-probe.exe") {
-		if err := os.WriteFile(marker, []byte("invoked"), 0600); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
-		}
-		fmt.Print("username=probe\npassword=probe\n")
-		os.Exit(0)
-	}
-	if os.Getenv("MINION_TEST_GH_HELPER") == "1" {
-		if len(os.Args) != 4 || os.Args[1] != "auth" || os.Args[2] != "git-credential" || os.Args[3] != "get" {
-			os.Exit(2)
-		}
-		fmt.Print("username=trusted\npassword=fixture\n")
-		os.Exit(0)
+	if os.Getenv("MINION_TEST_GIT_ECHO_TOKEN") == "1" && strings.EqualFold(filepath.Base(os.Args[0]), "git.exe") {
+		fmt.Fprintln(os.Stderr, os.Getenv("MINION_GITHUB_TOKEN"))
+		os.Exit(9)
 	}
 	if realGit := os.Getenv("MINION_TEST_GIT_PROXY"); realGit != "" {
 		for i, arg := range os.Args[1:] {
@@ -79,77 +65,53 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestWindowsCredentialHelperQuotedNativePath(t *testing.T) {
-	git, err := aicli.AbsoluteExecutable("git")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := filepath.Join(t.TempDir(), "gh's tools")
-	if err := os.Mkdir(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	helper := filepath.Join(dir, "gh.exe")
-	testsupport.LinkTestExecutable(t, helper)
-	cmd := exec.CommandContext(t.Context(), git, "-c", "credential.helper=", "-c", credentialHelperConfig(helper), "credential", "fill")
-	cmd.Dir = t.TempDir()
-	cmd.Env = append(cleanGitEnvironment(), "MINION_TEST_GH_HELPER=1", "GIT_TERMINAL_PROMPT=0")
-	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
-	output, err := cmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "username=trusted") || !strings.Contains(string(output), "password=fixture") {
-		t.Fatalf("native credential helper path was not invoked: %s: %v", output, err)
-	}
-}
-
-func TestWindowsInstalledGitRefusesAmbientCredentials(t *testing.T) {
-	git, err := aicli.AbsoluteExecutable("git")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestWindowsConfiguredGitHubCredentialIsolated(t *testing.T) {
 	root := t.TempDir()
 	bin := t.TempDir()
-	refusingGH := filepath.Join(bin, "gh.exe")
-	testsupport.LinkTestExecutable(t, refusingGH)
+	gh := filepath.Join(bin, "gh.exe")
+	testsupport.LinkTestExecutable(t, gh)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ghMarker := filepath.Join(root, "gh-invoked")
 	t.Setenv("MINION_TEST_REFUSE_GH_MARKER", ghMarker)
-	if got := resolveCredentialHelperGH(); got != refusingGH {
-		t.Fatalf("fixture gh helper = %q, want %q", got, refusingGH)
-	}
-	helper := filepath.Join(root, "credential-probe.exe")
-	testsupport.LinkTestExecutable(t, helper)
+	t.Setenv("GH_TOKEN", "ambient-gh")
+	t.Setenv("GITHUB_TOKEN", "ambient-github")
+	t.Setenv("MINION_GITHUB_TOKEN", "ambient-minion")
 	global := filepath.Join(root, "global.gitconfig")
-	helperValue := strings.TrimPrefix(credentialHelperConfig(helper), "credential.helper=")
-	config := exec.Command(git, "config", "--file", global, "credential.helper", helperValue)
-	config.Env = cleanGitEnvironment()
-	if output, err := config.CombinedOutput(); err != nil {
-		t.Fatalf("configure ambient helper: %s: %v", output, err)
-	}
-	marker := filepath.Join(root, "credential-invoked")
-	t.Setenv("MINION_TEST_CREDENTIAL_PROBE_PATH", marker)
-	control := gitCommand(t.Context(), git, root, append(cleanGitEnvironment(), "GIT_CONFIG_GLOBAL="+global), "credential", "fill")
-	control.Stdin = strings.NewReader("protocol=https\nhost=example.invalid\n\n")
-	if output, err := control.CombinedOutput(); err != nil || !strings.Contains(string(output), "username=probe") {
-		t.Fatalf("ambient helper control did not run: %s: %v", output, err)
-	}
-	if err := os.Remove(marker); err != nil {
-		t.Fatalf("ambient helper control left no marker: %v", err)
+	if err := os.WriteFile(global, []byte("[credential]\n\thelper = !f() { echo username=ambient; echo password=ambient; }; f\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
-	t.Setenv("GIT_ASKPASS", helper)
-	for _, extraEnv := range [][]string{nil, {"GIT_CONFIG_GLOBAL=" + global}} {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		var output bytes.Buffer
-		err := runGitInputToEnv(ctx, root, strings.NewReader("protocol=https\nhost=example.invalid\n\n"), &output, extraEnv, "credential", "fill")
-		contextErr := ctx.Err()
-		cancel()
-		if err == nil || contextErr != nil || output.Len() != 0 {
-			t.Fatalf("Git used ambient credentials or waited for input (extraEnv=%v): %s: %v (context: %v)", extraEnv, output.String(), err, contextErr)
-		}
-		if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("ambient credential program ran (extraEnv=%v): %v", extraEnv, err)
-		}
-		if err := os.Remove(ghMarker); err != nil {
-			t.Fatalf("trusted gh helper did not run (extraEnv=%v): %v", extraEnv, err)
-		}
+	for _, test := range []struct {
+		host string
+		want string
+	}{
+		{host: "github.com", want: "username=x-access-token\npassword=configured-token\n"},
+		{host: "example.invalid"},
+	} {
+		t.Run(test.host, func(t *testing.T) {
+			var output bytes.Buffer
+			err := runGitInputToEnvWithToken(t.Context(), root, strings.NewReader("protocol=https\nhost="+test.host+"\n\n"), &output, nil, "configured-token", "credential", "fill")
+			if test.want == "" {
+				if err == nil || output.Len() != 0 {
+					t.Fatalf("other host received credentials: %q: %v", output.String(), err)
+				}
+			} else if err != nil || !strings.Contains(output.String(), test.want) || strings.Contains(output.String(), "ambient") {
+				t.Fatalf("configured Git credential = %q: %v", output.String(), err)
+			}
+			if _, err := os.Stat(ghMarker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("gh was invoked: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsGitFailureRedactsConfiguredToken(t *testing.T) {
+	bin := t.TempDir()
+	testsupport.LinkTestExecutable(t, filepath.Join(bin, "git.exe"))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MINION_TEST_GIT_ECHO_TOKEN", "1")
+	_, err := runGitWithToken(t.Context(), t.TempDir(), "configured-secret", "clone")
+	if err == nil || strings.Contains(err.Error(), "configured-secret") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("Git diagnostic was not redacted: %v", err)
 	}
 }

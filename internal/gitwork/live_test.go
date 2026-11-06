@@ -55,7 +55,6 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 	if !strings.EqualFold(user.Login, cfg.BotLogin) {
 		t.Fatalf("%s gh credential belongs to %s", cfg.BotLogin, user.Login)
 	}
-	t.Setenv("GH_TOKEN", botToken)
 	remote, err := client.Repository(ctx, repoName)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +70,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("pull request metadata = %+v", pull)
 	}
 
-	defaultCheckout, err := Clone(ctx, t.TempDir(), repoName, remote.DefaultBranch, false)
+	defaultCheckout, err := Clone(ctx, t.TempDir(), repoName, remote.DefaultBranch, false, botToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +83,7 @@ func TestLiveCloneAndPullRequest(t *testing.T) {
 		t.Fatalf("cloned default-branch HEAD = %q, %v", head, err)
 	}
 
-	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA)
+	checkout, err := ClonePullRequest(ctx, t.TempDir(), repoName, pull.Number, pull.Base.Ref, pull.Head.SHA, botToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,8 +200,7 @@ func TestLiveCommitAndPush(t *testing.T) {
 			t.Errorf("test branch %s remains after cleanup: %v", branch, err)
 		}
 	})
-	t.Setenv("GH_TOKEN", botToken)
-	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, true)
+	checkout, err := Clone(ctx, t.TempDir(), repoName, repo.DefaultBranch, true, botToken)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -409,7 +409,7 @@ func withClaudeCritic(job Job) Job {
 
 func cloneFixture(t *testing.T, root string) *gitwork.Checkout {
 	t.Helper()
-	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true, "fixture-token")
 	if err != nil {
 		t.Fatal(err)
 	}

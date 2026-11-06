@@ -21,7 +21,8 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 	consecutive := 7
 	cfg := config.Config{
 		WorkRoot: "/private/work", StatePath: "/private/state.json", BotLogin: "bot",
-		Main: "claude", Adversarial: "codex",
+		GitHub: config.GitHubConfig{Token: "configured-bot-token"},
+		Main:   "claude", Adversarial: "codex",
 		MainSettings:             config.RoleModelConfig{Model: "main-pinned", Effort: "high"},
 		CriticSettings:           config.RoleModelConfig{Model: "critic-pinned", Effort: "low"},
 		CriticStopping:           config.CriticStopping{MaxRounds: 5, NonblockingAfterRound: &strict, ConsecutiveNoBlockerRounds: &consecutive},
@@ -32,9 +33,9 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		Claude:         config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", AllowAllUnixSockets: true, Skills: []string{"stale-host-skill"}},
 	}
 	admissionErr := errors.New("admission sentinel")
-	client, store, logger := &github.Client{}, &state.Store{}, log.New(io.Discard, "", 0)
+	client, store, logger := github.New(cfg.GitHub.Token), &state.Store{}, log.New(io.Discard, "", 0)
 	orchestrator := newOrchestrator(cfg, client, store, logger, func() error { return admissionErr })
-	if orchestrator.GitHub != client || orchestrator.Store != store || orchestrator.Logger != logger || orchestrator.Runner.Logger != logger {
+	if orchestrator.GitHub != client || orchestrator.GitHub.Token() != cfg.GitHub.Token || orchestrator.Store != store || orchestrator.Logger != logger || orchestrator.Runner.Logger != logger {
 		t.Fatal("service lost client, state or logger")
 	}
 	if orchestrator.WorkRoot != cfg.WorkRoot || !errors.Is(orchestrator.CheckWorkRoot(), admissionErr) ||

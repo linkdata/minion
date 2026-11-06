@@ -147,7 +147,7 @@ func TestGitEnvironmentPinsHardening(t *testing.T) {
 		{"GIT_CONFIG_GLOBAL", "/hostile/config", os.DevNull}, {"GIT_CONFIG_NOSYSTEM", "0", "1"},
 		{"GIT_CONFIG_COUNT", "2", "1"}, {"GIT_CONFIG_KEY_0", "filter.escape.clean", "safe.bareRepository"}, {"GIT_CONFIG_VALUE_0", "touch /hostile/marker", "explicit"},
 		{"GIT_TERMINAL_PROMPT", "1", "0"}, {"GIT_ASKPASS", "/hostile/askpass", os.DevNull},
-		{"GCM_INTERACTIVE", "always", "never"}, {"GH_PROMPT_DISABLED", "0", "1"},
+		{"GCM_INTERACTIVE", "always", "never"},
 		{"GIT_OPTIONAL_LOCKS", "1", "0"},
 	}
 	for _, setting := range settings {

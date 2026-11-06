@@ -89,6 +89,53 @@ func runStartupFixtureWithRun(t *testing.T, cfg config.Config, start func() int,
 	return code, string(data)
 }
 
+func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	t.Setenv("GH_TOKEN", "wrong-ambient-token")
+	t.Setenv("GITHUB_TOKEN", "wrong-ambient-token")
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get("Authorization"); got != "Bearer configured-bot-token" {
+			t.Errorf("GitHub request used %q", got)
+		}
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/user":
+			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		case "/repos/owner/repo/notifications":
+			_, _ = recorder.WriteString(`[]`)
+		case "/repos/owner/repo":
+			_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","default_branch":"main","owner":{"id":2}}`)
+		case "/repos/owner/repo/collaborators/bot/permission":
+			_, _ = recorder.WriteString(`{"permission":"write","user":{"id":8,"login":"bot"}}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", request.Method, request.URL)
+			recorder.WriteHeader(http.StatusNotFound)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	cfg := config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-bot-token"},
+		Codex:     config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		RemoteExecutor: &config.RemoteExecutorConfig{
+			ExecutorID: "remote", Listen: "127.0.0.1:8443", TLSCertFile: certFile, TLSKeyFile: keyFile,
+			Token: strings.Repeat("A", 43),
+		},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 0 || !strings.Contains(output, "preflight passed as @bot") {
+		t.Fatalf("configured GitHub account failed preflight: code=%d output=%q", code, output)
+	}
+}
+
 func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name, main, adversarial string
@@ -311,7 +358,7 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 				return recorder.Result(), nil
 			})
 			t.Cleanup(func() { http.DefaultTransport = previousTransport })
-			cfg := config.Config{BotLogin: "bot", StatePath: statePath, WorkRoot: badWorkRoot,
+			cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "offline-token"}, StatePath: statePath, WorkRoot: badWorkRoot,
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
 			code, output := runStartupFixtureWithRun(t, cfg, func() int {
@@ -356,7 +403,7 @@ func TestPreflightFailureRecoversAcceptanceWhoseDeadlinePassed(t *testing.T) {
 				t.Setenv(key, "")
 			}
 			statePath := filepath.Join(t.TempDir(), "state.json")
-			cfg := config.Config{BotLogin: "bot", StatePath: statePath, WorkRoot: t.TempDir(),
+			cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "offline-token"}, StatePath: statePath, WorkRoot: t.TempDir(),
 				Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"},

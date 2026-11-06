@@ -146,7 +146,7 @@ func TestSelectedWorkerRevalidatesAfterPreparation(t *testing.T) {
 			client := github.New("offline-token")
 			client.HTTPClient, client.BaseURL = server.Client(), server.URL
 			cfg := config.Config{WorkRoot: filepath.Join(base, "work"), StatePath: statePath,
-				BotLogin: "linkdataminion", Main: "codex", Codex: config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
+				BotLogin: "linkdataminion", GitHub: config.GitHubConfig{Token: "offline-token"}, Main: "codex", Codex: config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
 				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 				Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},
 					AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}},

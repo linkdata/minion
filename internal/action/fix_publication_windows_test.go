@@ -150,7 +150,7 @@ func testWindowsFixPublication(t *testing.T, changes []workspace.Change, publish
 		}
 	})
 	workRoot := t.TempDir()
-	checkout, err := gitwork.Clone(t.Context(), workRoot, "o/r", "main", true)
+	checkout, err := gitwork.Clone(t.Context(), workRoot, "o/r", "main", true, "fixture-token")
 	if err != nil {
 		t.Fatal(err)
 	}

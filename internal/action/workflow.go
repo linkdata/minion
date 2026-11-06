@@ -138,9 +138,9 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 		return nil, err
 	}
 	if pullHead != "" {
-		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead)
+		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, e.GitHub.Token())
 	} else {
-		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, false)
+		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, false, e.GitHub.Token())
 	}
 	if err != nil {
 		return nil, err
@@ -643,7 +643,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, true)
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, true, e.GitHub.Token())
 	if err != nil {
 		return nil, err
 	}

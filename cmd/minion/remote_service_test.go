@@ -208,8 +208,8 @@ func remoteTestTLSFiles(t *testing.T) (certFile, keyFile string, leaf *x509.Cert
 
 func TestRemoteCheckWithValidTLSDoesNotRequireLocalAI(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
-	t.Setenv("GH_TOKEN", "")
-	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("GH_TOKEN", "ambient-token")
+	t.Setenv("GITHUB_TOKEN", "ambient-token")
 	certFile, keyFile, _ := remoteTestTLSFiles(t)
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 	cfg := config.Config{
@@ -223,7 +223,7 @@ func TestRemoteCheckWithValidTLSDoesNotRequireLocalAI(t *testing.T) {
 	code, output := runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error { return nil })
 	}, "-check")
-	if code != 1 || !strings.Contains(output, "GitHub authentication:") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "remote TLS preflight:") {
+	if code != 1 || !strings.Contains(output, "github.token is required") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "remote TLS preflight:") {
 		t.Fatalf("valid remote -check required local AI before GitHub: code=%d output=%q", code, output)
 	}
 }

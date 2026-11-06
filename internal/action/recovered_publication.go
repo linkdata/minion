@@ -29,7 +29,7 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		if resultErr == nil {
 			e.CompleteTerminalUsage(request, "succeeded", time.Now().UTC())
 		}
-		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
+		resultErr = redactActionError(resultErr, append(e.Runner.secretValues(), e.GitHub.Token())...)
 	}()
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
 	defer cancel()
@@ -188,7 +188,7 @@ func (e *Orchestrator) publishRecoveredFix(ctx context.Context, p *preparedActio
 	if err := gitwork.Check(ctx, e.WorkRoot); err != nil {
 		return fmt.Errorf("Git readiness before recovered fix: %w", err)
 	}
-	p.checkout, err = gitwork.RestoreCheckout(ctx, e.WorkRoot, p.job.Source)
+	p.checkout, err = gitwork.RestoreCheckout(ctx, e.WorkRoot, p.job.Source, e.GitHub.Token())
 	if err != nil {
 		return err
 	}

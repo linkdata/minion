@@ -35,6 +35,14 @@ func New(token string) *Client {
 	}
 }
 
+// Token supplies the same credential to trusted Git operations as API requests.
+func (c *Client) Token() string {
+	if c == nil {
+		return ""
+	}
+	return c.token
+}
+
 type User struct {
 	ID     int64  `json:"id"`
 	Login  string `json:"login"`

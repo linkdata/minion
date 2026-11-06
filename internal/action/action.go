@@ -113,12 +113,12 @@ func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("%w: selected executor readiness is unavailable", monitor.ErrAcceptanceState)
 	}
-	return redactActionError(ready.WaitCapacity(ctx), e.Runner.secretValues()...)
+	return redactActionError(ready.WaitCapacity(ctx), append(e.Runner.secretValues(), e.GitHub.Token())...)
 }
 
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
 	defer func() {
-		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
+		resultErr = redactActionError(resultErr, append(e.Runner.secretValues(), e.GitHub.Token())...)
 	}()
 	if !e.assignmentRequired {
 		return fmt.Errorf("%w: selected assignment checkpoint is unavailable", monitor.ErrAcceptanceState)

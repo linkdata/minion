@@ -243,7 +243,7 @@ func TestSourceAliasesAreUnsupportedForDefaultAndPullRequestCheckout(t *testing.
 	if listing := fixture.git(fixture.source, "ls-tree", "-r", "--name-only", "HEAD"); !strings.Contains(listing, path) {
 		t.Fatalf("fixture omitted protected path: %q", listing)
 	}
-	checkout, err := cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true)
+	checkout, err := cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true, "")
 	if checkout != nil {
 		defer func() {
 			if err := checkout.Close(); err != nil {

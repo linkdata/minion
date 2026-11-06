@@ -49,9 +49,9 @@ func readOnlyFixture(t *testing.T, pull, link bool) (gitFixture, *Checkout, stri
 	var checkout *Checkout
 	var err error
 	if pull {
-		checkout, err = clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head)
+		checkout, err = clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head, "")
 	} else {
-		checkout, err = cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", false)
+		checkout, err = cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", false, "")
 	}
 	checkout = fixture.keepCheckout(checkout, err)
 	config, err := os.ReadFile(filepath.Join(checkout.path, ".git", "config"))

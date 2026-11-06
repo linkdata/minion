@@ -100,7 +100,7 @@ func TestWindowsHostileGitTreePathsFailBeforeCheckout(t *testing.T) {
 			}
 			log := windowsRecordGitCommands(t)
 			workRoot := t.TempDir()
-			checkout, err := cloneFromURL(t.Context(), workRoot, fixture.remote, "main", true)
+			checkout, err := cloneFromURL(t.Context(), workRoot, fixture.remote, "main", true, "")
 			if checkout != nil {
 				t.Cleanup(func() { _ = checkout.Close() })
 			}
@@ -128,7 +128,7 @@ func TestWindowsHostilePullRequestTreeFailsBeforeCheckout(t *testing.T) {
 	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
 	log := windowsRecordGitCommands(t)
 	workRoot := t.TempDir()
-	checkout, err := clonePullRequestFromURL(t.Context(), workRoot, fixture.remote, 7, "main", head)
+	checkout, err := clonePullRequestFromURL(t.Context(), workRoot, fixture.remote, 7, "main", head, "")
 	if checkout != nil {
 		t.Cleanup(func() { _ = checkout.Close() })
 	}
@@ -153,7 +153,7 @@ func TestWindowsPullRequestUsesSafeHeadAndSelectedBaseFiles(t *testing.T) {
 	head := fixture.gitInput(fixture.source, "safe head\n", "commit-tree", headTree, "-p", base)
 	fixture.git(fixture.source, "push", fixture.remote, base+":refs/heads/main")
 	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
-	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head)
+	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestWindowsPullRequestRejectsSelectedBaseCaseAliases(t *testing.T) {
 	fixture.git(fixture.source, "push", fixture.remote, base+":refs/heads/main")
 	fixture.git(fixture.source, "push", fixture.remote, head+":refs/pull/7/head")
 	log := windowsRecordGitCommands(t)
-	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head)
+	checkout, err := clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestWindowsGitTreeLinkCannotBecomeImportParent(t *testing.T) {
 	if err := os.WriteFile(keep, []byte("outside"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	checkout, err := cloneFromURL(t.Context(), workRoot, fixture.remote, "main", true)
+	checkout, err := cloneFromURL(t.Context(), workRoot, fixture.remote, "main", true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
