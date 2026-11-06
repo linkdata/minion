@@ -169,6 +169,11 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 			return candidate
 		}
 	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		if candidate := covered(host); candidate != "" {
+			return candidate
+		}
+	}
 	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
 		return rawURL
 	}

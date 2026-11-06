@@ -385,6 +385,7 @@ func TestCertifiedListenURL(t *testing.T) {
 		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "[::1]:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
+		{address: "127.0.0.1:8080", listenURL: "http://admin.example:8080", want: "https://127.0.0.1:8080", certificateNames: []string{"admin.example"}, certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
 		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
 		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
 		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateNames: []string{"other.example"}, certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
@@ -442,9 +443,8 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
-		t.Fatalf("HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
+	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+		t.Fatalf("HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)
 	reused := false
@@ -518,9 +518,8 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "https://"+leaf.DNSNames[0]+":"+port {
-		t.Fatalf("fallback HTTPS listener URL = %q, port=%q: %v", admin.entryURL, port, err)
+	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+		t.Fatalf("fallback HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "https://"+admin.listener.Addr().String()+"/jaws/.ping", nil)

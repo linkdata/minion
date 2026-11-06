@@ -112,7 +112,7 @@ By default, Minion runs as a persistent service on Linux, macOS, and Windows, wi
 ./bin/minion -config ./config.local.json
 ```
 
-The bundled [config.json](config.json) includes an optional `admin` block with an `admin` account whose `password_hash` is the inert `PASTE_GENERATED_HASH_HERE` placeholder. The default service starts a loopback listener whose home page shows sign-in disabled until you replace the placeholder with a generated hash and restart Minion. Login routes remain unavailable. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
+The bundled [config.json](config.json) includes an optional `admin` block with an `admin` account whose `password_hash` is the inert `PASTE_GENERATED_HASH_HERE` placeholder. The default service starts a loopback listener whose home page shows sign-in disabled until you replace the placeholder with a generated hash and restart Minion. Until then, `/admin/login` returns HTTP 403. Remove the block and restart Minion to disable the listener. Usernames are case-sensitive, at most 100 characters, and may contain only ASCII letters, digits, `.`, `_`, and `-`; `.` and `..` alone and names differing only by case are rejected. For example:
 
 ```json
 "admin": {
