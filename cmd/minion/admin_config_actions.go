@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -409,12 +408,8 @@ func editAdminSkills(cfg *config.Config, target string, change func([]string) ([
 }
 
 func preflightAdminSkillEdit(live *adminLiveConfig, edit func(*config.Config) error) error {
-	data, err := json.Marshal(live.snapshot().Config)
+	candidate, err := cloneConfig(live.snapshot().Config)
 	if err != nil {
-		return err
-	}
-	var candidate config.Config
-	if err := json.Unmarshal(data, &candidate); err != nil {
 		return err
 	}
 	if err := edit(&candidate); err != nil {
