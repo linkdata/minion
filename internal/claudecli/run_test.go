@@ -135,9 +135,124 @@ func readFile(t *testing.T, path string) string {
 	return string(data)
 }
 
+func TestRunRejectsUnsupportedBubblewrapBeforeClaude(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
+	testsupport.FakeBubblewrap(t, "--unshare-user")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	_, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{AllowAllUnixSockets: true})
+	if err == nil || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("Run passed without supported Bubblewrap: %v", err)
+	}
+	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
+		t.Fatalf("Claude started despite Bubblewrap failure: %v", err)
+	}
+	if session.runtimeRoot != "" {
+		t.Fatal("Bubblewrap failure created Claude scratch")
+	}
+}
+
+func TestRunChecksBubblewrapOncePerSession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	fakeExecutable(t, "claude", `cat >/dev/null
+printf '%s\n' '`+successfulResult+`'
+`)
+	binary := filepath.Join(testsupport.FakeOnPath(t, "bwrap", `#!/bin/sh
+printf 'checked\n' >> "$0.checked"
+printf '%s\n' '--disable-userns'
+`), "bwrap")
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	workspace := t.TempDir()
+	settings := config.ClaudeConfig{AllowAllUnixSockets: true}
+	for range 2 {
+		if _, err := session.Run(t.Context(), workspace, "task", false, "", settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := readFile(t, binary+".checked"); got != "checked\n" {
+		t.Fatalf("Bubblewrap probes = %q, want one", got)
+	}
+}
+
+func TestSandboxSettingsUserRuntimeDirectory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Unix socket opt-in applies only on Linux")
+	}
+	previous := userRuntimeDir
+	t.Cleanup(func() { userRuntimeDir = previous })
+	existing := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing")
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notDirectory := filepath.Join(file, "child")
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing fixture: %v", err)
+	}
+	if _, err := os.Stat(notDirectory); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("non-directory fixture: %v", err)
+	}
+	for _, tc := range []struct {
+		name, path string
+		deny       bool
+	}{
+		{name: "existing", path: existing, deny: true},
+		{name: "missing", path: missing},
+		{name: "non-directory error", path: notDirectory, deny: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userRuntimeDir = tc.path
+			policy, err := sandboxSettings(t.TempDir(), "", "", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var settings struct {
+				Sandbox struct {
+					Filesystem *struct {
+						DenyRead []string `json:"denyRead"`
+					} `json:"filesystem"`
+				} `json:"sandbox"`
+			}
+			if err := json.Unmarshal([]byte(policy), &settings); err != nil {
+				t.Fatal(err)
+			}
+			if tc.deny {
+				if settings.Sandbox.Filesystem == nil || !slices.Equal(settings.Sandbox.Filesystem.DenyRead, []string{tc.path}) {
+					t.Fatalf("missing denyRead for %q: %s", tc.path, policy)
+				}
+			} else if settings.Sandbox.Filesystem != nil {
+				t.Fatalf("missing path denied: %s", policy)
+			}
+		})
+	}
+}
+
 func TestRun(t *testing.T) {
-	for _, writable := range []bool{false, true} {
-		t.Run(map[bool]string{false: "review", true: "fix"}[writable], func(t *testing.T) {
+	for _, tc := range []struct {
+		name                          string
+		writable, allowAllUnixSockets bool
+	}{
+		{name: "review"},
+		{name: "fix", writable: true},
+		{name: "Unix socket opt-in", allowAllUnixSockets: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writable := tc.writable
 			workspace := t.TempDir()
 			reports := t.TempDir()
 			output := t.TempDir()
@@ -151,7 +266,10 @@ printf '%s\n' '`+successfulResult+`'
 			t.Setenv("GITHUB_TOKEN", "dummy-token")
 			t.Setenv("NODE_OPTIONS", "dummy-option")
 			t.Setenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", "600000")
-			result, err := Run(t.Context(), workspace, "Handle task", writable, output, config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}})
+			if tc.allowAllUnixSockets && runtime.GOOS == "linux" {
+				testsupport.FakeBubblewrap(t, "--disable-userns")
+			}
+			result, err := Run(t.Context(), workspace, "Handle task", writable, output, config.ClaudeConfig{Model: "claude-test", Effort: "high", Skills: []string{skills.BuiltinAntiPromptInjection}, ReadOnlyDirs: []string{reports}, AllowAllUnixSockets: tc.allowAllUnixSockets})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -228,10 +346,17 @@ printf '%s\n' '`+successfulResult+`'
 			if err := json.Unmarshal(raw["sandbox"], &nativeSandbox); err != nil {
 				t.Fatal(err)
 			}
-			for _, name := range []string{"filesystem", "network"} {
-				if _, authored := nativeSandbox[name]; authored {
-					t.Fatalf("Minion authored Claude %s rules: %s", name, raw["sandbox"])
-				}
+			wantSocketOverride := runtime.GOOS == "linux" && tc.allowAllUnixSockets
+			filesystem, authored := nativeSandbox["filesystem"]
+			wantFilesystem := fmt.Sprintf(`{"denyRead":["/run/user/%d"]}`, os.Getuid())
+			_, runtimeErr := os.Stat(fmt.Sprintf("/run/user/%d", os.Getuid()))
+			wantReadBlock := wantSocketOverride && !errors.Is(runtimeErr, os.ErrNotExist)
+			if authored != wantReadBlock || authored && string(filesystem) != wantFilesystem {
+				t.Fatalf("Unix socket opt-in filesystem policy = %s, want %s when enabled %t", filesystem, wantFilesystem, wantReadBlock)
+			}
+			network, authored := nativeSandbox["network"]
+			if authored != wantSocketOverride || wantSocketOverride && string(network) != `{"allowAllUnixSockets":true}` {
+				t.Fatalf("Unix socket override = %s, want enabled %t", network, wantSocketOverride)
 			}
 			wantDenials := []string{"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"}
 			var denials []string
@@ -256,10 +381,15 @@ printf '%s\n' '`+successfulResult+`'
 			if !strings.Contains(prompt, "Source snapshot: ") || !strings.Contains(prompt, workspace) || !strings.Contains(prompt, "SKILL.md") || !strings.HasSuffix(prompt, "Handle task") {
 				t.Fatalf("prompt = %q", prompt)
 			}
-			if cwd == workspace || filepath.Dir(cwd) != filepath.Dir(workspace) {
+			tempRoot, err := aicli.Directory(os.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cwd == workspace || filepath.Dir(filepath.Dir(cwd)) != tempRoot ||
+				filepath.Base(cwd) != runtimeChild || !strings.HasPrefix(filepath.Base(filepath.Dir(cwd)), runtimePrefix) {
 				t.Fatalf("runtime directory = %q", cwd)
 			}
-			if _, err := os.Stat(cwd); !errors.Is(err, os.ErrNotExist) {
+			if _, err := os.Stat(filepath.Dir(cwd)); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("runtime retained: %v", err)
 			}
 		})
@@ -288,7 +418,7 @@ printf '%s\n' '`+successfulResult+`'
 			t.Error(err)
 		}
 	})
-	if err := session.prepare(workspace, binary, true, output, config.ClaudeConfig{}); err != nil {
+	if err := session.prepare(t.Context(), workspace, binary, true, output, config.ClaudeConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	blocked := []string{filepath.Join(session.runtimeDir, "bin"), filepath.Join(workspace, "bin"), filepath.Join(output, "bin")}

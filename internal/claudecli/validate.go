@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -31,19 +33,22 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
-	dir, err := os.MkdirTemp("", "minion-claude-check-")
+	tempRoot, err := CheckHost(ctx, settings.AllowAllUnixSockets)
+	if err != nil {
+		return validated, err
+	}
+	parent, err := os.MkdirTemp(tempRoot, runtimePrefix)
 	if err != nil {
 		return validated, err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, os.RemoveAll(dir))
+		resultErr = errors.Join(resultErr, cleanup.RemoveAll(parent))
 	}()
-	authDir, err := authentication(filepath.Dir(dir), settings.APIKey)
-	if authDir != "" {
-		defer func() {
-			resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
-		}()
+	dir := filepath.Join(parent, runtimeChild)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return validated, err
 	}
+	authDir, err := authentication(parent, settings.APIKey)
 	if err != nil {
 		return validated, err
 	}
@@ -59,7 +64,7 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	policy, err := sandboxSettings(dir, "", authDir)
+	policy, err := sandboxSettings(dir, "", authDir, settings.AllowAllUnixSockets)
 	if err != nil {
 		return validated, err
 	}
@@ -115,6 +120,52 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 		return validated, nil
 	}
 	return validated, fmt.Errorf("claude model %q is absent from the installed CLI catalogue", settings.Model)
+}
+
+// CheckHost checks the canonical temp-root length and Claude's Linux sandbox opt-in.
+func CheckHost(ctx context.Context, allowAllUnixSockets bool) (string, error) {
+	root, err := runtimeTempRoot()
+	if err != nil {
+		return "", err
+	}
+	paths := []string{"/tmp/claude"}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".npm", "_logs"), filepath.Join(home, ".claude", "debug"))
+	}
+	if err := checkTempRootWritable(root, paths...); err != nil {
+		return "", err
+	}
+	if err := checkBubblewrap(ctx, allowAllUnixSockets); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func checkBubblewrap(ctx context.Context, allowAllUnixSockets bool) error {
+	if runtime.GOOS != "linux" || !allowAllUnixSockets {
+		return nil
+	}
+	binary, err := aicli.ExecutablePath("bwrap")
+	if err != nil {
+		return fmt.Errorf("claude Unix-socket opt-in requires non-setuid Bubblewrap with --disable-userns: %w", err)
+	}
+	info, err := os.Stat(binary)
+	if err != nil {
+		return fmt.Errorf("inspect Bubblewrap %q: %w", binary, err)
+	}
+	if info.Mode()&os.ModeSetuid != 0 {
+		return fmt.Errorf("claude Unix-socket opt-in requires non-setuid Bubblewrap: %q is setuid", binary)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := aicli.Probe(probeCtx, binary, "", []string{"--help"}, "", []string{}, "", "")
+	if err != nil {
+		return fmt.Errorf("probe Bubblewrap %q --disable-userns support: %w", binary, err)
+	}
+	if !bytes.Contains(output, []byte("--disable-userns")) {
+		return fmt.Errorf("claude Unix-socket opt-in requires Bubblewrap with --disable-userns: %q does not support it", binary)
+	}
+	return nil
 }
 
 // Probe the fresh invocation and resume's session lookup without a model turn.

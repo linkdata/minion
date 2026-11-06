@@ -48,7 +48,6 @@ func TestLoadModelProviders(t *testing.T) {
 		{name: "codex effort Unicode space", fields: `,"codex":{"reasoning_effort":"high\u00a0low"}`, wantError: "codex model and reasoning_effort"},
 		{name: "claude runtime skills", fields: `,"claude":{"skills":["/tmp/SKILL.md"]}`, wantError: "unknown field"},
 		{name: "claude runtime directories", fields: `,"claude":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
-		{name: "claude Unix socket override", fields: `,"claude":{"allow_all_unix_sockets":true}`, wantError: "unknown field"},
 		{name: "codex runtime directories", fields: `,"codex":{"read_only_dirs":["/tmp"]}`, wantError: "unknown field"},
 		{name: "claude runtime schema", fields: `,"claude":{"output_schema":"{}"}`, wantError: "unknown field"},
 		{name: "codex runtime schema", fields: `,"codex":{"output_schema":"{}"}`, wantError: "unknown field"},

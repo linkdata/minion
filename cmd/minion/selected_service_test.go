@@ -694,6 +694,7 @@ func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 		{"Claude only", func(cfg *config.Config) {
 			cfg.Main = "claude"
 			cfg.Claude.Model, cfg.Claude.Effort = "claude-main", "medium"
+			cfg.Claude.AllowAllUnixSockets = true
 		}, action.WorkerCredentials{ClaudeAPIKey: "unselected-config-key"}},
 		{"Codex critic", func(cfg *config.Config) {
 			cfg.Main, cfg.Adversarial = "claude", "codex"
@@ -726,8 +727,8 @@ func TestAttachSelectedLocalWorkerSelectedCredentials(t *testing.T) {
 			if err := json.Unmarshal(data, &startup); err != nil {
 				t.Fatal(err)
 			}
-			if startup.CodexAPIKey != tc.want.CodexAPIKey || startup.CodexNativeAPIKey != tc.want.CodexNativeAPIKey || startup.CodexAccessToken != tc.want.CodexAccessToken || startup.ClaudeAPIKey != tc.want.ClaudeAPIKey {
-				t.Fatal("child startup did not contain exactly the selected credentials")
+			if startup.CodexAPIKey != tc.want.CodexAPIKey || startup.CodexNativeAPIKey != tc.want.CodexNativeAPIKey || startup.CodexAccessToken != tc.want.CodexAccessToken || startup.ClaudeAPIKey != tc.want.ClaudeAPIKey || startup.ClaudeAllowAllUnixSockets != cfg.Claude.AllowAllUnixSockets {
+				t.Fatal("child startup credentials or Claude socket opt-in mismatch")
 			}
 		})
 	}

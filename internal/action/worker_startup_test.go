@@ -35,10 +35,11 @@ func testWorkerStartup(t *testing.T) WorkerStartup {
 			RetainedMainChoices:   []config.RoleModelConfig{{Model: "old-main", Effort: "medium"}},
 			RetainedCriticChoices: []config.RoleModelConfig{{Model: "old-critic", Effort: "medium"}},
 		},
-		WorkRoot:     t.TempDir(),
-		Endpoint:     endpoint.Access(),
-		CodexAPIKey:  "private-codex-key",
-		ClaudeAPIKey: "private-claude-key",
+		WorkRoot:                  t.TempDir(),
+		Endpoint:                  endpoint.Access(),
+		CodexAPIKey:               "private-codex-key",
+		ClaudeAPIKey:              "private-claude-key",
+		ClaudeAllowAllUnixSockets: true,
 	}
 }
 
@@ -59,7 +60,7 @@ func TestWorkerStartupRoundTripAndProviderKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runner.Codex.APIKey != startup.CodexAPIKey || runner.Claude.APIKey != startup.ClaudeAPIKey || runner.selection == nil || runner.WorkRoot != startup.WorkRoot {
+	if runner.Codex.APIKey != startup.CodexAPIKey || runner.Claude.APIKey != startup.ClaudeAPIKey || !runner.Claude.AllowAllUnixSockets || runner.selection == nil || runner.WorkRoot != startup.WorkRoot {
 		t.Fatal("selected runner lost configured provider credentials, selection, or work root")
 	}
 }

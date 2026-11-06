@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/usage"
 )
 
@@ -44,11 +45,20 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 		}
 	})
 	known := usage.Tokens{Input: 15, CacheCreationInput: 5, CachedInput: 7, Output: 11}
+	var parentBefore os.FileInfo
 	for call := 1; call <= 3; call++ {
 		if call == 2 {
 			settings.ReadOnlyDirs = []string{newGrant}
 		}
 		if call == 3 {
+			parent, err := os.Stat(session.runtimeRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parentBefore = parent
+			if err := os.WriteFile(filepath.Join(session.runtimeRoot, "parent-marker"), []byte("keep"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			for _, dir := range []string{session.runtimeDir, session.cacheDir} {
 				if err := os.WriteFile(filepath.Join(dir, "prior-notes"), []byte("previous critic findings"), 0600); err != nil {
 					t.Fatal(err)
@@ -60,6 +70,15 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 		result, err := session.Run(t.Context(), workspace, "task", false, "", settings)
 		if err != nil || !result.UsageComplete || result.Tokens != known || result.UsageCoverage != (usage.Coverage{Scope: "invocation"}) {
 			t.Fatalf("call%d: %+v, %v", call, result, err)
+		}
+		if call == 3 {
+			parentAfter, err := os.Stat(session.runtimeRoot)
+			if err != nil || !os.SameFile(parentBefore, parentAfter) {
+				t.Fatalf("private runtime parent changed on reset: %v", err)
+			}
+			if got, err := os.ReadFile(filepath.Join(session.runtimeRoot, "parent-marker")); err != nil || string(got) != "keep" {
+				t.Fatalf("private runtime parent lost marker on reset: %q, %v", got, err)
+			}
 		}
 		wantCost := 0.5
 		if call == 2 {
@@ -131,9 +150,16 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 			}
 		}
 	}
-	owned := []string{session.runtimeDir, session.authDir, session.embeddedDir}
+	rootInfo, err := os.Stat(session.runtimeRoot)
+	if err != nil || rootInfo.Mode().Perm() != 0700 {
+		t.Fatalf("private runtime root mode = %v, %v", rootInfo, err)
+	}
+	owned := []string{session.runtimeRoot, session.runtimeDir, session.authDir, session.embeddedDir}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if session.runtimeRoot != "" {
+		t.Fatal("closed session retained runtime root")
 	}
 	for _, path := range owned {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
@@ -145,6 +171,19 @@ if $resume; then printf '%s\n' '`+doubled+`'; else printf '%s\n' '`+firstWithCos
 	}
 	if _, err := session.Run(t.Context(), workspace, "task", false, "", settings); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("closed session ran: %v", err)
+	}
+}
+
+func TestDocumentedTempRootLimit(t *testing.T) {
+	if maxLinuxTempRootBytes != 56 || maxDarwinTempRootBytes != 56 {
+		t.Fatalf("temp-root limits: Linux=%d macOS=%d", maxLinuxTempRootBytes, maxDarwinTempRootBytes)
+	}
+	readme, err := os.ReadFile("../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), fmt.Sprintf("canonical path of at most %d bytes", maxTempRootBytes)) {
+		t.Fatalf("README does not state the %d-byte temp-root limit", maxTempRootBytes)
 	}
 }
 
@@ -1489,16 +1528,19 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "cat >/dev/null\nprintf called >>\"$0.calls\"\nprintf '%s\\n' '"+successfulResult+"'\n")
 	var session Session
 	dir := t.TempDir()
-	if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
-		t.Fatal(err)
-	}
-	runtime := session.runtimeDir
+	var root string
 	t.Cleanup(func() {
-		session.runtimeDir = runtime
+		if root != "" {
+			session.runtimeRoot = root
+		}
 		if err := session.Close(); err != nil {
 			t.Error(err)
 		}
 	})
+	if _, err := session.Run(t.Context(), dir, "first", false, "", config.ClaudeConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	root = session.runtimeRoot
 	session.NewConversation()
 	// A malformed owned path gives a portable filesystem failure without
 	// modifying host permissions or deleting any unowned resource.
@@ -1509,7 +1551,8 @@ func TestSessionScratchAndCloseFailuresAreVisible(t *testing.T) {
 	if readFile(t, binary+".calls") != "called" {
 		t.Fatal("scratch failure reached native execution")
 	}
-	if err := session.Close(); err == nil || session.runtimeDir == "" {
+	session.runtimeRoot = "invalid\x00path"
+	if err := session.Close(); err == nil || session.runtimeRoot == "" {
 		t.Fatalf("failed cleanup lost its path: %v", err)
 	}
 }
@@ -1834,6 +1877,7 @@ fi
 
 func TestSessionInitializationFailureStaysBound(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+	testsupport.UseShortClaudeTempDir(t, "/tmp")
 	skill := filepath.Join(t.TempDir(), "SKILL.md")
 	settings := config.ClaudeConfig{Skills: []string{skill}}
 	var session Session

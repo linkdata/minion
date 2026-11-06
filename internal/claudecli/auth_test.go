@@ -11,10 +11,34 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 )
 
 const dummyAPIKey = "minion-dummy-config-api-key"
+
+func TestValidateCleansLockedCredentialDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permissions are unavailable on native Windows")
+	}
+	binary := fakeExecutable(t, "claude", `printf '%s\n' "$CLAUDE_CONFIG_DIR" > "$0.authdir"
+chmod 000 "$CLAUDE_CONFIG_DIR"
+exit 9
+`)
+	if _, err := Validate(t.Context(), config.ClaudeConfig{APIKey: dummyAPIKey}); err == nil {
+		t.Fatal("accepted failed authentication probe")
+	}
+	dir := strings.TrimSpace(readFile(t, binary+".authdir"))
+	parent := filepath.Dir(dir)
+	t.Cleanup(func() {
+		if err := cleanup.RemoveAll(parent); err != nil {
+			t.Error(err)
+		}
+	})
+	if _, err := os.Stat(parent); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("locked credential directory retained: %v", err)
+	}
+}
 
 func TestAuthentication(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -69,6 +93,7 @@ func TestAPIKeyConfiguration(t *testing.T) {
 			binary := fakeExecutable(t, "claude", `test -z "$ANTHROPIC_API_KEY$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_AUTH_TOKEN" || exit 2
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
+printf '%s\n' "$PWD" > "$0.cwd"
 printf '%s\n' "$@" >> "$0.args"
 for arg in "$@"; do
   if [ "$arg" = auth ]; then
@@ -99,6 +124,16 @@ esac
 			for _, dir := range dirs {
 				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("credential directory retained: %v", err)
+				}
+			}
+			if validate {
+				cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
+				parent := filepath.Dir(cwd)
+				if filepath.Base(cwd) != runtimeChild || filepath.Dir(dirs[0]) != parent {
+					t.Fatalf("preflight credentials are not beside its runtime: cwd=%q auth=%q", cwd, dirs[0])
+				}
+				if _, err := os.Stat(parent); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("preflight private parent retained: %v", err)
 				}
 			}
 			args := readFile(t, binary+".args")
@@ -202,7 +237,7 @@ func TestAPIKeyGrantOverlap(t *testing.T) {
 		{workspace: root},
 		{workspace: filepath.Join(root, "source"), output: root},
 	} {
-		if _, err := sandboxSettings(test.workspace, test.output, filepath.Join(root, "auth")); err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
+		if _, err := sandboxSettings(test.workspace, test.output, filepath.Join(root, "auth"), false); err == nil || !strings.Contains(err.Error(), "API key directory overlaps") {
 			t.Fatalf("accepted writable root containing credential directory: %+v: %v", test, err)
 		}
 	}

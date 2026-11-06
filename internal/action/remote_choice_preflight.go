@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -65,8 +66,8 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 const remoteChoicePreflightTimeout = 90 * time.Second
 
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
-func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string) error {
-	err := preflightRemoteChoices(ctx, client, origin, executorID, remoteChoicePreflightTimeout)
+func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool) error {
+	err := preflightRemoteChoices(ctx, client, origin, executorID, allowAllUnixSockets, remoteChoicePreflightTimeout)
 	if err == nil {
 		return nil
 	}
@@ -79,7 +80,7 @@ func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	return preflightError{message: "remote selection preflight unavailable", cause: err}
 }
 
-func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, timeout time.Duration) error {
+func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool, timeout time.Duration) error {
 	preflightCtx, stop := context.WithTimeout(ctx, timeout)
 	defer stop()
 	u, err := url.Parse(origin)
@@ -107,9 +108,22 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	runner := Runner{
 		Codex: config.CodexConfig{APIKey: selection.Credentials.CodexAPIKey, NativeAPIKey: selection.Credentials.CodexNativeAPIKey,
 			NativeAccessToken: selection.Credentials.CodexAccessToken},
-		Claude: config.ClaudeConfig{APIKey: selection.Credentials.ClaudeAPIKey},
+		Claude: config.ClaudeConfig{APIKey: selection.Credentials.ClaudeAPIKey, AllowAllUnixSockets: allowAllUnixSockets},
 	}
-	if message, err := checkOfferedRolesCLI(preflightCtx, &runner, offeredPreflightRoles(selection.Main, selection.MainChoices, selection.Critic, selection.CriticChoices)); err != nil {
+	roles := offeredPreflightRoles(selection.Main, selection.MainChoices, selection.Critic, selection.CriticChoices)
+	for _, role := range roles {
+		if role.Provider == "claude" {
+			if _, err := claudecli.CheckHost(preflightCtx, allowAllUnixSockets); err != nil {
+				if preflightCtx.Err() != nil {
+					return preflightCtx.Err()
+				}
+				// The short host probe deadline must not look like the whole preflight deadline.
+				return preflightError{message: "remote Claude host check failed: " + redactActionText(err.Error(), runner.secretValues()...)}
+			}
+			break
+		}
+	}
+	if message, err := checkOfferedRolesCLI(preflightCtx, &runner, roles); err != nil {
 		return preflightError{message: message, cause: redactActionError(err, runner.secretValues()...)}
 	}
 	return preflightCtx.Err()

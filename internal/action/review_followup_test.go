@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -31,7 +32,7 @@ func TestRunnerNativeCleanupKeepsAcceptedAnswer(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/recover=%t", provider, recovers), func(t *testing.T) {
 				crossProviderSecret := "remove temporary directory"
 				if provider == "claude" {
-					crossProviderSecret = "claude cleanup"
+					crossProviderSecret = "claude credential cleanup"
 				}
 				installActionTestSkills(t)
 				t.Setenv("CODEX_HOME", t.TempDir())
@@ -93,6 +94,9 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"terminal_r
 					}
 				}
 				runner.Logger = log.New(journal, "", 0)
+				if provider == "claude" {
+					testsupport.UseShortClaudeTempDir(t, "/tmp")
+				}
 				result, err := runner.Run(t.Context(), job)
 				if err != nil || result.Answer != "Done." || len(result.Calls) != 1 || result.Validate(job) != nil {
 					t.Fatalf("session cleanup discarded accepted result: %+v,%v", result, err)

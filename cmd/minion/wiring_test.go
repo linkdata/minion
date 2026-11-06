@@ -29,7 +29,7 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		AlwaysOnSkills: []string{skills.BuiltinAntiPromptInjection},
 		Commands:       map[string]config.CommandMapping{"inspect": {Action: "review"}},
 		Codex:          config.CodexConfig{APIKey: "codex-test-key", Model: "codex-pinned", ReasoningEffort: "high", Skills: []string{"stale-host-skill"}},
-		Claude:         config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", Skills: []string{"stale-host-skill"}},
+		Claude:         config.ClaudeConfig{APIKey: "claude-test-key", Model: "claude-pinned", Effort: "medium", AllowAllUnixSockets: true, Skills: []string{"stale-host-skill"}},
 	}
 	admissionErr := errors.New("admission sentinel")
 	client, store, logger := &github.Client{}, &state.Store{}, log.New(io.Discard, "", 0)
@@ -56,7 +56,7 @@ func TestServiceWiringPreservesAdmissionAndCredentials(t *testing.T) {
 		t.Fatal("service lost configured execution, command or usage settings")
 	}
 	if orchestrator.Runner.Codex.APIKey != cfg.Codex.APIKey ||
-		orchestrator.Runner.Claude.APIKey != cfg.Claude.APIKey ||
+		orchestrator.Runner.Claude.APIKey != cfg.Claude.APIKey || !orchestrator.Runner.Claude.AllowAllUnixSockets ||
 		len(orchestrator.Runner.Codex.Skills) != 0 ||
 		len(orchestrator.Runner.Claude.Skills) != 0 {
 		t.Fatal("runner lost provider authentication or retained unselected skills")

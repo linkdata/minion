@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/testsupport"
 )
@@ -20,18 +21,20 @@ func TestValidate(t *testing.T) {
   printf '%s\n' '{"loggedIn":true}'
 else
   printf '%s\n' "$@" > "$0.args"
+  printf '%s\n' "$PWD" > "$0.cwd"
   cat > "$0.input"
   printf '%s\n' '`+modelCatalogue+`'
 fi
 `)
 	for _, tc := range []struct {
 		name, model, effort, wantModel, wantEffort string
-		fails                                      bool
+		fails, allowAllUnixSockets                 bool
 	}{
 		{name: "defaults", wantModel: "claude-pinned"},
 		{name: "explicit default", model: "default", wantModel: "claude-pinned"},
 		{name: "alias", model: "quick", effort: "low", wantModel: "claude-small", wantEffort: "low"},
 		{name: "pinned", model: "claude-small", effort: "high", wantModel: "claude-small", wantEffort: "high"},
+		{name: "Unix socket opt-in", wantModel: "claude-pinned", allowAllUnixSockets: true},
 		{name: "unknown model", model: "missing", fails: true},
 		{name: "unresolved model", model: "unresolved", fails: true},
 		{name: "unsupported effort", effort: "max", fails: true},
@@ -40,7 +43,26 @@ fi
 			if err := os.Remove(binary + ".args"); err != nil && !os.IsNotExist(err) {
 				t.Fatal(err)
 			}
-			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort})
+			if err := os.Remove(binary + ".cwd"); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if tc.allowAllUnixSockets && runtime.GOOS == "linux" {
+				testsupport.FakeBubblewrap(t, "--disable-userns")
+			}
+			cfg, err := Validate(t.Context(), config.ClaudeConfig{Model: tc.model, Effort: tc.effort, AllowAllUnixSockets: tc.allowAllUnixSockets})
+			cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
+			tempRoot, rootErr := aicli.Directory(os.TempDir())
+			if rootErr != nil {
+				t.Fatal(rootErr)
+			}
+			parent := filepath.Dir(cwd)
+			if filepath.Dir(parent) != tempRoot || !strings.HasPrefix(filepath.Base(parent), runtimePrefix) ||
+				filepath.Base(cwd) != runtimeChild || len(cwd)-len(tempRoot) > runtimeDirSuffixBytes {
+				t.Fatalf("validation runtime directory = %q", cwd)
+			}
+			if _, statErr := os.Stat(parent); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("validation private parent retained: %v", statErr)
+			}
 			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--include-partial-messages\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)
 			}
@@ -54,6 +76,11 @@ fi
 				t.Fatalf("Validate = %+v, %v", cfg, err)
 			}
 			fresh := readFile(t, binary+".fresh-args")
+			wantSocketOverride := runtime.GOOS == "linux" && tc.allowAllUnixSockets
+			gotSocketOverride := strings.Contains(fresh, `"allowAllUnixSockets":true`)
+			if gotSocketOverride != wantSocketOverride {
+				t.Fatalf("fresh capability probe Unix socket override = %t, want %t", gotSocketOverride, wantSocketOverride)
+			}
 			if !strings.Contains(fresh, "--no-session-persistence\n") || !strings.Contains(fresh, "--session-id\n") || !strings.Contains(fresh, "--add-dir\n") || !strings.Contains(fresh, "--model\n"+tc.wantModel+"\n") || !strings.Contains(fresh, "--include-partial-messages\n") || !strings.Contains(fresh, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("fresh capability probe used wrong arguments: %q", fresh)
 			}
@@ -61,6 +88,67 @@ fi
 				t.Fatalf("fresh capability probe omitted selected effort: %q", fresh)
 			}
 		})
+	}
+}
+
+func TestBubblewrapOptInPrerequisite(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	t.Run("disabled", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if err := checkBubblewrap(t.Context(), false); err != nil {
+			t.Fatalf("disabled Bubblewrap check: %v", err)
+		}
+	})
+	for _, tc := range []struct {
+		name, help, wantError string
+		setuid                bool
+	}{
+		{name: "supported", help: "--disable-userns"},
+		{name: "old", help: "--unshare-user", wantError: "does not support"},
+		{name: "setuid", help: "--disable-userns", setuid: true, wantError: "is setuid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := testsupport.FakeBubblewrap(t, tc.help)
+			if tc.setuid {
+				if err := os.Chmod(binary, os.ModeSetuid|0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := checkBubblewrap(t.Context(), true)
+			if tc.wantError == "" && err != nil || tc.wantError != "" && (err == nil || !strings.Contains(err.Error(), tc.wantError)) {
+				t.Fatalf("Bubblewrap check = %v, want %q", err, tc.wantError)
+			}
+		})
+	}
+	t.Run("missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		if err := checkBubblewrap(t.Context(), true); err == nil || !strings.Contains(err.Error(), "requires non-setuid Bubblewrap") {
+			t.Fatalf("missing Bubblewrap passed: %v", err)
+		}
+	})
+	t.Run("no inherited environment", func(t *testing.T) {
+		t.Setenv("MINION_BWRAP_SENTINEL", "secret")
+		testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\n[ -z \"$MINION_BWRAP_SENTINEL\" ] || exit 1\nprintf '%s\\n' '--disable-userns'\n")
+		if err := checkBubblewrap(t.Context(), true); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestValidateRejectsUnsupportedBubblewrapBeforeClaude(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	binary := fakeExecutable(t, "claude", `printf called > "$0.called"`)
+	testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexit 1\n")
+	_, err := Validate(t.Context(), config.ClaudeConfig{AllowAllUnixSockets: true})
+	if err == nil || !strings.Contains(err.Error(), "probe Bubblewrap") {
+		t.Fatalf("Validate passed without supported Bubblewrap: %v", err)
+	}
+	if _, err := os.Stat(binary + ".called"); !os.IsNotExist(err) {
+		t.Fatalf("Claude started despite Bubblewrap failure: %v", err)
 	}
 }
 

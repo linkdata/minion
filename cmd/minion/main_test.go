@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
+	"github.com/linkdata/minion/internal/testsupport"
 )
 
 type startupTransport func(*http.Request) (*http.Response, error)
@@ -84,6 +87,63 @@ func runStartupFixtureWithRun(t *testing.T, cfg config.Config, start func() int,
 		t.Fatal(err)
 	}
 	return code, string(data)
+}
+
+func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name, main, adversarial string
+		warn                    bool
+	}{
+		{name: "main Claude", main: "claude", warn: true},
+		{name: "critic Claude", main: "codex", adversarial: "claude", warn: true},
+		{name: "Codex only", main: "codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{
+				BotLogin: "fixture", Main: tc.main, Adversarial: tc.adversarial,
+				Claude:    config.ClaudeConfig{Effort: "high", AllowAllUnixSockets: true},
+				StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+			}
+			store, err := state.Open(cfg.StatePath, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := store.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			code, output := runStartupFixture(t, cfg)
+			if code != 0 || !strings.Contains(output, "another run is active") || strings.Contains(output, claudeUnixSocketWarning) {
+				t.Fatalf("locked startup warned before admission: exit=%d log=%q", code, output)
+			}
+			cfg.StatePath = filepath.Join(t.TempDir(), "active-state.json")
+			code, output = runStartupFixtureWithRun(t, cfg, func() int {
+				return runWithGitCheck(func(context.Context, string) error { return errors.New("fixture Git stop") })
+			})
+			wantWarnings := 0
+			if runtime.GOOS == "linux" && tc.warn {
+				wantWarnings = 1
+			}
+			if code != 1 || !strings.Contains(output, "Git preflight: fixture Git stop") || strings.Count(output, claudeUnixSocketWarning) != wantWarnings {
+				t.Fatalf("local socket warning: exit=%d want=%d log=%q", code, wantWarnings, output)
+			}
+		})
+	}
+}
+
+func TestLocalClaudeSocketOptInReachesModelCheck(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Bubblewrap opt-in applies only on Linux")
+	}
+	testsupport.FakeBubblewrap(t, "--unshare-user")
+	cfg := config.Config{Main: "claude", Claude: config.ClaudeConfig{Model: "claude-pinned", Effort: "low", AllowAllUnixSockets: true}}
+	var output bytes.Buffer
+	if err := checkModels(t.Context(), &cfg, log.New(&output, "", 0)); err == nil || !strings.Contains(err.Error(), "Claude:") || !strings.Contains(err.Error(), "does not support") {
+		t.Fatalf("local model check lost Bubblewrap opt-in: %v", err)
+	}
 }
 
 func TestCronPassSkipsPreflightWhenStateLocked(t *testing.T) {

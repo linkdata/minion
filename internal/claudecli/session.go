@@ -1,18 +1,34 @@
 package claudecli
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/cleanup"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/usage"
+	workspacefs "github.com/linkdata/minion/internal/workspace"
+)
+
+const (
+	runtimePrefix = "mc-"
+	runtimeChild  = "r"
+	// MkdirTemp appends at most ten decimal digits to the prefix.
+	runtimeDirSuffixBytes    = len("/" + runtimePrefix + "4294967295/" + runtimeChild)
+	maxLinuxSocketPathBytes  = 107
+	maxLinuxTempRootBytes    = maxLinuxSocketPathBytes - len("/claude-socks-0123456789abcdef.sock") - runtimeDirSuffixBytes
+	maxDarwinSocketPathBytes = 103
+	// Eleven base36 digits cover JavaScript's maximum safe integer mux counter.
+	maxDarwinTempRootBytes = maxDarwinSocketPathBytes - len("/srt-mux-99999-xxxxxxxxxxx.sock") - runtimeDirSuffixBytes
+	maxTempRootBytes       = min(maxLinuxTempRootBytes, maxDarwinTempRootBytes)
 )
 
 // Session owns one action role's native conversation and scratch directories.
@@ -26,16 +42,16 @@ type Session struct {
 	OnInput func(aicli.PreparedInput)
 	// OnProgress receives process start and exit plus fresh native execution activity.
 	// Stdout may call it concurrently with process lifecycle callbacks.
-	OnProgress                   func()
-	workspace, binary, outputDir string
-	writable                     bool
-	settings                     config.ClaudeConfig
-	runtimeDir, cacheDir         string
-	authDir, configDir           string
-	nativeHome                   string
-	embeddedDir                  string
-	skillPaths                   []string
-	id                           string
+	OnProgress                        func()
+	workspace, binary, outputDir      string
+	writable                          bool
+	settings                          config.ClaudeConfig
+	runtimeRoot, runtimeDir, cacheDir string
+	authDir, configDir                string
+	nativeHome                        string
+	embeddedDir                       string
+	skillPaths                        []string
+	id                                string
 	// A missing snapshot leaves only a cumulative floor until a covering snapshot arrives.
 	baseline         usage.Tokens
 	usageGap         bool
@@ -79,7 +95,7 @@ func (s *Session) Close() error {
 	for _, resource := range []struct {
 		path  *string
 		label string
-	}{{&s.embeddedDir, "skill cleanup"}, {&s.authDir, "credential cleanup"}, {&s.runtimeDir, "cleanup"}} {
+	}{{&s.embeddedDir, "skill cleanup"}, {&s.authDir, "credential cleanup"}, {&s.runtimeRoot, "runtime cleanup"}} {
 		if *resource.path == "" {
 			continue
 		}
@@ -92,7 +108,7 @@ func (s *Session) Close() error {
 	return aicli.RedactError(err, s.settings.APIKey)
 }
 
-func (s *Session) prepare(workspace, binary string, writable bool, outputDir string, settings config.ClaudeConfig) error {
+func (s *Session) prepare(ctx context.Context, workspace, binary string, writable bool, outputDir string, settings config.ClaudeConfig) error {
 	if s.closed {
 		return errors.New("claude session is closed")
 	}
@@ -119,9 +135,16 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 			return errors.New("claude session native configuration changed")
 		}
 	} else {
+		tempRoot, err := CheckHost(ctx, settings.AllowAllUnixSockets)
+		if err != nil {
+			return err
+		}
+		if err := checkTempRootWritable(tempRoot, workspace, outputDir); err != nil {
+			return err
+		}
 		s.workspace, s.binary, s.outputDir, s.writable, s.settings = workspace, binary, outputDir, writable, bound
 		s.settings.Skills = slices.Clone(bound.Skills)
-		s.initErr = s.initialize()
+		s.initErr = s.initialize(tempRoot)
 		if s.initErr != nil {
 			return s.initErr
 		}
@@ -142,8 +165,7 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 	if err := cleanup.RemoveAll(filepath.Join(s.runtimeDir, ".git")); err != nil {
 		return fmt.Errorf("claude runtime Git metadata cleanup: %w", err)
 	}
-	// Native startup must not follow temp paths planted by the previous model call.
-	// Earlier CLI temp outputs are intentionally discarded; native transcripts stay outside tmp.
+	// Reset the configured native temp path so startup cannot follow a link planted by the previous call.
 	tmp := filepath.Join(s.runtimeDir, "tmp")
 	if err := cleanup.RemoveAll(tmp); err != nil {
 		return fmt.Errorf("claude native temp cleanup: %w", err)
@@ -154,8 +176,14 @@ func (s *Session) prepare(workspace, binary string, writable bool, outputDir str
 	return nil
 }
 
-func (s *Session) initialize() (err error) {
-	if s.runtimeDir, err = os.MkdirTemp(filepath.Dir(s.workspace), ".minion-claude-"); err != nil {
+func (s *Session) initialize(tempRoot string) (err error) {
+	// Claude's sandbox creates Unix sockets directly in TMPDIR, so keep it short.
+	if s.runtimeRoot, err = os.MkdirTemp(tempRoot, runtimePrefix); err != nil {
+		return
+	}
+	// Reset only the child, keeping the private parent against shared-temp races.
+	s.runtimeDir = filepath.Join(s.runtimeRoot, runtimeChild)
+	if err = os.Mkdir(s.runtimeDir, 0700); err != nil {
 		return
 	}
 	if s.authDir, err = authentication(filepath.Dir(s.workspace), s.settings.APIKey); err != nil {
@@ -171,6 +199,31 @@ func (s *Session) initialize() (err error) {
 	s.skillPaths, s.embeddedDir, err = aicli.MaterializeSkills(s.workspace, s.settings.Skills)
 	if err != nil {
 		return fmt.Errorf("claude skills: %w", err)
+	}
+	return nil
+}
+
+func runtimeTempRoot() (string, error) {
+	tempDir := os.TempDir()
+	root, err := aicli.Directory(tempDir)
+	if err != nil {
+		return "", fmt.Errorf("claude temp root %q: %w", tempDir, err)
+	}
+	if runtime.GOOS != "windows" && len(root) > maxTempRootBytes {
+		return "", fmt.Errorf("claude temp root %q (%d bytes): sandbox socket path is too long; set TMPDIR to a canonical path of at most %d bytes", root, len(root), maxTempRootBytes)
+	}
+	return root, nil
+}
+
+func checkTempRootWritable(root string, paths ...string) error {
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		resolved, err := aicli.ResolvePath(path)
+		if err == nil && workspacefs.Within(resolved, root) {
+			return fmt.Errorf("claude temp root %q is writable by sandboxed Bash; choose another TMPDIR", root)
+		}
 	}
 	return nil
 }

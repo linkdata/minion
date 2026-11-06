@@ -166,6 +166,8 @@ type ClaudeConfig struct {
 	Effort string `json:"effort,omitempty"`
 	// APIKey overrides environment credentials and stored login when nonempty.
 	APIKey string `json:"api_key,omitempty"`
+	// AllowAllUnixSockets permits Unix and AF_VSOCK VM host sockets in Claude's Linux sandbox.
+	AllowAllUnixSockets bool `json:"allow_all_unix_sockets,omitempty"`
 	// Skills contains installed paths selected by the application, not config JSON.
 	Skills []string `json:"-"`
 	// ReadOnlyDirs identifies application-selected evidence kept outside writable roots.
@@ -492,6 +494,9 @@ func (c *Config) Validate(configDir string) error {
 		}
 	}
 	if remote := c.RemoteExecutor; remote != nil {
+		if c.Claude.AllowAllUnixSockets {
+			return errors.New("claude.allow_all_unix_sockets belongs in the remote worker config, not the orchestrator config")
+		}
 		if !workspace.ValidIdentitySegment(remote.ExecutorID) {
 			return errors.New("remote_executor.executor_id is invalid")
 		}

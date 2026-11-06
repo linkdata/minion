@@ -25,6 +25,7 @@ func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, 
 			Selection: selected, WorkRoot: owner.WorkRoot, Endpoint: endpoint,
 			CodexAPIKey: credentials.CodexAPIKey, CodexNativeAPIKey: credentials.CodexNativeAPIKey,
 			CodexAccessToken: credentials.CodexAccessToken, ClaudeAPIKey: credentials.ClaudeAPIKey,
+			ClaudeAllowAllUnixSockets: owner.Runner.Claude.AllowAllUnixSockets,
 		}
 		input, err := action.EncodeWorkerStartup(startup)
 		if err != nil {

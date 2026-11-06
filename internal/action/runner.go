@@ -380,7 +380,6 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, preparationFailure("prepare private review ledger", err)
 		}
 	}
-	// Keep source and context as siblings: native CLI socket paths are bounded.
 	source, err := os.MkdirTemp(workRoot, "minion-")
 	if err != nil {
 		return result, preparationFailure("create source workspace", err)

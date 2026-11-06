@@ -52,6 +52,30 @@ func FakeOnPath(t *testing.T, name, script string) string {
 	return bin
 }
 
+// FakeBubblewrap installs a Bubblewrap help fixture and returns its path.
+func FakeBubblewrap(t *testing.T, help string) string {
+	t.Helper()
+	return filepath.Join(FakeOnPath(t, "bwrap", "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = --help ] || exit 2\nprintf '%s\\n' '"+help+"'\n"), "bwrap")
+}
+
+// UseShortClaudeTempDir isolates a short temp root and checks Claude scratch cleanup.
+func UseShortClaudeTempDir(t *testing.T, parent string) {
+	t.Helper()
+	root, err := os.MkdirTemp(parent, "mc-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+			t.Errorf("Claude temp directory %q not empty: %v, %v", root, entries, err)
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("TMPDIR", root)
+}
+
 // GitEnvironment isolates scratch paths and disables ambient Git configuration.
 func GitEnvironment(scratch string) []string {
 	return append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + scratch, "TMPDIR=" + scratch, "LC_ALL=C"}, aicli.ModelGitEnvironment()...)

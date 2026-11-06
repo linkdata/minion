@@ -97,6 +97,7 @@ func TestRemoteExecutorConfigRejectsInvalidTransportOrMissingSelectedModel(t *te
 		{"certificate", "tls_cert_file", func(c *Config) { c.RemoteExecutor.TLSCertFile = "" }},
 		{"key", "tls_key_file", func(c *Config) { c.RemoteExecutor.TLSKeyFile = "" }},
 		{"token", "token", func(c *Config) { c.RemoteExecutor.Token = "short" }},
+		{"Claude socket setting", "remote worker config", func(c *Config) { c.Claude.AllowAllUnixSockets = true }},
 		{"codex model", "explicit model and effort", func(c *Config) { c.Codex.Model = "" }},
 		{"codex effort", "explicit model and effort", func(c *Config) { c.Codex.ReasoningEffort = "" }},
 		{"critic model", "explicit model and effort", func(c *Config) { c.Adversarial = "claude"; c.Claude.Effort = "medium" }},

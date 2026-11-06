@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -158,6 +159,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("close state: %v", err)
 		}
 	}()
+	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+		logger.Print(claudeUnixSocketWarning)
+	}
 	if !*check {
 		defer func() {
 			if ctx.Err() != nil {
@@ -407,7 +411,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
 			Codex:  codexAuth,
-			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey},
+			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
 			Logger: logger,
 		},
 	}

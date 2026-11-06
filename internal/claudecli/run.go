@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,11 +29,12 @@ import (
 // Run continues one action role's conversation with sandboxed shell tools.
 //
 // The CLI retains API network access. Model-generated commands use Claude's
-// native sandbox with its default filesystem and network restrictions. A
-// writable run may edit the source snapshot; outputDir grants a separate report
-// directory write. ReadOnlyDirs and configured skills are readable without
-// granting them write access. When OutputSchema is set, the answer contains
-// the CLI's structured JSON result.
+// native sandbox with filesystem and network restrictions. The optional Linux
+// Unix-socket workaround leaves host services reachable.
+// A writable run may edit the source snapshot; outputDir grants a separate
+// report directory write. ReadOnlyDirs and configured skills are readable
+// without granting them write access. When OutputSchema is set, the answer
+// contains the CLI's structured JSON result.
 //
 // APIKey overrides environment credentials and stored CLI login through a
 // temporary, tool-inaccessible key helper. Without APIKey, use Claude's stored
@@ -65,7 +67,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 		}
 		outputDir = resolved
 	}
-	if err := s.prepare(workspace, binary, writable, outputDir, settings); err != nil {
+	if err := s.prepare(ctx, workspace, binary, writable, outputDir, settings); err != nil {
 		return result, err
 	}
 	runtimeDir, authDir, cacheDir := s.runtimeDir, s.authDir, s.cacheDir
@@ -86,7 +88,7 @@ func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, ou
 			return result, errors.New("claude read-only directory overlaps a writable grant")
 		}
 	}
-	policy, err := sandboxSettings(workspace, outputDir, authDir)
+	policy, err := sandboxSettings(workspace, outputDir, authDir, settings.AllowAllUnixSockets)
 	if err != nil {
 		return result, err
 	}
@@ -269,7 +271,10 @@ func arguments(policy string) []string {
 	}
 }
 
-func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
+// Tests replace this path to cover hosts without a user runtime directory.
+var userRuntimeDir = fmt.Sprintf("/run/user/%d", os.Getuid())
+
+func sandboxSettings(workspace, outputDir, authDir string, allowAllUnixSockets bool) (string, error) {
 	if authDir != "" && (workspacefs.Within(workspace, authDir) || workspacefs.Within(authDir, workspace) ||
 		outputDir != "" && (workspacefs.Within(outputDir, authDir) || workspacefs.Within(authDir, outputDir))) {
 		return "", errors.New("claude API key directory overlaps a writable directory")
@@ -278,15 +283,24 @@ func sandboxSettings(workspace, outputDir, authDir string) (string, error) {
 	if authDir != "" {
 		credentials["files"] = []map[string]string{{"path": filepath.Join(authDir, "api-key"), "mode": "deny"}}
 	}
+	sandbox := map[string]any{
+		"enabled":                  true,
+		"failIfUnavailable":        true,
+		"allowUnsandboxedCommands": false,
+		"credentials":              credentials,
+	}
+	if runtime.GOOS == "linux" && allowAllUnixSockets {
+		// shortcut: Linux Bash can still reach host, Claude session, and AF_VSOCK VM host sockets; replace the CLI sandbox for stronger isolation.
+		sandbox["network"] = map[string]any{"allowAllUnixSockets": true}
+		// A missing target makes Claude hide its nearest existing parent instead.
+		if _, err := os.Stat(userRuntimeDir); !errors.Is(err, os.ErrNotExist) {
+			sandbox["filesystem"] = map[string]any{"denyRead": []string{userRuntimeDir}}
+		}
+	}
 	policy := map[string]any{
 		"disableClaudeAiConnectors": true,
 		"autoMemoryEnabled":         false,
-		"sandbox": map[string]any{
-			"enabled":                  true,
-			"failIfUnavailable":        true,
-			"allowUnsandboxedCommands": false,
-			"credentials":              credentials,
-		},
+		"sandbox":                   sandbox,
 	}
 	if authDir != "" {
 		policy["apiKeyHelper"] = apiKeyHelper(authDir)

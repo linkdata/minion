@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -22,6 +23,7 @@ func TestLoadRemoteWorkerConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "remote.json")
 	cfg := remoteWorkerConfig{BaseURL: "https://worker.example:8443", ExecutorID: "remote-1", Token: "token", WorkRoot: "work"}
+	cfg.Claude.AllowAllUnixSockets = true
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +32,7 @@ func TestLoadRemoteWorkerConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, err := loadRemoteWorkerConfig(path)
-	if err != nil || loaded.WorkRoot != filepath.Join(dir, "work") || loaded.BaseURL != cfg.BaseURL || loaded.ExecutorID != cfg.ExecutorID {
+	if err != nil || loaded.WorkRoot != filepath.Join(dir, "work") || loaded.BaseURL != cfg.BaseURL || loaded.ExecutorID != cfg.ExecutorID || !loaded.Claude.AllowAllUnixSockets {
 		t.Fatalf("load remote worker config: %+v, %v", loaded, err)
 	}
 	for name, body := range map[string]string{
@@ -63,9 +65,11 @@ func TestRemoteExecuteModeRejectsServiceFlags(t *testing.T) {
 func TestRemoteExecuteChecksWorkerGitBeforePull(t *testing.T) {
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	configPath := filepath.Join(t.TempDir(), "remote.json")
-	data, err := json.Marshal(remoteWorkerConfig{
+	cfg := remoteWorkerConfig{
 		BaseURL: "https://127.0.0.1:1", ExecutorID: "remote", Token: token, WorkRoot: t.TempDir(),
-	})
+	}
+	cfg.Claude.AllowAllUnixSockets = true
+	data, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +80,13 @@ func TestRemoteExecuteChecksWorkerGitBeforePull(t *testing.T) {
 	var logs bytes.Buffer
 	if code := runRemoteExecuteMode(configPath, log.New(&logs, "", 0)); code != 1 || !strings.Contains(logs.String(), "remote worker Git preflight: git readiness requires git") {
 		t.Fatalf("missing worker Git reached the pull: exit=%d logs=%q", code, logs.String())
+	}
+	wantWarnings := 0
+	if runtime.GOOS == "linux" {
+		wantWarnings = 1
+	}
+	if got := strings.Count(logs.String(), "Claude Unix-socket opt-in enabled"); got != wantWarnings {
+		t.Fatalf("socket opt-in warnings = %d, want %d: %q", got, wantWarnings, logs.String())
 	}
 }
 
@@ -102,9 +113,10 @@ func TestRemoteWorkerLoopDoesNotLogPrivateFailureText(t *testing.T) {
 	const privateText = "private model discussion returned in a worker error"
 	client := &http.Client{Transport: remoteWorkerFailureTransport{err: errors.New(privateText)}}
 	var logs bytes.Buffer
-	code := runRemoteWorkerLoop(t.Context(), remoteWorkerConfig{
+	cfg := remoteWorkerConfig{
 		BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
-	}, client, log.New(&logs, "", 0))
+	}
+	code := runRemoteWorkerLoop(t.Context(), cfg, client, log.New(&logs, "", 0))
 	if code != 1 || logs.String() != "remote worker: execution or protocol failure\n" || strings.Contains(logs.String(), privateText) {
 		t.Fatalf("remote worker exposed untrusted error text: exit=%d logs=%q", code, logs.String())
 	}
