@@ -374,12 +374,13 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 
 func TestCertifiedListenURL(t *testing.T) {
 	for _, test := range []struct {
-		address, listenURL, want string
-		certificateNames         []string
-		certificateIPs           []net.IP
+		address, listenURL, listen, want string
+		certificateNames                 []string
+		certificateIPs                   []net.IP
 	}{
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
+		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", listen: "minion.example.com:8080", want: "https://minion.example.com:8080", certificateNames: []string{"*.example.com"}},
 		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "[::1]:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
@@ -389,7 +390,7 @@ func TestCertifiedListenURL(t *testing.T) {
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", certificateNames: []string{"*.example"}},
 	} {
 		certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: test.certificateNames, IPAddresses: test.certificateIPs}}
-		if got := certifiedListenURL(test.listenURL, test.address, certificate, config.AdminConfig{}); got != test.want {
+		if got := certifiedListenURL(test.listenURL, test.address, certificate, config.AdminConfig{Listen: test.listen}); got != test.want {
 			t.Errorf("TLS URL for %s = %q, want %q", test.address, got, test.want)
 		}
 	}

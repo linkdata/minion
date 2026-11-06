@@ -171,6 +171,11 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 		}
 		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
 	}
+	if listenHost, _, err := net.SplitHostPort(cfg.Listen); err == nil && net.ParseIP(listenHost) == nil {
+		if candidate := covered(listenHost); candidate != "" {
+			return candidate
+		}
+	}
 	for _, name := range certificate.Leaf.DNSNames {
 		if candidate := covered(name); candidate != "" {
 			return candidate

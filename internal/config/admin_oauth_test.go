@@ -47,6 +47,14 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 			t.Errorf("loopback HTTP OAuth on %s: %v", tc.listen, err)
 		}
 	}
+	equivalentIPv6 := valid()
+	equivalentIPv6.Admin.Listen = "[::1]:8377"
+	equivalentIPv6.Admin.TLSCertFile, equivalentIPv6.Admin.TLSKeyFile = "", ""
+	equivalentIPv6.Admin.GitHubOAuth.RedirectURL = "http://[::1]:8377/auth/github/callback"
+	equivalentIPv6.Admin.GitLabOAuth.RedirectURL = "http://[0:0::1]:8377/auth/gitlab/callback"
+	if err := equivalentIPv6.Validate(t.TempDir()); err != nil {
+		t.Fatalf("equivalent IPv6 callback hosts: %v", err)
+	}
 	for _, tc := range []struct{ listen, host string }{
 		{"127.0.0.1:8377", "127.0.0.2"},
 		{"127.0.0.1:8377", "[::1]"},

@@ -62,7 +62,7 @@ const (
 	maxGuestPageRequests      = 4
 	maxRotatedCookies         = 2048
 	adminSignInReserve        = 32
-	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve // Public entry pages stop one slot early for sign-in.
+	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve // OAuth starts stop here; home and OAuth login pages stop one slot earlier.
 	// One sign-out marker may be needed for each live JaWS session.
 	maxSignInRotations = maxRotatedCookies - maxAdminSessions
 	// OAuth leaves room for those sign-outs and admin password rotations.
@@ -612,9 +612,7 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 	value := old.CookieValue()
 	if !a.rememberRotatedCookie(value, maxOAuthRotations) {
 		a.sessionAdmissionMu.Unlock()
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Retry-After", "60")
-		w.WriteHeader(http.StatusServiceUnavailable)
+		guestAdmissionUnavailable(w)
 		return
 	}
 	key := sha256.Sum256([]byte(value))

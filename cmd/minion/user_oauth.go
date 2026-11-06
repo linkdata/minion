@@ -365,7 +365,7 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	w.Header().Set("Cache-Control", "no-store")
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
+		if a.jaws.SessionCount() >= maxGuestAdmissionSessions-1 {
 			guestAdmissionUnavailable(w)
 			return
 		}

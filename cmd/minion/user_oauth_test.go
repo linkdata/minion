@@ -923,6 +923,9 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, guest, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 0 {
 		t.Fatalf("existing guest page at reserve: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
+	if failed := adminResponse(handler, http.MethodGet, "/auth/github/callback", nil, nil, ""); failed.Code != http.StatusServiceUnavailable || failed.Header().Get("Retry-After") != "60" || failed.Header().Get("Location") != "" || len(failed.Result().Cookies()) != 0 {
+		t.Fatalf("OAuth error at guest entry limit: status=%d headers=%v cookies=%v", failed.Code, failed.Header(), failed.Result().Cookies())
+	}
 	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
 		t.Fatalf("reserved admin page: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}

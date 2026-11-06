@@ -48,10 +48,14 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
 			}
 		}
-		if cookieHost != "" && !strings.EqualFold(cookieHost, redirect.Hostname()) {
+		redirectHost := redirect.Hostname()
+		if ip, err := netip.ParseAddr(redirectHost); err == nil {
+			redirectHost = ip.String()
+		}
+		if cookieHost != "" && !strings.EqualFold(cookieHost, redirectHost) {
 			return errors.New("admin OAuth redirect_url hosts must match for the session cookie")
 		}
-		cookieHost = redirect.Hostname()
+		cookieHost = redirectHost
 		if entry.name == "github_oauth" {
 			if client.BaseURL != "" {
 				return errors.New("admin.github_oauth base_url is fixed to https://github.com")
