@@ -185,9 +185,13 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 	}
 	rounds := job.rounds()
 	policy := criticPolicy{job: job}
-	request := modelRun{session: &sessions.main, role: roleMain, provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: prompt, writable: job.Action == command.Fix, outputDir: outputDir}
+	mainTask := prompt
 	if job.Critic != nil {
-		request.prompt, request.outputSchema = mainPrompt(prompt), mainOutputSchema
+		mainTask = actionAIInstructions(job.AIInstructions) + "\n\n" + prompt
+	}
+	request := modelRun{session: &sessions.main, role: roleMain, provider: job.Main.Provider, model: job.Main.Model, effort: job.Main.Effort, dir: dir, prompt: mainTask, writable: job.Action == command.Fix, outputDir: outputDir}
+	if job.Critic != nil {
+		request.prompt, request.outputSchema = mainPrompt(mainTask), mainOutputSchema
 	}
 	var priorAnswer, priorFeedback string
 	secrets := r.secretValues()
@@ -262,7 +266,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		}
 		feedback := strings.Join(rejectedFeedback, "\n\n")
 		priorAnswer, priorFeedback = candidate, feedback
-		request.prompt = revisionPrompt(prompt, candidate, feedback)
+		request.prompt = revisionPrompt(mainTask, candidate, feedback)
 		request.refutations = slices.Clone(history)
 	}
 	if job.RequiredCleanCriticRounds > 0 {
@@ -313,6 +317,13 @@ func effectiveAIInstructions(instructions string) string {
 		return DefaultAIInstructions
 	}
 	return instructions
+}
+
+func actionAIInstructions(instructions string) string {
+	if instructions == "" {
+		return "For any review or audit required by the selected task: " + DefaultAIInstructions
+	}
+	return "Operator instructions for this action: " + instructions
 }
 
 func revisionPrompt(task, proposed, feedback string) string {

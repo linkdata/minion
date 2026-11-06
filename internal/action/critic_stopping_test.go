@@ -127,7 +127,7 @@ func TestRunAIPreservesRejectedVerificationAndFullFeedback(t *testing.T) {
 	runner := Runner{runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls++
 		if request.role == roleMain {
-			if request.round == 3 && request.prompt != revisionPrompt("Complete the task", "Candidate 2", combined) {
+			if request.round == 3 && request.prompt != revisionPrompt(actionAIInstructions("")+"\n\nComplete the task", "Candidate 2", combined) {
 				t.Fatalf("revision lost phase-labelled feedback: %q", request.prompt)
 			}
 			return aicli.Result{Answer: proposalJSON(fmt.Sprintf("Candidate %d", request.round), "")}, nil

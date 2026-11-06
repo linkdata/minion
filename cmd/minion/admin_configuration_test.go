@@ -69,7 +69,7 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 	if err := adminConfigurationHTML.ExecuteTemplate(&remote, "admin skills", page); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(remote.String(), "Remote worker restart required") || strings.Contains(remote.String(), "/admin/skills/add") || strings.Contains(remote.String(), "/admin/skills/remove") {
+	if strings.Count(remote.String(), "Skill edits require restarting the remote worker") != 1 || strings.Contains(remote.String(), "Remote worker restart required") || strings.Contains(remote.String(), "/admin/skills/add") || strings.Contains(remote.String(), "/admin/skills/remove") {
 		t.Fatalf("remote worker skills page offered live edits: %s", remote.String())
 	}
 }

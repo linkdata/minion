@@ -160,7 +160,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
 {{define "admin skills"}}{{template "head.html" $}}<title>Skills · Minion admin</title></head>
 <body>{{template "admin-nav" $}}<main class="container py-4">
   <div class="border-bottom mb-4"><h1>Skills</h1><p class="text-body-secondary">Sources used for every action or for a selected command.</p></div>
-  {{with .Dot}}{{template "admin-config-notice" .}}{{if .Remote}}<p class="text-body-secondary">A remote worker is selected. Installed skill status is checked on that worker.</p>{{end}}
+  {{with .Dot}}{{template "admin-config-notice" .}}{{if .Remote}}<p class="text-body-secondary">Skill edits require restarting the remote worker. Installed skill status is checked on that worker.</p>{{end}}
   <section class="border rounded p-3 mb-3"><h2 class="h5">Every action</h2>{{template "admin-skill-list" .AlwaysOnSkills}}</section>
   {{range .CommandSkills}}<section class="border rounded p-3 mb-3"><h2 class="h5">{{.Name}} command</h2>{{template "admin-skill-list" .Skills}}</section>{{else}}<p>No commands are configured.</p>{{end}}
   {{if not .Remote}}<section class="border rounded p-3"><h2 class="h5">Add skill</h2><form method="post" action="/admin/skills/add" class="vstack gap-3">
@@ -170,7 +170,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
   </form></section>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin-skill-list"}}{{if .}}<ul class="list-group">{{range .}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><div class="me-auto"><strong>{{.Name}}</strong><small class="d-block text-body-secondary text-break">{{.URL}}</small></div>
-  {{if .Remote}}<small class="text-body-secondary">Remote worker restart required</small>{{else if .CanRemove}}<form method="post" action="/admin/skills/remove"><input type="hidden" name="target" value="{{.Target}}"><input type="hidden" name="url" value="{{.URL}}"><button class="btn btn-sm btn-outline-danger" type="submit">Remove</button></form>{{else}}<small class="text-body-secondary">Required</small>{{end}}
+  {{if not .Remote}}{{if .CanRemove}}<form method="post" action="/admin/skills/remove"><input type="hidden" name="target" value="{{.Target}}"><input type="hidden" name="url" value="{{.URL}}"><button class="btn btn-sm btn-outline-danger" type="submit">Remove</button></form>{{else}}<small class="text-body-secondary">Required</small>{{end}}{{end}}
 </li>{{end}}</ul>{{else}}<p class="mb-0 text-body-secondary">No skills configured.</p>{{end}}{{end}}
 `))
 
