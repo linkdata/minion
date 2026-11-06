@@ -76,11 +76,12 @@ case "$1" in
         esac
         exit 0 ;;
     esac
-    cat >/dev/null
+    cat >/dev/null || exit 99
     selected=other
     [ "${CODEX_API_KEY-}" = ` + aicli.ShellQuote(offlineModeSelectedAPIKey) + ` ] && selected=selected
     leaked=absent
-    case "$(env)" in
+    environment=$(env) || exit 99
+    case "$environment" in
       *offline-token*|*fixture-unselected-key*|*fixture-ambient-codex-key*) leaked=present ;;
     esac
     printf '%s,%s\n' "$selected" "$leaked" > ` + aicli.ShellQuote(modelCalls+".env") + `
