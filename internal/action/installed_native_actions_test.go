@@ -45,6 +45,7 @@ func TestInstalledNativeActions(t *testing.T) {
 
 				workRoot := t.TempDir()
 				t.Cleanup(func() { assertEmptyDir(t, workRoot) })
+				t.Setenv("HOME", t.TempDir())
 				runner := NewRemoteRunner(workRoot)
 				if role.provider == "codex" {
 					runner.Codex.APIKey = os.Getenv("MINION_LIVE_CODEX_API_KEY")
