@@ -149,7 +149,7 @@ To enable user sign-in, register OAuth applications with the providers and add e
 }
 ```
 
-`gitlab_oauth.base_url` defaults to `https://gitlab.com`; it can name an HTTPS GitLab instance that supports OpenID Connect. The two callbacks must stay distinct. For local development without admin TLS, use the listener's loopback IP and port in both HTTP callbacks. With the default `127.0.0.1` listener, `localhost` also works; open Minion's logged URL so the browser sends its session cookie to the callback.
+`gitlab_oauth.base_url` defaults to `https://gitlab.com`; it can name an HTTPS GitLab instance that supports OpenID Connect. The two callbacks must stay distinct. For local development without admin TLS, use the listener's literal loopback IP and port in both HTTP callbacks. Open Minion's logged URL so the browser sends its session cookie to the callback.
 
 Open `/auth/login` to sign in with either provider and link the other account. Each linked account can contain at most one GitHub identity and one GitLab identity, even across GitLab hosts. Links are saved in `<state_path>.link`; back up this owner-only file with the state file. GitHub identity uses its numeric account ID; GitLab uses the OpenID Connect subject. GitHub requests `read:user`; GitLab requests `openid email`. Names and email addresses are labels, never ownership proof. Sign-in alone grants no repository access or GitLab action discovery. A linked account stays one account regardless of which provider is used next. Provider sign-in does not grant admin access; the local password account controls the admin dashboard.
 

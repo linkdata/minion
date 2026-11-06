@@ -1415,7 +1415,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 	baseURL := "http://" + admin.listener.Addr().String()
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://localhost:"+port {
+	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
 		t.Fatalf("admin home URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	entry, err := client.Get(baseURL + "/")

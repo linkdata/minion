@@ -45,7 +45,7 @@ func TestInProcessModeRejectedBeforeStartup(t *testing.T) {
 	}
 }
 
-func TestOneshotAndCheckRejectedBeforeStartup(t *testing.T) {
+func TestOneShotAndCheckRejectedBeforeStartup(t *testing.T) {
 	code, output := runStartupFixtureWithRun(t, config.Config{}, func() int {
 		return runWithGitCheck(func(context.Context, string) error {
 			t.Fatal("conflicting flags reached Git preflight")

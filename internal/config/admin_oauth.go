@@ -29,7 +29,7 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 		redirect, err := url.Parse(client.RedirectURL)
 		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != entry.callbackPath ||
 			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
-			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
+			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or literal loopback IP HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
 		}
 		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
 			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
@@ -44,8 +44,7 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 			}
 			callbackIP, _ := netip.ParseAddr(redirect.Hostname())
 			listenIP, _ := netip.ParseAddr(listenHost)
-			if !(callbackIP.IsValid() && callbackIP.Unmap() == listenIP.Unmap() ||
-				strings.EqualFold(redirect.Hostname(), "localhost") && listenIP.Unmap() == netip.MustParseAddr("127.0.0.1")) {
+			if !callbackIP.IsValid() || callbackIP.Unmap() != listenIP.Unmap() {
 				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
 			}
 		}
@@ -99,9 +98,6 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	}
 	if u.Scheme != "http" || !allowLoopbackHTTP {
 		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return true
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.Unmap().IsLoopback()

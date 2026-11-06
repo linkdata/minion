@@ -61,7 +61,7 @@ const (
 	maxGuestPageRequests      = 4
 	maxRotatedCookies         = 2048
 	adminSignInReserve        = 32
-	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve
+	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve // Public entry pages stop one slot early for sign-in.
 	// One sign-out marker may be needed for each live JaWS session.
 	maxSignInRotations = maxRotatedCookies - maxAdminSessions
 	// OAuth leaves room for those sign-outs and admin password rotations.

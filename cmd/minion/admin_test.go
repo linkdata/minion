@@ -48,7 +48,7 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		}
 	})
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://localhost:"+port {
+	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
 		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	if admin.signInEnabled {
@@ -191,15 +191,6 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	}
 	if !admin.signInEnabled {
 		t.Fatal("OAuth-only configuration did not enable sign-in")
-	}
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://localhost:"+port {
-		t.Fatalf("OAuth home URL = %q, port=%q: %v", admin.entryURL, port, err)
-	}
-	entry, err := url.Parse(admin.entryURL)
-	redirect, redirectErr := url.Parse(cfg.GitHubOAuth.RedirectURL)
-	if err != nil || redirectErr != nil || entry.Hostname() != redirect.Hostname() {
-		t.Fatalf("OAuth callback %q does not match webserv URL %q: %v, %v", cfg.GitHubOAuth.RedirectURL, admin.entryURL, err, redirectErr)
 	}
 	base := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -420,13 +411,12 @@ func TestPlainAdminListenURL(t *testing.T) {
 	for _, tc := range []struct {
 		address, callback, want string
 	}{
-		{address: "127.0.0.1:8080", want: "http://localhost:8080"},
+		{address: "127.0.0.1:8080", want: "http://127.0.0.1:8080"},
 		{address: "127.0.0.2:8080", want: "http://127.0.0.2:8080"},
 		{address: "[::1]:8080", want: "http://[::1]:8080"},
 		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8080/auth/github/callback", want: "http://127.0.0.1:8080"},
 		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:08080/auth/github/callback", want: "http://127.0.0.1:08080"},
-		{address: "127.0.0.1:8080", callback: "http://localhost:8080/auth/github/callback", want: "http://localhost:8080"},
-		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8081/auth/github/callback", want: "http://localhost:8080"},
+		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8081/auth/github/callback", want: "http://127.0.0.1:8080"},
 	} {
 		cfg := config.AdminConfig{}
 		if tc.callback != "" {

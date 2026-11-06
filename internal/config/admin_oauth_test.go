@@ -29,15 +29,14 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	localhost.Admin.TLSCertFile, localhost.Admin.TLSKeyFile = "", ""
 	localhost.Admin.GitHubOAuth.RedirectURL = "http://localhost:8377/auth/github/callback"
 	localhost.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback"
-	if err := localhost.Validate(t.TempDir()); err != nil {
-		t.Fatalf("webserv localhost HTTP OAuth: %v", err)
+	if err := localhost.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "redirect_url") {
+		t.Fatalf("localhost HTTP OAuth: %v, want redirect_url error", err)
 	}
 	for _, tc := range []struct{ listen, host string }{
 		{"127.0.0.1:8377", "127.0.0.1"},
 		{"127.0.0.2:8377", "127.0.0.2"},
 		{"[::1]:8377", "[::1]"},
 		{"[::ffff:127.0.0.1]:8377", "127.0.0.1"},
-		{"[::ffff:127.0.0.1]:8377", "localhost"},
 	} {
 		loopback := valid()
 		loopback.Admin.Listen = tc.listen
@@ -51,8 +50,6 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	for _, tc := range []struct{ listen, host string }{
 		{"127.0.0.1:8377", "127.0.0.2"},
 		{"127.0.0.1:8377", "[::1]"},
-		{"127.0.0.2:8377", "localhost"},
-		{"[::1]:8377", "localhost"},
 		{"[::ffff:127.0.0.1]:8377", "127.0.0.2"},
 	} {
 		unbound := valid()
@@ -67,8 +64,8 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	defaultHTTPPort := valid()
 	defaultHTTPPort.Admin.Listen = "127.0.0.1:80"
 	defaultHTTPPort.Admin.TLSCertFile, defaultHTTPPort.Admin.TLSKeyFile = "", ""
-	defaultHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://localhost/auth/github/callback"
-	defaultHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://localhost/auth/gitlab/callback"
+	defaultHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
+	defaultHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
 	if err := defaultHTTPPort.Validate(t.TempDir()); err != nil {
 		t.Fatalf("implicit HTTP port 80: %v", err)
 	}
@@ -118,26 +115,22 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"mixed HTTP callback hosts", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
-			c.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://[::ffff:127.0.0.1]:8377/auth/gitlab/callback"
 		}, "hosts must match"},
 		{"loopback IP callback wrong port", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8378/auth/github/callback"
-			c.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback"
 		}, "port must match"},
-		{"localhost callback wrong port", func(c *Config) {
+		{"implicit HTTP callback port mismatch", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
-			c.Admin.GitHubOAuth.RedirectURL = "http://localhost:8378/auth/github/callback"
-		}, "port must match"},
-		{"localhost callback missing port", func(c *Config) {
-			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
-			c.Admin.GitHubOAuth.RedirectURL = "http://localhost/auth/github/callback"
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
 		}, "port must match"},
 		{"localhost suffix HTTP callback", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://localhost.example/auth/github/callback"
 		}, "redirect_url"},
-		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback" }, "admin TLS"},
+		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback" }, "admin TLS"},
 		{"plain listener with HTTPS callback", func(c *Config) { c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", "" }, "admin TLS"},
 		{"public listener without TLS", func(c *Config) {
 			c.Admin.Listen = "0.0.0.0:8377"

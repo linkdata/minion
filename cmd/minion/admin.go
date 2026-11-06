@@ -176,17 +176,15 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 			return candidate
 		}
 	}
-	ip := net.ParseIP(host)
-	if ip != nil && !ip.IsUnspecified() {
-		if candidate := covered(host); candidate != "" {
-			return candidate
-		}
-	}
-	if ip != nil && ip.IsUnspecified() {
-		for _, address := range certificate.Leaf.IPAddresses {
-			if candidate := covered(address.String()); candidate != "" {
-				return candidate
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsUnspecified() {
+			for _, address := range certificate.Leaf.IPAddresses {
+				if candidate := covered(address.String()); candidate != "" {
+					return candidate
+				}
 			}
+		} else if candidate := covered(host); candidate != "" {
+			return candidate
 		}
 	}
 	return ""
@@ -217,7 +215,7 @@ func plainAdminListenURL(rawURL, address string, cfg config.AdminConfig) string 
 			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
 		}
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() && host != "127.0.0.1" {
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return "http://" + address
 	}
 	return rawURL
