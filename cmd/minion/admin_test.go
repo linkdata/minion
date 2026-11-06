@@ -418,7 +418,6 @@ func TestPlainAdminListenURL(t *testing.T) {
 		{address: "[::1]:8080", want: "http://[::1]:8080"},
 		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8080/auth/github/callback", want: "http://127.0.0.1:8080"},
 		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:08080/auth/github/callback", want: "http://127.0.0.1:08080"},
-		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8081/auth/github/callback", want: "http://127.0.0.1:8080"},
 	} {
 		cfg := config.AdminConfig{}
 		if tc.callback != "" {

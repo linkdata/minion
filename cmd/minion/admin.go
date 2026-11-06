@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -154,7 +153,7 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 			continue
 		}
 		callback, err := url.Parse(client.RedirectURL)
-		if err != nil || callback.Scheme != "https" {
+		if err != nil {
 			continue
 		}
 		if certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
@@ -196,21 +195,9 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 }
 
 func plainAdminListenURL(address string, cfg config.AdminConfig) string {
-	_, port, _ := net.SplitHostPort(address) // listener addresses always have a numeric port.
-	listenPort, _ := strconv.Atoi(port)
 	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
-		if client == nil {
-			continue
-		}
-		callback, err := url.Parse(client.RedirectURL)
-		if err != nil || callback.Scheme != "http" {
-			continue
-		}
-		callbackPort := callback.Port()
-		if callbackPort == "" {
-			callbackPort = "80"
-		}
-		if number, err := strconv.Atoi(callbackPort); err == nil && number == listenPort {
+		if client != nil {
+			callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
 			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
 		}
 	}

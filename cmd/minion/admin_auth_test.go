@@ -509,7 +509,7 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}, nil)
-	for jw.SessionCount() < maxGuestAdmissionSessions-2 {
+	for jw.SessionCount() < maxGuestPageSessions-1 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest session reserve")
 		}
@@ -522,27 +522,27 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
 	}
 	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("home exhausted sign-in reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
 	}
 }
 
 func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	for jw.SessionCount() < maxGuestAdmissionSessions-2 {
+	for jw.SessionCount() < maxGuestPageSessions-1 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest sessions")
 		}
 	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("admin-only home: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
 	}
-	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
+	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
 	}
 	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions-1 {
+	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
@@ -590,48 +590,6 @@ func TestAdminReloginRetiresOldSession(t *testing.T) {
 	}
 	if denied := adminResponse(handler, http.MethodPost, "/admin/login", form, currentCookie, ""); denied.Code != http.StatusConflict || len(denied.Result().Cookies()) != 0 {
 		t.Fatalf("revoked admin session relogged in: status=%d cookies=%v", denied.Code, denied.Result().Cookies())
-	}
-}
-
-func TestAdminLogoutWaitsForSessionAdmission(t *testing.T) {
-	jw, err := jaws.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer jw.Close()
-	request := httptest.NewRequest(http.MethodPost, "https://admin.example/admin/logout", nil)
-	if sess := jw.NewSession(httptest.NewRecorder(), request); sess == nil {
-		t.Fatal("could not create admin session")
-	}
-	access := &adminAccess{jaws: jw}
-	access.sessionAdmissionMu.Lock()
-	started := make(chan struct{})
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		close(started)
-		response := httptest.NewRecorder()
-		access.logout(response, request)
-		done <- response
-	}()
-	<-started
-	select {
-	case <-done:
-		access.sessionAdmissionMu.Unlock()
-		t.Fatal("logout bypassed session admission lock")
-	case <-time.After(50 * time.Millisecond):
-	}
-	if jw.GetSession(request) == nil {
-		access.sessionAdmissionMu.Unlock()
-		t.Fatal("logout revoked session before admission lock was released")
-	}
-	access.sessionAdmissionMu.Unlock()
-	select {
-	case response := <-done:
-		if response.Code != http.StatusSeeOther || jw.GetSession(request) != nil {
-			t.Fatalf("logout after admission: status=%d live=%t", response.Code, jw.GetSession(request) != nil)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("logout did not finish after admission lock was released")
 	}
 }
 

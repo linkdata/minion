@@ -429,25 +429,17 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 		!strings.Contains(home.Body.String(), `href="/auth/login"`) {
 		t.Fatalf("combined sign-in home: status=%d body=%q", home.Code, home.Body.String())
 	}
-	for jw.SessionCount() < maxGuestAdmissionSessions-17 {
+	for jw.SessionCount() < maxGuestPageSessions-1 {
 		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
 		if response.Code != http.StatusFound || len(response.Result().Cookies()) != 1 {
 			t.Fatalf("OAuth start before limit: status=%d cookies=%v", response.Code, response.Result().Cookies())
 		}
 	}
-	var guest *http.Cookie
-	for i := range 16 {
-		response := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
-		if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
-			t.Fatalf("guest page %d: status=%d cookies=%v", i, response.Code, response.Result().Cookies())
-		}
-		if guest == nil {
-			guest = response.Result().Cookies()[0]
-		}
+	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("guest page before final start: status=%d cookies=%v sessions=%d", page.Code, page.Result().Cookies(), jw.SessionCount())
 	}
-	if got := jw.SessionCount(); got != maxGuestAdmissionSessions-1 {
-		t.Fatalf("sessions before final start=%d", got)
-	}
+	guest := page.Result().Cookies()[0]
 
 	start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
 	if start.Code != http.StatusFound || len(start.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
@@ -481,7 +473,7 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
 	var guest *http.Cookie
-	for jw.SessionCount() < maxGuestAdmissionSessions-2 {
+	for jw.SessionCount() < maxGuestPageSessions-1 {
 		w := httptest.NewRecorder()
 		if jw.NewSession(w, httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)) == nil {
 			t.Fatal("could not fill guest sessions")

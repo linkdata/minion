@@ -44,7 +44,7 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 			}
 			callbackIP, _ := netip.ParseAddr(redirect.Hostname())
 			listenIP, _ := netip.ParseAddr(listenHost)
-			if !callbackIP.IsValid() || callbackIP.Unmap() != listenIP.Unmap() {
+			if callbackIP.Unmap() != listenIP.Unmap() {
 				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
 			}
 		}

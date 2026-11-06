@@ -103,9 +103,6 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		w.Header().Del("Content-Type")
 		w.Header().Del("Content-Length")
 		w.Header().Set("Cache-Control", "no-store")
-		// Serialize the slot check with login pages and other guest notices.
-		a.sessionAdmissionMu.Lock()
-		defer a.sessionAdmissionMu.Unlock()
 		sess := a.jaws.GetSession(r)
 		// Leave one request slot for a guest to return to the sign-in page.
 		if sess == nil || (a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests-1) {

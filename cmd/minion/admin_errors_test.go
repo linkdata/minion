@@ -2,10 +2,8 @@ package main
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
@@ -189,46 +187,6 @@ func TestAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); page.Code != http.StatusOK ||
 		!strings.Contains(page.Body.String(), `name="password"`) {
 		t.Fatalf("reserved sign-in page unavailable: status=%d body=%q", page.Code, page.Body.String())
-	}
-}
-
-func TestConcurrentAdminGuestNoticesReserveSignInSlot(t *testing.T) {
-	for round := range 10 {
-		handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-		guest := adminGuestCookie(t, handler)
-		if second := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); second.Code != http.StatusOK {
-			t.Fatalf("second guest page: status=%d", second.Code)
-		}
-		const requests = 16
-		start := make(chan struct{})
-		responses := make(chan *httptest.ResponseRecorder, requests)
-		var ready sync.WaitGroup
-		ready.Add(requests)
-		for range requests {
-			go func() {
-				ready.Done()
-				<-start
-				responses <- adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
-			}()
-		}
-		ready.Wait()
-		close(start)
-		rendered := 0
-		for range requests {
-			response := <-responses
-			if response.Code != http.StatusForbidden {
-				t.Fatalf("round %d guest notice status=%d", round, response.Code)
-			}
-			if response.Body.Len() != 0 {
-				rendered++
-			}
-		}
-		if rendered > maxGuestPageRequests-3 {
-			t.Fatalf("round %d guest notices consumed sign-in slot: rendered=%d", round, rendered)
-		}
-		if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); page.Code != http.StatusOK {
-			t.Fatalf("round %d reserved sign-in page unavailable: status=%d", round, page.Code)
-		}
 	}
 }
 

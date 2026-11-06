@@ -84,15 +84,14 @@ type loginWindow struct {
 }
 
 type adminAccess struct {
-	jaws               *jaws.Jaws
-	oauth              *oauthAccess
-	actionAccess       *userActionAccess
-	accounts           map[string]config.AdminAccount
-	dummy              config.AdminAccount
-	mu                 sync.Mutex
-	attempts           map[string]loginWindow
-	hashSlots          chan struct{}
-	sessionAdmissionMu sync.Mutex
+	jaws         *jaws.Jaws
+	oauth        *oauthAccess
+	actionAccess *userActionAccess
+	accounts     map[string]config.AdminAccount
+	dummy        config.AdminAccount
+	mu           sync.Mutex
+	attempts     map[string]loginWindow
+	hashSlots    chan struct{}
 }
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess) (http.Handler, error) {
@@ -138,8 +137,6 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		access.sessionAdmissionMu.Lock()
-		defer access.sessionAdmissionMu.Unlock()
 		loginPage.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("HEAD /admin/login", headPublicPage)
@@ -396,14 +393,12 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	a.sessionAdmissionMu.Lock()
 	if a.oauth != nil {
 		a.oauth.linkMu.Lock()
 		defer a.oauth.linkMu.Unlock()
 	}
 	previous := a.jaws.GetSession(r)
 	if previous == nil {
-		a.sessionAdmissionMu.Unlock()
 		http.Error(w, "Sign-in session unavailable; load the login page and try again", http.StatusConflict)
 		return
 	}
@@ -413,7 +408,6 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	if sess != nil {
 		sess.Set(adminSessionKey, username)
 	}
-	a.sessionAdmissionMu.Unlock()
 	if sess == nil {
 		http.Error(w, "Session unavailable", http.StatusServiceUnavailable)
 		return
@@ -427,7 +421,6 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
-	a.sessionAdmissionMu.Lock()
 	if a.oauth != nil {
 		a.oauth.linkMu.Lock()
 	}
@@ -438,7 +431,6 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	if a.oauth != nil {
 		a.oauth.linkMu.Unlock()
 	}
-	a.sessionAdmissionMu.Unlock()
 	if sess != nil {
 		if a.oauth != nil {
 			for _, provider := range a.oauth.providers {
