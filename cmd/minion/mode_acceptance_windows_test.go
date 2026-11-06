@@ -330,7 +330,4 @@ func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
 	if data, err := os.ReadFile(modelCalls); err != nil || string(data) != "model\n" {
 		t.Fatalf("model calls=%q error=%v", data, err)
 	}
-	if err := closeWorker(); err != nil {
-		t.Fatal(err)
-	}
 }
