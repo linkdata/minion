@@ -55,12 +55,13 @@ fi
 			if rootErr != nil {
 				t.Fatal(rootErr)
 			}
-			if filepath.Dir(cwd) != tempRoot || !strings.HasPrefix(filepath.Base(cwd), runtimePrefix) ||
-				len(cwd)-len(tempRoot) > len("/"+runtimePrefix+"4294967295") {
+			parent := filepath.Dir(cwd)
+			if filepath.Dir(parent) != tempRoot || !strings.HasPrefix(filepath.Base(parent), runtimePrefix) ||
+				filepath.Base(cwd) != runtimeChild || len(cwd)-len(tempRoot) > runtimeDirSuffixBytes {
 				t.Fatalf("validation runtime directory = %q", cwd)
 			}
-			if _, statErr := os.Stat(cwd); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("validation runtime retained: %v", statErr)
+			if _, statErr := os.Stat(parent); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("validation private parent retained: %v", statErr)
 			}
 			if args := readFile(t, binary+".args"); !strings.Contains(args, "--no-session-persistence\n") || !strings.Contains(args, "--input-format\nstream-json\n") || !strings.Contains(args, "--include-partial-messages\n") || !strings.Contains(args, "--json-schema\n{\"type\":\"object\"}\n") {
 				t.Fatalf("model discovery retained a session or lost initialization framing: %q", args)

@@ -66,8 +66,8 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 const remoteChoicePreflightTimeout = 90 * time.Second
 
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
-func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, base *Runner) error {
-	err := preflightRemoteChoices(ctx, client, origin, executorID, base, remoteChoicePreflightTimeout)
+func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool) error {
+	err := preflightRemoteChoices(ctx, client, origin, executorID, allowAllUnixSockets, remoteChoicePreflightTimeout)
 	if err == nil {
 		return nil
 	}
@@ -80,11 +80,11 @@ func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	return preflightError{message: "remote selection preflight unavailable", cause: err}
 }
 
-func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, base *Runner, timeout time.Duration) error {
+func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool, timeout time.Duration) error {
 	preflightCtx, stop := context.WithTimeout(ctx, timeout)
 	defer stop()
 	u, err := url.Parse(origin)
-	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" || !workspace.ValidIdentitySegment(executorID) || client == nil || base == nil {
+	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" || !workspace.ValidIdentitySegment(executorID) || client == nil {
 		return errors.New("invalid remote preflight endpoint")
 	}
 	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID}, httpControlBytes)
@@ -105,20 +105,20 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	if err := validateRemoteChoices(selection); err != nil {
 		return err
 	}
-	runner := *base
-	runner.Codex.APIKey = selection.Credentials.CodexAPIKey
-	runner.Codex.NativeAPIKey = selection.Credentials.CodexNativeAPIKey
-	runner.Codex.NativeAccessToken = selection.Credentials.CodexAccessToken
-	runner.Claude.APIKey = selection.Credentials.ClaudeAPIKey
+	runner := Runner{
+		Codex: config.CodexConfig{APIKey: selection.Credentials.CodexAPIKey, NativeAPIKey: selection.Credentials.CodexNativeAPIKey,
+			NativeAccessToken: selection.Credentials.CodexAccessToken},
+		Claude: config.ClaudeConfig{APIKey: selection.Credentials.ClaudeAPIKey, AllowAllUnixSockets: allowAllUnixSockets},
+	}
 	roles := offeredPreflightRoles(selection.Main, selection.MainChoices, selection.Critic, selection.CriticChoices)
 	for _, role := range roles {
 		if role.Provider == "claude" {
-			if _, err := claudecli.CheckHost(preflightCtx, runner.Claude.AllowAllUnixSockets); err != nil {
+			if _, err := claudecli.CheckHost(preflightCtx, allowAllUnixSockets); err != nil {
 				if preflightCtx.Err() != nil {
 					return preflightCtx.Err()
 				}
 				// The short host probe deadline must not look like the whole preflight deadline.
-				return preflightError{message: "remote Claude host check failed: " + err.Error(), cause: errors.New(err.Error())}
+				return preflightError{message: "remote Claude host check failed: " + err.Error()}
 			}
 			break
 		}

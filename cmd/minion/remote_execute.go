@@ -93,7 +93,7 @@ func runRemoteExecuteMode(path string, logger *log.Logger) int {
 func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
 	runner := action.NewRemoteRunner(cfg.WorkRoot)
 	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
-	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner); err != nil {
+	if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, cfg.Claude.AllowAllUnixSockets); err != nil {
 		logger.Printf("remote worker: selection preflight failed: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}

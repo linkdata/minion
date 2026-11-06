@@ -69,6 +69,7 @@ func TestAPIKeyConfiguration(t *testing.T) {
 			binary := fakeExecutable(t, "claude", `test -z "$ANTHROPIC_API_KEY$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_AUTH_TOKEN" || exit 2
 test "$(cat "$CLAUDE_CONFIG_DIR/api-key")" = '`+dummyAPIKey+`' || exit 3
 printf '%s\n' "$CLAUDE_CONFIG_DIR" >> "$0.authdirs"
+printf '%s\n' "$PWD" > "$0.cwd"
 printf '%s\n' "$@" >> "$0.args"
 for arg in "$@"; do
   if [ "$arg" = auth ]; then
@@ -99,6 +100,16 @@ esac
 			for _, dir := range dirs {
 				if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("credential directory retained: %v", err)
+				}
+			}
+			if validate {
+				cwd := strings.TrimSpace(readFile(t, binary+".cwd"))
+				parent := filepath.Dir(cwd)
+				if filepath.Base(cwd) != runtimeChild || filepath.Dir(dirs[0]) != parent {
+					t.Fatalf("preflight credentials are not beside its runtime: cwd=%q auth=%q", cwd, dirs[0])
+				}
+				if _, err := os.Stat(parent); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("preflight private parent retained: %v", err)
 				}
 			}
 			args := readFile(t, binary+".args")

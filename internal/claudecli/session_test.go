@@ -1876,8 +1876,8 @@ fi
 }
 
 func TestSessionInitializationFailureStaysBound(t *testing.T) {
-	testsupport.UseShortClaudeTempDir(t, "/tmp")
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
+	testsupport.UseShortClaudeTempDir(t, "/tmp")
 	skill := filepath.Join(t.TempDir(), "SKILL.md")
 	settings := config.ClaudeConfig{Skills: []string{skill}}
 	var session Session

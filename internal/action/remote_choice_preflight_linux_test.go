@@ -117,8 +117,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 				}
 				t.Setenv("TMPDIR", root)
 			}
-			base := &Runner{Claude: config.ClaudeConfig{AllowAllUnixSockets: true}}
-			err = PreflightRemoteChoices(ctx, client, origin, "remote", base)
+			err = PreflightRemoteChoices(ctx, client, origin, "remote", true)
 			if tc.wantError {
 				if err == nil || err.Error() != preflightCodexInvocationUnsupported {
 					t.Fatalf("unsupported role was offered: %v", err)
@@ -185,7 +184,7 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 			Body: io.NopCloser(bytes.NewReader(data)), Request: request}, nil
 	})}
 	start := time.Now()
-	err = preflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", &Runner{}, time.Second)
+	err = preflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", false, time.Second)
 	if !errors.Is(err, context.DeadlineExceeded) || t.Context().Err() != nil || time.Since(start) > 3*time.Second {
 		t.Fatalf("slow CLI probe escaped remote preflight deadline: elapsed=%s error=%v", time.Since(start), err)
 	}
@@ -265,19 +264,15 @@ func TestRemoteClaudePreflightReportsHostFailures(t *testing.T) {
 			t.Setenv("TMPDIR", root)
 		}},
 		{name: "old Bubblewrap", want: "does not support", setup: func(t *testing.T) {
-			testsupport.UseShortClaudeTempDir(t, "/tmp")
 			testsupport.FakeBubblewrap(t, "--unshare-user")
 		}},
 		{name: "Bubblewrap probe timeout", want: "probe Bubblewrap", setup: func(t *testing.T) {
-			testsupport.UseShortClaudeTempDir(t, "/tmp")
 			testsupport.FakeOnPath(t, "bwrap", "#!/bin/sh\nexec /bin/sleep 30\n")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.setup(t)
-			base := NewRemoteRunner(t.TempDir())
-			base.Claude.AllowAllUnixSockets = true
-			err := PreflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", base)
+			err := PreflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", true)
 			if err == nil || !strings.Contains(err.Error(), "remote Claude host check failed:") || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), secret) {
 				t.Fatalf("remote host failure = %v, want %q without secret", err, tc.want)
 			}

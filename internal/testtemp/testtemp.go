@@ -5,11 +5,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
-// Main keeps native test sockets below Claude's 56-byte temp-root limit.
+// Main keeps Unix test sockets below Claude's 56-byte temp-root limit.
 func Main(m *testing.M) {
+	if runtime.GOOS == "windows" {
+		os.Exit(m.Run())
+	}
 	root, err := filepath.EvalSymlinks(os.TempDir())
 	if err != nil {
 		log.Fatal(err)

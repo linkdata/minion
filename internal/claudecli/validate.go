@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -35,19 +36,18 @@ func Validate(ctx context.Context, settings config.ClaudeConfig) (validated conf
 	if err != nil {
 		return validated, err
 	}
-	dir, err := os.MkdirTemp(tempRoot, runtimePrefix)
+	parent, err := os.MkdirTemp(tempRoot, runtimePrefix)
 	if err != nil {
 		return validated, err
 	}
 	defer func() {
-		resultErr = errors.Join(resultErr, os.RemoveAll(dir))
+		resultErr = errors.Join(resultErr, os.RemoveAll(parent))
 	}()
-	authDir, err := authentication(tempRoot, settings.APIKey)
-	if authDir != "" {
-		defer func() {
-			resultErr = errors.Join(resultErr, os.RemoveAll(authDir))
-		}()
+	dir := filepath.Join(parent, runtimeChild)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return validated, err
 	}
+	authDir, err := authentication(parent, settings.APIKey)
 	if err != nil {
 		return validated, err
 	}

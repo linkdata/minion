@@ -182,7 +182,7 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer workerClient.CloseIdleConnections()
-	if err := action.PreflightRemoteChoices(ctx, workerClient, origin, "remote", &action.Runner{WorkRoot: cfg.WorkRoot}); err != nil {
+	if err := action.PreflightRemoteChoices(ctx, workerClient, origin, "remote", false); err != nil {
 		t.Fatalf("remote worker preflight failed: %v (%v)", err, errors.Unwrap(err))
 	}
 	workerDone := make(chan error, 1)

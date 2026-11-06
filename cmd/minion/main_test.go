@@ -138,7 +138,6 @@ func TestLocalClaudeSocketOptInReachesModelCheck(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Bubblewrap opt-in applies only on Linux")
 	}
-	testsupport.UseShortClaudeTempDir(t, "/tmp")
 	testsupport.FakeBubblewrap(t, "--unshare-user")
 	cfg := config.Config{Main: "claude", Claude: config.ClaudeConfig{Model: "claude-pinned", Effort: "low", AllowAllUnixSockets: true}}
 	var output bytes.Buffer
