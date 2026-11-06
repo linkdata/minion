@@ -79,7 +79,6 @@ type oauthAccess struct {
 	choices     *config.UserModelChoices
 	detailSlots chan struct{}
 	actionReads chan struct{}
-	admissionMu sync.Mutex
 	linkMu      sync.Mutex
 	usageGate   *userUsageGate
 }
@@ -124,8 +123,6 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		a.admissionMu.Lock()
-		defer a.admissionMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
@@ -183,8 +180,6 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 			if strings.HasSuffix(path, "/login") {
 				login := handler
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					a.admissionMu.Lock()
-					defer a.admissionMu.Unlock()
 					if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
 						w.Header().Set("Cache-Control", "no-store")
 						w.Header().Set("Retry-After", "60")
@@ -312,7 +307,7 @@ func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
 				if admin.rejectRotatedCookie(w, r) {
 					return
 				}
-				if r.URL.Path == "/auth/login" && admin.redirectClosedSession(w, r) {
+				if admin.redirectClosedSession(w, r) {
 					return
 				}
 			}
@@ -359,7 +354,10 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *admi
 		sess, _ = admin.rotatedSessionForLogout(r)
 	}
 	if sess != nil {
-		admin.markSignedOutCookie(sess.CookieValue())
+		account, _ := a.currentUser(sess)
+		if admin.sessionUsername(sess) != "" || account != "" {
+			admin.markSignedOutCookie(sess.CookieValue())
+		}
 		sess.Close()
 	}
 	a.linkMu.Unlock()

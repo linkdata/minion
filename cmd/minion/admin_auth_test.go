@@ -157,7 +157,8 @@ func TestSignedOutCookieMintsOnlyOneHomeGuest(t *testing.T) {
 		t.Fatalf("first home: status=%d cookies=%v", first.Code, first.Result().Cookies())
 	}
 	second := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
-	if second.Code != http.StatusConflict || len(second.Result().Cookies()) != 0 || second.Body.Len() != 0 {
+	if second.Code != http.StatusConflict || len(second.Result().Cookies()) != 0 || second.Body.Len() != 0 ||
+		second.Header().Get("Refresh") != "3; url=/" {
 		t.Fatalf("stale home: status=%d cookies=%v", second.Code, second.Result().Cookies())
 	}
 	latest := login(first.Result().Cookies()[0])
@@ -719,7 +720,6 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}, nil)
-	jw.MaxSessionsPerIP = 0
 	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest session reserve")
@@ -740,7 +740,6 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 
 func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	jw.MaxSessionsPerIP = 0
 	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest sessions")

@@ -191,8 +191,9 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			state := access.rotatedCookies[signedOutKey]
 			if state.signedOut && time.Now().Before(state.until) {
 				if state.homeIssued {
-					// shortcut: a lost first response delays retry until expiry; revisit if immediate retry matters.
+					// shortcut: a lost first response retries until expiry; revisit if immediate recovery matters.
 					// A second guest cookie could overwrite a newer sign-in response.
+					w.Header().Set("Refresh", "3; url=/")
 					w.WriteHeader(http.StatusConflict)
 					return
 				}
@@ -725,9 +726,6 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := sha256.Sum256([]byte(previousCookie))
-	state := a.rotatedCookies[key]
-	state.originIP = previous.IP()
-	a.rotatedCookies[key] = state
 	previous.Clear()
 	previous.Close()
 	sess := a.jaws.NewSession(w, r)
@@ -737,7 +735,7 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		state.replacement = sess
 		a.rotatedCookies[key] = state
 	} else {
-		delete(a.rotatedCookies, sha256.Sum256([]byte(previousCookie)))
+		delete(a.rotatedCookies, key)
 	}
 	a.sessionAdmissionMu.Unlock()
 	if sess == nil {

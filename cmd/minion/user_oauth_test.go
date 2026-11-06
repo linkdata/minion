@@ -110,6 +110,69 @@ func testOAuthAdminHandler(t *testing.T, cfg config.AdminConfig, client *http.Cl
 	return handler, jw, auth
 }
 
+func TestSignedOutCookieCannotStartOAuthProvider(t *testing.T) {
+	cfg := config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}, GitHubOAuth: &config.OAuthClient{
+		ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	guest := adminGuestCookie(t, handler)
+	login := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "https://admin.example")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
+	}
+	signed := login.Result().Cookies()[0]
+	logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, signed, "https://admin.example")
+	if logout.Code != http.StatusSeeOther || jw.GetSession(requestWithCookie(signed)) != nil {
+		t.Fatalf("admin logout: status=%d session=%v", logout.Code, jw.GetSession(requestWithCookie(signed)))
+	}
+	checkProviderStart := func() {
+		t.Helper()
+		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, signed, "")
+		if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/" || len(response.Result().Cookies()) != 0 {
+			t.Fatalf("signed-out provider start: status=%d location=%q cookies=%v",
+				response.Code, response.Header().Get("Location"), response.Result().Cookies())
+		}
+	}
+	checkProviderStart()
+	home := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 {
+		t.Fatalf("home after logout: status=%d cookies=%v", home.Code, home.Result().Cookies())
+	}
+	checkProviderStart()
+	if jw.SessionCount() != 1 {
+		t.Fatalf("signed-out provider start created %d sessions, want one home guest", jw.SessionCount())
+	}
+	start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], "")
+	location, err := url.Parse(start.Header().Get("Location"))
+	if start.Code != http.StatusFound || err != nil || location.Host != "github.com" || location.Query().Get("state") == "" ||
+		len(start.Result().Cookies()) != 0 {
+		t.Fatalf("fresh guest provider start: status=%d location=%q cookies=%v error=%v",
+			start.Code, start.Header().Get("Location"), start.Result().Cookies(), err)
+	}
+}
+
+func TestGuestOAuthLogoutDoesNotMarkSignedOutCookie(t *testing.T) {
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{
+		ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
+		t.Fatalf("OAuth guest page: status=%d cookies=%v", page.Code, page.Result().Cookies())
+	}
+	guest := page.Result().Cookies()[0]
+	logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, guest, "https://admin.example")
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" ||
+		jw.GetSession(requestWithCookie(guest)) != nil {
+		t.Fatalf("guest logout: status=%d location=%q session=%v",
+			logout.Code, logout.Header().Get("Location"), jw.GetSession(requestWithCookie(guest)))
+	}
+	again := adminResponse(handler, http.MethodGet, "/auth/login", nil, guest, "")
+	if again.Code != http.StatusOK || len(again.Result().Cookies()) != 1 ||
+		again.Result().Cookies()[0].Value == guest.Value {
+		t.Fatalf("old guest cookie after logout: status=%d cookies=%v", again.Code, again.Result().Cookies())
+	}
+}
+
 func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	const githubID = "9007199254740993"
 	client := &http.Client{Transport: oauthRoundTrip(func(r *http.Request) (*http.Response, error) {
