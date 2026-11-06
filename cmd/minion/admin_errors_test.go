@@ -23,7 +23,7 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 		status             int
 	}{
 		{"bad login", http.MethodPost, "/admin/login", url.Values{"username": {"operator"}, "password": {"wrong-password"}}, guest, "", http.StatusUnauthorized},
-		{"guest dashboard", http.MethodGet, "/", nil, guest, "", http.StatusForbidden},
+		{"guest usage", http.MethodGet, "/admin/usage", nil, guest, "", http.StatusForbidden},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			response := adminResponse(handler, test.method, test.path, test.form, test.cookie, test.origin)
@@ -64,7 +64,8 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 			response := adminResponse(handler, test.method, test.path, test.form, admin, test.origin)
 			if response.Code != test.status || response.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
 				!strings.Contains(response.Body.String(), "Request could not be completed") ||
-				!strings.Contains(response.Body.String(), "/jaws/.tail/") {
+				!strings.Contains(response.Body.String(), "/jaws/.tail/") ||
+				strings.Contains(response.Body.String(), `href="/admin/login"`) {
 				t.Fatalf("browser failure: status=%d type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
 			}
 		})
@@ -74,9 +75,33 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 		!strings.Contains(dashboard.Body.String(), "Live actions") {
 		t.Fatalf("successful dashboard: status=%d body=%q", dashboard.Code, dashboard.Body.String())
 	}
+	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, admin, "https://admin.example"); logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" {
+		t.Fatalf("sign-out redirect: status=%d location=%q", logout.Code, logout.Header().Get("Location"))
+	}
 }
 
-func TestAdminNoticeOmitsDisabledLogin(t *testing.T) {
+func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
+	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 {
+		t.Fatalf("guest home: status=%d cookies=%v", home.Code, home.Result().Cookies())
+	}
+	guest := home.Result().Cookies()[0]
+	if login := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); login.Code != http.StatusOK {
+		t.Fatalf("guest login page: status=%d", login.Code)
+	}
+	failed := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"wrong-password"}}, guest, "")
+	if failed.Code != http.StatusUnauthorized || !strings.Contains(failed.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("failed login has no direct retry: status=%d body=%q", failed.Code, failed.Body.String())
+	}
+	if retry := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); retry.Code != http.StatusOK ||
+		!strings.Contains(retry.Body.String(), `name="password"`) {
+		t.Fatalf("reserved retry page unavailable: status=%d body=%q", retry.Code, retry.Body.String())
+	}
+}
+
+func TestOAuthOnlyAdminErrorOmitsAdminLogin(t *testing.T) {
 	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}
 	handler, _, _ := testOAuthAdminHandler(t, cfg, nil)
@@ -84,16 +109,16 @@ func TestAdminNoticeOmitsDisabledLogin(t *testing.T) {
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
 		t.Fatalf("user login: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
-	notice := adminResponse(handler, http.MethodGet, "/", nil, page.Result().Cookies()[0], "")
-	if notice.Code != http.StatusForbidden || !strings.Contains(notice.Body.String(), "Request could not be completed") ||
-		strings.Contains(notice.Body.String(), `href="/admin/login"`) {
-		t.Fatalf("OAuth-only admin notice: status=%d body=%q", notice.Code, notice.Body.String())
+	denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, page.Result().Cookies()[0], "")
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `href="/"`) ||
+		strings.Contains(denied.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("OAuth-only error links to unavailable admin login: status=%d body=%q", denied.Code, denied.Body.String())
 	}
 }
 
 func TestAdminErrorWithoutSessionIsStatusOnly(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	response := adminResponse(handler, http.MethodGet, "/admin/usage", nil, nil, "")
 	if response.Code != http.StatusForbidden || response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" ||
 		len(response.Result().Cookies()) != 0 {
 		t.Fatalf("sessionless error: status=%d type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
@@ -148,12 +173,13 @@ func TestAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	guest := adminGuestCookie(t, handler)
 	for range 2 {
-		notice := adminResponse(handler, http.MethodGet, "/", nil, guest, "")
-		if notice.Code != http.StatusForbidden || notice.Header().Get("Content-Type") != "text/html; charset=utf-8" {
-			t.Fatalf("available guest notice: status=%d type=%q", notice.Code, notice.Header().Get("Content-Type"))
+		notice := adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
+		if notice.Code != http.StatusForbidden || notice.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
+			!strings.Contains(notice.Body.String(), `href="/admin/login"`) {
+			t.Fatalf("available guest notice: status=%d type=%q body=%q", notice.Code, notice.Header().Get("Content-Type"), notice.Body.String())
 		}
 	}
-	limited := adminResponse(handler, http.MethodGet, "/", nil, guest, "")
+	limited := adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
 	if limited.Code != http.StatusForbidden || limited.Body.Len() != 0 || limited.Header().Get("Content-Type") != "" {
 		t.Fatalf("guest notice consumed sign-in slot: status=%d type=%q body=%q", limited.Code, limited.Header().Get("Content-Type"), limited.Body.String())
 	}
@@ -163,43 +189,70 @@ func TestAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	}
 }
 
-func TestConcurrentAdminGuestNoticesReserveSignInSlot(t *testing.T) {
-	for round := range 10 {
-		handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-		guest := adminGuestCookie(t, handler)
-		if second := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); second.Code != http.StatusOK {
-			t.Fatalf("second guest page: status=%d", second.Code)
+func TestConcurrentAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
+	account := testAdminAccount()
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{account})
+	guest := adminGuestCookie(t, handler)
+	const concurrent = 16
+	var ready, done sync.WaitGroup
+	ready.Add(concurrent)
+	done.Add(concurrent)
+	release := make(chan struct{})
+	failure := (&adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account}}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ready.Done()
+		<-release
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	responses := make([]*httptest.ResponseRecorder, concurrent)
+	for i := range responses {
+		go func() {
+			defer done.Done()
+			responses[i] = adminResponse(failure, http.MethodGet, "/admin/usage", nil, guest, "")
+		}()
+	}
+	ready.Wait()
+	close(release)
+	done.Wait()
+	notices := 0
+	for _, response := range responses {
+		if response.Code != http.StatusForbidden {
+			t.Fatalf("concurrent notice: status=%d body=%q", response.Code, response.Body.String())
 		}
-		const requests = 16
-		start := make(chan struct{})
-		responses := make(chan *httptest.ResponseRecorder, requests)
-		var ready sync.WaitGroup
-		ready.Add(requests)
-		for range requests {
-			go func() {
-				ready.Done()
-				<-start
-				responses <- adminResponse(handler, http.MethodGet, "/", nil, guest, "")
-			}()
+		if response.Header().Get("Content-Type") == "text/html; charset=utf-8" {
+			notices++
+			continue
 		}
-		ready.Wait()
-		close(start)
-		rendered := 0
-		for range requests {
-			response := <-responses
-			if response.Code != http.StatusForbidden {
-				t.Fatalf("round %d guest notice status=%d", round, response.Code)
-			}
-			if response.Body.Len() != 0 {
-				rendered++
-			}
+		if response.Body.Len() != 0 || response.Header().Get("Content-Type") != "" {
+			t.Fatalf("limited notice: type=%q body=%q", response.Header().Get("Content-Type"), response.Body.String())
 		}
-		if rendered > maxGuestLoginRequests-3 {
-			t.Fatalf("round %d guest notices consumed sign-in slot: rendered=%d", round, rendered)
+	}
+	if notices != maxGuestPageRequests-2 {
+		t.Fatalf("concurrent notices=%d, want %d", notices, maxGuestPageRequests-2)
+	}
+	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), `name="password"`) {
+		t.Fatalf("reserved sign-in page unavailable: status=%d body=%q", page.Code, page.Body.String())
+	}
+}
+
+func TestSignedInOAuthAdminErrorIsNotGuestLimited(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	key := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	cookie := userUsageCookie(t, jw, key, false)
+	for range maxGuestPageRequests {
+		if page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie); page.Code != http.StatusOK {
+			t.Fatalf("signed-in OAuth page: status=%d body=%q", page.Code, page.Body.String())
 		}
-		if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); page.Code != http.StatusOK {
-			t.Fatalf("round %d reserved sign-in page unavailable: status=%d", round, page.Code)
-		}
+	}
+	denied := userUsageRequest(handler, http.MethodGet, "/admin/usage", "", cookie)
+	if denied.Code != http.StatusForbidden || denied.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
+		!strings.Contains(denied.Body.String(), "Request could not be completed") {
+		t.Fatalf("signed-in OAuth notice: status=%d type=%q body=%q", denied.Code, denied.Header().Get("Content-Type"), denied.Body.String())
 	}
 }
 

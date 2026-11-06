@@ -26,14 +26,10 @@ const userActionVisiblePageSize = 4
 
 type userActionPageKey struct{}
 
-var userActionsHTML = template.Must(template.New("user actions").Funcs(template.FuncMap{
-	"utc": func(at time.Time) string { return at.UTC().Format(time.RFC3339) },
-}).Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>My Minion actions</title>{{$.HeadHTML}}</head><body><main>
+var userActionsHTML = template.Must(template.New("user actions").Funcs(utcTemplateFuncs).Parse(headHTML + `{{template "head.html" $}}<title>My Minion actions</title></head><body><main class="container py-4">
 <h1>My actions</h1><p><a href="/auth/login">Account</a></p>
 {{if .Dot.GitHubLinked}}
-{{if .Dot.Entries}}<ol>{{range .Dot.Entries}}<li>
+{{if .Dot.Entries}}<ol class="list-group">{{range .Dot.Entries}}<li class="list-group-item">
 <p><a href="/auth/actions/{{.AttemptID}}">{{.Summary.Repository}} · {{.Summary.Action}} #{{.Summary.SubjectNumber}}</a></p>
 <p>{{.Outcome}} · accepted {{utc .Summary.AcceptedAt}} · deadline {{utc .Deadline}}</p>
 {{if .Progress}}<p>Progress: {{.Progress}}</p>{{end}}

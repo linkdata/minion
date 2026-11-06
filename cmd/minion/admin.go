@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,30 +21,34 @@ import (
 
 // adminServer owns the dashboard listener and the JaWS processing loop.
 type adminServer struct {
-	listener    net.Listener
-	server      *http.Server
-	jaws        *jaws.Jaws
-	cancel      context.CancelFunc
-	serveDone   chan struct{}
-	jawsDone    chan struct{}
-	tickDone    chan struct{}
-	serveErr    error // read only after serveDone closes
-	preferences *userLinks
+	listener      net.Listener
+	entryURL      string
+	signInEnabled bool
+	server        *http.Server
+	jaws          *jaws.Jaws
+	cancel        context.CancelFunc
+	serveDone     chan struct{}
+	jawsDone      chan struct{}
+	tickDone      chan struct{}
+	serveErr      error // read only after serveDone closes
+	preferences   *userLinks
 }
 
 func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func()) (*adminServer, error) {
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
+	var certificate tls.Certificate
 	if cfg.TLSCertFile != "" {
+		var err error
+		certificate, err = loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
 		certDir := filepath.Dir(cfg.TLSCertFile)
 		relKey, err := filepath.Rel(certDir, cfg.TLSKeyFile)
 		// webserv expands CertDir and cleans paths; Windows volumes may differ.
 		if err != nil || strings.Contains(certDir, "$") ||
 			filepath.Clean(cfg.TLSCertFile) != cfg.TLSCertFile || filepath.Clean(cfg.TLSKeyFile) != cfg.TLSKeyFile {
-			certificate, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
-			if err != nil {
-				return nil, err
-			}
 			fallbackTLS = &tls.Config{
 				MinVersion:   tls.VersionTLS13,
 				Certificates: []tls.Certificate{certificate},
@@ -62,6 +67,12 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	}
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
+	}
+	var entryURL string
+	if cfg.TLSCertFile != "" {
+		entryURL = certifiedListenURL(listener.Addr().String(), &certificate, cfg)
+	} else {
+		entryURL = plainAdminListenURL(listener.Addr().String(), cfg)
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -90,7 +101,14 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		DisableGeneralOptionsHandler: true,
 	}
 	serveCtx, cancel := context.WithCancel(ctx)
-	a := &adminServer{listener: listener, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
+	signInEnabled := oauth != nil
+	for _, account := range cfg.Administrators {
+		if account.PasswordHash != config.AdminPasswordHashPlaceholder {
+			signInEnabled = true
+			break
+		}
+	}
+	a := &adminServer{listener: listener, entryURL: entryURL, signInEnabled: signInEnabled, server: server, jaws: jw, cancel: cancel, serveDone: make(chan struct{}), jawsDone: make(chan struct{}), tickDone: make(chan struct{})}
 	if oauth != nil {
 		a.preferences = oauth.links
 	}
@@ -122,6 +140,73 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		close(a.serveDone)
 	}()
 	return a, nil
+}
+
+func certifiedListenURL(address string, certificate *tls.Certificate, cfg config.AdminConfig) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || certificate.Leaf == nil {
+		return ""
+	}
+	boundIP := net.ParseIP(host)
+	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
+		if client == nil {
+			continue
+		}
+		callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
+		if certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
+			return ""
+		}
+		return (&url.URL{Scheme: "https", Host: callback.Host}).String()
+	}
+	if boundIP == nil {
+		return ""
+	}
+	localhostOK := boundIP.IsUnspecified() || boundIP.Equal(net.IPv4(127, 0, 0, 1)) || boundIP.Equal(net.IPv6loopback)
+	covered := func(name string) string {
+		if strings.EqualFold(name, "localhost") && !localhostOK {
+			return ""
+		}
+		if strings.Contains(name, "*") || certificate.Leaf.VerifyHostname(name) != nil {
+			return ""
+		}
+		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
+	}
+	if listenHost, _, err := net.SplitHostPort(cfg.Listen); err == nil && net.ParseIP(listenHost) == nil {
+		if candidate := covered(listenHost); candidate != "" {
+			return candidate
+		}
+	}
+	if !boundIP.IsUnspecified() {
+		if candidate := covered(host); candidate != "" {
+			return candidate
+		}
+		if candidate := covered("localhost"); candidate != "" {
+			return candidate
+		}
+	}
+	for _, name := range certificate.Leaf.DNSNames {
+		if candidate := covered(name); candidate != "" {
+			return candidate
+		}
+	}
+	if boundIP.IsUnspecified() {
+		for _, address := range certificate.Leaf.IPAddresses {
+			if candidate := covered(address.String()); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func plainAdminListenURL(address string, cfg config.AdminConfig) string {
+	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
+		if client != nil {
+			callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
+			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
+		}
+	}
+	return "http://" + address
 }
 
 // adminGuard is the single entry gate for all dashboard routes.

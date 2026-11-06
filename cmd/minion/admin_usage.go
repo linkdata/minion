@@ -17,48 +17,44 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-var adminUsageHTML = template.Must(template.New("admin usage").Parse(usageEstimatedCostTemplate + `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Usage · Minion admin</title>{{$.HeadHTML}}
+var adminUsageHTML = template.Must(template.New("admin usage").Parse(headHTML + usageEstimatedCostTemplate + `{{template "head.html" $}}<title>Usage · Minion admin</title>
 </head>
 <body>{{with .Dot}}
-  <header class="topbar">
-    <div><strong>MINION</strong><span> / usage</span></div>
+  <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
+    <div><strong>MINION</strong><span class="text-body-secondary"> / usage</span></div>
     <nav><a href="/">Live actions</a></nav>
-    <form method="post" action="/admin/logout"><button type="submit">Sign out</button></form>
+    <form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
   </header>
-  <main>
-    <div class="heading">
-      <p class="eyebrow">ACCOUNTING</p><h1>Usage and billing</h1>
+  <main class="container-fluid py-4">
+    <div class="border-bottom mb-4">
+      <p class="text-body-secondary small fw-semibold">ACCOUNTING</p><h1>Usage and billing</h1>
       <p>Date filters use attempt start times in UTC. The To boundary is exclusive.</p>
     </div>
-    <form class="filters" method="get" action="/admin/usage">
-      <label>From (UTC)<input name="from" value="{{.From}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
-      <label>To, exclusive (UTC)<input name="to" value="{{.To}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
-      <label>Repository<input name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
-      <label>Repository ID<input name="repository_id" value="{{.RepositoryID}}" inputmode="numeric" maxlength="20"></label>
-      <label>Requester<input name="user" value="{{.User}}" maxlength="105" placeholder="GitHub login"></label>
-      <label>Requester ID<input name="requester_id" value="{{.RequesterID}}" inputmode="numeric" maxlength="20"></label>
-      <label>Service<select name="service">
+    <form class="d-flex flex-wrap align-items-end gap-3 mb-4" method="get" action="/admin/usage">
+      <label class="d-grid gap-1">From (UTC)<input class="form-control" name="from" value="{{.From}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
+      <label class="d-grid gap-1">To, exclusive (UTC)<input class="form-control" name="to" value="{{.To}}" maxlength="35" placeholder="YYYY-MM-DD"></label>
+      <label class="d-grid gap-1">Repository<input class="form-control" name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
+      <label class="d-grid gap-1">Repository ID<input class="form-control" name="repository_id" value="{{.RepositoryID}}" inputmode="numeric" maxlength="20"></label>
+      <label class="d-grid gap-1">Requester<input class="form-control" name="user" value="{{.User}}" maxlength="105" placeholder="GitHub login"></label>
+      <label class="d-grid gap-1">Requester ID<input class="form-control" name="requester_id" value="{{.RequesterID}}" inputmode="numeric" maxlength="20"></label>
+      <label class="d-grid gap-1">Service<select class="form-select" name="service">
         <option value=""{{if eq .Service ""}} selected{{end}}>All services</option>
         <option value="codex"{{if eq .Service "codex"}} selected{{end}}>Codex</option>
         <option value="claude"{{if eq .Service "claude"}} selected{{end}}>Claude</option>
         <option value="unknown"{{if eq .Service "unknown"}} selected{{end}}>Unknown</option>
       </select></label>
-      <button type="submit">Apply filters</button>
+      <button class="btn btn-primary" type="submit">Apply filters</button>
     </form>
     <p><a href="{{.ExportURL}}">Download filtered JSON</a>. With a service filter, token counts in <code>totals</code> and <code>selected_usage</code> reflect that service; outcome counts remain attempt-level. Each attempt's <code>tokens</code> and <code>total_tokens</code> retain all services.</p>
-    <div class="metrics">
-      <article><h2>Attempts</h2><p class="metric">{{.Report.Totals.Attempts}}</p></article>
-      <article><h2>Reported tokens</h2><p class="metric">{{.Report.Totals.TotalTokens}}</p></article>
-      <article><h2>Unallocated tokens</h2><p class="metric">{{.Report.Totals.UnallocatedTokens.Total}}</p></article>
-      <article><h2>Attempts with incomplete usage or still running</h2><p class="metric">{{.Report.Totals.IncompleteUsage}}</p></article>
+    <div class="row row-cols-1 row-cols-md-2 g-3 mb-3">
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Attempts</h2><p class="display-6 font-monospace">{{.Report.Totals.Attempts}}</p></article></div>
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">{{.Report.Totals.TotalTokens}}</p></article></div>
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Unallocated tokens</h2><p class="display-6 font-monospace">{{.Report.Totals.UnallocatedTokens.Total}}</p></article></div>
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Attempts with incomplete usage or still running</h2><p class="display-6 font-monospace">{{.Report.Totals.IncompleteUsage}}</p></article></div>
     </div>
     <p>Estimated cost and currency: {{template "estimatedCost" .Report.Totals}}. Billed cost and credits: Unknown.</p>
-    <section class="panel actions" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading">Usage by repository, requester, and service</h2>
-      {{if .Report.Groups}}<table><thead><tr>
+    <section class="border rounded p-3 mb-3 overflow-auto" aria-labelledby="usage-groups-heading" tabindex="0"><h2 id="usage-groups-heading" class="h5">Usage by repository, requester, and service</h2>
+      {{if .Report.Groups}}<table class="table table-striped align-middle"><thead><tr>
         <th scope="col">Repository</th><th scope="col">Repository ID</th>
         <th scope="col">Requester</th><th scope="col">Requester ID</th><th scope="col">Service</th>
         <th scope="col">Attempts</th><th scope="col">Total tokens</th>
@@ -67,12 +63,12 @@ var adminUsageHTML = template.Must(template.New("admin usage").Parse(usageEstima
       </tr></thead><tbody>{{range .Report.Groups}}<tr>
         <td>{{.Repo}}</td><td>{{if .RepositoryID}}{{.RepositoryID}}{{else}}Unknown{{end}}</td>
         <td>{{.User}}</td><td>{{if .RequesterID}}{{.RequesterID}}{{else}}Unknown{{end}}</td><td>{{.Service}}</td>
-        <td class="number">{{.Attempts}}</td><td class="number">{{.TotalTokens}}</td>
-        <td class="number">{{.UnallocatedTokens.Total}}</td><td class="number">{{.IncompleteUsage}}</td>
+        <td class="text-end font-monospace">{{.Attempts}}</td><td class="text-end font-monospace">{{.TotalTokens}}</td>
+        <td class="text-end font-monospace">{{.UnallocatedTokens.Total}}</td><td class="text-end font-monospace">{{.IncompleteUsage}}</td>
         <td>{{template "estimatedCost" .}}</td>
       </tr>{{end}}</tbody></table>{{else}}<p>No usage records match these filters.</p>{{end}}
     </section>
-    <p class="hint">Action coverage: {{.Report.ActionCoverage}}.
+    <p class="text-body-secondary small">Action coverage: {{.Report.ActionCoverage}}.
       Actions without usage files are excluded.
       Repository and requester ID filters exclude older usage records without the corresponding numeric IDs.
       Tokens and USD estimates are executor-reported; incomplete usage can omit unknown amounts.

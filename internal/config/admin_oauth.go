@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-func (a *AdminConfig) validateOAuth() error {
+func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error {
+	var cookieHost string
 	for _, entry := range []struct {
 		name, callbackPath string
 		client             *OAuthClient
@@ -28,11 +29,33 @@ func (a *AdminConfig) validateOAuth() error {
 		redirect, err := url.Parse(client.RedirectURL)
 		if err != nil || !validOAuthOrigin(redirect, true) || redirect.Path != entry.callbackPath ||
 			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
-			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or loopback HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
+			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or literal loopback IP HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
 		}
 		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
 			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
 		}
+		if redirect.Scheme == "http" {
+			redirectPort := uint64(80)
+			if redirect.Port() != "" {
+				redirectPort, _ = strconv.ParseUint(redirect.Port(), 10, 16) // validOAuthOrigin checked the port.
+			}
+			if listenPort != redirectPort {
+				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
+			}
+			callbackIP, _ := netip.ParseAddr(redirect.Hostname())
+			listenIP, _ := netip.ParseAddr(listenHost)
+			if callbackIP.Unmap() != listenIP.Unmap() {
+				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
+			}
+		}
+		redirectHost := redirect.Hostname()
+		if ip, err := netip.ParseAddr(redirectHost); err == nil {
+			redirectHost = ip.String()
+		}
+		if cookieHost != "" && !strings.EqualFold(cookieHost, redirectHost) {
+			return errors.New("admin OAuth redirect_url hosts must match for the session cookie")
+		}
+		cookieHost = redirectHost
 		if entry.name == "github_oauth" {
 			if client.BaseURL != "" {
 				return errors.New("admin.github_oauth base_url is fixed to https://github.com")

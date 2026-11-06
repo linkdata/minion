@@ -47,7 +47,7 @@ func TestOAuthPreferencesUseJaWSAndBoundSavedChoice(t *testing.T) {
 	signed := callback.Result().Cookies()[0]
 	page := adminResponse(handler, http.MethodGet, "/auth/preferences", nil, signed, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="jawsKey"`) ||
-		!strings.Contains(page.Body.String(), `<form method="post" action="/auth/preferences">`) ||
+		!strings.Contains(page.Body.String(), `method="post" action="/auth/preferences"`) ||
 		!strings.Contains(page.Body.String(), `name="viewport"`) ||
 		!strings.Contains(page.Body.String(), "approved-main") {
 		t.Fatalf("preference JaWS page: status=%d body=%q", page.Code, page.Body.String())
@@ -79,7 +79,7 @@ func TestOAuthPreferencesUseJaWSAndBoundSavedChoice(t *testing.T) {
 	auth.choices.Main = nil
 	withdrawn := adminResponse(handler, http.MethodGet, "/auth/preferences", nil, signed, "")
 	if withdrawn.Code != http.StatusOK || !strings.Contains(withdrawn.Body.String(), "Saved main choice is unavailable") ||
-		!strings.Contains(withdrawn.Body.String(), `<select name="main">`) ||
+		!strings.Contains(withdrawn.Body.String(), `name="main"`) ||
 		!strings.Contains(withdrawn.Body.String(), `<option value="default" selected>Service default</option>`) {
 		t.Fatalf("withdrawn choice page: status=%d body=%q", withdrawn.Code, withdrawn.Body.String())
 	}

@@ -132,16 +132,25 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if auth == nil || len(auth.providers) != 1 {
 		t.Fatal("GitHub sign-in not configured")
 	}
+	if head := adminResponse(handler, http.MethodHead, "/auth/login", nil, nil, ""); head.Code != http.StatusOK ||
+		head.Body.Len() != 0 || len(head.Result().Cookies()) != 0 || jw.SessionCount() != 0 {
+		t.Fatalf("OAuth login HEAD: status=%d cookies=%v sessions=%d body=%q", head.Code, head.Result().Cookies(), jw.SessionCount(), head.Body.String())
+	}
 	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 ||
 		!strings.Contains(page.Body.String(), `name="jawsKey"`) ||
-		!strings.Contains(page.Body.String(), `<script defer src="/admin/login.js"></script>`) ||
+		strings.Contains(page.Body.String(), `<script defer src="/admin/login.js"></script>`) ||
 		!strings.Contains(page.Body.String(), "Sign in with GitHub") {
 		t.Fatalf("JaWS sign-in page: status=%d body=%q", page.Code, page.Body.String())
 	}
-	if script := adminResponse(handler, http.MethodGet, "/admin/login.js", nil, nil, ""); script.Code != http.StatusOK ||
-		!strings.Contains(script.Body.String(), `form[action="/auth/logout"]`) {
-		t.Fatalf("OAuth logout JaWS script: status=%d body=%q", script.Code, script.Body.String())
+	if asset := adminResponse(handler, http.MethodGet, bootstrapAssetPath(t, page.Body.String(), ".css"), nil, nil, ""); asset.Code != http.StatusOK {
+		t.Fatalf("OAuth sign-in Bootstrap asset: status=%d", asset.Code)
+	}
+	home := adminResponse(handler, http.MethodGet, "/", nil, page.Result().Cookies()[0], "")
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/auth/login">User sign in</a>`) ||
+		strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		!strings.Contains(home.Body.String(), `name="jawsKey"`) {
+		t.Fatalf("OAuth-only home: status=%d body=%q", home.Code, home.Body.String())
 	}
 	guest := page.Result().Cookies()[0]
 	start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, guest, "")
@@ -158,6 +167,9 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 		len(wrong.Result().Cookies()) != 0 || wrong.Body.Len() != 0 {
 		t.Fatalf("failed OAuth redirect: status=%d location=%q cookies=%v body=%q",
 			wrong.Code, wrong.Header().Get("Location"), wrong.Result().Cookies(), wrong.Body.String())
+	}
+	if home := adminResponse(handler, http.MethodGet, "/", nil, guest, ""); home.Code != http.StatusOK || len(home.Result().Cookies()) != 0 {
+		t.Fatalf("failed OAuth callback changed guest session: status=%d cookies=%v", home.Code, home.Result().Cookies())
 	}
 	guestErrorPage := adminResponse(handler, http.MethodGet, wrong.Header().Get("Location"), nil, guest, "")
 	if guestErrorPage.Code != http.StatusOK || !strings.Contains(guestErrorPage.Body.String(), `name="jawsKey"`) ||
@@ -197,7 +209,12 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if denied := adminResponse(handler, http.MethodPost, "/auth/link/github", nil, signed, "https://admin.example"); denied.Code != http.StatusForbidden || denied.Header().Get("Content-Type") != "text/html; charset=utf-8" || !strings.Contains(denied.Body.String(), `name="jawsKey"`) {
 		t.Fatalf("same-provider JaWS error: status=%d content-type=%q body=%q", denied.Code, denied.Header().Get("Content-Type"), denied.Body.String())
 	}
-	for _, path := range []string{"/", "/admin/usage", "/admin/stop"} {
+	if home := adminResponse(handler, http.MethodGet, "/", nil, signed, ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), `href="/auth/login">Your account</a>`) ||
+		strings.Contains(home.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("signed-in OAuth home: status=%d body=%q", home.Code, home.Body.String())
+	}
+	for _, path := range []string{"/admin/usage", "/admin/stop"} {
 		method := http.MethodGet
 		if path == "/admin/stop" {
 			method = http.MethodPost
@@ -207,8 +224,8 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 		}
 	}
 	logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, signed, "https://admin.example")
-	if logout.Code != http.StatusSeeOther || len(logout.Result().Cookies()) != 0 {
-		t.Fatalf("OAuth logout: status=%d cookies=%v", logout.Code, logout.Result().Cookies())
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 {
+		t.Fatalf("OAuth logout: status=%d location=%q cookies=%v", logout.Code, logout.Header().Get("Location"), logout.Result().Cookies())
 	}
 	if account, _ := auth.currentUser(jw.GetSession(requestWithCookie(signed))); account != "" {
 		t.Fatalf("closed session retained account %q", account)
@@ -216,17 +233,61 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if denied := adminResponse(handler, http.MethodGet, "/jaws/"+adminJaWSKey(t, signedPage.Body.String()), nil, signed, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("closed session retained JaWS page: %d", denied.Code)
 	}
-	reopened := adminResponse(handler, http.MethodGet, "/auth/login", nil, signed, "")
+	if usageReload := adminResponse(handler, http.MethodGet, "/user/usage", nil, signed, ""); usageReload.Code != http.StatusSeeOther || !strings.HasPrefix(usageReload.Header().Get("Location"), "/auth/login") {
+		t.Fatalf("closed user page reload: status=%d location=%q", usageReload.Code, usageReload.Header().Get("Location"))
+	}
+	reopened := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
 	if reopened.Code != http.StatusOK || len(reopened.Result().Cookies()) != 1 ||
 		reopened.Result().Cookies()[0].Value == signed.Value ||
-		!strings.Contains(reopened.Body.String(), "Sign in with GitHub") {
-		t.Fatalf("guest page after logout: status=%d cookies=%v body=%q", reopened.Code, reopened.Result().Cookies(), reopened.Body.String())
+		!strings.Contains(reopened.Body.String(), `href="/auth/login">User sign in</a>`) ||
+		strings.Contains(reopened.Body.String(), "Your account") {
+		t.Fatalf("guest home after logout: status=%d cookies=%v body=%q", reopened.Code, reopened.Result().Cookies(), reopened.Body.String())
 	}
-	if denied := adminResponse(handler, http.MethodPost, "/auth/logout", nil, reopened.Result().Cookies()[0], "https://admin.example"); denied.Code != http.StatusSeeOther || denied.Header().Get("Location") != "/auth/login?error=request" || denied.Body.Len() != 0 {
-		t.Fatalf("guest logout error: status=%d body=%q", denied.Code, denied.Body.String())
+	if loginPage := adminResponse(handler, http.MethodGet, "/auth/login", nil, reopened.Result().Cookies()[0], ""); loginPage.Code != http.StatusOK || !strings.Contains(loginPage.Body.String(), "Sign in with GitHub") {
+		t.Fatalf("guest OAuth login after logout: status=%d body=%q", loginPage.Code, loginPage.Body.String())
+	}
+	if guestLogout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, reopened.Result().Cookies()[0], "https://admin.example"); guestLogout.Code != http.StatusSeeOther || guestLogout.Header().Get("Location") != "/" || jw.GetSession(requestWithCookie(reopened.Result().Cookies()[0])) != nil {
+		t.Fatalf("guest logout: status=%d location=%q", guestLogout.Code, guestLogout.Header().Get("Location"))
 	}
 	if _, err := os.Stat(auth.links.path); !os.IsNotExist(err) {
 		t.Fatalf("unlinked login wrote durable links: %v", err)
+	}
+}
+
+func TestOAuthLogoutClosesSessionAfterLinkStoreWriteFailure(t *testing.T) {
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/github/callback"}}
+	handler, jw, auth := testOAuthAdminHandler(t, cfg, nil)
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)
+	response := httptest.NewRecorder()
+	sess := jw.NewSession(response, request)
+	if sess == nil || len(response.Result().Cookies()) != 1 {
+		t.Fatal("could not create OAuth session")
+	}
+	provider := auth.providers[0].server
+	sess.Set(provider.SessionKey, map[string]any{"iss": "https://github.com", "sub": "42"})
+	sess.Set("oauth2authexpiry.github", time.Now().Add(time.Hour))
+	if account, _ := auth.currentUser(sess); account == "" {
+		t.Fatal("OAuth session was not authenticated before storage failure")
+	}
+	auth.links.mu.Lock()
+	auth.links.bad = errors.New("save user links: injected write failure")
+	auth.links.mu.Unlock()
+	if account, _ := auth.currentUser(sess); account != "" {
+		t.Fatalf("fault-injected link store resolved account %q", account)
+	}
+	var logoutEvents int
+	provider.LogoutEvent = func(*jaws.Session, *http.Request) { logoutEvents++ }
+	cookie := response.Result().Cookies()[0]
+	logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, cookie, "https://admin.example")
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 ||
+		jw.GetSession(requestWithCookie(cookie)) != nil || sess.Get(provider.SessionKey) != nil || logoutEvents != 1 {
+		t.Fatalf("storage-failure logout: status=%d location=%q cookies=%v session=%v claims=%v provider logout events=%d",
+			logout.Code, logout.Header().Get("Location"), logout.Result().Cookies(), jw.GetSession(requestWithCookie(cookie)), sess.Get(provider.SessionKey), logoutEvents)
+	}
+	missing := adminResponse(handler, http.MethodPost, "/auth/logout", nil, nil, "https://admin.example")
+	if missing.Code != http.StatusSeeOther || missing.Header().Get("Location") != "/" || len(missing.Result().Cookies()) != 0 {
+		t.Fatalf("sessionless logout: status=%d location=%q cookies=%v", missing.Code, missing.Header().Get("Location"), missing.Result().Cookies())
 	}
 }
 
@@ -294,7 +355,7 @@ func TestOAuthGuestErrorsLeaveLoginRequestSlot(t *testing.T) {
 		t.Fatalf("guest page: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
 	guest := page.Result().Cookies()[0]
-	for i := range maxGuestLoginRequests + 1 {
+	for i := range maxGuestPageRequests + 1 {
 		failed := adminResponse(handler, http.MethodGet, "/auth/github/callback?state=wrong", nil, guest, "")
 		if failed.Code != http.StatusSeeOther || failed.Header().Get("Location") != "/auth/login?error=request" || failed.Body.Len() != 0 {
 			t.Fatalf("guest callback error %d: status=%d location=%q body=%q", i, failed.Code, failed.Header().Get("Location"), failed.Body.String())
@@ -340,7 +401,7 @@ func TestOAuthGuestErrorsLeaveLoginRequestSlot(t *testing.T) {
 	}
 }
 
-func TestOAuthErrorWriterPreservesSetCookie(t *testing.T) {
+func TestOAuthErrorWriterPreservesHeaders(t *testing.T) {
 	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}
 	handler, _, auth := testOAuthAdminHandler(t, cfg, nil)
@@ -349,7 +410,7 @@ func TestOAuthErrorWriterPreservesSetCookie(t *testing.T) {
 		t.Fatalf("guest page: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
 	wrapped := auth.oauthErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "expired", Path: "/auth", MaxAge: -1})
+		w.Header().Set("X-Provider-Result", "retained")
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("private provider error"))
@@ -358,9 +419,8 @@ func TestOAuthErrorWriterPreservesSetCookie(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/github/callback", nil)
 	r.AddCookie(page.Result().Cookies()[0])
 	wrapped.ServeHTTP(w, r)
-	cookies := w.Result().Cookies()
 	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/auth/login?error=request" ||
-		len(cookies) != 1 || cookies[0].Name != "oauth_state" || cookies[0].Path != "/auth" || cookies[0].MaxAge != -1 ||
+		w.Header().Get("X-Provider-Result") != "retained" ||
 		w.Body.Len() != 0 || w.Header().Get("Content-Type") != "" {
 		t.Fatalf("OAuth error response: status=%d headers=%v body=%q", w.Code, w.Header(), w.Body.String())
 	}
@@ -373,54 +433,28 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}
 	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
-	for jw.SessionCount() < maxOAuthAdmissionSessions-17 {
+	if home := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		!strings.Contains(home.Body.String(), `href="/auth/login"`) {
+		t.Fatalf("combined sign-in home: status=%d body=%q", home.Code, home.Body.String())
+	}
+	for jw.SessionCount() < maxGuestPageSessions-1 {
 		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
 		if response.Code != http.StatusFound || len(response.Result().Cookies()) != 1 {
 			t.Fatalf("OAuth start before limit: status=%d cookies=%v", response.Code, response.Result().Cookies())
 		}
 	}
-	guests := make([]*http.Cookie, 16)
-	for i := range guests {
-		response := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
-		if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
-			t.Fatalf("guest page %d: status=%d cookies=%v", i, response.Code, response.Result().Cookies())
-		}
-		guests[i] = response.Result().Cookies()[0]
+	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("guest page before final start: status=%d cookies=%v sessions=%d", page.Code, page.Result().Cookies(), jw.SessionCount())
 	}
-	if got := jw.SessionCount(); got != maxOAuthAdmissionSessions-1 {
-		t.Fatalf("sessions before concurrent starts=%d", got)
-	}
+	guest := page.Result().Cookies()[0]
 
-	responses := make([]*httptest.ResponseRecorder, 64)
-	start := make(chan struct{})
-	var workers sync.WaitGroup
-	for i := range responses {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			<-start
-			var cookie *http.Cookie
-			if i%2 != 0 {
-				cookie = guests[(i/2)%len(guests)]
-			}
-			responses[i] = adminResponse(handler, http.MethodGet, "/auth/github/login", nil, cookie, "")
-		}()
+	start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
+	if start.Code != http.StatusFound || len(start.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("last OAuth start: status=%d cookies=%v sessions=%d", start.Code, start.Result().Cookies(), jw.SessionCount())
 	}
-	close(start)
-	workers.Wait()
-	cookieFreeStarts := 0
-	for i, response := range responses {
-		if response.Code != http.StatusFound && response.Code != http.StatusServiceUnavailable {
-			t.Fatalf("concurrent start %d: status=%d", i, response.Code)
-		}
-		if i%2 == 0 && response.Code == http.StatusFound {
-			cookieFreeStarts++
-		}
-	}
-	if cookieFreeStarts != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
-		t.Fatalf("cookie-free starts=%d sessions=%d", cookieFreeStarts, jw.SessionCount())
-	}
-	for _, cookie := range []*http.Cookie{nil, guests[0]} {
+	for _, cookie := range []*http.Cookie{nil, guest} {
 		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, cookie, "")
 		if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 || response.Header().Get("Retry-After") != "60" ||
 			(cookie == nil && response.Body.Len() != 0) ||
@@ -440,6 +474,56 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 	}
 }
 
+func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	for jw.SessionCount() < maxGuestPageSessions-1 {
+		w := httptest.NewRecorder()
+		if jw.NewSession(w, httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)) == nil {
+			t.Fatal("could not fill guest sessions")
+		}
+	}
+	paths := []string{"/", "/auth/login", "/auth/github/login"}
+	responses := make([]*httptest.ResponseRecorder, 128)
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := range responses {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			responses[i] = adminResponse(handler, http.MethodGet, paths[i%len(paths)], nil, nil, "")
+		}()
+	}
+	close(start)
+	workers.Wait()
+	if count := jw.SessionCount(); count != maxGuestAdmissionSessions {
+		t.Fatalf("concurrent guest sessions=%d, want %d", count, maxGuestAdmissionSessions)
+	}
+	admitted := 0
+	for i, response := range responses {
+		want := http.StatusOK
+		if paths[i%len(paths)] == "/auth/github/login" {
+			want = http.StatusFound
+		}
+		if response.Code == want {
+			admitted++
+		} else if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("concurrent guest %d (%s): status=%d", i, paths[i%len(paths)], response.Code)
+		}
+	}
+	if admitted != 2 {
+		t.Fatalf("concurrent guest admissions=%d, want 2", admitted)
+	}
+	if admin := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); admin.Code != http.StatusOK {
+		t.Fatalf("admin login after guest burst: status=%d sessions=%d", admin.Code, jw.SessionCount())
+	}
+}
+
 func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	cfg := config.AdminConfig{
 		Administrators: []config.AdminAccount{testAdminAccount()},
@@ -448,7 +532,7 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
 	var guest *http.Cookie
-	for jw.SessionCount() < maxOAuthAdmissionSessions-1 {
+	for jw.SessionCount() < maxGuestPageSessions-1 {
 		w := httptest.NewRecorder()
 		if jw.NewSession(w, httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)) == nil {
 			t.Fatal("could not fill guest sessions")
@@ -457,40 +541,22 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 			guest = w.Result().Cookies()[0]
 		}
 	}
-	responses := make([]*httptest.ResponseRecorder, 32)
-	start := make(chan struct{})
-	var workers sync.WaitGroup
-	for i := range responses {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			<-start
-			responses[i] = adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
-		}()
+	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("last guest page: status=%d cookies=%v sessions=%d", page.Code, page.Result().Cookies(), jw.SessionCount())
 	}
-	close(start)
-	workers.Wait()
-	created := 0
-	for i, response := range responses {
-		switch response.Code {
-		case http.StatusOK:
-			created++
-			if len(response.Result().Cookies()) != 1 {
-				t.Fatalf("guest page %d: missing cookie", i)
-			}
-		case http.StatusServiceUnavailable:
-			if len(response.Result().Cookies()) != 0 {
-				t.Fatalf("guest page %d: over-limit cookie", i)
-			}
-		default:
-			t.Fatalf("guest page %d: status=%d", i, response.Code)
-		}
+	last := page.Result().Cookies()[0]
+	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, last, ""); start.Code != http.StatusFound {
+		t.Fatalf("last OAuth login page cannot start OAuth: status=%d", start.Code)
 	}
-	if created != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
-		t.Fatalf("guest pages created=%d sessions=%d", created, jw.SessionCount())
+	if denied := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, ""); denied.Code != http.StatusServiceUnavailable || len(denied.Result().Cookies()) != 0 {
+		t.Fatalf("guest page above reserve: status=%d cookies=%v", denied.Code, denied.Result().Cookies())
 	}
 	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, guest, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 0 {
 		t.Fatalf("existing guest page at reserve: status=%d cookies=%v", page.Code, page.Result().Cookies())
+	}
+	if failed := adminResponse(handler, http.MethodGet, "/auth/github/callback", nil, nil, ""); failed.Code != http.StatusServiceUnavailable || failed.Header().Get("Retry-After") != "60" || failed.Header().Get("Location") != "" || len(failed.Result().Cookies()) != 0 {
+		t.Fatalf("OAuth error at guest entry limit: status=%d headers=%v cookies=%v", failed.Code, failed.Header(), failed.Result().Cookies())
 	}
 	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
 		t.Fatalf("reserved admin page: status=%d cookies=%v", page.Code, page.Result().Cookies())
@@ -674,8 +740,12 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("GitLab callback did not reach provider")
 	}
-	if logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
-		t.Fatalf("logout before callback: status=%d", logout.Code)
+	if logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" ||
+		len(logout.Result().Cookies()) != 0 {
+		t.Fatalf("logout before callback: status=%d location=%q cookies=%v", logout.Code, logout.Header().Get("Location"), logout.Result().Cookies())
+	}
+	if home := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || home.Result().Cookies()[0].Value == cookie.Value {
+		t.Fatalf("home after sign-out during callback: status=%d cookies=%v", home.Code, home.Result().Cookies())
 	}
 	releaseToken()
 	select {
@@ -734,13 +804,18 @@ func TestOAuthLoginRotationCannotPersistStaleLink(t *testing.T) {
 	if auth.providers[0].server.SessionRotationLock != &auth.linkMu {
 		t.Fatal("GitHub callback does not share the link persistence lock")
 	}
-	notice := &oauthRotationNoticeLock{lock: &auth.linkMu, entered: make(chan struct{})}
-	auth.providers[0].server.SessionRotationLock = notice
 	link := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, signed, "https://admin.example")
 	linkURL, err := url.Parse(link.Header().Get("Location"))
 	if err != nil || link.Code != http.StatusSeeOther || linkURL.Query().Get("state") == "" {
 		t.Fatalf("GitLab link start: status=%d error=%v", link.Code, err)
 	}
+	relogin := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, signed, "")
+	reloginURL, err := url.Parse(relogin.Header().Get("Location"))
+	if err != nil || relogin.Code != http.StatusFound || reloginURL.Query().Get("state") == "" {
+		t.Fatalf("second GitHub start: status=%d error=%v", relogin.Code, err)
+	}
+	notice := &oauthRotationNoticeLock{lock: &auth.linkMu, entered: make(chan struct{})}
+	auth.providers[0].server.SessionRotationLock = notice
 	nonce.Store(linkURL.Query().Get("nonce"))
 	linked := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -750,11 +825,6 @@ func TestOAuthLoginRotationCannotPersistStaleLink(t *testing.T) {
 	case <-tokenEntered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("GitLab callback did not reach provider")
-	}
-	relogin := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, signed, "")
-	reloginURL, err := url.Parse(relogin.Header().Get("Location"))
-	if err != nil || relogin.Code != http.StatusFound || reloginURL.Query().Get("state") == "" {
-		t.Fatalf("second GitHub start: status=%d error=%v", relogin.Code, err)
 	}
 	auth.linkMu.Lock()
 	releaseRotation := sync.OnceFunc(func() { auth.linkMu.Unlock() })

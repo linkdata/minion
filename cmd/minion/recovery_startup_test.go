@@ -146,7 +146,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 			gitChecks++
 			return errors.New("unexpected Git preflight")
 		})
-	}, "-mode=orchestrate")
+	}, "-mode=orchestrate", "-oneshot")
 	if code != 0 || gitChecks != 0 || strings.Contains(output, "preflight:") || strings.Contains(output, "start selected worker:") {
 		t.Fatalf("stored result recovery ran preflight or worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
@@ -177,13 +177,13 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		return // The next preflight uses a POSIX shell CLI fixture.
 	}
 
-	// Repeat recovery with -loop. Its later preflight resolves the default
+	// Repeat recovery in the default service mode. Its later preflight resolves the default
 	// model; the worker startup must use that resolved selection.
 	accepted.ResultReady = false
 	store.Data.Accepted = &accepted
 	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
 	delete(store.Data.Processed, accepted.JobID)
-	delete(store.Data.TerminalDecisions, accepted.JobID) // Rebuild an unprocessed fixture for the loop case.
+	delete(store.Data.TerminalDecisions, accepted.JobID) // Rebuild an unprocessed fixture for the service case.
 	delete(store.Data.PublicationWrites, accepted.JobID)
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
@@ -231,11 +231,12 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 			mu.Unlock()
 			return nil
 		})
-	}, "-loop")
+	})
 	// The test binary cannot serve as an execute-mode worker, so startup exits 1 after preflight.
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "Claude settings: model=claude-test") ||
-		!strings.Contains(output, "start selected worker:") || strings.Contains(output, "worker main selection requires a resolved model") {
-		t.Fatalf("loop did not use resolved service config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)
+		!strings.Contains(output, "start selected worker:") ||
+		strings.Contains(output, "worker main selection requires a resolved model") {
+		t.Fatalf("service did not use resolved config after recovery: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
 	observedRequests, _, observedPublications = snapshot()
 	firstPublish := slices.Index(observedRequests, "POST /repos/owner/repo/issues/7/comments")
@@ -247,18 +248,18 @@ case "$input" in *minion-initialize*) printf '%s\n' '{"type":"control_response",
 	}
 	preflight := slices.Index(observedRequests, "git preflight")
 	if observedPublications != 2 || secondPublish < 0 || preflight < 0 || secondPublish >= preflight {
-		t.Fatalf("loop did not recover the saved result before preflight: requests=%v publications=%d", observedRequests, observedPublications)
+		t.Fatalf("service did not recover the saved result before preflight: requests=%v publications=%d", observedRequests, observedPublications)
 	}
 
-	// With recovery complete, a default one-pass start still selects the local worker.
+	// With recovery complete, a one-shot start still selects the local worker.
 	gitChecks = 0
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error {
 			gitChecks++
 			return nil
 		})
-	})
+	}, "-oneshot")
 	if code != 1 || gitChecks != 1 || !strings.Contains(output, "start selected worker:") {
-		t.Fatalf("default startup did not select the local worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
+		t.Fatalf("one-shot startup did not select the local worker: exit=%d git_checks=%d log=%q", code, gitChecks, output)
 	}
 }

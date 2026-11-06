@@ -57,7 +57,7 @@ func TestHashModeRejectsArgumentAndBypassesConfig(t *testing.T) {
 		args       []string
 	}{
 		{name: "plaintext argument", args: []string{"-mode", "hash", "secret-in-argv"}, want: "do not pass it as an argument"},
-		{name: "loop flag", args: []string{"-mode=hash", "-loop"}, want: "cannot be combined"},
+		{name: "oneshot flag", args: []string{"-mode=hash", "-oneshot"}, want: "cannot be combined"},
 		{name: "check flag", args: []string{"-mode=hash", "-check"}, want: "cannot be combined"},
 		{name: "install-skills flag", args: []string{"-mode=hash", "-install-skills"}, want: "cannot be combined"},
 		{name: "no terminal before config", args: []string{"-mode=hash", "-config=" + filepath.Join(t.TempDir(), "missing.json")}, want: "requires an interactive terminal"},

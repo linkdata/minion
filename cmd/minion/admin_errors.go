@@ -8,10 +8,10 @@ import (
 	"github.com/linkdata/jaws/lib/ui"
 )
 
-var adminNoticeHTML = template.Must(template.New("admin notice").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion admin request error</title>{{$.HeadHTML}}</head>
-<body><main><h1>Request could not be completed</h1><p role="alert">{{.Dot.Status}}</p>
-{{if .Auth.IsAdmin}}<a href="/">Dashboard</a>{{else if .Dot.AdminLogin}}<a href="/admin/login">Sign in</a>{{end}}
+var adminNoticeHTML = template.Must(template.New("admin notice").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin request error</title></head>
+<body><main class="container py-4"><h1>Request could not be completed</h1><p role="alert" class="alert alert-danger">{{.Dot.Status}}</p>
+{{if .Dot.AdminLogin}}<a href="/admin/login">Admin sign in</a>{{end}}
+<a href="/">Home</a>
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminNoticeView struct {
@@ -24,7 +24,7 @@ func adminBrowserRoute(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/admin/usage.json", "/admin/dashboard.css", "/admin/login.js":
+	case "/admin/usage.json", "/admin/login.js":
 		return false
 	}
 	return r.URL.Path == "/" || r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/admin/")
@@ -102,18 +102,26 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		w.Header().Del("Content-Type")
 		w.Header().Del("Content-Length")
 		w.Header().Set("Cache-Control", "no-store")
-		// Serialize the slot check with login pages and other guest notices.
-		a.sessionAdmissionMu.Lock()
-		defer a.sessionAdmissionMu.Unlock()
 		sess := a.jaws.GetSession(r)
-		// Leave one request slot for a guest to return to the sign-in page.
-		if sess == nil || (a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestLoginRequests-1) {
+		if sess == nil {
 			w.WriteHeader(capture.status)
 			return
 		}
+		// Leave one request slot for a guest to return to the sign-in page.
+		if a.sessionUsername(sess) == "" {
+			if account, _ := a.oauth.currentUser(sess); account == "" {
+				// Keep guest admission and JaWS registration in one critical section.
+				a.noticeMu.Lock()
+				defer a.noticeMu.Unlock()
+				if len(sess.Requests()) >= maxGuestPageRequests-1 {
+					w.WriteHeader(capture.status)
+					return
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), AdminLogin: len(a.accounts) != 0}).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), AdminLogin: len(a.accounts) != 0 && a.sessionUsername(sess) == ""}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)

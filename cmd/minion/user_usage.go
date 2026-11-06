@@ -151,30 +151,26 @@ func (g *userUsageGate) takeGitHubCall(ctx context.Context, account string) bool
 
 const usageEstimatedCostTemplate = `{{define "estimatedCost"}}{{if .EstimatedCostKnownCalls}}USD {{printf "%.15g" .EstimatedCostUSD}} {{if .EstimatedCostUnknownCalls}}known estimated subtotal{{else}}reported estimated total{{end}}{{else}}Unknown{{end}}{{if or .EstimatedCostKnownCalls .EstimatedCostUnknownCalls}} (calls with any reported amount: {{.EstimatedCostKnownCalls}}; calls with missing or incomplete estimates: {{.EstimatedCostUnknownCalls}}{{if and .EstimatedCostKnownCalls .EstimatedCostUnknownCalls}}; counts may overlap{{end}}){{end}}{{end}}`
 
-var userUsageHTML = template.Must(template.New("user usage").Parse(usageEstimatedCostTemplate + `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Your usage · Minion</title><link rel="stylesheet" href="/user/usage.css">{{$.HeadHTML}}
+var userUsageHTML = template.Must(template.New("user usage").Parse(headHTML + usageEstimatedCostTemplate + `{{template "head.html" $}}<title>Your usage · Minion</title>
 </head>
 <body>{{with .Dot}}
-  <header class="topbar">
-    <div><strong>MINION</strong><span> / your usage</span></div>
+  <header class="d-flex flex-wrap align-items-center gap-3 px-4 py-3 border-bottom bg-body-tertiary">
+    <div><strong>MINION</strong><span class="text-body-secondary"> / your usage</span></div>
     <nav><a href="/auth/login">Account</a></nav>
-    <form method="post" action="/auth/logout"><button type="submit">Sign out</button></form>
+    <form class="ms-auto" method="post" action="/auth/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form>
   </header>
-  <main>
-    <div class="heading">
-      <p class="eyebrow">ACCOUNTING</p><h1>Your usage</h1>
+  <main class="container-fluid py-4">
+    <div class="border-bottom mb-4">
+      <p class="text-body-secondary small fw-semibold">ACCOUNTING</p><h1>Your usage</h1>
       <p>Totals include usage from your linked GitHub identity. Repository filters affect the table only.</p>
     </div>
-    <div class="metrics">
-      <article><h2>Reported tokens</h2><p class="metric">{{.Total.TotalTokens}}</p></article>
-      <article><h2>Unallocated tokens</h2><p class="metric">{{.Total.UnallocatedTokens.Total}}</p></article>
-      <article><h2>Usage-recorded actions</h2><p class="metric">{{.Total.UsageRecordedActions}}</p></article>
-      <article><h2>Incomplete attempts</h2><p class="metric">{{.Total.IncompleteUsage}}</p></article>
+    <div class="row row-cols-1 row-cols-md-2 g-3 mb-3">
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Reported tokens</h2><p class="display-6 font-monospace">{{.Total.TotalTokens}}</p></article></div>
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Unallocated tokens</h2><p class="display-6 font-monospace">{{.Total.UnallocatedTokens.Total}}</p></article></div>
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Usage-recorded actions</h2><p class="display-6 font-monospace">{{.Total.UsageRecordedActions}}</p></article></div>
+      <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Incomplete attempts</h2><p class="display-6 font-monospace">{{.Total.IncompleteUsage}}</p></article></div>
     </div>
-    <section class="panel"><h2>All attempts</h2><dl>
+    <section class="border rounded p-3 mb-3"><h2 class="h5">All attempts</h2><dl>
       <dt>Attempts</dt><dd>{{.Total.Attempts}} ({{.Total.Succeeded}} succeeded, {{.Total.Failed}} failed or stopped, {{.Total.Running}} running)</dd>
       <dt>Input tokens</dt><dd>{{.Total.Tokens.Input}}</dd>
       <dt>Cache creation input</dt><dd>{{.Total.Tokens.CacheCreationInput}}</dd>
@@ -186,27 +182,27 @@ var userUsageHTML = template.Must(template.New("user usage").Parse(usageEstimate
       <dt>Estimated cost and currency</dt><dd>{{template "estimatedCost" .Total}}</dd>
       <dt>Billed cost and currency</dt><dd>Unknown</dd>
     </dl></section>
-    <p class="hint">Reported tokens are input plus output. Cache creation and cached input are included in input tokens; unallocated tokens are included in the reported total but lack call attribution. Token counts and Claude CLI USD estimates are executor-reported claims, not verified billing. They include captured main, critic, and helper usage. Call checkpoints can precede provider invocation. Estimated cost is a known subtotal when any call lacks a complete estimate. Incomplete attempts can omit unknown amounts; actions without usage records and records without a stable requester ID are excluded.</p>
-    <form class="filters" method="get" action="/user/usage">
-      <label>Repository<input name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
-      <button type="submit">Filter repositories</button>
+    <p class="text-body-secondary small">Reported tokens are input plus output. Cache creation and cached input are included in input tokens; unallocated tokens are included in the reported total but lack call attribution. Token counts and Claude CLI USD estimates are executor-reported claims, not verified billing. They include captured main, critic, and helper usage. Call checkpoints can precede provider invocation. Estimated cost is a known subtotal when any call lacks a complete estimate. Incomplete attempts can omit unknown amounts; actions without usage records and records without a stable requester ID are excluded.</p>
+    <form class="d-flex flex-wrap align-items-end gap-3 mb-4" method="get" action="/user/usage">
+      <label class="d-grid gap-1">Repository<input class="form-control" name="repo" value="{{.Repo}}" maxlength="201" placeholder="owner/repo"></label>
+      <button class="btn btn-primary" type="submit">Filter repositories</button>
     </form>
-    <section class="panel actions" aria-labelledby="accessible-repositories-heading" tabindex="0"><h2 id="accessible-repositories-heading">Accessible repositories</h2>
+    <section class="border rounded p-3 mb-3 overflow-auto" aria-labelledby="accessible-repositories-heading" tabindex="0"><h2 id="accessible-repositories-heading" class="h5">Accessible repositories</h2>
       {{if .Repo}}{{if not .Repositories}}{{if .RetryURL}}<p>Repository verification is incomplete at this position. Recheck{{if .ContinueURL}} or continue to later repositories{{end}}.</p>{{else if .VerificationUnavailable}}<p>Repository verification is unavailable right now. Retry this page later.</p>{{else if .ContinueURL}}<p>No matching accessible repository on this page. Continue checking.</p>{{else}}<p>No matching accessible repository was verified. Start over to check again.</p>{{end}}{{end}}{{else if .VerificationUnavailable}}<p>Some repository usage could not be verified right now. Refresh later.</p>{{end}}
-      {{if .Repositories}}<table><thead><tr>
+      {{if .Repositories}}<table class="table table-striped align-middle"><thead><tr>
         <th scope="col">Repository</th><th scope="col">Attempts</th><th scope="col">Reported tokens</th>
         <th scope="col">Unallocated tokens</th><th scope="col">Incomplete attempts</th>
         <th scope="col">Billed credits</th><th scope="col">Reported cost and currency</th>
         <th scope="col">Estimated cost and currency</th><th scope="col">Billed cost and currency</th>
       </tr></thead><tbody>{{range .Repositories}}<tr>
-        <th scope="row">{{.Repo}}</th><td class="number">{{.Attempts}}</td><td class="number">{{.TotalTokens}}</td>
-        <td class="number">{{.UnallocatedTokens.Total}}</td><td class="number">{{.IncompleteUsage}}</td>
+        <th scope="row">{{.Repo}}</th><td class="text-end font-monospace">{{.Attempts}}</td><td class="text-end font-monospace">{{.TotalTokens}}</td>
+        <td class="text-end font-monospace">{{.UnallocatedTokens.Total}}</td><td class="text-end font-monospace">{{.IncompleteUsage}}</td>
         <td>Unknown</td><td>Unknown</td><td>{{template "estimatedCost" .}}</td><td>Unknown</td>
       </tr>{{end}}</tbody></table>{{else if not .Repo}}{{if not .VerificationUnavailable}}<p>No accessible repository usage found in this check.</p>{{end}}{{end}}
       {{if .ContinueURL}}<a href="{{.ContinueURL}}">Continue checking repositories</a>{{end}}
       {{if .RetryURL}}<a href="{{.RetryURL}}">Recheck from this position</a>{{end}}
     </section>
-    <p class="hint">Repository rows require current access and verified repository identity. Records without a stable repository ID appear only in your total. Your total remains available if repository access is lost. Totals use a short-lived snapshot and may lag recently saved usage. Continue and Recheck use positions; new usage or account-link changes can repeat or skip rows. Start over after changing linked accounts and for the latest view. Action coverage beyond saved usage records is unknown.</p>
+    <p class="text-body-secondary small">Repository rows require current access and verified repository identity. Records without a stable repository ID appear only in your total. Your total remains available if repository access is lost. Totals use a short-lived snapshot and may lag recently saved usage. Continue and Recheck use positions; new usage or account-link changes can repeat or skip rows. Start over after changing linked accounts and for the latest view. Action coverage beyond saved usage records is unknown.</p>
   </main>{{end}}{{$.TailHTML}}
 </body>
 </html>`))
@@ -265,7 +261,7 @@ func (a *oauthAccess) usageHandler(owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
-		account := a.sessionAccount(r)
+		account, _ := a.currentUser(a.jaws.GetSession(r))
 		if account == "" {
 			if a.links.storageError() != nil {
 				a.browserError(w, r, http.StatusServiceUnavailable)

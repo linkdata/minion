@@ -8,7 +8,7 @@ KillMode=mixed
 WorkingDirectory=/path/to/minion
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=TMPDIR=/var/tmp
-ExecStart=/path/to/minion/bin/minion -config /path/to/minion/config.local.json -loop
+ExecStart=/path/to/minion/bin/minion -config /path/to/minion/config.local.json
 Restart=always
 RestartSec=30s
 UMask=0077

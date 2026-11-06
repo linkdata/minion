@@ -429,9 +429,6 @@ func (c *Config) Validate(configDir string) error {
 		}
 	}
 	if admin := c.Admin; admin != nil {
-		if err := admin.validateOAuth(); err != nil {
-			return err
-		}
 		if choices := admin.UserModelChoices; choices != nil {
 			if admin.GitHubOAuth == nil {
 				return errors.New("admin.user_model_choices requires github_oauth to prove action requester identity")
@@ -487,6 +484,9 @@ func (c *Config) Validate(configDir string) error {
 		addr, err := netip.ParseAddr(host)
 		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" {
 			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+		}
+		if err := admin.validateOAuth(host, number); err != nil {
+			return err
 		}
 		if admin.TLSCertFile != "" {
 			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)

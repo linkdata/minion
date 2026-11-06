@@ -18,29 +18,27 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-var userLoginHTML = template.Must(template.New("user login").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion account</title>{{$.HeadHTML}}</head>
-<body><main>
-{{if .Dot.Error}}<p role="alert">Request could not be completed. Try again.</p>{{end}}
+var userLoginHTML = template.Must(template.New("user login").Parse(headHTML + `{{template "head.html" $}}<title>Minion account</title></head>
+<body><main class="container py-4">
+{{if .Dot.Error}}<p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>{{end}}
 {{if .Dot.SignedIn}}
 <h1>Signed in with {{.Dot.Provider}}</h1>
 <p><a href="/user/usage">Your usage</a></p>
-{{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button>Link GitHub account</button></form>{{end}}
-{{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button>Link GitLab account</button></form>{{end}}
+{{if .Dot.GitHub}}<form method="post" action="/auth/link/github"><button class="btn btn-primary">Link GitHub account</button></form>{{end}}
+{{if .Dot.GitLab}}<form method="post" action="/auth/link/gitlab"><button class="btn btn-primary">Link GitLab account</button></form>{{end}}
 {{if .Dot.Preferences}}<p><a href="/auth/preferences">Model preferences</a></p>{{end}}
 <p><a href="/auth/actions">My actions</a></p>
-<form method="post" action="/auth/logout"><button>Sign out</button></form>
+<form method="post" action="/auth/logout"><button class="btn btn-outline-light">Sign out</button></form>
 {{else}}
 <h1>Sign in</h1>
-{{if .Dot.GitHub}}<p><a href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
-{{if .Dot.GitLab}}<p><a href="/auth/gitlab/login{{.Dot.SignInSuffix}}">Sign in with GitLab</a></p>{{end}}
+{{if .Dot.GitHub}}<p><a class="btn btn-primary" href="/auth/github/login{{.Dot.SignInSuffix}}">Sign in with GitHub</a></p>{{end}}
+{{if .Dot.GitLab}}<p><a class="btn btn-primary" href="/auth/gitlab/login{{.Dot.SignInSuffix}}">Sign in with GitLab</a></p>{{end}}
 {{end}}
-</main><script defer src="/admin/login.js"></script>{{$.TailHTML}}</body></html>`))
+</main>{{$.TailHTML}}</body></html>`))
 
-var userErrorHTML = template.Must(template.New("user error").Parse(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minion request failed</title>{{$.HeadHTML}}</head>
-<body><main><h1>Request failed</h1><p role="alert">Request could not be completed. Try again.</p>
-{{if .Dot.RetryAfter}}<p role="status">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
+var userErrorHTML = template.Must(template.New("user error").Parse(headHTML + `{{template "head.html" $}}<title>Minion request failed</title></head>
+<body><main class="container py-4"><h1>Request failed</h1><p role="alert" class="alert alert-danger">Request could not be completed. Try again.</p>
+{{if .Dot.RetryAfter}}<p role="status" class="alert alert-info">Wait {{.Dot.RetryAfter}} seconds before retrying.</p>{{end}}
 <a href="/auth/login">Return to account</a></main>{{$.TailHTML}}</body></html>`))
 
 type userErrorView struct{ RetryAfter string }
@@ -84,9 +82,6 @@ type oauthAccess struct {
 	usageGate   *userUsageGate
 }
 
-// Keep 32 slots for admin login pages and session rotation while OAuth flows wait at providers.
-const maxOAuthAdmissionSessions = maxAdminSessions - 32
-
 func githubProfileSubject(claims map[string]any) (string, error) {
 	raw, ok := claims["id"].(json.Number)
 	if !ok {
@@ -126,20 +121,13 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 		closeUnreadAdminBody(w, r)
 		a.admissionMu.Lock()
 		defer a.admissionMu.Unlock()
-		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusServiceUnavailable)
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
+			guestAdmissionUnavailable(w)
 			return
 		}
 		page.ServeHTTP(&oauthErrorWriter{ResponseWriter: w}, r)
 	}))
-	a.mux.HandleFunc("HEAD /auth/login", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	})
-	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(a.logout)))
+	a.mux.HandleFunc("HEAD /auth/login", headPublicPage)
 	if a.choices != nil {
 		if err := jw.AddTemplateLookuper(userPreferencesHTML); err != nil {
 			return nil, err
@@ -186,10 +174,8 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					a.admissionMu.Lock()
 					defer a.admissionMu.Unlock()
-					if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
-						w.Header().Set("Cache-Control", "no-store")
-						w.Header().Set("Retry-After", "60")
-						w.WriteHeader(http.StatusServiceUnavailable)
+					if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
+						guestAdmissionUnavailable(w)
 						return
 					}
 					returnTo := userUsageReturnTarget(r.URL.Query().Get("next"))
@@ -253,21 +239,11 @@ func (a *oauthAccess) allowed(r *http.Request) bool {
 	if a == nil {
 		return false
 	}
-	if r.Method == http.MethodGet {
-		switch r.URL.Path {
-		case "/user/usage":
-			return true // The handler redirects anonymous readers to sign-in.
-		case "/user/usage.css":
-			return a.sessionAccount(r) != ""
-		}
+	if r.Method == http.MethodGet && r.URL.Path == "/user/usage" {
+		return true // The handler redirects anonymous readers to sign-in.
 	}
 	_, pattern := a.mux.Handler(r)
 	return pattern != ""
-}
-
-func (a *oauthAccess) sessionAccount(r *http.Request) string {
-	account, _ := a.currentUser(a.jaws.GetSession(r))
-	return account
 }
 
 // Only a canonical usage URL may survive an unauthenticated sign-in detour.
@@ -287,17 +263,11 @@ func userUsageReturnTarget(raw string) string {
 	return userUsageContinueURL(repo, after)
 }
 
-func (a *oauthAccess) routes(mux *http.ServeMux) {
-	if a != nil {
-		mux.Handle("/auth/", a.mux)
-	}
-}
-
 func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	sess := a.jaws.GetSession(r)
 	account, provider := a.currentUser(sess)
-	if account == "" && len(sess.Requests()) >= maxGuestLoginRequests {
+	if account == "" && sess.Get(adminSessionKey) == nil && len(sess.Requests()) >= maxGuestPageRequests {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusTooManyRequests)
 		return
@@ -319,26 +289,6 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ui.Handler(a.jaws, "user login", view).ServeHTTP(w, r)
-}
-
-func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request) {
-	closeUnreadAdminBody(w, r)
-	w.Header().Set("Cache-Control", "no-store")
-	a.linkMu.Lock()
-	sess := a.jaws.GetSession(r)
-	account, _ := a.currentUser(sess)
-	if account != "" {
-		sess.Close()
-	}
-	a.linkMu.Unlock()
-	if account == "" {
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
-	for _, p := range a.providers {
-		p.server.Logout(sess, r)
-	}
-	http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 }
 
 type oauthErrorWriter struct {
@@ -378,9 +328,8 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	w.Header().Set("Cache-Control", "no-store")
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		if a.jaws.SessionCount() >= maxOAuthAdmissionSessions {
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusServiceUnavailable)
+		if a.jaws.SessionCount() >= maxGuestPageSessions {
+			guestAdmissionUnavailable(w)
 			return
 		}
 		w.Header().Set("Location", "/auth/login?error=request")

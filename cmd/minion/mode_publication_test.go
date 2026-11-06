@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -102,6 +103,9 @@ func TestOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T) {
 	t.Run("admin_listener_closed", func(t *testing.T) {
 		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, "active")
 	})
+	t.Run("placeholder_admin", func(t *testing.T) {
+		testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t, false, true, "placeholder")
+	})
 }
 
 func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withAccepted, loop bool, adminSetup string) {
@@ -156,7 +160,9 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		t.Cleanup(func() { _ = listener.Close() })
 		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
 	} else if adminSetup == "active" {
-		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0"}
+		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()}}
+	} else if adminSetup == "placeholder" {
+		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: config.AdminPasswordHashPlaceholder}}}
 	}
 	var output strings.Builder
 	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {
@@ -173,11 +179,19 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		t.Fatalf("worker startup preceded reconciliation: lookups=%d write=%+v", lookups.Load(), store.Data.PublicationWrites[jobID])
 	}
 	if adminSetup == "active" {
-		_, addressLine, found := strings.Cut(output.String(), "admin dashboard listening on ")
+		_, addressLine, found := strings.Cut(output.String(), "Minion UI listening on ")
 		if !found {
 			t.Fatalf("admin listener did not start after reconciliation: log=%q", output.String())
 		}
-		address, _, _ := strings.Cut(addressLine, "\n")
+		homeURL, bound, _ := strings.Cut(addressLine, " (bound to ")
+		parsed, err := url.Parse(homeURL)
+		if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Path != "" || parsed.Port() == "" {
+			t.Fatalf("admin home URL is not clickable: %q: %v", homeURL, err)
+		}
+		address := net.JoinHostPort("127.0.0.1", parsed.Port())
+		if !strings.HasPrefix(bound, address+")") {
+			t.Fatalf("admin listener log omitted bound address %s: %q", address, addressLine)
+		}
 		listener, err := net.Listen("tcp", address)
 		if err != nil {
 			t.Fatalf("admin listener still holds %s after return: %v", address, err)
@@ -185,5 +199,8 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		if err := listener.Close(); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if adminSetup == "placeholder" && !strings.Contains(output.String(), "sign-in disabled until password_hash or OAuth is configured") {
+		t.Fatalf("placeholder admin log omitted sign-in status: %q", output.String())
 	}
 }

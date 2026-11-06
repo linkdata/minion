@@ -180,6 +180,7 @@ func TestUserActionsRoutesBindRequesterAndCurrentPrivateAccess(t *testing.T) {
 	}
 	list := adminResponse(handler, http.MethodGet, "/auth/actions", nil, signed, "")
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "attempt-1") ||
+		!strings.Contains(list.Body.String(), `<ol class="list-group">`) ||
 		!strings.Contains(list.Body.String(), "owner/repo") || strings.Contains(list.Body.String(), "PRIVATE_DISCUSSION") {
 		t.Fatalf("own JaWS list: status=%d body=%q", list.Code, list.Body.String())
 	}
@@ -203,6 +204,8 @@ func TestUserActionsRoutesBindRequesterAndCurrentPrivateAccess(t *testing.T) {
 	}
 	detail := adminResponse(handler, http.MethodGet, "/auth/actions/attempt-1", nil, signed, "")
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "PRIVATE_DISCUSSION") ||
+		!strings.Contains(detail.Body.String(), `action="/auth/logout"`) ||
+		!strings.Contains(detail.Body.String(), `href="/auth/actions">← My actions`) ||
 		!strings.Contains(detail.Body.String(), "o3") {
 		t.Fatalf("renamed-login private JaWS detail: status=%d body=%q", detail.Code, detail.Body.String())
 	}

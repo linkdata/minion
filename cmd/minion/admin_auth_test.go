@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
@@ -94,6 +93,22 @@ func adminJaWSKey(t *testing.T, page string) string {
 	return key
 }
 
+func pageAssetPath(t *testing.T, page, prefix, suffix string) string {
+	t.Helper()
+	for _, part := range strings.Split(page, `"`) {
+		if strings.HasPrefix(part, prefix) && strings.HasSuffix(part, suffix) {
+			return part
+		}
+	}
+	t.Fatalf("page omitted %s%s asset", prefix, suffix)
+	return ""
+}
+
+func bootstrapAssetPath(t *testing.T, page, suffix string) string {
+	t.Helper()
+	return pageAssetPath(t, page, "/static/bootstrap", suffix)
+}
+
 func adminGuestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
@@ -176,35 +191,24 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	if noscript := adminResponse(handler, http.MethodGet, "/jaws/"+secondKey+"/noscript", nil, secondCookie, ""); noscript.Code != http.StatusNoContent {
 		t.Fatalf("own JaWS noscript: status=%d, want 204", noscript.Code)
 	}
-	if denied := adminResponse(handler, http.MethodGet, "/", nil, firstCookie, ""); denied.Code != http.StatusForbidden {
-		t.Fatalf("guest reached dashboard: status=%d", denied.Code)
+	home := adminResponse(handler, http.MethodGet, "/", nil, firstCookie, "")
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		strings.Contains(home.Body.String(), `href="/auth/login"`) || !strings.Contains(home.Body.String(), `name="jawsKey"`) ||
+		len(home.Result().Cookies()) != 0 {
+		t.Fatalf("guest home: status=%d cookies=%v body=%q", home.Code, home.Result().Cookies(), home.Body.String())
 	}
-	assetPath := func(ext string) string {
-		t.Helper()
-		for _, part := range strings.Split(first.Body.String(), `"`) {
-			if strings.HasPrefix(part, "/jaws/.jaws.") && strings.HasSuffix(part, ext) {
-				return part
-			}
-		}
-		t.Fatalf("login page omitted JaWS %s asset", ext)
-		return ""
+	if tail := adminResponse(handler, http.MethodGet, "/jaws/.tail/"+adminJaWSKey(t, home.Body.String()), nil, firstCookie, ""); tail.Code != http.StatusOK {
+		t.Fatalf("guest home JaWS tail: status=%d", tail.Code)
 	}
 	for _, tc := range []struct {
 		path string
 		want int
-	}{{"/admin/dashboard.css", http.StatusOK}, {"/admin/login.js", http.StatusOK}, {assetPath(".js"), http.StatusOK},
-		{assetPath(".css"), http.StatusOK}, {"/jaws/.ping", http.StatusNoContent}} {
+	}{{bootstrapAssetPath(t, first.Body.String(), ".css"), http.StatusOK}, {bootstrapAssetPath(t, first.Body.String(), ".js"), http.StatusOK},
+		{"/admin/login.js", http.StatusOK}, {pageAssetPath(t, first.Body.String(), "/jaws/.jaws.", ".js"), http.StatusOK},
+		{pageAssetPath(t, first.Body.String(), "/jaws/.jaws.", ".css"), http.StatusOK}, {"/jaws/.ping", http.StatusNoContent}} {
 		if asset := adminResponse(handler, http.MethodGet, tc.path, nil, nil, ""); asset.Code != tc.want {
 			t.Fatalf("public asset %s: status=%d, want %d", tc.path, asset.Code, tc.want)
 		}
-	}
-	duplicate := httptest.NewRequest(http.MethodGet, "https://admin.example/admin/login", nil)
-	duplicate.AddCookie(firstCookie)
-	duplicate.AddCookie(firstCookie)
-	duplicateResponse := httptest.NewRecorder()
-	handler.ServeHTTP(duplicateResponse, duplicate)
-	if duplicateResponse.Code != http.StatusForbidden {
-		t.Fatalf("duplicate session cookies: status=%d", duplicateResponse.Code)
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login",
 		url.Values{"username": {"operator"}, "password": {"correct-password"}}, firstCookie, "https://admin.example")
@@ -212,25 +216,8 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 		t.Fatalf("login after guest page: status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
 	adminCookie := login.Result().Cookies()[0]
-	if len(jw.Sessions()) >= jw.MaxSessions {
-		t.Fatal("stale-response regression needs spare guest session capacity")
-	}
-	postLoginGET := adminResponse(handler, http.MethodGet, "/admin/login", nil, firstCookie, "")
-	if postLoginGET.Code != http.StatusConflict || len(postLoginGET.Result().Cookies()) != 0 {
-		t.Fatalf("rotated guest GET changed cookie: status=%d cookies=%v", postLoginGET.Code, postLoginGET.Result().Cookies())
-	}
-	for _, order := range [][]*httptest.ResponseRecorder{
-		{preLoginGET, login}, {login, preLoginGET}, {postLoginGET, login}, {login, postLoginGET},
-	} {
-		lastCookie := firstCookie
-		for _, response := range order {
-			if cookies := response.Result().Cookies(); len(cookies) > 0 {
-				lastCookie = cookies[len(cookies)-1]
-			}
-		}
-		if lastCookie.Value != adminCookie.Value {
-			t.Fatal("delayed guest response replaced admin cookie")
-		}
+	if jw.GetSession(requestWithCookie(firstCookie)) != nil {
+		t.Fatal("old JaWS session remained live after sign-in")
 	}
 	for _, cookie := range []*http.Cookie{firstCookie, adminCookie} {
 		if denied := adminResponse(handler, http.MethodGet, "/jaws/"+firstKey, nil, cookie, ""); denied.Code != http.StatusForbidden {
@@ -239,7 +226,7 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	}
 	signed := adminResponse(handler, http.MethodGet, "/admin/login", nil, adminCookie, "")
 	if signed.Code != http.StatusOK || !strings.Contains(signed.Body.String(), "Signed in") ||
-		!strings.Contains(signed.Body.String(), `<script defer src="/admin/login.js"></script>`) {
+		strings.Contains(signed.Body.String(), `<script defer src="/admin/login.js"></script>`) {
 		t.Fatalf("signed-in JaWS login page: status=%d body=%q", signed.Code, signed.Body.String())
 	}
 	signedKey := adminJaWSKey(t, signed.Body.String())
@@ -249,30 +236,23 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 		}
 	}
 	logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, adminCookie, "https://admin.example")
-	if logout.Code != http.StatusSeeOther || len(logout.Result().Cookies()) != 0 {
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 {
 		t.Fatalf("logout: status=%d cookies=%v", logout.Code, logout.Result().Cookies())
 	}
-	newGuest := adminResponse(handler, http.MethodGet, "/admin/login", nil, adminCookie, "")
-	if newGuest.Code != http.StatusOK || len(newGuest.Result().Cookies()) != 1 {
-		t.Fatalf("guest page after logout: status=%d cookies=%v", newGuest.Code, newGuest.Result().Cookies())
+	newGuest := adminResponse(handler, http.MethodGet, "/", nil, adminCookie, "")
+	if newGuest.Code != http.StatusOK || len(newGuest.Result().Cookies()) != 1 ||
+		!strings.Contains(newGuest.Body.String(), `href="/admin/login"`) || strings.Contains(newGuest.Body.String(), "Live actions") {
+		t.Fatalf("guest home after logout: status=%d cookies=%v body=%q", newGuest.Code, newGuest.Result().Cookies(), newGuest.Body.String())
 	}
-	for _, order := range [][]*httptest.ResponseRecorder{{logout, newGuest}, {newGuest, logout}} {
-		lastCookie := adminCookie
-		for _, response := range order {
-			if cookies := response.Result().Cookies(); len(cookies) > 0 {
-				lastCookie = cookies[len(cookies)-1]
-			}
-		}
-		if lastCookie.Value != newGuest.Result().Cookies()[0].Value {
-			t.Fatal("delayed logout response replaced newer guest cookie")
-		}
+	if loginPage := adminResponse(handler, http.MethodGet, "/admin/login", nil, newGuest.Result().Cookies()[0], ""); loginPage.Code != http.StatusOK || !strings.Contains(loginPage.Body.String(), `name="password"`) {
+		t.Fatalf("guest login after logout: status=%d body=%q", loginPage.Code, loginPage.Body.String())
 	}
 	if denied := adminResponse(handler, http.MethodGet, "/jaws/"+signedKey, nil, adminCookie, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("revoked admin key remained usable: status=%d", denied.Code)
 	}
 }
 
-func TestAuthFormSubmitClosesJaWSSocket(t *testing.T) {
+func TestAdminLoginSubmitClosesJaWSSocket(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node.js is unavailable for the browser hook check")
@@ -282,50 +262,31 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const script = fs.readFileSync(process.argv[1], 'utf8');
-for (const action of ['/admin/login', '/admin/logout', '/auth/logout']) {
-    const calls = [];
-    class WebSocket { removeEventListener(type, fn) { calls.push('socket:' + type + ':' + fn.name); } }
-    const jaws = new WebSocket();
-    let submit;
-    const document = { querySelector(selector) {
-        assert.ok(selector.includes('form[action="' + action + '"]'));
-        return { addEventListener(type, fn) { assert.equal(type, 'submit'); submit = fn; } };
-    } };
-    const window = { removeEventListener(type, fn) { calls.push('window:' + type + ':' + fn.name); } };
-    function jawsConnectWhenReady() {}
-    function jawsMessage() {}
-    function jawsUnloading() { calls.push('close'); }
-    vm.runInNewContext(script, { document, window, WebSocket, jaws, jawsMessage, jawsConnectWhenReady, jawsUnloading });
-    assert.equal(typeof submit, 'function');
-    submit();
-    assert.deepEqual(calls, [
-        'window:DOMContentLoaded:jawsConnectWhenReady',
-        'window:load:jawsConnectWhenReady',
-        'socket:message:jawsMessage',
-        'close',
-    ]);
-}
+const calls = [];
+class WebSocket { removeEventListener(type, fn) { calls.push('socket:' + type + ':' + fn.name); } }
+const jaws = new WebSocket();
+let submit;
+const document = { querySelector(selector) {
+    assert.equal(selector, 'form[action="/admin/login"]');
+    return { addEventListener(type, fn) { assert.equal(type, 'submit'); submit = fn; } };
+} };
+const window = { removeEventListener(type, fn) { calls.push('window:' + type + ':' + fn.name); } };
+function jawsConnectWhenReady() {}
+function jawsMessage() {}
+function jawsUnloading() { calls.push('close'); }
+vm.runInNewContext(script, { document, window, WebSocket, jaws, jawsMessage, jawsConnectWhenReady, jawsUnloading });
+assert.equal(typeof submit, 'function');
+submit();
+assert.deepEqual(calls, [
+    'window:DOMContentLoaded:jawsConnectWhenReady',
+    'window:load:jawsConnectWhenReady',
+    'socket:message:jawsMessage',
+    'close',
+]);
 `
 	command := exec.CommandContext(t.Context(), node, "-e", check, "admin_login.js")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("login submit script: %v: %s", err, output)
-	}
-}
-
-func TestAdminDuplicateCookieOverflowRejected(t *testing.T) {
-	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	login := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, adminGuestCookie(t, handler), "")
-	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
-		t.Fatalf("login: status=%d cookies=%v", login.Code, login.Result().Cookies())
-	}
-	cookie := login.Result().Cookies()[0]
-	request := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
-	request.Header.Set("Cookie", jw.CookieName+"="+cookie.Value+strings.Repeat("; filler=x", 3001)+"; "+jw.CookieName+"="+cookie.Value)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("oversized duplicate session cookie bypassed guard: status=%d", response.Code)
 	}
 }
 
@@ -401,7 +362,7 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 		}
 		return response.StatusCode
 	}
-	for range maxGuestLoginRequests - 1 {
+	for range maxGuestPageRequests - 1 {
 		if status := getWithCookie(); status != http.StatusOK {
 			t.Fatalf("guest page before request cap: status=%d", status)
 		}
@@ -453,7 +414,7 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 	signedBody, readErr := io.ReadAll(signedResponse.Body)
 	closeErr := signedResponse.Body.Close()
 	if readErr != nil || closeErr != nil || signedResponse.StatusCode != http.StatusOK ||
-		!strings.Contains(string(signedBody), `<script defer src="/admin/login.js"></script>`) {
+		strings.Contains(string(signedBody), `<script defer src="/admin/login.js"></script>`) {
 		t.Fatalf("signed-in network page: status=%d read=%v close=%v body=%q", signedResponse.StatusCode, readErr, closeErr, signedBody)
 	}
 	adminKey := adminJaWSKey(t, string(signedBody))
@@ -461,7 +422,7 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 	if err != nil || upgrade == nil || upgrade.StatusCode != http.StatusSwitchingProtocols {
 		t.Fatalf("signed-in WebSocket: response=%v error=%v", upgrade, err)
 	}
-	adminConn.CloseNow() // The submit hook closes the page socket before navigation.
+	defer adminConn.CloseNow()
 	logoutRequest, err := http.NewRequestWithContext(postCtx, http.MethodPost, server.URL+"/admin/logout", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -473,7 +434,30 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 	}
 	logoutResponse.Body.Close()
 	if logoutResponse.StatusCode != http.StatusSeeOther || len(logoutResponse.Cookies()) != 0 {
-		t.Fatalf("sign-out after admin socket closes: status=%d cookies=%v", logoutResponse.StatusCode, logoutResponse.Cookies())
+		t.Fatalf("sign-out with live admin socket: status=%d cookies=%v", logoutResponse.StatusCode, logoutResponse.Cookies())
+	}
+	for {
+		_, message, err := adminConn.Read(postCtx)
+		if err != nil {
+			t.Fatalf("live admin socket closed without Reload: %v", err)
+		}
+		if strings.Contains(string(message), "Reload\t") {
+			break
+		}
+	}
+	reload, err := http.NewRequestWithContext(postCtx, http.MethodGet, server.URL+"/admin/login", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reload.AddCookie(adminCookie)
+	reloaded, err := client.Do(reload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reloaded.Body.Close()
+	body, err := io.ReadAll(reloaded.Body)
+	if err != nil || reloaded.StatusCode != http.StatusOK || len(reloaded.Cookies()) != 1 || !strings.Contains(string(body), `name="password"`) {
+		t.Fatalf("live socket reload guest page: status=%d cookies=%v read=%v body=%q", reloaded.StatusCode, reloaded.Cookies(), err, body)
 	}
 }
 
@@ -520,6 +504,140 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 	}
 }
 
+func TestHomeReservesSessionsForSignIn(t *testing.T) {
+	handler, jw, _ := testOAuthAdminHandler(t, config.AdminConfig{
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}, nil)
+	for jw.SessionCount() < maxGuestPageSessions-1 {
+		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
+			t.Fatal("could not fill guest session reserve")
+		}
+	}
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("home admission: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
+	}
+	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], ""); start.Code != http.StatusFound {
+		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
+	}
+	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("home exhausted sign-in reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
+	}
+}
+
+func TestSignedInPublicPagesAreNotGuestLimited(t *testing.T) {
+	cfg := config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+			RedirectURL: "https://admin.example/auth/github/callback"},
+	}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	key := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
+	cookie := userUsageCookie(t, jw, key, false)
+	for range maxGuestPageRequests {
+		page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie)
+		if page.Code != http.StatusOK {
+			t.Fatalf("OAuth account page status=%d", page.Code)
+		}
+	}
+	if page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie); page.Code != http.StatusOK {
+		t.Fatalf("fifth OAuth account page status=%d", page.Code)
+	}
+	r := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
+	r.RemoteAddr = "192.0.2.7:12345"
+	r.AddCookie(cookie)
+	sess := jw.GetSession(r)
+	if sess == nil {
+		t.Fatal("signed-in OAuth session missing")
+	}
+	if len(sess.Requests()) < maxGuestPageRequests {
+		t.Fatalf("signed-in OAuth pages=%d, want at least %d", len(sess.Requests()), maxGuestPageRequests)
+	}
+	home := userUsageRequest(handler, http.MethodGet, "/", "", cookie)
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		!strings.Contains(home.Body.String(), `href="/auth/login">Your account</a>`) {
+		t.Fatalf("signed-in OAuth home: status=%d body=%q", home.Code, home.Body.String())
+	}
+	if login := userUsageRequest(handler, http.MethodGet, "/admin/login", "", cookie); login.Code != http.StatusOK {
+		t.Fatalf("admin login for OAuth user: status=%d body=%q", login.Code, login.Body.String())
+	}
+	adminCookie := userUsageCookie(t, jw, "", true)
+	for range maxGuestPageRequests {
+		page := userUsageRequest(handler, http.MethodGet, "/admin/login", "", adminCookie)
+		if page.Code != http.StatusOK {
+			t.Fatalf("admin account page status=%d", page.Code)
+		}
+	}
+	if page := userUsageRequest(handler, http.MethodGet, "/admin/login", "", adminCookie); page.Code != http.StatusOK {
+		t.Fatalf("fifth admin account page status=%d", page.Code)
+	}
+	if page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", adminCookie); page.Code != http.StatusOK {
+		t.Fatalf("OAuth login page for admin: status=%d body=%q", page.Code, page.Body.String())
+	}
+}
+
+func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	for jw.SessionCount() < maxGuestPageSessions-1 {
+		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
+			t.Fatal("could not fill guest sessions")
+		}
+	}
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("admin-only home: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
+	}
+	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
+	}
+	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" ||
+		len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
+	}
+	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("admin sign-in at home reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
+	}
+}
+
+func TestHomeSharesOAuthGuestAdmissionLock(t *testing.T) {
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/github/callback"}}
+	handler, _, auth := testOAuthAdminHandler(t, cfg, nil)
+	auth.admissionMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			auth.admissionMu.Unlock()
+		}
+	}()
+	started := make(chan struct{})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		close(started)
+		done <- adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	}()
+	<-started
+	select {
+	case <-done:
+		t.Fatal("home bypassed OAuth guest admission lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	auth.admissionMu.Unlock()
+	locked = false
+	select {
+	case response := <-done:
+		if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
+			t.Fatalf("home after admission unlock: status=%d cookies=%v", response.Code, response.Result().Cookies())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("home did not resume after admission unlock")
+	}
+}
+
 func TestAdminLoginRequiresLiveSession(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
@@ -535,8 +653,8 @@ func TestAdminLoginRequiresLiveSession(t *testing.T) {
 	}
 }
 
-func TestAdminReloginRetiresOldCookie(t *testing.T) {
-	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+func TestAdminReloginRetiresOldSession(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
 	first := adminResponse(handler, http.MethodPost, "/admin/login", form, adminGuestCookie(t, handler), "")
 	if first.Code != http.StatusSeeOther || len(first.Result().Cookies()) != 1 {
@@ -547,8 +665,8 @@ func TestAdminReloginRetiresOldCookie(t *testing.T) {
 	if second.Code != http.StatusSeeOther || len(second.Result().Cookies()) != 1 {
 		t.Fatalf("relogin: status=%d cookies=%v", second.Code, second.Result().Cookies())
 	}
-	if stale := adminResponse(handler, http.MethodGet, "/admin/login", nil, oldCookie, ""); stale.Code != http.StatusConflict || len(stale.Result().Cookies()) != 0 {
-		t.Fatalf("retired admin cookie minted guest session: status=%d cookies=%v", stale.Code, stale.Result().Cookies())
+	if jw.GetSession(requestWithCookie(oldCookie)) != nil {
+		t.Fatal("old admin session remained live after sign-in")
 	}
 	if dashboard := adminResponse(handler, http.MethodGet, "/", nil, second.Result().Cookies()[0], ""); dashboard.Code != http.StatusOK {
 		t.Fatalf("replacement admin cookie cannot open dashboard: status=%d", dashboard.Code)
@@ -562,67 +680,6 @@ func TestAdminReloginRetiresOldCookie(t *testing.T) {
 	}
 }
 
-func TestAdminLogoutWaitsForSessionAdmission(t *testing.T) {
-	jw, err := jaws.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer jw.Close()
-	request := httptest.NewRequest(http.MethodPost, "https://admin.example/admin/logout", nil)
-	if sess := jw.NewSession(httptest.NewRecorder(), request); sess == nil {
-		t.Fatal("could not create admin session")
-	}
-	access := &adminAccess{jaws: jw}
-	access.sessionAdmissionMu.Lock()
-	started := make(chan struct{})
-	done := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		close(started)
-		response := httptest.NewRecorder()
-		access.logout(response, request)
-		done <- response
-	}()
-	<-started
-	select {
-	case <-done:
-		access.sessionAdmissionMu.Unlock()
-		t.Fatal("logout bypassed session admission lock")
-	case <-time.After(50 * time.Millisecond):
-	}
-	if jw.GetSession(request) == nil {
-		access.sessionAdmissionMu.Unlock()
-		t.Fatal("logout revoked session before admission lock was released")
-	}
-	access.sessionAdmissionMu.Unlock()
-	select {
-	case response := <-done:
-		if response.Code != http.StatusSeeOther || jw.GetSession(request) != nil {
-			t.Fatalf("logout after admission: status=%d live=%t", response.Code, jw.GetSession(request) != nil)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("logout did not finish after admission lock was released")
-	}
-}
-
-func TestAdminRotatedCookieTombstonesStayBounded(t *testing.T) {
-	access := &adminAccess{rotatedCookies: make(map[[32]byte]time.Time)}
-	now := time.Now()
-	for i := range maxRotatedCookies {
-		access.rotatedCookies[sha256.Sum256([]byte(fmt.Sprintf("guest-%d", i)))] = now.Add(time.Minute)
-	}
-	oldest := sha256.Sum256([]byte("guest-0"))
-	if access.rememberRotatedCookie("overflow") || len(access.rotatedCookies) != maxRotatedCookies {
-		t.Fatalf("full tombstone map admitted another rotation: entries=%d", len(access.rotatedCookies))
-	}
-	if _, retained := access.rotatedCookies[oldest]; !retained {
-		t.Fatal("full tombstone map evicted a live rotated cookie")
-	}
-	access.rotatedCookies[oldest] = now.Add(-time.Second)
-	if !access.rememberRotatedCookie("after-expiry") || len(access.rotatedCookies) != maxRotatedCookies {
-		t.Fatalf("expired tombstone did not release capacity: entries=%d", len(access.rotatedCookies))
-	}
-}
-
 func TestCheckedInAdminPlaceholderCannotSignIn(t *testing.T) {
 	cfg, err := config.Load(filepath.Join("..", "..", "config.json"))
 	if err != nil {
@@ -633,12 +690,24 @@ func TestCheckedInAdminPlaceholderCannotSignIn(t *testing.T) {
 	}
 	placeholder := cfg.Admin.Administrators[0]
 	handler, _, _ := testAdminHandler(t, cfg.Admin.Administrators)
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 ||
+		!strings.Contains(home.Body.String(), `disabled>Sign in</button>`) ||
+		strings.Contains(home.Body.String(), `href="/admin/login"`) ||
+		strings.Contains(home.Body.String(), `href="/auth/login"`) {
+		t.Fatalf("sample home enabled sign-in: status=%d cookies=%v body=%q", home.Code, home.Result().Cookies(), home.Body.String())
+	}
+	if asset := adminResponse(handler, http.MethodGet, bootstrapAssetPath(t, home.Body.String(), ".css"), nil, nil, ""); asset.Code != http.StatusOK {
+		t.Fatalf("sample home Bootstrap asset: status=%d", asset.Code)
+	}
+	if tail := adminResponse(handler, http.MethodGet, "/jaws/.tail/"+adminJaWSKey(t, home.Body.String()), nil, home.Result().Cookies()[0], ""); tail.Code != http.StatusOK {
+		t.Fatalf("sample home JaWS tail: status=%d", tail.Code)
+	}
 	for _, test := range []struct {
 		method, path string
 		form         url.Values
 	}{
 		{method: http.MethodGet, path: "/admin/login"},
-		{method: http.MethodGet, path: "/"},
 		{method: http.MethodPost, path: "/admin/login", form: url.Values{"username": {"admin"}, "password": {"PASTE_GENERATED_HASH_HERE"}}},
 	} {
 		response := adminResponse(handler, test.method, test.path, test.form, nil, "")
@@ -704,6 +773,10 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	if !jw.MakeAuth(jaWSRequest).IsAdmin() {
 		t.Fatal("JaWS template authorization did not use the admin session")
 	}
+	session := jaWSRequest.Session()
+	if session == nil || session.Get(adminSessionKey) != "operator" {
+		t.Fatal("admin session did not contain the signed-in identity")
+	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatalf("cross-origin logout: status=%d hasHSTS=%t", response.Code, response.Header().Get("Strict-Transport-Security") != "")
 	}
@@ -720,14 +793,17 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	if jw.MakeAuth(jaWSRequest).IsAdmin() {
 		t.Fatal("revoked JaWS request retained admin template authorization")
 	}
+	if session.Get(adminSessionKey) != nil {
+		t.Fatal("logout retained the admin identity in the closed session")
+	}
 	if response := adminResponse(handler, http.MethodPost, "/jaws/invalid-key", nil, cookie, ""); response.Code != http.StatusForbidden {
 		t.Errorf("revoked POST /jaws/invalid-key: status=%d, want 403", response.Code)
 	}
 	if response := adminResponse(handler, http.MethodGet, "/jaws/.ping", nil, cookie, ""); response.Code != http.StatusNoContent {
 		t.Errorf("public JaWS ping after logout: status=%d, want 204", response.Code)
 	}
-	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("revoked logout: status=%d toLogin=%t", response.Code, response.Header().Get("Location") == "/admin/login")
+	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/" {
+		t.Fatalf("revoked logout: status=%d location=%q", response.Code, response.Header().Get("Location"))
 	}
 	wsRequest := httptest.NewRequest(http.MethodGet, "https://admin.example/jaws/test-websocket", nil)
 	wsRequest.TLS = &tls.ConnectionState{}
@@ -809,6 +885,23 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	client := &http.Client{Transport: &http.Transport{}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	t.Cleanup(client.CloseIdleConnections)
 	baseURL := "http://" + admin.listener.Addr().String()
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
+		t.Fatalf("admin home URL = %q, port=%q: %v", admin.entryURL, port, err)
+	}
+	entry, err := client.Get(baseURL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Body.Close()
+	entryBody, err := io.ReadAll(entry.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.StatusCode != http.StatusOK || !strings.Contains(string(entryBody), `href="/admin/login"`) ||
+		!strings.Contains(string(entryBody), `name="jawsKey"`) {
+		t.Fatalf("loopback home: status=%d body=%q", entry.StatusCode, entryBody)
+	}
 	response, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 || response.Cookies()[0].Secure {
@@ -850,26 +943,43 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil, "", nil)
+		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
+	}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = admin.Close() })
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, guestCookie := adminNetworkLogin(t, client, "http://"+admin.listener.Addr().String(),
+	response, _ := adminNetworkLogin(t, client, "http://"+admin.listener.Addr().String(),
 		url.Values{"username": {"operator"}, "password": {"correct-password"}})
 	response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
 		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
 	}
+	page := adminResponse(admin.server.Handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if page.Code != http.StatusOK {
+		t.Fatalf("Bootstrap entry page: status=%d", page.Code)
+	}
+	cssPath := bootstrapAssetPath(t, page.Body.String(), ".css")
 	cookie := response.Cookies()[0]
+	oauthPage, err := client.Get("http://" + admin.listener.Addr().String() + "/auth/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oauthPage.Body.Close()
+	if oauthPage.StatusCode != http.StatusOK || len(oauthPage.Cookies()) != 1 {
+		t.Fatalf("OAuth login page: status=%d cookies=%v", oauthPage.StatusCode, oauthPage.Cookies())
+	}
+	oauthCookie := oauthPage.Cookies()[0]
 	for _, tc := range []struct {
 		name, method, path, headers string
 		want                        int
+		location                    string
 	}{
 		{name: "public GET", method: http.MethodGet, path: "/admin/login", want: http.StatusOK},
-		{name: "stale guest GET", method: http.MethodGet, path: "/admin/login",
-			headers: "Cookie: " + guestCookie.Name + "=" + guestCookie.Value + "\r\n", want: http.StatusConflict},
+		{name: "OAuth callback", method: http.MethodGet, path: "/auth/github/callback?state=wrong",
+			headers: "Cookie: " + oauthCookie.Name + "=" + oauthCookie.Value + "\r\n", want: http.StatusSeeOther,
+			location: "/auth/login?error=request"},
 		{name: "cross-origin login", method: http.MethodPost, path: "/admin/login",
 			headers: "Origin: http://other.example\r\n", want: http.StatusForbidden},
 		{name: "unsupported login body", method: http.MethodPost, path: "/admin/login",
@@ -878,7 +988,7 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
 		{name: "authenticated dashboard", method: http.MethodGet, path: "/",
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
-		{name: "authenticated stylesheet", method: http.MethodGet, path: "/admin/dashboard.css",
+		{name: "authenticated stylesheet", method: http.MethodGet, path: cssPath,
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
 		{name: "authenticated usage page", method: http.MethodGet, path: "/admin/usage",
 			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusServiceUnavailable},
@@ -898,7 +1008,7 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 				t.Fatal(err)
 			}
-			request := tc.method + " " + tc.path + " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n" + tc.headers + "\r\n"
+			request := tc.method + " " + tc.path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n" + tc.headers + "\r\n"
 			if _, err := io.WriteString(conn, request); err != nil {
 				t.Fatal(err)
 			}
@@ -910,6 +1020,9 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 			if resp.StatusCode != tc.want || !resp.Close {
 				t.Fatalf("incomplete body: status=%d close=%t, want %d and close", resp.StatusCode, resp.Close, tc.want)
 			}
+			if tc.location != "" && resp.Header.Get("Location") != tc.location {
+				t.Fatalf("redirect location=%q, want %q", resp.Header.Get("Location"), tc.location)
+			}
 			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 				t.Fatal(err)
 			}
@@ -920,18 +1033,25 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	}
 }
 
-func TestAdminWithoutConfiguredAccountsDeniesEveryEntry(t *testing.T) {
+func TestAdminWithoutConfiguredAccountsServesPublicHome(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, nil)
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, "/admin/login"}, {http.MethodPost, "/admin/login"},
 		{http.MethodHead, "/admin/login"},
-		{http.MethodPost, "/admin/logout"}, {http.MethodGet, "/jaws/.ping"},
+		{http.MethodPost, "/admin/logout"},
 		{http.MethodGet, "/jaws/test-websocket"}, {http.MethodPost, "/jaws/invalid-key"},
 	} {
 		if response := adminResponse(handler, tc.method, tc.path, nil, nil, ""); response.Code != http.StatusForbidden ||
 			len(response.Result().Cookies()) != 0 {
 			t.Errorf("unconfigured %s %s: status=%d cookieCount=%d", tc.method, tc.path, response.Code, len(response.Result().Cookies()))
 		}
+	}
+	if home := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), "Sign-in is not configured") {
+		t.Fatalf("unconfigured home: status=%d body=%q", home.Code, home.Body.String())
+	}
+	if ping := adminResponse(handler, http.MethodGet, "/jaws/.ping", nil, nil, ""); ping.Code != http.StatusNoContent {
+		t.Fatalf("public JaWS ping: status=%d", ping.Code)
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://admin.example/jaws/.ping", nil)
 	if jw.MakeAuth(jw.NewRequest(httptest.NewRecorder(), request)).IsAdmin() {
@@ -1091,11 +1211,11 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		}
 		cookie := response.Result().Cookies()[0]
 		time.Sleep(time.Minute + time.Second)
-		if response := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); response.Code != http.StatusForbidden {
-			t.Fatalf("expired admin session: status=%d, want 403", response.Code)
+		if response := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `href="/admin/login"`) {
+			t.Fatalf("expired admin session home: status=%d body=%q", response.Code, response.Body.String())
 		}
-		if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/login" {
-			t.Fatalf("expired sign-out: status=%d toLogin=%t, want login redirect", response.Code, response.Header().Get("Location") == "/admin/login")
+		if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/" {
+			t.Fatalf("expired sign-out: status=%d location=%q", response.Code, response.Header().Get("Location"))
 		}
 	})
 }

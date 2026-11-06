@@ -20,6 +20,22 @@ import (
 
 var detailTestSource = strings.Repeat("a", 40)
 
+func TestEvidenceRows(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want int
+	}{
+		{"short", 2},
+		{"\nleading line", 2},
+		{"one\ntwo\nthree", 3},
+		{strings.Repeat("line\n", 8) + "last", 8},
+	} {
+		if got := evidenceRows(tc.text); got != tc.want {
+			t.Errorf("evidenceRows(%q) = %d, want %d", tc.text, got, tc.want)
+		}
+	}
+}
+
 func detailTestIdentity() map[string]any {
 	return map[string]any{"job_id": "job-1", "attempt_id": "attempt-1", "executor_id": "local",
 		"repository": "owner/repo", "repository_id": 1, "owner_id": 2, "requester": "writer",
@@ -129,12 +145,12 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	hostile := `<script>alert("owned")</script><img src=x onerror=alert(1)>`
+	hostile := `</textarea><script>alert("owned")</script><img src=x onerror=alert(1)>`
 	detailTestRecords(t, owner.WorkRoot, hostile+strings.Repeat("x", 15<<10), true)
 	detailTestReview(t, owner.WorkRoot, "approved", detailTestCall(true, true, false, true))
 	detailTestFile(t, owner.WorkRoot, "worker-diagnostics", "attempt-1.json", map[string]any{
 		"identity": detailTestIdentity(), "source_ref": detailTestSource,
-		"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": hostile}},
+		"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": hostile + "\nsecond line"}},
 	})
 	if denied := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, nil, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("anonymous detail status=%d", denied.Code)
@@ -146,7 +162,7 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	}
 	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 	body := view.Body.String()
-	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;"} {
+	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl`, `<textarea`, `action="/admin/logout"`, `href="/">← Live actions`, `readonly aria-labelledby="record-caption-0"`, `id="record-caption-0"`, `>Received report`, `id="diagnostic-caption-0"`, `>Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q: %s", want, body)
 		}
@@ -155,6 +171,36 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 		!strings.Contains(body, `<meta name="jawsKey"`) || !strings.Contains(body, `/jaws/.tail/`) ||
 		strings.Contains(body, `<script>alert`) || strings.Contains(body, "<img src=x") || len(body) > 20<<10 {
 		t.Fatalf("detail not safe and bounded: status=%d bytes=%d body=%s", view.Code, len(body), body)
+	}
+}
+
+func TestAdminActionDetailPreservesInitialEvidenceNewline(t *testing.T) {
+	handler, root, cookie := detailTestActive(t)
+	const evidence = "\nleading line"
+	detailTestRecords(t, root, evidence, true)
+	detailTestFile(t, root, "reviews", "attempt-1.json", map[string]any{
+		"identity": detailTestIdentity(), "source_ref": detailTestSource, "review_claim_origin": "executor_reported",
+		"critic_max_rounds": 3,
+		"calls":             []any{detailTestMain(1), detailTestCall(false, false, true, true), detailTestMain(2)},
+		"refutations":       []any{map[string]any{"round": 2, "text": evidence}},
+	})
+	detailTestFile(t, root, "worker-diagnostics", "attempt-1.json", map[string]any{
+		"identity": detailTestIdentity(), "source_ref": detailTestSource,
+		"worker_reported_failure":     map[string]any{"message": evidence, "observed_message": evidence},
+		"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": evidence}},
+	})
+	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
+	if view.Code != http.StatusOK {
+		t.Fatalf("detail status=%d: %s", view.Code, view.Body.String())
+	}
+	for _, label := range []string{
+		`aria-labelledby="refutation-caption-0"`, `aria-labelledby="record-caption-0"`,
+		`aria-label="Worker-reported failure"`, `aria-label="Worker-observed failure"`,
+		`aria-labelledby="diagnostic-caption-0"`,
+	} {
+		if want := `rows="2" readonly ` + label + ">\n\nleading line</textarea>"; !strings.Contains(view.Body.String(), want) {
+			t.Errorf("detail missing initial evidence newline after %s: %s", label, view.Body.String())
+		}
 	}
 }
 
@@ -604,7 +650,10 @@ func TestAdminActionDetailKeepsProvenanceOnTruncatedEvidence(t *testing.T) {
 			"refutations":       []any{map[string]any{"round": 2, "text": strings.Repeat("<", 5<<10)}},
 		})
 		view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
-		if !strings.Contains(view.Body.String(), "Saved critic calls are executor-reported and validated at receipt; main-model refutations are truncated in this view") {
+		if !strings.Contains(view.Body.String(), "Saved critic calls are executor-reported and validated at receipt; main-model refutations are truncated in this view") ||
+			!strings.Contains(view.Body.String(), `id="refutation-caption-0"`) ||
+			!strings.Contains(view.Body.String(), `>Main-model refutation`) ||
+			!strings.Contains(view.Body.String(), `aria-labelledby="refutation-caption-0"`) {
 			t.Fatalf("truncated refutation lost provenance: %s", view.Body.String())
 		}
 	})

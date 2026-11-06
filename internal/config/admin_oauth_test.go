@@ -20,12 +20,62 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if good.Admin.GitLabOAuth.BaseURL != "https://gitlab.com" {
 		t.Fatalf("default GitLab origin = %q", good.Admin.GitLabOAuth.BaseURL)
 	}
-	loopback := valid()
-	loopback.Admin.TLSCertFile, loopback.Admin.TLSKeyFile = "", ""
-	loopback.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
-	loopback.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback"
-	if err := loopback.Validate(t.TempDir()); err != nil {
-		t.Fatalf("loopback HTTP OAuth: %v", err)
+	caseFold := valid()
+	caseFold.Admin.GitLabOAuth.RedirectURL = "https://MINION.EXAMPLE/auth/gitlab/callback"
+	if err := caseFold.Validate(t.TempDir()); err != nil {
+		t.Fatalf("same callback host with different case: %v", err)
+	}
+	localhost := valid()
+	localhost.Admin.TLSCertFile, localhost.Admin.TLSKeyFile = "", ""
+	localhost.Admin.GitHubOAuth.RedirectURL = "http://localhost:8377/auth/github/callback"
+	localhost.Admin.GitLabOAuth.RedirectURL = "http://localhost:8377/auth/gitlab/callback"
+	if err := localhost.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "redirect_url") {
+		t.Fatalf("localhost HTTP OAuth: %v, want redirect_url error", err)
+	}
+	for _, tc := range []struct{ listen, host string }{
+		{"127.0.0.1:8377", "127.0.0.1"},
+		{"127.0.0.2:8377", "127.0.0.2"},
+		{"[::1]:8377", "[::1]"},
+		{"[::ffff:127.0.0.1]:8377", "127.0.0.1"},
+	} {
+		loopback := valid()
+		loopback.Admin.Listen = tc.listen
+		loopback.Admin.TLSCertFile, loopback.Admin.TLSKeyFile = "", ""
+		loopback.Admin.GitHubOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/github/callback"
+		loopback.Admin.GitLabOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/gitlab/callback"
+		if err := loopback.Validate(t.TempDir()); err != nil {
+			t.Errorf("loopback HTTP OAuth on %s: %v", tc.listen, err)
+		}
+	}
+	equivalentIPv6 := valid()
+	equivalentIPv6.Admin.Listen = "[::1]:8377"
+	equivalentIPv6.Admin.TLSCertFile, equivalentIPv6.Admin.TLSKeyFile = "", ""
+	equivalentIPv6.Admin.GitHubOAuth.RedirectURL = "http://[::1]:8377/auth/github/callback"
+	equivalentIPv6.Admin.GitLabOAuth.RedirectURL = "http://[0:0::1]:8377/auth/gitlab/callback"
+	if err := equivalentIPv6.Validate(t.TempDir()); err != nil {
+		t.Fatalf("equivalent IPv6 callback hosts: %v", err)
+	}
+	for _, tc := range []struct{ listen, host string }{
+		{"127.0.0.1:8377", "127.0.0.2"},
+		{"127.0.0.1:8377", "[::1]"},
+		{"[::ffff:127.0.0.1]:8377", "127.0.0.2"},
+	} {
+		unbound := valid()
+		unbound.Admin.Listen = tc.listen
+		unbound.Admin.TLSCertFile, unbound.Admin.TLSKeyFile = "", ""
+		unbound.Admin.GitHubOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/github/callback"
+		unbound.Admin.GitLabOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/gitlab/callback"
+		if err := unbound.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP host must match admin.listen") {
+			t.Errorf("unbound HTTP callback %s for %s: %v", tc.host, tc.listen, err)
+		}
+	}
+	defaultHTTPPort := valid()
+	defaultHTTPPort.Admin.Listen = "127.0.0.1:80"
+	defaultHTTPPort.Admin.TLSCertFile, defaultHTTPPort.Admin.TLSKeyFile = "", ""
+	defaultHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
+	defaultHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
+	if err := defaultHTTPPort.Validate(t.TempDir()); err != nil {
+		t.Fatalf("implicit HTTP port 80: %v", err)
 	}
 	defaultPort := valid()
 	defaultPort.Admin.GitLabOAuth.BaseURL = "https://GITLAB.example:443"
@@ -40,12 +90,14 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	punycode := valid()
 	punycode.Admin.GitLabOAuth.BaseURL = "https://XN--BCHER-KVA.EXAMPLE:443"
 	punycode.Admin.GitHubOAuth.RedirectURL = "https://xn--bcher-kva.example/auth/github/callback"
+	punycode.Admin.GitLabOAuth.RedirectURL = "https://xn--bcher-kva.example/auth/gitlab/callback"
 	if err := punycode.Validate(t.TempDir()); err != nil || punycode.Admin.GitLabOAuth.BaseURL != "https://xn--bcher-kva.example" {
 		t.Fatalf("ASCII IDN host was not normalized: base=%q error=%v", punycode.Admin.GitLabOAuth.BaseURL, err)
 	}
 	ipv6 := valid()
 	ipv6.Admin.GitLabOAuth.BaseURL = "https://[::1]:8443"
 	ipv6.Admin.GitHubOAuth.RedirectURL = "https://[::1]/auth/github/callback"
+	ipv6.Admin.GitLabOAuth.RedirectURL = "https://[::1]/auth/gitlab/callback"
 	if err := ipv6.Validate(t.TempDir()); err != nil || ipv6.Admin.GitLabOAuth.BaseURL != "https://[::1]:8443" {
 		t.Fatalf("plain IPv6 GitLab origin was rejected: base=%q error=%v", ipv6.Admin.GitLabOAuth.BaseURL, err)
 	}
@@ -65,8 +117,34 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"scoped IPv6 callback host", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://[fe80::1%25Eth0]/auth/github/callback" }, "redirect_url"},
 		{"empty callback port", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://minion.example:/auth/github/callback" }, "redirect_url"},
 		{"public HTTP callback", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "http://minion.example/auth/github/callback" }, "redirect_url"},
+		{"mixed HTTPS callback hosts", func(c *Config) {
+			c.Admin.GitLabOAuth.RedirectURL = "https://other.example/auth/gitlab/callback"
+		}, "hosts must match"},
+		{"mixed HTTP callback hosts", func(c *Config) {
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://[::ffff:127.0.0.1]:8377/auth/gitlab/callback"
+		}, "hosts must match"},
+		{"loopback IP callback wrong port", func(c *Config) {
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8378/auth/github/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback"
+		}, "port must match"},
+		{"implicit HTTP callback port mismatch", func(c *Config) {
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
+		}, "port must match"},
+		{"localhost suffix HTTP callback", func(c *Config) {
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.GitHubOAuth.RedirectURL = "http://localhost.example/auth/github/callback"
+		}, "redirect_url"},
 		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback" }, "admin TLS"},
 		{"plain listener with HTTPS callback", func(c *Config) { c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", "" }, "admin TLS"},
+		{"public listener without TLS", func(c *Config) {
+			c.Admin.Listen = "0.0.0.0:8377"
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
+		}, "outside literal loopback"},
 		{"GitHub endpoint override", func(c *Config) { c.Admin.GitHubOAuth.BaseURL = "https://github.example" }, "base_url"},
 		{"GitLab HTTP origin", func(c *Config) { c.Admin.GitLabOAuth.BaseURL = "http://gitlab.example" }, "base_url"},
 		{"GitLab path origin", func(c *Config) { c.Admin.GitLabOAuth.BaseURL = "https://gitlab.example/subpath" }, "base_url"},
