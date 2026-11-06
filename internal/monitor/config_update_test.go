@@ -135,14 +135,14 @@ func TestConfigUpdatePreservesCommandDeniedByOldRequesterPolicy(t *testing.T) {
 			return item, nil
 		},
 	}
-	var executed, decisions int
+	var executed, fences int
 	m := selectedMonitor(t, now, gh, selectedHandler(func(Job) error {
 		executed++
 		return nil
 	}))
 	m.Config.Repositories[0].DenyAllActors = true
 	m.BeforeAccept = func(decide func() error) error {
-		decisions++
+		fences++
 		if updatePending {
 			return ErrConfigUpdatePending
 		}
@@ -152,9 +152,9 @@ func TestConfigUpdatePreservesCommandDeniedByOldRequesterPolicy(t *testing.T) {
 		t.Fatalf("saved grant did not stop old-policy denial: %v", err)
 	}
 	key := notificationKey(testNotification(now))
-	if decisions != 1 || executed != 0 || !store.Data.Processed[jobID(item.Key, "review")].IsZero() ||
+	if fences != 1 || executed != 0 || !store.Data.Processed[jobID(item.Key, "review")].IsZero() ||
 		store.Data.PendingNotifications[key].Repository == "" || !store.Data.RepositoryCursors["example-owner/example-repo"].Equal(initial) {
-		t.Fatalf("old policy consumed newly granted command: decisions=%d executed=%d state=%+v", decisions, executed, store.Data)
+		t.Fatalf("old policy consumed newly granted command: fences=%d executed=%d state=%+v", fences, executed, store.Data)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -169,7 +169,61 @@ func TestConfigUpdatePreservesCommandDeniedByOldRequesterPolicy(t *testing.T) {
 	if _, err := m.RunOnce(t.Context(), store); err != nil {
 		t.Fatalf("replay with granted requester: %v", err)
 	}
-	if decisions != 2 || executed != 1 || store.Data.Processed[jobID(item.Key, "review")].IsZero() || len(store.Data.PendingNotifications) != 0 {
-		t.Fatalf("granted command did not replay: decisions=%d executed=%d state=%+v", decisions, executed, store.Data)
+	if fences != 3 || executed != 1 || store.Data.Processed[jobID(item.Key, "review")].IsZero() || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("granted command did not replay: fences=%d executed=%d state=%+v", fences, executed, store.Data)
+	}
+}
+
+func TestConfigUpdateReplaysOldNotificationForNewlyEnabledCommand(t *testing.T) {
+	now := time.Now().UTC()
+	updated := now.Add(-10 * time.Second) // Older than the poll's two-second overlap.
+	initial := now.Add(-time.Minute)
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := openStateAt(t, path, initial)
+	notification := testNotification(updated)
+	item := selectedItem(updated)
+	editPending := false
+	gh := &fakeGitHub{
+		notifications: []github.Notification{notification},
+		permission:    github.Permission{Permission: "write"},
+		threadItems: func(string, int, time.Time) ([]github.Item, error) {
+			editPending = true // A command is enabled while the old action list is in use.
+			return []github.Item{item}, nil
+		},
+	}
+	var executed int
+	m := selectedMonitor(t, now, gh, selectedHandler(func(Job) error {
+		executed++
+		return nil
+	}))
+	m.Config.Repositories[0].Actions = []string{"fix"}
+	m.BeforeAccept = func(decide func() error) error {
+		if editPending {
+			return ErrConfigUpdatePending
+		}
+		return decide()
+	}
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, ErrConfigUpdatePending) {
+		t.Fatalf("new command was not held for config activation: %v", err)
+	}
+	key := notificationKey(notification)
+	if executed != 0 || !store.Data.Cursor.Equal(initial) || !store.Data.RepositoryCursors["example-owner/example-repo"].Equal(initial) ||
+		store.Data.PendingNotifications[key].Repository == "" {
+		t.Fatalf("old notification was lost before activation: executed=%d state=%+v", executed, store.Data)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openStateAt(t, path, initial)
+	gh.notifications, gh.threadItems = nil, nil
+	gh.items = []github.Item{item}
+	m.Config.Repositories[0].Actions = []string{"fix", "review"}
+	m.Now = func() time.Time { return store.Data.NextPollAt.Add(time.Second) }
+	editPending = false
+	if _, err := m.RunOnce(t.Context(), store); err != nil {
+		t.Fatalf("replay after enabling command: %v", err)
+	}
+	if executed != 1 || store.Data.Processed[jobID(item.Key, "review")].IsZero() || len(store.Data.PendingNotifications) != 0 {
+		t.Fatalf("enabled command did not replay: executed=%d state=%+v", executed, store.Data)
 	}
 }

@@ -101,6 +101,9 @@ func registerAdminPolicyActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if strings.TrimSpace(instructions) == "" {
 			return errors.New("instructions cannot be blank; use Reset to restore the built-in default")
 		}
+		if instructions == action.DefaultAIInstructions {
+			instructions = ""
+		}
 		return live.save(func(cfg *config.Config) error {
 			cfg.AIInstructions = instructions
 			return nil

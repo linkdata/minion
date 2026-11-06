@@ -252,4 +252,11 @@ func TestAdminPolicyRoutesRequireAdminAndSaveSettings(t *testing.T) {
 	if saved.Repositories[0].RequiredCleanRounds != nil || saved.RequiredCleanRounds(11, 7) != 3 || saved.AIInstructions != "" {
 		t.Fatalf("reset policy = %+v", saved)
 	}
+	response := adminResponse(handler, http.MethodPost, "/admin/policy/instructions", url.Values{"instructions": {action.DefaultAIInstructions}}, cookie, "https://admin.example")
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("save unchanged built-in instructions = %d: %s", response.Code, response.Body.String())
+	}
+	if saved := configForAdminTest(t, path); saved.AIInstructions != "" || policyView(live.snapshot()).Custom {
+		t.Fatalf("built-in instructions became a custom override: %+v", saved)
+	}
 }
