@@ -61,7 +61,7 @@ func loadTLSCertificate(kind, certFile, keyFile string) (tls.Certificate, error)
 	return certificate, nil
 }
 
-func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, endpoint *action.RemoteEndpoint, readyTimeout time.Duration, liveConfigs ...*adminLiveConfig) (code int) {
+func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, endpoint *action.RemoteEndpoint, readyTimeout time.Duration, live *adminLiveConfig) (code int) {
 	if endpoint == nil {
 		logger.Print("selected remote worker is missing")
 		return 1
@@ -88,10 +88,6 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 	if err != nil {
 		logger.Printf("wait for selected remote worker: %s", monitor.InertLogText(err.Error()))
 		return 1
-	}
-	var live *adminLiveConfig
-	if len(liveConfigs) != 0 {
-		live = liveConfigs[0]
 	}
 	retryConfig := false // A retry wake goes straight to activation, before another poll.
 	for {

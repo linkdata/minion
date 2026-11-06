@@ -342,7 +342,7 @@ The bounds allow six encoded bytes per UTF-8 text byte and `4 * ceil(n/3)` base6
 | Body | Conservative size basis |
 | --- | --- |
 | Control/ACK, 128 KiB | Pinned identity, checkpoint/status metadata and at most one bounded Status log chunk; the largest finite failure adds an 8 KiB diagnostic. |
-| Review, 8 MiB | At most 19 refutations of 58 KiB each expand to about 6.46 MiB, plus 59 calls with bounded 128-byte metadata fields, identity and envelope. |
+| Review, 8 MiB | At most 19 refutations of 58 KiB each expand to about 6.46 MiB. The raw shape also permits up to 439 calls with six 128-byte text fields each; worst-case escaping can exceed 8 MiB, so encoding may reject a shape-admissible review. |
 | Outcome, 64 MiB | The finite raw shape permits seven 5 MiB artifacts, about 46.67 MiB in base64, plus 1 MiB aggregate changes, about 1.34 MiB in base64. Escaped refutations, call metadata, a 58 KiB answer, 100 bounded diagnostics, change/artifact paths and failure/envelope overhead keep the combined bound below 63 MiB. This uses all seven artifact maxima even though a valid complete `REPORT.md` has a smaller 58 KiB raw limit. |
 | Assignment, 256 MiB | Deliberately narrower than decoded Job validity: separate 64 MiB bundle and file-content budgets, a 1 MiB diff, 64 MiB task text, role/skill settings and four path lists can exceed a GiB after encoding. The pre-encoding estimate counts actual admitted lengths with worst-case expansion, individual base64 padding, container overhead and an assignment reserve, then rejects estimates above 256 MiB. Even a 64 MiB ASCII description can be conservatively refused although its actual encoding would fit. |
 

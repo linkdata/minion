@@ -31,7 +31,11 @@ type adminPolicyView struct {
 
 func policyView(snapshot adminConfigSnapshot) adminPolicyView {
 	cfg := snapshot.Config
-	view := adminPolicyView{Global: cfg.RequiredCleanRounds(0, 0), Max: config.MaxCriticMaxRounds,
+	global := 1
+	if cfg.CriticStopping.RequiredCleanRounds != nil {
+		global = *cfg.CriticStopping.RequiredCleanRounds
+	}
+	view := adminPolicyView{Global: global, Max: config.MaxCriticMaxRounds,
 		Critic: cfg.Adversarial != "", Pending: snapshot.Pending, Error: snapshot.Error,
 		Instructions: cfg.AIInstructions, Custom: cfg.AIInstructions != ""}
 	if !view.Custom {

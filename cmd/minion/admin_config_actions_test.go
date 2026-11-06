@@ -150,6 +150,47 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 	post("/admin/repositories/actions", url.Values{"name": {"owner/existing"}}, http.StatusConflict)
 }
 
+func TestAdminRequesterAddRejectsChangedRepositoryIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name, details string
+	}{
+		{"repository ID", `{"id":12,"full_name":"owner/repo","owner":{"id":22}}`},
+		{"owner ID", `{"id":11,"full_name":"owner/repo","owner":{"id":23}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live, path := liveConfigFixture(t, false)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/owner/repo/collaborators/alice/permission":
+					_, _ = w.Write([]byte(`{"permission":"write","user":{"id":77,"login":"alice"}}`))
+				case "/repos/owner/repo":
+					_, _ = w.Write([]byte(tc.details))
+				default:
+					t.Errorf("unexpected GitHub path %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			client := github.New("fixture-token")
+			client.BaseURL = server.URL
+			mux := http.NewServeMux()
+			registerAdminConfigActions(mux, live, &action.Orchestrator{GitHub: client})
+			form := url.Values{"repository": {"owner/repo"}, "login": {"alice"}}
+			req := httptest.NewRequest(http.MethodPost, "/admin/users/add", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, req)
+			if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "identity") {
+				t.Fatalf("changed repository identity: status=%d body=%q", response.Code, response.Body.String())
+			}
+			repo, _ := configForAdminTest(t, path).Repository("owner/repo")
+			if len(repo.AllowedActors) != 0 || len(repo.AllowedActorIDs) != 0 {
+				t.Fatalf("requester saved for wrong repository: %+v", repo)
+			}
+		})
+	}
+}
+
 func TestAdminRepositoryCommandsRejectUnsupportedMainAI(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Main: "claude", Claude: config.ClaudeConfig{Effort: "high"}, AlwaysOnSkills: []string{}, Commands: map[string]config.CommandMapping{
 		"review":         {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},

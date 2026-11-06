@@ -181,7 +181,7 @@ func TestRemoteStartupRecoversWithoutWorkerPull(t *testing.T) {
 			if readyTimeout == 0 {
 				readyTimeout = 7 * time.Second
 			}
-			code := runSelectedRemoteService(ctx, owner, watcher, store, tc.endpointStops, logger, endpoint, readyTimeout)
+			code := runSelectedRemoteService(ctx, owner, watcher, store, tc.endpointStops, logger, endpoint, readyTimeout, nil)
 			if tc.endpointStops {
 				<-endpointStopped
 				if code != 1 || store.Data.Accepted == nil || !store.Data.Processed[accepted.JobID].IsZero() {
@@ -300,7 +300,7 @@ func TestRemoteStartupClearsOrphanResultBeforeReadiness(t *testing.T) {
 					t.Fatalf("precleanup authenticated pull was unavailable: %v", err)
 				}
 			}
-			if code := runSelectedRemoteService(ctx, owner, watcher, store, false, logger, endpoint, 100*time.Millisecond); code != 1 {
+			if code := runSelectedRemoteService(ctx, owner, watcher, store, false, logger, endpoint, 100*time.Millisecond, nil); code != 1 {
 				t.Fatalf("remote startup did not await a fresh pull: code=%d logs=%q", code, logs.String())
 			}
 			if present, err := store.HasAcceptedResult(); err != nil || present {
@@ -500,7 +500,7 @@ func testRemoteLoopContinuesAfterRecoveryWithFreshPull(t *testing.T, service boo
 	serviceDone := make(chan int, 1)
 	go func() {
 		if service {
-			serviceDone <- runSelectedRemoteService(serviceCtx, owner, watcher, store, true, logger, endpoint, 5*time.Second)
+			serviceDone <- runSelectedRemoteService(serviceCtx, owner, watcher, store, true, logger, endpoint, 5*time.Second, nil)
 		} else {
 			serviceDone <- runMonitorLoop(serviceCtx, watcher, store, true, endpoint.Done(), logger, false)
 		}

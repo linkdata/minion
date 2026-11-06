@@ -388,6 +388,26 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 		t.Fatalf("replacement child received commands=%v always-on=%v", startup.Selection.Commands, startup.Selection.Main.AlwaysOnSkills)
 	}
 	firstReplacement := owner.Executor
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = next.Repositories[0].Actions[:3]
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != firstReplacement || len(watcher.Config.Repositories[0].Actions) != 3 {
+		t.Fatal("disabling a selected command restarted the worker or left stale actions")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != firstReplacement || len(watcher.Config.Repositories[0].Actions) != 4 {
+		t.Fatal("reenabling a previously selected command restarted the worker or left stale actions")
+	}
 	skillDir := filepath.Join(home, ".agents", "skills", "newly-installed")
 	if err := os.MkdirAll(skillDir, 0o700); err != nil {
 		t.Fatal(err)

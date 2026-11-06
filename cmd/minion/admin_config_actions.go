@@ -26,7 +26,11 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 	var skillMu sync.Mutex
 	mux.Handle("POST /admin/users/add", adminConfigPost("/admin/users", []string{"repository", "login"}, "", func(ctx context.Context, values url.Values) error {
 		repoName, login := strings.ToLower(values.Get("repository")), strings.ToLower(values.Get("login"))
-		requesterID, err := validateAdminRequester(ctx, live, owner, repoName, login)
+		configured, ok := live.snapshot().Config.Repository(repoName)
+		if !ok {
+			return errors.New("Repository is not configured")
+		}
+		requesterID, err := validateAdminRequesterInRepository(ctx, owner, configured, login)
 		if err != nil {
 			return err
 		}
@@ -35,6 +39,9 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 				repo := &cfg.Repositories[i]
 				if !strings.EqualFold(repo.Name, repoName) {
 					continue
+				}
+				if !repo.MatchesIdentity(configured.ID, configured.OwnerID) {
+					return errors.New("Repository identity changed; reload and try again")
 				}
 				for _, existing := range repo.AllowedActors {
 					if strings.EqualFold(existing, login) {
@@ -306,21 +313,36 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 }
 
 func validateAdminRequester(ctx context.Context, live *adminLiveConfig, owner *action.Orchestrator, repoName, login string) (int64, error) {
-	if !workspace.ValidRepository(repoName) || !validAdminGitHubLogin(login) {
+	if !workspace.ValidRepository(repoName) {
 		return 0, errors.New("Enter a configured repository and valid GitHub login")
 	}
-	if _, ok := live.snapshot().Config.Repository(repoName); !ok {
+	repo, ok := live.snapshot().Config.Repository(repoName)
+	if !ok {
 		return 0, errors.New("Repository is not configured")
+	}
+	return validateAdminRequesterInRepository(ctx, owner, repo, login)
+}
+
+func validateAdminRequesterInRepository(ctx context.Context, owner *action.Orchestrator, repo config.Repository, login string) (int64, error) {
+	if !validAdminGitHubLogin(login) {
+		return 0, errors.New("Enter a configured repository and valid GitHub login")
 	}
 	if owner == nil || owner.GitHub == nil {
 		return 0, errors.New("GitHub client is unavailable")
 	}
-	permission, err := owner.GitHub.Permission(ctx, repoName, login)
+	permission, err := owner.GitHub.Permission(ctx, repo.Name, login)
 	if err != nil {
 		return 0, fmt.Errorf("Check requester permission: %w", err)
 	}
 	if permission.User.ID <= 0 || !strings.EqualFold(permission.User.Login, login) || !adminCanWrite(permission.Permission) {
 		return 0, errors.New("Requester must have write, maintain, or admin permission on this repository")
+	}
+	details, err := owner.GitHub.Repository(ctx, repo.Name)
+	if err != nil {
+		return 0, fmt.Errorf("Check GitHub repository: %w", err)
+	}
+	if !repo.MatchesIdentity(details.ID, details.Owner.ID) {
+		return 0, errors.New("GitHub repository ID or owner ID differs from configured identity")
 	}
 	return permission.User.ID, nil
 }

@@ -50,15 +50,65 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 	}
 }
 
+func TestAdminPolicyNoCriticDefaultSurvivesSave(t *testing.T) {
+	_, path := liveConfigFixture(t, false)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Adversarial = ""
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := policyView(live.snapshot())
+	if view.Global != 1 || view.Critic {
+		t.Fatalf("no-critic default = %+v", view)
+	}
+	mux := http.NewServeMux()
+	registerAdminPolicyActions(mux, live, nil)
+	form := url.Values{"rounds": {strconv.Itoa(view.Global)}}
+	request := httptest.NewRequest(http.MethodPost, "/admin/policy/global", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("save displayed default: status=%d body=%q", response.Code, response.Body.String())
+	}
+	saved := configForAdminTest(t, path)
+	if saved.CriticStopping.RequiredCleanRounds == nil || *saved.CriticStopping.RequiredCleanRounds != 1 {
+		t.Fatalf("saved default = %+v", saved.CriticStopping.RequiredCleanRounds)
+	}
+	saved.Adversarial = "codex"
+	if got := saved.RequiredCleanRounds(11, 7); got != 1 {
+		t.Fatalf("default after enabling critic = %d, want 1", got)
+	}
+	zero := 0
+	saved.CriticStopping.RequiredCleanRounds = &zero
+	if got := policyView(adminConfigSnapshot{Config: saved}).Global; got != 0 {
+		t.Fatalf("explicit zero displayed as %d", got)
+	}
+}
+
 func TestAdminPolicyRequesterPinsGitHubIdentity(t *testing.T) {
 	live, path := liveConfigFixture(t, false)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/owner/repo/collaborators/writer/permission" || r.Header.Get("Authorization") != "Bearer fixture-token" {
+		if r.Header.Get("Authorization") != "Bearer fixture-token" {
 			t.Errorf("unexpected GitHub policy check: %s", r.URL.Path)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		_, _ = w.Write([]byte(`{"permission":"write","user":{"login":"writer","id":77}}`))
+		switch r.URL.Path {
+		case "/repos/owner/repo":
+			_, _ = w.Write([]byte(`{"id":11,"full_name":"owner/repo","owner":{"id":22}}`))
+		case "/repos/owner/repo/collaborators/writer/permission":
+			_, _ = w.Write([]byte(`{"permission":"write","user":{"login":"writer","id":77}}`))
+		default:
+			t.Errorf("unexpected GitHub policy check: %s", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
 	}))
 	t.Cleanup(server.Close)
 	client := github.New("fixture-token")

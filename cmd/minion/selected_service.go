@@ -30,22 +30,15 @@ func selectedSkillConfigChanged(before, after config.Config, selected map[string
 	return false
 }
 
-func selectedCommandsChanged(cfg config.Config, selected map[string]bool) bool {
-	enabled := make(map[string]bool)
+func hasNewInstalledCommand(cfg config.Config, selected map[string]bool) bool {
 	for _, repo := range cfg.Repositories {
 		for _, name := range repo.Actions {
-			enabled[name] = true
 			if !selected[name] {
 				installed, err := cfg.CommandInstalled(name)
 				if err == nil && installed {
 					return true
 				}
 			}
-		}
-	}
-	for name := range selected {
-		if !enabled[name] {
-			return true
 		}
 	}
 	return false
@@ -131,7 +124,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 		}
 		retryConfig = false
 		cfg, generation := live.next()
-		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || selectedCommandsChanged(cfg, watcher.SelectedCommands)
+		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || hasNewInstalledCommand(cfg, watcher.SelectedCommands)
 		if !refresh {
 			owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 			owner.AIInstructions = cfg.AIInstructions
