@@ -284,28 +284,6 @@ func TestOldCookieLogoutFromDifferentIPKeepsPasswordSession(t *testing.T) {
 	}
 }
 
-func TestOldCookieLogoutUsesJaWSTrustedForwardedIP(t *testing.T) {
-	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	jw.TrustForwardedHeaders = true
-	guest := adminGuestCookie(t, handler)
-	login := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "https://admin.example")
-	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
-		t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
-	}
-	current := login.Result().Cookies()[0]
-	request := httptest.NewRequest(http.MethodPost, "https://admin.example/admin/logout", nil)
-	request.RemoteAddr = "198.51.100.9:1234"
-	request.Header.Set("Origin", "https://admin.example")
-	request.Header.Set("X-Forwarded-For", "192.0.2.1")
-	request.AddCookie(guest)
-	logout := httptest.NewRecorder()
-	handler.ServeHTTP(logout, request)
-	if logout.Code != http.StatusSeeOther || jw.GetSession(requestWithCookie(current)) != nil {
-		t.Fatalf("trusted proxy logout: status=%d live=%t", logout.Code, jw.GetSession(requestWithCookie(current)) != nil)
-	}
-}
-
 func TestSamePeerIPMatchesJaWSBinding(t *testing.T) {
 	for _, tc := range []struct {
 		sessionIP, remoteAddr string

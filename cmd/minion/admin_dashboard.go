@@ -58,8 +58,7 @@ const adminDashboardHTML = `{{define "dashboard"}}<!doctype html>
 {{define "dashboard-live"}}{{if .Auth.IsAdmin}}{{with .Dot.View}}
 {{if .Unavailable}}<p role="alert" class="alert alert-danger">Live state is unavailable. Check the orchestrator state file.</p>{{else}}
 <div class="row row-cols-1 row-cols-md-2 g-3 mb-3">
-  <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Tracked accepted actions</h2><p class="display-6 font-monospace">{{.Snapshot.TrackedAccepted}}</p>
-    <small class="text-body-secondary">Counted since this dashboard counter was introduced.</small></article></div>
+  <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">Tracked accepted actions</h2><p class="display-6 font-monospace">{{.Snapshot.TrackedAccepted}}</p></article></div>
   <div class="col"><article class="h-100 border rounded p-3"><h2 class="h5">In progress</h2><p class="display-6 font-monospace">{{.Snapshot.InProgress}}</p>
     <small class="text-body-secondary">Includes preparation through publication and terminal cleanup.</small></article></div>
 </div>

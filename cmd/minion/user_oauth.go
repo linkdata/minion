@@ -121,9 +121,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions-1 {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusServiceUnavailable)
+			guestAdmissionUnavailable(w)
 			return
 		}
 		page.ServeHTTP(&oauthErrorWriter{ResponseWriter: w}, r)
@@ -174,9 +172,7 @@ func (a *oauthAccess) addProvider(name, issuer, host string, cfg *jawsauth.Confi
 				login := handler
 				handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
-						w.Header().Set("Cache-Control", "no-store")
-						w.Header().Set("Retry-After", "60")
-						w.WriteHeader(http.StatusServiceUnavailable)
+						guestAdmissionUnavailable(w)
 						return
 					}
 					returnTo := userUsageReturnTarget(r.URL.Query().Get("next"))
@@ -276,9 +272,7 @@ func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
 	for _, provider := range a.providers {
 		provider.server.LoginEvent = admin.recordOAuthRotation
 	}
-	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.logout(w, r, admin)
-	})))
+	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(admin.logout)))
 	mux.Handle("/auth/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			guestPage, callback := r.URL.Path == "/auth/login", false
@@ -334,32 +328,6 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	ui.Handler(a.jaws, "user login", view).ServeHTTP(w, r)
 }
 
-func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *adminAccess) {
-	closeUnreadAdminBody(w, r)
-	w.Header().Set("Cache-Control", "no-store")
-	admin.sessionAdmissionMu.Lock()
-	a.linkMu.Lock()
-	sess := a.jaws.GetSession(r)
-	if sess == nil {
-		sess = admin.rotatedSessionForLogout(r)
-	}
-	if sess != nil {
-		account, _ := a.currentUser(sess)
-		if admin.sessionUsername(sess) != "" || account != "" {
-			admin.markSignedOutCookie(sess.CookieValue())
-		}
-		sess.Close()
-	}
-	a.linkMu.Unlock()
-	admin.sessionAdmissionMu.Unlock()
-	if sess != nil {
-		for _, p := range a.providers {
-			p.server.Logout(sess, r)
-		}
-	}
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
 type oauthErrorWriter struct {
 	http.ResponseWriter
 	oauth   *oauthAccess
@@ -398,8 +366,7 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
 		if a.jaws.SessionCount() >= maxGuestAdmissionSessions {
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusServiceUnavailable)
+			guestAdmissionUnavailable(w)
 			return
 		}
 		w.Header().Set("Location", "/auth/login?error=request")

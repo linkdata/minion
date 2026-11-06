@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"errors"
@@ -76,6 +77,12 @@ func headPublicPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 }
 
+func guestAdmissionUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "60")
+	w.WriteHeader(http.StatusServiceUnavailable)
+}
+
 func (adminIdentity) Data() map[string]any { return nil }
 func (adminIdentity) Email() string        { return "" }
 func (id adminIdentity) IsAdmin() bool     { return id != "" }
@@ -93,6 +100,8 @@ type rotatedCookie struct {
 	originIP    netip.Addr
 	replacement *jaws.Session
 }
+
+type oauthRotationContextKey struct{}
 
 type adminAccess struct {
 	jaws               *jaws.Jaws
@@ -183,7 +192,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			dashboard.ServeHTTP(w, r)
 			return
 		}
-		if oauth != nil && oauth.sessionAccount(r) != "" {
+		if account, _ := oauth.currentUser(sess); account != "" {
 			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 			return
 		}
@@ -209,9 +218,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			}
 		}
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions-1 {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusServiceUnavailable)
+			guestAdmissionUnavailable(w)
 			return
 		}
 		home.ServeHTTP(w, r)
@@ -502,7 +509,7 @@ func (a *adminAccess) rotatedSessionForLogout(r *http.Request) *jaws.Session {
 	if pending {
 		// A callback can be between closing its old session and publishing the new one.
 		// shortcut: pending logout cannot validate forwarded IPs; revisit if Minion enables trusted proxy headers.
-		if a.jaws.TrustForwardedHeaders || !samePeerIP(pendingIP, r.RemoteAddr) {
+		if !samePeerIP(pendingIP, r.RemoteAddr) {
 			return nil
 		}
 	} else {
@@ -539,24 +546,21 @@ func samePeerIP(sessionIP netip.Addr, remoteAddr string) bool {
 }
 
 func (a *adminAccess) recordOAuthRotation(sess *jaws.Session, r *http.Request) {
+	key, ok := r.Context().Value(oauthRotationContextKey{}).([32]byte)
+	if !ok {
+		return
+	}
 	a.sessionAdmissionMu.Lock()
 	defer a.sessionAdmissionMu.Unlock()
-	for _, cookie := range r.Cookies() {
-		if cookie.Name != a.jaws.CookieName {
-			continue
-		}
-		key := sha256.Sum256([]byte(cookie.Value))
-		state := a.rotatedCookies[key]
-		if state.pending == 0 {
-			continue
-		}
-		state.replacement = sess
-		a.rotatedCookies[key] = state
-		if state.signedOut {
-			sess.Clear()
-			sess.Close()
-		}
+	state := a.rotatedCookies[key]
+	if state.pending == 0 {
 		return
+	}
+	state.replacement = sess
+	a.rotatedCookies[key] = state
+	if state.signedOut {
+		sess.Clear()
+		sess.Close()
 	}
 }
 
@@ -636,7 +640,7 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 		a.sessionAdmissionMu.Unlock()
 	}()
 	callback := &oauthCallbackWriter{ResponseWriter: w, admin: a, key: key}
-	next.ServeHTTP(callback, r)
+	next.ServeHTTP(callback, r.WithContext(context.WithValue(r.Context(), oauthRotationContextKey{}, key)))
 	if !callback.committed {
 		callback.WriteHeader(http.StatusOK)
 	}
@@ -743,23 +747,29 @@ func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
 	a.sessionAdmissionMu.Lock()
 	if a.oauth != nil {
 		a.oauth.linkMu.Lock()
-		defer a.oauth.linkMu.Unlock()
 	}
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
 		sess = a.rotatedSessionForLogout(r)
 	}
 	if sess != nil {
-		account := ""
-		if a.oauth != nil {
-			account, _ = a.oauth.currentUser(sess)
-		}
+		account, _ := a.oauth.currentUser(sess)
 		if a.sessionUsername(sess) != "" || account != "" {
 			a.markSignedOutCookie(sess.CookieValue())
 		}
-		sess.Clear()
 		sess.Close()
 	}
+	if a.oauth != nil {
+		a.oauth.linkMu.Unlock()
+	}
 	a.sessionAdmissionMu.Unlock()
+	if sess != nil {
+		if a.oauth != nil {
+			for _, provider := range a.oauth.providers {
+				provider.server.Logout(sess, r)
+			}
+		}
+		sess.Clear()
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

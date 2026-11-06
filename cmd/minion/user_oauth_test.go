@@ -385,12 +385,17 @@ func TestOAuthOldCookieLogoutRevokesRotatedSession(t *testing.T) {
 				cfg := config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}, GitHubOAuth: &config.OAuthClient{
 					ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
 				handler, jw, auth := testOAuthAdminHandler(t, cfg, client)
+				var logoutEvents atomic.Int32
+				auth.providers[0].server.LogoutEvent = func(*jaws.Session, *http.Request) { logoutEvents.Add(1) }
 				ready := make(chan *http.Cookie, 1)
 				release := make(chan struct{})
 				var releaseOnce sync.Once
+				var rotatedSession *jaws.Session
 				recordRotation := auth.providers[0].server.LoginEvent
 				auth.providers[0].server.LoginEvent = func(sess *jaws.Session, r *http.Request) {
 					recordRotation(sess, r)
+					rotatedSession = sess
+					sess.Set("test.logout.marker", true)
 					ready <- sess.Cookie()
 					<-release
 				}
@@ -408,8 +413,13 @@ func TestOAuthOldCookieLogoutRevokesRotatedSession(t *testing.T) {
 				finished := make(chan struct{})
 				go func() {
 					defer close(finished)
-					done <- adminResponse(handler, http.MethodGet,
-						"/auth/github/callback?code=proof&state="+url.QueryEscape(location.Query().Get("state")), nil, guest, "")
+					request := httptest.NewRequest(http.MethodGet,
+						"https://admin.example/auth/github/callback?code=proof&state="+url.QueryEscape(location.Query().Get("state")), nil)
+					request.Header.Add("Cookie", "other=x")
+					request.Header.Add("Cookie", guest.Name+"="+guest.Value)
+					callback := httptest.NewRecorder()
+					handler.ServeHTTP(callback, request)
+					done <- callback
 				}()
 				t.Cleanup(func() {
 					releaseOnce.Do(func() { close(release) })
@@ -460,6 +470,9 @@ func TestOAuthOldCookieLogoutRevokesRotatedSession(t *testing.T) {
 				}
 				if jw.GetSession(requestWithCookie(home.Result().Cookies()[0])) == nil {
 					t.Fatal("late callback displaced the new home guest session")
+				}
+				if logoutEvents.Load() != 1 || rotatedSession.Get("test.logout.marker") != nil {
+					t.Fatalf("logout left provider auth or session data: events=%d data=%v", logoutEvents.Load(), rotatedSession.Get("test.logout.marker"))
 				}
 			})
 		}
