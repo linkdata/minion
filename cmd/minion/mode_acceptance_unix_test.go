@@ -61,6 +61,9 @@ case "$1" in
     printf '%s\n' '{"id":1,"result":{}}'
     IFS= read -r request || exit 1
     IFS= read -r request || exit 1
+    case "$request" in
+      *'account/login/start'*) printf '%s\n' '{"id":0,"result":{"type":"apiKey"}}'; IFS= read -r request || exit 1 ;;
+    esac
     printf '%s\n' '{"id":2,"result":{"data":[{"model":"main-1","isDefault":true,"defaultReasoningEffort":"high","supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"low"}]}]}}'
     exec /bin/cat >/dev/null ;;
   exec)
@@ -73,7 +76,15 @@ case "$1" in
         esac
         exit 0 ;;
     esac
-    cat >/dev/null
+    cat >/dev/null || exit 99
+    selected=other
+    [ "${CODEX_API_KEY-}" = ` + aicli.ShellQuote(offlineModeSelectedAPIKey) + ` ] && selected=selected
+    leaked=absent
+    environment=$(env) || exit 99
+    case "$environment" in
+      *offline-token*|*fixture-unselected-key*|*fixture-ambient-codex-key*) leaked=present ;;
+    esac
+    printf '%s,%s\n' "$selected" "$leaked" > ` + aicli.ShellQuote(modelCalls+".env") + `
     printf 'model\n' >> ` + aicli.ShellQuote(modelCalls) + `
     printf '%s\n' '{"type":"thread.started","thread_id":"root"}' '{"type":"item.completed","item":{"type":"agent_message","text":"No findings."}}' '{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"output_tokens":2}}'
     exit 0 ;;

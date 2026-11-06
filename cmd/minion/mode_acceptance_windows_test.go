@@ -109,7 +109,9 @@ func windowsModeCodexProbe() {
 				continue
 			}
 			var result any = map[string]any{}
-			if request.Method == "model/list" {
+			if request.Method == "account/login/start" {
+				result = map[string]string{"type": "apiKey"}
+			} else if request.Method == "model/list" {
 				result = map[string]any{"data": []any{map[string]any{"model": "main-1", "isDefault": true, "defaultReasoningEffort": "high", "supportedReasoningEfforts": []any{map[string]any{"reasoningEffort": "high"}, map[string]any{"reasoningEffort": "low"}}}}}
 			}
 			_ = encoder.Encode(map[string]any{"id": *request.ID, "result": result})
@@ -138,8 +140,25 @@ func windowsModeCodexProbe() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(99)
 		}
+		selected := "other"
+		if os.Getenv("CODEX_API_KEY") == offlineModeSelectedAPIKey {
+			selected = "selected"
+		}
+		leaked := "absent"
+		environment := strings.Join(os.Environ(), "\n")
+		for _, secret := range []string{"offline-token", "fixture-unselected-key", "fixture-ambient-codex-key"} {
+			if strings.Contains(environment, secret) {
+				leaked = "present"
+				break
+			}
+		}
 		calls, err := os.OpenFile(filepath.Join(filepath.Dir(binary), "model-calls"), os.O_WRONLY|os.O_APPEND, 0)
 		if err != nil { // An unarmed fixture must not stand in for a model call.
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(99)
+		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(binary), "model-calls.env"), []byte(selected+","+leaked+"\n"), 0600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
 			os.Exit(99)
 		}
 		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
