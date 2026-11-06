@@ -57,6 +57,7 @@ const (
 	maxGuestPageRequests      = 4
 	adminSignInReserve        = 32
 	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve // OAuth starts stop here; home and OAuth login pages stop one slot earlier.
+	maxGuestPageSessions      = maxGuestAdmissionSessions - 1
 )
 
 type adminIdentity string
@@ -168,9 +169,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 			return
 		}
-		access.sessionAdmissionMu.Lock()
-		defer access.sessionAdmissionMu.Unlock()
-		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions-1 {
+		if sess == nil && jw.SessionCount() >= maxGuestPageSessions {
 			guestAdmissionUnavailable(w)
 			return
 		}

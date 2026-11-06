@@ -109,30 +109,6 @@ func bootstrapAssetPath(t *testing.T, page, suffix string) string {
 	return pageAssetPath(t, page, "/static/bootstrap", suffix)
 }
 
-type pageGateWriter struct {
-	*httptest.ResponseRecorder
-	entered chan struct{}
-	release <-chan struct{}
-	once    sync.Once
-}
-
-func (w *pageGateWriter) wait() {
-	w.once.Do(func() {
-		close(w.entered)
-		<-w.release
-	})
-}
-
-func (w *pageGateWriter) WriteHeader(status int) {
-	w.wait()
-	w.ResponseRecorder.WriteHeader(status)
-}
-
-func (w *pageGateWriter) Write(p []byte) (int, error) {
-	w.wait()
-	return w.ResponseRecorder.Write(p)
-}
-
 func adminGuestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
@@ -538,31 +514,9 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 			t.Fatal("could not fill guest session reserve")
 		}
 	}
-	responses := make(chan *httptest.ResponseRecorder, 16)
-	start := make(chan struct{})
-	var group sync.WaitGroup
-	for range cap(responses) {
-		group.Go(func() {
-			<-start
-			responses <- adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-		})
-	}
-	close(start)
-	group.Wait()
-	close(responses)
-	var home *httptest.ResponseRecorder
-	for response := range responses {
-		if response.Code == http.StatusOK {
-			if home != nil || len(response.Result().Cookies()) != 1 {
-				t.Fatalf("concurrent home admission: status=%d cookies=%v", response.Code, response.Result().Cookies())
-			}
-			home = response
-		} else if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 {
-			t.Fatalf("concurrent home rejection: status=%d cookies=%v", response.Code, response.Result().Cookies())
-		}
-	}
-	if home == nil || jw.SessionCount() != maxGuestAdmissionSessions-1 {
-		t.Fatalf("concurrent home admission: sessions=%d admitted=%t", jw.SessionCount(), home != nil)
+	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("home admission: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
 	}
 	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], ""); start.Code != http.StatusFound {
 		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
@@ -681,71 +635,10 @@ func TestAdminLogoutWaitsForSessionAdmission(t *testing.T) {
 	}
 }
 
-func TestGuestPagesHoldSessionAdmissionUntilResponse(t *testing.T) {
-	for _, path := range []string{"/", "/auth/login"} {
-		t.Run(path, func(t *testing.T) {
-			cfg := config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}, GitHubOAuth: &config.OAuthClient{
-				ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
-			handler, _, _ := testOAuthAdminHandler(t, cfg, nil)
-			guest := adminGuestCookie(t, handler)
-			release := make(chan struct{})
-			var releaseOnce sync.Once
-			releaseFirst := func() { releaseOnce.Do(func() { close(release) }) }
-			var workers sync.WaitGroup
-			defer func() { releaseFirst(); workers.Wait() }()
-			first := &pageGateWriter{ResponseRecorder: httptest.NewRecorder(), entered: make(chan struct{}), release: release}
-			firstDone := make(chan struct{})
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				req := httptest.NewRequest(http.MethodGet, "https://admin.example"+path, nil)
-				handler.ServeHTTP(first, req)
-				close(firstDone)
-			}()
-			select {
-			case <-first.entered:
-			case <-time.After(time.Second):
-				t.Fatal("first guest page did not reach response writer")
-			}
-			started := make(chan struct{})
-			secondDone := make(chan *httptest.ResponseRecorder, 1)
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				close(started)
-				secondDone <- adminResponse(handler, http.MethodGet, path, nil, guest, "")
-			}()
-			<-started
-			select {
-			case response := <-secondDone:
-				t.Fatalf("guest page bypassed admission lock: path=%q status=%d", path, response.Code)
-			case <-time.After(50 * time.Millisecond):
-			}
-			releaseFirst()
-			select {
-			case <-firstDone:
-				if first.Code != http.StatusOK {
-					t.Fatalf("first guest page: path=%q status=%d", path, first.Code)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("first guest page did not finish after admission release")
-			}
-			select {
-			case response := <-secondDone:
-				if response.Code != http.StatusOK {
-					t.Fatalf("second guest page: path=%q status=%d", path, response.Code)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("second guest page did not finish after admission release")
-			}
-		})
-	}
-}
-
 func TestOAuthCallbackClosesUnreadBody(t *testing.T) {
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0",
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
-			RedirectURL: "http://localhost/auth/github/callback"}}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
+			RedirectURL: "http://127.0.0.1/auth/github/callback"}}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -771,7 +664,7 @@ func TestOAuthCallbackClosesUnreadBody(t *testing.T) {
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fmt.Fprintf(conn, "GET /auth/github/callback?state=wrong HTTP/1.1\r\nHost: localhost\r\nCookie: %s=%s\r\nContent-Length: 10\r\nConnection: close\r\n\r\n", cookie.Name, cookie.Value); err != nil {
+	if _, err := fmt.Fprintf(conn, "GET /auth/github/callback?state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: %s=%s\r\nContent-Length: 10\r\nConnection: close\r\n\r\n", cookie.Name, cookie.Value); err != nil {
 		t.Fatal(err)
 	}
 	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})

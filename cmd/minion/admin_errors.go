@@ -107,12 +107,8 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 		a.sessionAdmissionMu.Lock()
 		defer a.sessionAdmissionMu.Unlock()
 		sess := a.jaws.GetSession(r)
-		if sess == nil {
-			w.WriteHeader(capture.status)
-			return
-		}
 		// Leave one request slot for a guest to return to the sign-in page.
-		if a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests-1 {
+		if sess == nil || (a.sessionUsername(sess) == "" && len(sess.Requests()) >= maxGuestPageRequests-1) {
 			w.WriteHeader(capture.status)
 			return
 		}

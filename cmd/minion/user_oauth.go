@@ -120,7 +120,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions-1 {
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
 			guestAdmissionUnavailable(w)
 			return
 		}
@@ -269,14 +269,8 @@ func (a *oauthAccess) routes(mux *http.ServeMux, admin *adminAccess) {
 	if a == nil {
 		return
 	}
-	a.mux.Handle("POST /auth/logout", a.oauthErrors(http.HandlerFunc(admin.logout)))
-	mux.Handle("/auth/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/login") {
-			admin.sessionAdmissionMu.Lock()
-			defer admin.sessionAdmissionMu.Unlock()
-		}
-		a.mux.ServeHTTP(w, r)
-	}))
+	a.mux.HandleFunc("POST /auth/logout", admin.logout)
+	mux.Handle("/auth/", a.mux)
 }
 
 func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +338,7 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 	w.Header().Set("Cache-Control", "no-store")
 	sess := a.jaws.GetSession(r)
 	if sess == nil {
-		if a.jaws.SessionCount() >= maxGuestAdmissionSessions-1 {
+		if a.jaws.SessionCount() >= maxGuestPageSessions {
 			guestAdmissionUnavailable(w)
 			return
 		}

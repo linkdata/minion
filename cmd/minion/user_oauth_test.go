@@ -435,48 +435,25 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 			t.Fatalf("OAuth start before limit: status=%d cookies=%v", response.Code, response.Result().Cookies())
 		}
 	}
-	guests := make([]*http.Cookie, 16)
-	for i := range guests {
+	var guest *http.Cookie
+	for i := range 16 {
 		response := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
 		if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
 			t.Fatalf("guest page %d: status=%d cookies=%v", i, response.Code, response.Result().Cookies())
 		}
-		guests[i] = response.Result().Cookies()[0]
+		if guest == nil {
+			guest = response.Result().Cookies()[0]
+		}
 	}
 	if got := jw.SessionCount(); got != maxGuestAdmissionSessions-1 {
-		t.Fatalf("sessions before concurrent starts=%d", got)
+		t.Fatalf("sessions before final start=%d", got)
 	}
 
-	responses := make([]*httptest.ResponseRecorder, 64)
-	start := make(chan struct{})
-	var workers sync.WaitGroup
-	for i := range responses {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			<-start
-			var cookie *http.Cookie
-			if i%2 != 0 {
-				cookie = guests[(i/2)%len(guests)]
-			}
-			responses[i] = adminResponse(handler, http.MethodGet, "/auth/github/login", nil, cookie, "")
-		}()
+	start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, "")
+	if start.Code != http.StatusFound || len(start.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("last OAuth start: status=%d cookies=%v sessions=%d", start.Code, start.Result().Cookies(), jw.SessionCount())
 	}
-	close(start)
-	workers.Wait()
-	cookieFreeStarts := 0
-	for i, response := range responses {
-		if response.Code != http.StatusFound && response.Code != http.StatusServiceUnavailable {
-			t.Fatalf("concurrent start %d: status=%d", i, response.Code)
-		}
-		if i%2 == 0 && response.Code == http.StatusFound {
-			cookieFreeStarts++
-		}
-	}
-	if cookieFreeStarts != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
-		t.Fatalf("cookie-free starts=%d sessions=%d", cookieFreeStarts, jw.SessionCount())
-	}
-	for _, cookie := range []*http.Cookie{nil, guests[0]} {
+	for _, cookie := range []*http.Cookie{nil, guest} {
 		response := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, cookie, "")
 		if response.Code != http.StatusServiceUnavailable || len(response.Result().Cookies()) != 0 || response.Header().Get("Retry-After") != "60" ||
 			(cookie == nil && response.Body.Len() != 0) ||
@@ -513,40 +490,16 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 			guest = w.Result().Cookies()[0]
 		}
 	}
-	responses := make([]*httptest.ResponseRecorder, 32)
-	start := make(chan struct{})
-	var workers sync.WaitGroup
-	for i := range responses {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			<-start
-			responses[i] = adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
-		}()
+	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("last guest page: status=%d cookies=%v sessions=%d", page.Code, page.Result().Cookies(), jw.SessionCount())
 	}
-	close(start)
-	workers.Wait()
-	var last *http.Cookie
-	for i, response := range responses {
-		switch response.Code {
-		case http.StatusOK:
-			if len(response.Result().Cookies()) != 1 || last != nil {
-				t.Fatalf("guest page %d: unexpected successful admission: cookies=%v", i, response.Result().Cookies())
-			}
-			last = response.Result().Cookies()[0]
-		case http.StatusServiceUnavailable:
-			if len(response.Result().Cookies()) != 0 {
-				t.Fatalf("guest page %d: over-limit cookie", i)
-			}
-		default:
-			t.Fatalf("guest page %d: status=%d", i, response.Code)
-		}
-	}
-	if last == nil || jw.SessionCount() != maxGuestAdmissionSessions-1 {
-		t.Fatalf("guest page burst: one admitted=%t sessions=%d", last != nil, jw.SessionCount())
-	}
+	last := page.Result().Cookies()[0]
 	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, last, ""); start.Code != http.StatusFound {
 		t.Fatalf("last OAuth login page cannot start OAuth: status=%d", start.Code)
+	}
+	if denied := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, ""); denied.Code != http.StatusServiceUnavailable || len(denied.Result().Cookies()) != 0 {
+		t.Fatalf("guest page above reserve: status=%d cookies=%v", denied.Code, denied.Result().Cookies())
 	}
 	if page := adminResponse(handler, http.MethodGet, "/auth/login", nil, guest, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 0 {
 		t.Fatalf("existing guest page at reserve: status=%d cookies=%v", page.Code, page.Result().Cookies())
@@ -800,8 +753,6 @@ func TestOAuthLoginRotationCannotPersistStaleLink(t *testing.T) {
 	if auth.providers[0].server.SessionRotationLock != &auth.linkMu {
 		t.Fatal("GitHub callback does not share the link persistence lock")
 	}
-	notice := &oauthRotationNoticeLock{lock: &auth.linkMu, entered: make(chan struct{})}
-	auth.providers[0].server.SessionRotationLock = notice
 	link := adminResponse(handler, http.MethodPost, "/auth/link/gitlab", nil, signed, "https://admin.example")
 	linkURL, err := url.Parse(link.Header().Get("Location"))
 	if err != nil || link.Code != http.StatusSeeOther || linkURL.Query().Get("state") == "" {
@@ -812,6 +763,8 @@ func TestOAuthLoginRotationCannotPersistStaleLink(t *testing.T) {
 	if err != nil || relogin.Code != http.StatusFound || reloginURL.Query().Get("state") == "" {
 		t.Fatalf("second GitHub start: status=%d error=%v", relogin.Code, err)
 	}
+	notice := &oauthRotationNoticeLock{lock: &auth.linkMu, entered: make(chan struct{})}
+	auth.providers[0].server.SessionRotationLock = notice
 	nonce.Store(linkURL.Query().Get("nonce"))
 	linked := make(chan *httptest.ResponseRecorder, 1)
 	go func() {

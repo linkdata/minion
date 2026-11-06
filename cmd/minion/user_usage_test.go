@@ -196,7 +196,7 @@ func TestUserUsageWebservListenerRoutes(t *testing.T) {
 	}
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-		GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/auth/github/callback"},
+		GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
 	}, &action.Orchestrator{GitHub: githubClient, Usage: usageStore}, filepath.Join(t.TempDir(), "state.json"), nil)
 	if err != nil {
 		t.Fatal(err)

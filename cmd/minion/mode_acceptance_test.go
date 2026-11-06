@@ -173,7 +173,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	cfg := config.Config{WorkRoot: filepath.Join(base, "work"), StatePath: statePath,
 		BotLogin: "linkdataminion", Main: "codex",
 		Admin: &config.AdminConfig{Listen: "127.0.0.1:0",
-			GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/auth/github/callback"},
+			GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
 			UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{approved}}},
 		PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},

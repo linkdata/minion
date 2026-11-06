@@ -88,12 +88,9 @@ func TestAdminUsagePageAndJSONReuseCLIAccounting(t *testing.T) {
 	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://admin.example"); logout.Code != http.StatusSeeOther {
 		t.Fatalf("logout status=%d", logout.Code)
 	}
-	for _, test := range []struct {
-		path string
-		want int
-	}{{"/admin/usage", http.StatusForbidden}, {"/admin/usage.json", http.StatusForbidden}} {
-		if denied := adminResponse(handler, http.MethodGet, test.path, nil, cookie, ""); denied.Code != test.want {
-			t.Fatalf("revoked %s status=%d", test.path, denied.Code)
+	for _, path := range []string{"/admin/usage", "/admin/usage.json"} {
+		if denied := adminResponse(handler, http.MethodGet, path, nil, cookie, ""); denied.Code != http.StatusForbidden {
+			t.Fatalf("revoked %s status=%d", path, denied.Code)
 		}
 	}
 }

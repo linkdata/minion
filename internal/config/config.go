@@ -482,7 +482,7 @@ func (c *Config) Validate(configDir string) error {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
 		addr, err := netip.ParseAddr(host)
-		if admin.TLSCertFile == "" && (err != nil || !addr.Unmap().IsLoopback()) {
+		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" {
 			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
 		}
 		if err := admin.validateOAuth(host, number); err != nil {

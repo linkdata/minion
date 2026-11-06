@@ -175,7 +175,7 @@ func TestAdminServerServesSignedInUserPreferences(t *testing.T) {
 	choice := config.RoleModelConfig{Model: "approved-main", Effort: "low"}
 	criticChoice := config.RoleModelConfig{Model: "approved-critic", Effort: "high"}
 	cfg := config.AdminConfig{Listen: "127.0.0.1:0",
-		GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/auth/github/callback"},
+		GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
 		UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{choice}, Critic: []config.RoleModelConfig{criticChoice}}}
 	admin, err := startAdminServer(t.Context(), cfg, nil, statePath, nil)
 	if err != nil {
@@ -341,7 +341,7 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = store.Close() })
 				admin := &config.AdminConfig{Listen: "127.0.0.1:0",
-					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://localhost/auth/github/callback"}}
+					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"}}
 				choice := config.RoleModelConfig{Model: "approved", Effort: "low"}
 				if enabled {
 					admin.UserModelChoices = &config.UserModelChoices{Main: []config.RoleModelConfig{choice}}
@@ -380,6 +380,7 @@ func TestCertifiedListenURL(t *testing.T) {
 	}{
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
+		{address: "127.0.0.1:8080", listenURL: "https://admin.example:8080", listen: "minion.example:8080", want: "https://minion.example:8080", certificateNames: []string{"admin.example", "minion.example"}},
 		{address: "192.0.2.8:8080", listenURL: "https://192.0.2.8:8080", listen: "minion.example.com:8080", want: "https://minion.example.com:8080", certificateNames: []string{"*.example.com"}},
 		{address: "0.0.0.0:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "[::1]:8080", listenURL: "http://localhost:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
@@ -423,7 +424,7 @@ func TestPlainAdminListenURL(t *testing.T) {
 		if tc.callback != "" {
 			cfg.GitHubOAuth = &config.OAuthClient{RedirectURL: tc.callback}
 		}
-		if got := plainAdminListenURL("http://localhost:8080", tc.address, cfg); got != tc.want {
+		if got := plainAdminListenURL(tc.address, cfg); got != tc.want {
 			t.Errorf("plain URL for %s and %s = %q, want %q", tc.address, tc.callback, got, tc.want)
 		}
 	}

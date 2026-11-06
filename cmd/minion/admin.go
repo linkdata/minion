@@ -72,7 +72,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	if cfg.TLSCertFile != "" {
 		service.ListenURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate, cfg)
 	} else {
-		service.ListenURL = plainAdminListenURL(service.ListenURL, listener.Addr().String(), cfg)
+		service.ListenURL = plainAdminListenURL(listener.Addr().String(), cfg)
 	}
 	jw, err := jaws.New()
 	if err != nil {
@@ -162,9 +162,6 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 		}
 		return (&url.URL{Scheme: "https", Host: callback.Host}).String()
 	}
-	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
-		return rawURL
-	}
 	covered := func(name string) string {
 		if name == "" || strings.Contains(name, "*") || certificate.Leaf.VerifyHostname(name) != nil {
 			return ""
@@ -175,6 +172,9 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 		if candidate := covered(listenHost); candidate != "" {
 			return candidate
 		}
+	}
+	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
+		return rawURL
 	}
 	for _, name := range certificate.Leaf.DNSNames {
 		if candidate := covered(name); candidate != "" {
@@ -195,15 +195,9 @@ func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cf
 	return ""
 }
 
-func plainAdminListenURL(rawURL, address string, cfg config.AdminConfig) string {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return rawURL
-	}
-	listenPort, err := strconv.Atoi(port)
-	if err != nil {
-		return rawURL
-	}
+func plainAdminListenURL(address string, cfg config.AdminConfig) string {
+	_, port, _ := net.SplitHostPort(address) // listener addresses always have a numeric port.
+	listenPort, _ := strconv.Atoi(port)
 	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
 		if client == nil {
 			continue
@@ -220,10 +214,7 @@ func plainAdminListenURL(rawURL, address string, cfg config.AdminConfig) string 
 			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
 		}
 	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		return "http://" + address
-	}
-	return rawURL
+	return "http://" + address
 }
 
 // adminGuard is the single entry gate for all dashboard routes.
