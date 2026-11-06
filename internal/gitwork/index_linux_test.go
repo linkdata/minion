@@ -20,9 +20,8 @@ import (
 func TestFixIndexPreservesPipeDrainOverrunAboveOutputLimit(t *testing.T) {
 	index, _ := offlineIndexFixture(t, nil)
 	pidFile := filepath.Join(t.TempDir(), "holder.pid")
-	stopFile := pidFile + ".stop"
-	testsupport.StopOnCleanup(t, stopFile)
-	script := "#!/bin/sh\n(sleep 1; printf overflow-output; while [ ! -f " + shellQuote(stopFile) + " ]; do sleep .05; done) &\nprintf '%s' $! > " + shellQuote(pidFile) + "\nexit 0\n"
+	stopFile := gitFixtureStopFile(t, pidFile)
+	script := "#!/bin/sh\n(sleep 1; printf overflow-output; i=0; while [ ! -f " + shellQuote(stopFile) + " ] && [ -d " + shellQuote(filepath.Dir(pidFile)) + " ] && [ \"$i\" -lt 600 ]; do sleep .05; i=$((i+1)); done) &\nprintf '%s' $! > " + shellQuote(pidFile) + "\nexit 0\n"
 	index.binary = filepath.Join(fakeOnPath(t, "git-proxy", script), "git-proxy")
 	_, err := index.run(t.Context(), 4, nil, "status")
 	process, pinErr := testsupport.PinProcess(pidFile)
@@ -30,13 +29,6 @@ func TestFixIndexPreservesPipeDrainOverrunAboveOutputLimit(t *testing.T) {
 		t.Fatalf("pin finite pipe holder: %v", pinErr)
 	}
 	defer process.Close()
-	defer func() {
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		defer cancel()
-		if err := process.Cleanup(ctx); err != nil {
-			t.Errorf("clean finite pipe holder: %v", err)
-		}
-	}()
 	if !errors.Is(err, exec.ErrWaitDelay) || errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("pipe-drain overrun classified as output size: %v", err)
 	}
