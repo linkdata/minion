@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -40,9 +41,11 @@ func (g cancelAfterReactionGitHub) ReactEyes(ctx context.Context, nodeID string)
 
 // The parent supplies a GitHub command and repository, then publishes the
 // answer returned by a real, separately spawned public execute-mode child.
+// Fake Codex checks the selected model-call credential environment.
 // Losing the local completion record after publication must not repeat either
 // the model call or the GitHub write when the service starts again.
 func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
+	worker := offlineModePublicWorkerPath(t)
 	offlineModeGitRemote(t)
 	base := t.TempDir()
 	home := filepath.Join(base, "home")
@@ -178,6 +181,13 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		PollIntervalSeconds: 60, Commands: commands,
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},
 			AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}}
+	cfg.Codex.APIKey = offlineModeSelectedAPIKey
+	t.Setenv("GH_TOKEN", "offline-token")
+	t.Setenv("CODEX_API_KEY", "fixture-ambient-codex-key")
+	for _, name := range []string{"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "OPENAI_API_KEY",
+		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CODEX_ACCESS_TOKEN"} {
+		t.Setenv(name, "fixture-unselected-key")
+	}
 	if err := checkModels(t.Context(), &cfg, log.New(&bytes.Buffer{}, "", 0)); err != nil {
 		t.Fatalf("local startup did not resolve CLI defaults: %v", err)
 	}
@@ -206,11 +216,6 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	binary, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker := offlineModeWorkerPath(t, binary)
 	runPoll := func(at time.Time) {
 		t.Helper()
 		var logs bytes.Buffer
@@ -239,7 +244,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	if store.Data.Accepted == nil || store.Data.Accepted.Assigned || store.Data.Accepted.AttemptID == "" ||
 		!store.Data.Accepted.Deadline.After(store.Data.Accepted.AcceptedAt) ||
 		store.Data.JobFailures[store.Data.Accepted.JobID].Attempts != 1 {
-		t.Fatalf("first poll did not retain one unassigned acceptance: %+v", store.Data)
+		t.Fatalf("first poll did not retain one unassigned acceptance: %+v; logs=%s", store.Data, firstLogs.String())
 	}
 	accepted := *store.Data.Accepted
 	if accepted.MainProvider != "codex" || accepted.MainSettings != approved {
@@ -266,6 +271,10 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	}
 	runPoll(now)
 	assertOfflineModeCounts(t, modelCalls, &mu, &published, 1)
+	modelEnv, err := os.ReadFile(modelCalls + ".env")
+	if err != nil || string(modelEnv) != "selected,absent\n" {
+		t.Fatalf("model credential boundary = %q, %v; want selected key and no other credential variables", modelEnv, err)
+	}
 	mu.Lock()
 	checkpoint := publicationStates[0]
 	mu.Unlock()
@@ -310,6 +319,23 @@ func assertOfflineModeCounts(t *testing.T, modelCalls string, mu *sync.Mutex, pu
 	if len(*published) != want {
 		t.Fatalf("published comments = %d; want %d", len(*published), want)
 	}
+}
+
+const offlineModeSelectedAPIKey = "fixture-selected-codex-key"
+
+func offlineModePublicWorkerPath(t *testing.T) string {
+	t.Helper()
+	name := "minion"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	path := filepath.Join(t.TempDir(), name)
+	cmd := exec.CommandContext(t.Context(), "go", "build", "-buildvcs=false", "-o", path, ".")
+	cmd.Env = append(os.Environ(), "GOPROXY=off")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build public execute-mode worker: %v\n%s", err, output)
+	}
+	return path
 }
 
 func offlineModeGitRemote(t *testing.T) {
