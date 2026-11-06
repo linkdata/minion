@@ -55,13 +55,7 @@ func TestGitTruncationRejectsPipeDrainOverrun(t *testing.T) {
 	if pinErr != nil {
 		t.Fatalf("pin finite pipe holder: %v", pinErr)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
-		defer cancel()
-		if err := process.Cleanup(ctx); err != nil {
-			t.Errorf("clean finite pipe holder: %v", err)
-		}
-	}()
+	defer process.Close()
 	if len(output) != 0 || truncated || !errors.Is(err, exec.ErrWaitDelay) {
 		t.Fatalf("pipe-drain overrun accepted as truncation: output=%q truncated=%t error=%v", output, truncated, err)
 	}
