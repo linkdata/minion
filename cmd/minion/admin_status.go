@@ -70,7 +70,7 @@ func statusView(owner *action.Orchestrator, cfg config.Config) adminStatusView {
 	}
 	requesters := make(map[string]struct{})
 	for _, repo := range cfg.Repositories {
-		if repo.AllowedActors == nil {
+		if !repo.DenyAllActors && len(repo.AllowedActors) == 0 {
 			view.OpenRepositories++
 		}
 		for _, login := range repo.AllowedActors {

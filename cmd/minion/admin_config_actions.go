@@ -55,6 +55,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 					}
 				}
 				repo.AllowedActors = append(repo.AllowedActors, login)
+				repo.DenyAllActors = false
 				if repo.AllowedActorIDs == nil {
 					repo.AllowedActorIDs = make(map[string]int64)
 				}
@@ -75,13 +76,17 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 				if !strings.EqualFold(repo.Name, repoName) {
 					continue
 				}
-				if repo.AllowedActors == nil {
-					return errors.New("This repository allows any writer; there is no named requester to remove")
+				if len(repo.AllowedActors) == 0 {
+					return errors.New("There is no named requester to remove")
 				}
 				for j, existing := range repo.AllowedActors {
 					if strings.EqualFold(existing, login) {
 						repo.AllowedActors = slices.Delete(repo.AllowedActors, j, j+1)
 						delete(repo.AllowedActorIDs, strings.ToLower(existing))
+						if len(repo.AllowedActors) == 0 {
+							repo.AllowedActors, repo.AllowedActorIDs = nil, nil
+							repo.DenyAllActors = true
+						}
 						return nil
 					}
 				}
@@ -100,6 +105,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 				repo := &cfg.Repositories[i]
 				if strings.EqualFold(repo.Name, repoName) {
 					repo.AllowedActors, repo.AllowedActorIDs = nil, nil
+					repo.DenyAllActors = false
 					return nil
 				}
 			}
@@ -116,7 +122,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if _, exists := current.Repository(name); exists {
 			return errors.New("Repository is already configured")
 		}
-		if err := validateAdminActions(current, actions); err != nil {
+		if err := validateAdminActions(current, actions, nil); err != nil {
 			return err
 		}
 		if owner == nil || owner.GitHub == nil {
@@ -129,7 +135,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if details.ID <= 0 || details.Owner.ID <= 0 {
 			return errors.New("GitHub repository or owner identity is missing")
 		}
-		repo := config.Repository{Name: name, ID: details.ID, OwnerID: details.Owner.ID, AllowedActors: []string{}, Actions: actions}
+		repo := config.Repository{Name: name, ID: details.ID, OwnerID: details.Owner.ID, DenyAllActors: true, Actions: actions}
 		probe := current
 		probe.Repositories = []config.Repository{repo}
 		if err := checkRepositories(ctx, owner.GitHub, probe, log.New(io.Discard, "", 0)); err != nil {
@@ -139,7 +145,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			if _, exists := cfg.Repository(name); exists {
 				return errors.New("Repository is already configured")
 			}
-			if err := validateAdminActions(*cfg, actions); err != nil {
+			if err := validateAdminActions(*cfg, actions, nil); err != nil {
 				return err
 			}
 			cfg.Repositories = append(cfg.Repositories, repo)
@@ -152,12 +158,12 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			return errors.New("Repository must use owner/name")
 		}
 		current := live.snapshot().Config
-		if err := validateAdminActions(current, actions); err != nil {
-			return err
-		}
 		repo, ok := current.Repository(name)
 		if !ok {
 			return errors.New("Repository is not configured")
+		}
+		if err := validateAdminActions(current, actions, repo.Actions); err != nil {
+			return err
 		}
 		workerRestart := current.RemoteExecutor != nil && hasNewCommand(current, config.Config{Repositories: []config.Repository{{Actions: actions}}})
 		for _, action := range actions {
@@ -178,11 +184,11 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			break
 		}
 		return live.save(func(cfg *config.Config) error {
-			if err := validateAdminActions(*cfg, actions); err != nil {
-				return err
-			}
 			for i := range cfg.Repositories {
 				if strings.EqualFold(cfg.Repositories[i].Name, name) {
+					if err := validateAdminActions(*cfg, actions, cfg.Repositories[i].Actions); err != nil {
+						return err
+					}
 					cfg.Repositories[i].Actions = actions
 					return nil
 				}
@@ -332,15 +338,15 @@ func adminCanWrite(permission string) bool {
 	return permission == "write" || permission == "maintain" || permission == "admin"
 }
 
-func validateAdminActions(cfg config.Config, actions []string) error {
+func validateAdminActions(cfg config.Config, actions, existing []string) error {
 	if len(actions) == 0 || len(actions) > len(cfg.Commands) {
 		return errors.New("Select at least one configured command")
 	}
 	selected := make(map[string]bool, len(actions))
 	for _, name := range actions {
 		mapping, exists := cfg.Commands[name]
-		if !exists || !mapping.SupportsProvider(cfg.Main) || selected[name] {
-			return errors.New("Select distinct commands supported by the configured main AI")
+		if !exists || selected[name] || !mapping.SupportsProvider(cfg.Main) && !slices.Contains(existing, name) {
+			return errors.New("Select distinct commands supported by the configured main AI, or keep commands already enabled here")
 		}
 		selected[name] = true
 	}

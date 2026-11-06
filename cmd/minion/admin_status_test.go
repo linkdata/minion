@@ -51,6 +51,18 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 	}
 }
 
+func TestAdminStatusCountsOpenRepositories(t *testing.T) {
+	cfg := config.Config{Repositories: []config.Repository{
+		{Name: "owner/default"},
+		{Name: "owner/empty", AllowedActors: []string{}},
+		{Name: "owner/closed", DenyAllActors: true},
+	}}
+	view := statusView(&action.Orchestrator{}, cfg)
+	if view.OpenRepositories != 2 || view.Repositories != 3 {
+		t.Fatalf("open repository count = %+v", view)
+	}
+}
+
 func TestAdminStatusGitHubAuthCheck(t *testing.T) {
 	var mu sync.Mutex
 	status := http.StatusOK

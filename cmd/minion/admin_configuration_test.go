@@ -15,14 +15,15 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
 		Repositories: []config.Repository{
 			{Name: "owner/open", ID: 1, OwnerID: 10, Actions: []string{"review"}},
-			{Name: "owner/closed", ID: 2, OwnerID: 10, AllowedActors: []string{}, Actions: []string{"review"}},
+			{Name: "owner/closed", ID: 2, OwnerID: 10, DenyAllActors: true, Actions: []string{"review"}},
 			{Name: "owner/limited", ID: 3, OwnerID: 10, AllowedActors: []string{"alice"}, AllowedActorIDs: map[string]int64{"alice": 42}, Actions: []string{"review"}},
+			{Name: "owner/legacy-open", ID: 4, OwnerID: 10, AllowedActors: []string{}, Actions: []string{"review"}},
 		},
 		Commands:       map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"https://github.com/owner/project/tree/main/skills/review"}}},
 		AlwaysOnSkills: []string{"builtin://anti-prompt-injection"},
 	}
 	view := configurationView(adminConfigSnapshot{Config: cfg, Error: "<script>alert(1)</script>", Pending: true})
-	if len(view.Users) != 3 || !view.Users[0].AnyWriter || view.Users[1].AnyWriter || len(view.Users[1].Users) != 0 || view.Users[2].Users[0].ID != 42 {
+	if len(view.Users) != 4 || !view.Users[0].AnyWriter || view.Users[1].AnyWriter || len(view.Users[1].Users) != 0 || view.Users[2].Users[0].ID != 42 || !view.Users[3].AnyWriter {
 		t.Fatalf("requester policies = %+v", view.Users)
 	}
 	if view.Repositories[0].CanRemove != true || view.CommandSkills[0].Skills[0].CanRemove || !view.AlwaysOnSkills[0].CanRemove {

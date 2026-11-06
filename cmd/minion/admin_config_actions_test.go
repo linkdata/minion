@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -52,6 +54,8 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 			_, _ = w.Write([]byte(`[]`))
 		case "/repos/owner/new/collaborators/fixture-bot/permission":
 			_, _ = w.Write([]byte(`{"permission":"write","user":{"id":9,"login":"fixture-bot"}}`))
+		case "/repos/owner/new/collaborators/alice/permission":
+			_, _ = w.Write([]byte(`{"permission":"write","user":{"id":77,"login":"alice"}}`))
 		default:
 			t.Errorf("unexpected GitHub path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -88,22 +92,28 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 	}
 	post("/admin/users/remove", url.Values{"repository": {"owner/existing"}, "login": {"alice"}}, http.StatusSeeOther)
 	repo, _ = configForAdminTest(t, path).Repository("owner/existing")
-	if repo.AllowedActors == nil || len(repo.AllowedActors) != 0 {
+	if !repo.DenyAllActors || len(repo.AllowedActors) != 0 || repo.AllowsActor("another", 88) {
 		t.Fatalf("last requester removal did not preserve explicit deny-all: %+v", repo)
 	}
 	post("/admin/users/allow-any", url.Values{"repository": {"owner/existing"}}, http.StatusSeeOther)
 	repo, _ = configForAdminTest(t, path).Repository("owner/existing")
-	if repo.AllowedActors != nil {
+	if repo.DenyAllActors || len(repo.AllowedActors) != 0 || !repo.AllowsActor("another", 88) {
 		t.Fatalf("allow-any did not restore omitted allowlist: %+v", repo)
 	}
 	post("/admin/repositories/add", url.Values{"name": {"owner/new"}, "actions": {"review"}}, http.StatusSeeOther)
 	repo, ok := live.snapshot().Config.Repository("owner/new")
-	if !ok || repo.ID != 11 || repo.OwnerID != 2 || repo.AllowedActors == nil || len(repo.AllowedActors) != 0 || len(repo.Actions) != 1 || repo.Actions[0] != "review" {
+	if !ok || repo.ID != 11 || repo.OwnerID != 2 || !repo.DenyAllActors || len(repo.AllowedActors) != 0 || repo.AllowsActor("another", 88) || len(repo.Actions) != 1 || repo.Actions[0] != "review" {
 		t.Fatalf("repository not pinned: %+v, found=%t", repo, ok)
 	}
+	post("/admin/users/add", url.Values{"repository": {"owner/new"}, "login": {"alice"}}, http.StatusSeeOther)
+	repo, _ = live.snapshot().Config.Repository("owner/new")
+	if repo.DenyAllActors || !repo.AllowsActor("alice", 77) {
+		t.Fatalf("adding requester did not clear deny-all: %+v", repo)
+	}
+	post("/admin/users/remove", url.Values{"repository": {"owner/new"}, "login": {"alice"}}, http.StatusSeeOther)
 	post("/admin/repositories/actions", url.Values{"name": {"owner/new"}, "actions": {"comment"}}, http.StatusSeeOther)
 	repo, _ = live.snapshot().Config.Repository("owner/new")
-	if len(repo.Actions) != 1 || repo.Actions[0] != "comment" || repo.AllowedActors == nil {
+	if len(repo.Actions) != 1 || repo.Actions[0] != "comment" || !repo.DenyAllActors {
 		t.Fatalf("edited repository commands or access changed: %+v", repo)
 	}
 	owner.GitHub = nil
@@ -132,17 +142,68 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 }
 
 func TestAdminRepositoryCommandsRejectUnsupportedMainAI(t *testing.T) {
-	cfg := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
+	cfg := config.Config{BotLogin: "bot", Main: "claude", Claude: config.ClaudeConfig{Effort: "high"}, AlwaysOnSkills: []string{}, Commands: map[string]config.CommandMapping{
 		"review":         {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
-		"security-audit": {Action: "security-audit", Skills: []string{"builtin://anti-prompt-injection"}},
+		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/owner/skills/tree/main/skills/security-audit"}},
+	}, Repositories: []config.Repository{
+		{Name: "owner/legacy", ID: 1, OwnerID: 2, Actions: []string{"security-audit", "review"}},
+		{Name: "owner/new", ID: 3, OwnerID: 2, Actions: []string{"review"}},
 	}}
 	view := configurationView(adminConfigSnapshot{Config: cfg})
-	if len(view.Commands) != 1 || view.Commands[0] != "review" {
+	if len(view.Commands) != 1 || view.Commands[0] != "review" || len(view.AllCommands) != 2 || view.AllCommands[1] != "security-audit" {
 		t.Fatalf("unsupported command offered in repository form: %v", view.Commands)
 	}
-	if err := validateAdminActions(cfg, []string{"security-audit"}); err == nil {
+	if err := validateAdminActions(cfg, []string{"security-audit"}, nil); err == nil {
 		t.Fatal("unsupported command accepted by repository action handler")
 	}
+	if err := validateAdminActions(cfg, []string{"security-audit", "review"}, cfg.Repositories[0].Actions); err != nil {
+		t.Fatalf("existing unsupported command could not be kept: %v", err)
+	}
+	var body strings.Builder
+	page := struct {
+		Dot                adminConfigurationView
+		HeadHTML, TailHTML template.HTML
+	}{Dot: view}
+	if err := adminConfigurationHTML.ExecuteTemplate(&body, "admin repositories", page); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body.String(), `value="security-audit" checked`) || !strings.Contains(body.String(), `value="security-audit" disabled`) || !strings.Contains(body.String(), "unavailable with the current main AI") {
+		t.Fatalf("existing unsupported command is hidden in editor: %s", body.String())
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, nil)
+	post := func(name string, want int) {
+		t.Helper()
+		form := url.Values{"name": {name}, "actions": {"review", "security-audit"}}
+		r := httptest.NewRequest(http.MethodPost, "/admin/repositories/actions", strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Fatalf("POST %s: status=%d body=%q", name, w.Code, w.Body.String())
+		}
+	}
+	post("owner/legacy", http.StatusSeeOther)
+	if got, _ := configForAdminTest(t, path).Repository("owner/legacy"); len(got.Actions) != 2 || got.Actions[0] != "review" || got.Actions[1] != "security-audit" {
+		t.Fatalf("existing unsupported command was removed: %+v", got)
+	}
+	post("owner/new", http.StatusConflict)
 }
 
 func TestAdminRepositoryActionExpansionRequiresRemoteRestart(t *testing.T) {

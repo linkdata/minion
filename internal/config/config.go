@@ -100,6 +100,7 @@ type Repository struct {
 	Actions             []string         `json:"actions"`
 	AllowedActors       []string         `json:"allowed_actors,omitzero"`
 	AllowedActorIDs     map[string]int64 `json:"allowed_actor_ids,omitempty"`
+	DenyAllActors       bool             `json:"deny_all_actors,omitempty"`
 	RequiredCleanRounds *int             `json:"required_clean_rounds,omitempty"`
 }
 
@@ -776,6 +777,9 @@ func (c *Config) Validate(configDir string) error {
 				return fmt.Errorf("%s: allowed actor %q requires a positive allowed_actor_ids pin", repo.Name, actor)
 			}
 		}
+		if repo.DenyAllActors && (len(repo.AllowedActors) != 0 || len(repo.AllowedActorIDs) != 0) {
+			return fmt.Errorf("%s: deny_all_actors cannot be combined with named allowed actors", repo.Name)
+		}
 		if len(repo.AllowedActorIDs) != len(repo.AllowedActors) {
 			return fmt.Errorf("%s: allowed_actor_ids must match allowed_actors exactly", repo.Name)
 		}
@@ -885,13 +889,13 @@ func (r Repository) MatchesIdentity(id, ownerID int64) bool {
 
 // AllowsActor reports whether a GitHub account is allowed to run commands.
 //
-// An omitted AllowedActors list permits any account with a positive ID.
-// An explicit empty list permits nobody.
+// An empty AllowedActors list permits any account with a positive ID.
+// DenyAllActors permits nobody.
 func (r Repository) AllowsActor(login string, id int64) bool {
-	if id <= 0 {
+	if id <= 0 || r.DenyAllActors {
 		return false
 	}
-	if r.AllowedActors == nil {
+	if len(r.AllowedActors) == 0 {
 		return true
 	}
 	for _, actor := range r.AllowedActors {

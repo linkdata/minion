@@ -76,7 +76,7 @@ func sameFixedConfig(a, b config.Config) bool {
 }
 
 func sameSkillConfig(a, b config.Config) bool {
-	return bytes.Equal(mustConfigJSON(a.Commands, a.AlwaysOnSkills), mustConfigJSON(b.Commands, b.AlwaysOnSkills))
+	return reflect.DeepEqual(a.Commands, b.Commands) && reflect.DeepEqual(a.AlwaysOnSkills, b.AlwaysOnSkills)
 }
 
 func hasNewCommand(before, after config.Config) bool {
@@ -94,14 +94,6 @@ func hasNewCommand(before, after config.Config) bool {
 		}
 	}
 	return false
-}
-
-func mustConfigJSON(commands map[string]config.CommandMapping, always []string) []byte {
-	data, _ := json.Marshal(struct {
-		Commands map[string]config.CommandMapping
-		Always   []string
-	}{commands, always})
-	return data
 }
 
 func cloneConfig(cfg config.Config) (config.Config, error) {

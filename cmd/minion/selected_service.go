@@ -7,12 +7,28 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"slices"
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
+
+func selectedSkillConfigChanged(before, after config.Config, selected map[string]bool) bool {
+	if !slices.Equal(before.AlwaysOnSkills, after.AlwaysOnSkills) {
+		return true
+	}
+	for name := range selected {
+		old, oldOK := before.Commands[name]
+		current, currentOK := after.Commands[name]
+		if oldOK != currentOK || old.Action != current.Action || !slices.Equal(old.Skills, current.Skills) {
+			return true
+		}
+	}
+	return false
+}
 
 // attachSelectedLocalWorker prepares one selected child before the monitor can
 // discover work. Public service mode selection remains with the CLI switch.
@@ -90,7 +106,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			return code
 		}
 		cfg, generation := live.next()
-		refresh := !sameSkillConfig(watcher.Config, cfg) || hasNewCommand(watcher.Config, cfg) || hasNewCommand(cfg, watcher.Config)
+		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || hasNewCommand(watcher.Config, cfg) || hasNewCommand(cfg, watcher.Config)
 		if !refresh {
 			for _, repo := range cfg.Repositories {
 				for _, name := range repo.Actions {
@@ -104,6 +120,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			}
 		}
 		if !refresh {
+			owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 			owner.AIInstructions = cfg.AIInstructions
 			owner.CleanCriticRounds = cfg.RequiredCleanRounds
 			watcher.Config = cfg

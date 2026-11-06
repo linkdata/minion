@@ -53,6 +53,7 @@ type adminConfigurationView struct {
 	Users           []adminRequesterRepository
 	Repositories    []adminRepositoryRow
 	Commands        []string
+	AllCommands     []string
 	AlwaysOnSkills  []adminSkillRow
 	CommandSkills   []adminCommandSkills
 }
@@ -60,13 +61,14 @@ type adminConfigurationView struct {
 func configurationView(snapshot adminConfigSnapshot) adminConfigurationView {
 	cfg := snapshot.Config
 	view := adminConfigurationView{Pending: snapshot.Pending, Error: snapshot.Error, Remote: snapshot.Remote}
-	for _, name := range cfg.CommandNames() {
+	view.AllCommands = cfg.CommandNames()
+	for _, name := range view.AllCommands {
 		if cfg.Commands[name].SupportsProvider(cfg.Main) {
 			view.Commands = append(view.Commands, name)
 		}
 	}
 	for _, repo := range cfg.Repositories {
-		users := adminRequesterRepository{Name: repo.Name, AnyWriter: repo.AllowedActors == nil}
+		users := adminRequesterRepository{Name: repo.Name, AnyWriter: !repo.DenyAllActors && len(repo.AllowedActors) == 0}
 		for _, login := range repo.AllowedActors {
 			users.Users = append(users.Users, adminRequester{Login: login, ID: repo.AllowedActorIDs[login]})
 		}
@@ -85,7 +87,7 @@ func configurationView(snapshot adminConfigSnapshot) adminConfigurationView {
 	for _, source := range cfg.AlwaysOnSkills {
 		view.AlwaysOnSkills = append(view.AlwaysOnSkills, adminSkill(source, "always", true, snapshot.Remote))
 	}
-	for _, name := range cfg.CommandNames() {
+	for _, name := range view.AllCommands {
 		mapping := cfg.Commands[name]
 		group := adminCommandSkills{Name: name}
 		for _, source := range mapping.Skills {
@@ -141,7 +143,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
     {{if .CanRemove}}<form method="post" action="/admin/repositories/remove"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-sm btn-outline-danger" type="submit">Remove repository</button></form>{{end}}</div>
     <p>Commands: {{range $i, $name := .Actions}}{{if $i}}, {{end}}<code>{{$name}}</code>{{else}}None{{end}}</p>
     <details><summary>Edit commands</summary><form method="post" action="/admin/repositories/actions" class="mt-3">
-      <input type="hidden" name="name" value="{{.Name}}"><fieldset><legend class="fs-6">Allowed commands</legend>{{$selected := .Actions}}{{range $.Dot.Commands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}" {{if hasAction $selected .}}checked{{end}}><span class="form-check-label">{{.}}</span></label>{{end}}</fieldset>
+      <input type="hidden" name="name" value="{{.Name}}"><fieldset><legend class="fs-6">Allowed commands</legend>{{$selected := .Actions}}{{range $.Dot.AllCommands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}" {{if hasAction $selected .}}checked{{else if not (hasAction $.Dot.Commands .)}}disabled{{end}}><span class="form-check-label">{{.}}{{if not (hasAction $.Dot.Commands .)}} (unavailable with the current main AI){{end}}</span></label>{{end}}</fieldset>
       <button class="btn btn-outline-light mt-2" type="submit">Save commands</button>
     </form></details>
     {{if not .CanRemove}}<small class="text-body-secondary">At least one repository is required.</small>{{end}}

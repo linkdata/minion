@@ -260,6 +260,7 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	cfg.Repositories[0].Actions = []string{"comment", "available", "unavailable"}
 	cfg.Commands["available"] = config.CommandMapping{Action: "comment", Skills: []string{availableSkill}}
 	cfg.Commands["unavailable"] = config.CommandMapping{Action: "comment", Skills: []string{unavailableSkill}}
+	cfg.Commands["unused"] = config.CommandMapping{Action: "comment", Skills: []string{unavailableSkill}}
 	cfg.AlwaysOnSkills = []string{}
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data, err := json.Marshal(cfg)
@@ -295,13 +296,6 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	if !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] || watcher.SelectedCommands["available"] || watcher.SelectedCommands["unavailable"] {
 		t.Fatalf("initial commands = %v", watcher.SelectedCommands)
 	}
-	if err := live.save(func(next *config.Config) error {
-		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
-		next.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithCancel(t.Context())
 	finished := make(chan struct{})
 	var code int
@@ -335,6 +329,26 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 		if got := live.snapshot().Error; got != "" {
 			t.Fatal(got)
 		}
+	}
+	unusedSkill := "https://github.com/example/skills/tree/main/skills/unused-other"
+	if err := live.save(func(next *config.Config) error {
+		mapping := next.Commands["unused"]
+		mapping.Skills = []string{unusedSkill}
+		next.Commands["unused"] = mapping
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != initialWorker || watcher.Config.Commands["unused"].Skills[0] != unusedSkill || owner.Commands["unused"].Skills[0] != unusedSkill {
+		t.Fatal("unused command skill edit restarted the selected worker or left stale configuration")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
+		next.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 	waitApplied()
 	if owner.Executor == initialWorker || !watcher.SelectedCommands["review"] || !watcher.SelectedCommands["comment"] ||
