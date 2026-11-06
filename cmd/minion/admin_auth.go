@@ -57,13 +57,15 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `<!docty
 type adminHomeView struct{ Admin, User bool }
 
 const (
-	maxAdminSessions     = 512
-	maxGuestPageRequests = 4
-	maxRotatedCookies    = 2048
-	adminSignInReserve   = 32
+	maxAdminSessions          = 512
+	maxGuestPageRequests      = 4
+	maxRotatedCookies         = 2048
+	adminSignInReserve        = 32
+	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve
 	// One sign-out marker may be needed for each live JaWS session.
 	maxSignInRotations = maxRotatedCookies - maxAdminSessions
-	maxOAuthRotations  = maxSignInRotations - adminSignInReserve
+	// OAuth leaves room for those sign-outs and admin password rotations.
+	maxOAuthRotations = maxSignInRotations - maxAdminSessions - adminSignInReserve
 )
 
 type adminIdentity string
@@ -596,9 +598,8 @@ func (w *oauthCallbackWriter) Write(body []byte) (int, error) {
 // serveOAuthCallback holds the old cookie out of guest admission until every callback using it finishes.
 func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	closeUnreadAdminBody(w, r)
-	original := r.Clone(r.Context()) // JaWS adds the rotated cookie to r during the callback.
 	a.sessionAdmissionMu.Lock()
-	old := a.jaws.GetSession(original)
+	old := a.jaws.GetSession(r)
 	if old == nil {
 		a.sessionAdmissionMu.Unlock()
 		next.ServeHTTP(w, r)

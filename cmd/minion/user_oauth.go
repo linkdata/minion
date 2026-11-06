@@ -83,9 +83,6 @@ type oauthAccess struct {
 	usageGate   *userUsageGate
 }
 
-// Keep slots for admin sign-in and session rotation after guest pages.
-const maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve
-
 func githubProfileSubject(claims map[string]any) (string, error) {
 	raw, ok := claims["id"].(json.Number)
 	if !ok {
@@ -243,11 +240,8 @@ func (a *oauthAccess) allowed(r *http.Request) bool {
 	if a == nil {
 		return false
 	}
-	if r.Method == http.MethodGet {
-		switch r.URL.Path {
-		case "/user/usage":
-			return true // The handler redirects anonymous readers to sign-in.
-		}
+	if r.Method == http.MethodGet && r.URL.Path == "/user/usage" {
+		return true // The handler redirects anonymous readers to sign-in.
 	}
 	_, pattern := a.mux.Handler(r)
 	return pattern != ""
