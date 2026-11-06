@@ -273,7 +273,7 @@ func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
 	logger := log.New(&logs, "", 0)
 	owner := newOrchestrator(cfg, nil, nil, logger, nil)
 	watcher := &monitor.Monitor{Config: cfg}
-	done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, binary, []string{"-mode=execute"}, 40*time.Second)
+	_, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, binary, []string{"-mode=execute"}, 40*time.Second)
 	if err != nil {
 		t.Fatalf("selected worker startup: %v; logs=%s", err, logs.String())
 	}
@@ -317,7 +317,6 @@ func TestWindowsPublicExecuteModeReturnsSelectedFix(t *testing.T) {
 	if err := closeWorker(); err != nil {
 		t.Fatal(err)
 	}
-	<-done
 	entries, err := os.ReadDir(cfg.WorkRoot)
 	if err != nil {
 		t.Fatal(err)
