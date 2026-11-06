@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 
 	"github.com/linkdata/minion/internal/config"
@@ -104,13 +105,56 @@ func cloneConfig(cfg config.Config) (config.Config, error) {
 }
 
 func applyRuntimeModels(cfg *config.Config, active config.Config) {
-	cfg.Codex, cfg.Claude = active.Codex, active.Claude
+	cfg.Codex.Model, cfg.Codex.ReasoningEffort = active.Codex.Model, active.Codex.ReasoningEffort
+	cfg.Claude.Model, cfg.Claude.Effort = active.Claude.Model, active.Claude.Effort
 	cfg.MainSettings, cfg.CriticSettings = active.MainSettings, active.CriticSettings
+}
+
+// Invited repositories stay on disk but outside the running selection until restart.
+func visibleRepositories(current, disk []config.Repository, added map[string]bool) []config.Repository {
+	visible := make(map[string]bool, len(current)+len(added))
+	for _, repo := range current {
+		visible[repo.Name] = true
+	}
+	for name := range added {
+		visible[name] = true
+	}
+	var selected []config.Repository
+	for _, repo := range disk {
+		if visible[repo.Name] {
+			selected = append(selected, repo)
+		}
+	}
+	return selected
+}
+
+func sameEnabledCommands(a, b config.Config) bool {
+	if len(a.Repositories) != len(b.Repositories) {
+		return false
+	}
+	for i, repo := range a.Repositories {
+		if repo.Name != b.Repositories[i].Name || !slices.Equal(repo.Actions, b.Repositories[i].Actions) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasRunnableLocalCommand(cfg config.Config) bool {
+	for _, repo := range cfg.Repositories {
+		for _, name := range repo.Actions {
+			if installed, err := cfg.CommandInstalled(name); err == nil && installed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	var activate config.Config
 	updated, err := config.Update(a.path, func(raw *config.Config) error {
 		before, err := cloneConfig(*raw)
 		if err != nil {
@@ -135,8 +179,23 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		if !sameFixedConfig(before, after) {
 			return errors.New("this setting requires a restart")
 		}
-		if after.RemoteExecutor != nil && (!sameSkillConfig(before, after) || hasNewCommand(before, after)) {
+		added := make(map[string]bool)
+		for _, repo := range after.Repositories {
+			if _, existed := before.Repository(repo.Name); !existed {
+				added[repo.Name] = true
+			}
+		}
+		activate = after
+		activate.Repositories = visibleRepositories(a.desired.Repositories, after.Repositories, added)
+		if len(activate.Repositories) == 0 {
+			return errAdminRestartRequired
+		}
+		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
+		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasNewCommand(a.desired, activate)) {
 			return errors.New("this change requires restarting the remote worker")
+		}
+		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
+			return errors.New("at least one enabled command must have its required skills installed")
 		}
 		if !reflect.DeepEqual(before.Repositories, after.Repositories) {
 			raw.Repositories = after.Repositories
@@ -158,13 +217,13 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		return err
 	}
 	a.disk = updated
-	applyRuntimeModels(&updated, a.active)
+	applyRuntimeModels(&activate, a.active)
 	before, _ := json.Marshal(a.desired)
-	after, _ := json.Marshal(updated)
+	after, _ := json.Marshal(activate)
 	if bytes.Equal(before, after) {
 		return nil
 	}
-	a.desired = updated
+	a.desired = activate
 	a.generation++
 	a.pending = true
 	a.lastError = ""

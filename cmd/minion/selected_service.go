@@ -96,7 +96,9 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 				for _, name := range repo.Actions {
 					if !watcher.SelectedCommands[name] {
 						installed, err := cfg.CommandInstalled(name)
-						refresh = installed && err == nil
+						if installed && err == nil {
+							refresh = true
+						}
 					}
 				}
 			}

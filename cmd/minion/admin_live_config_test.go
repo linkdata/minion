@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
 )
 
 func liveConfigFixture(t *testing.T, remote bool) (*adminLiveConfig, string) {
@@ -173,7 +174,7 @@ func TestAdminLiveConfigEditsOmittedSkillDefaults(t *testing.T) {
 	}
 	if err := live.save(func(cfg *config.Config) error {
 		mapping := cfg.Commands["review"]
-		mapping.Skills = append(mapping.Skills, "https://github.com/owner/skills/tree/main/skills/reviewer")
+		mapping.Skills = append(mapping.Skills, skills.BuiltinAntiPromptInjection)
 		cfg.Commands["review"] = mapping
 		return nil
 	}); err != nil {
@@ -183,8 +184,92 @@ func TestAdminLiveConfigEditsOmittedSkillDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(saved.Commands["review"].Skills) != 2 || saved.Commands["review"].Skills[1] != "https://github.com/owner/skills/tree/main/skills/reviewer" {
+	if len(saved.Commands["review"].Skills) != 2 || saved.Commands["review"].Skills[1] != skills.BuiltinAntiPromptInjection {
 		t.Fatalf("editing a default command dropped its skills: %+v", saved.Commands["review"])
+	}
+}
+
+func TestAdminLiveConfigKeepsInvitedRepositoryDeferred(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/invited", ID: 12, OwnerID: 22, Actions: []string{"review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Check the task."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(live.snapshot().Config.Repositories) != 1 {
+		t.Fatal("unrelated admin save activated an invited repository")
+	}
+	cfg, generation := live.next()
+	live.applied(cfg, generation, nil)
+	if len(live.current().Repositories) != 1 {
+		t.Fatal("invited repository reached the running monitor before restart")
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 2 {
+		t.Fatalf("invited repository was lost from disk: %+v, %v", saved.Repositories, err)
+	}
+	restarted, err := newAdminLiveConfig(path, saved)
+	if err != nil || len(restarted.current().Repositories) != 2 {
+		t.Fatalf("restart did not activate invited repository: %+v, %v", restarted, err)
+	}
+}
+
+func TestAdminLiveConfigRejectsLossOfLastRunnableCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{
+		"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"audit":  {Action: "comment", Skills: []string{"https://github.com/owner/skills/tree/main/skills/not-installed"}},
+	}, AlwaysOnSkills: []string{}, Repositories: []config.Repository{
+		{Name: "owner/ready", ID: 11, OwnerID: 22, Actions: []string{"review"}},
+		{Name: "owner/missing", ID: 12, OwnerID: 22, Actions: []string{"audit"}},
+	}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRunnableLocalCommand(loaded) {
+		t.Fatal("fixture has no runnable command")
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*config.Config) error
+	}{
+		{"switch to missing command", func(cfg *config.Config) error {
+			cfg.Repositories[0].Actions = []string{"audit"}
+			return nil
+		}},
+		{"remove ready repository", func(cfg *config.Config) error {
+			cfg.Repositories = cfg.Repositories[1:]
+			return nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := live.save(test.edit); err == nil || !strings.Contains(err.Error(), "at least one enabled command") {
+				t.Fatalf("invalid local selection was saved: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != string(data) {
+				t.Fatalf("rejected edit changed disk: %v", err)
+			}
+		})
 	}
 }
 

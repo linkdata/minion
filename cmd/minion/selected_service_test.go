@@ -251,8 +251,15 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 }
 
 func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
+	home := t.TempDir()
+	isolateHostPaths(t, home)
+	availableSkill := "https://github.com/example/skills/tree/main/skills/newly-installed"
+	unavailableSkill := "https://github.com/example/skills/tree/main/skills/still-missing"
 	cfg := selectedServiceTestConfig(t)
 	cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = 1, 2
+	cfg.Repositories[0].Actions = []string{"comment", "available", "unavailable"}
+	cfg.Commands["available"] = config.CommandMapping{Action: "comment", Skills: []string{availableSkill}}
+	cfg.Commands["unavailable"] = config.CommandMapping{Action: "comment", Skills: []string{unavailableSkill}}
 	cfg.AlwaysOnSkills = []string{}
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data, err := json.Marshal(cfg)
@@ -285,11 +292,11 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeWorker() })
 	initialWorker := owner.Executor
-	if !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
+	if !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] || watcher.SelectedCommands["available"] || watcher.SelectedCommands["unavailable"] {
 		t.Fatalf("initial commands = %v", watcher.SelectedCommands)
 	}
 	if err := live.save(func(next *config.Config) error {
-		next.Repositories[0].Actions = []string{"comment", "review"}
+		next.Repositories[0].Actions = append(next.Repositories[0].Actions, "review")
 		next.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection}
 		return nil
 	}); err != nil {
@@ -312,22 +319,26 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	})
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	for live.snapshot().Pending {
-		select {
-		case <-ticker.C:
-		case <-finished:
-			t.Fatalf("selected service exited before activating config: code=%d", code)
-		case <-deadline.C:
-			t.Fatal("selected service did not activate config")
+	waitApplied := func() {
+		t.Helper()
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		for live.snapshot().Pending {
+			select {
+			case <-ticker.C:
+			case <-finished:
+				t.Fatalf("selected service exited before activating config: code=%d", code)
+			case <-deadline.C:
+				t.Fatal("selected service did not activate config")
+			}
+		}
+		if got := live.snapshot().Error; got != "" {
+			t.Fatal(got)
 		}
 	}
-	if got := live.snapshot().Error; got != "" {
-		t.Fatal(got)
-	}
+	waitApplied()
 	if owner.Executor == initialWorker || !watcher.SelectedCommands["review"] || !watcher.SelectedCommands["comment"] ||
-		len(watcher.Config.Repositories[0].Actions) != 2 || len(live.current().Repositories[0].Actions) != 2 {
+		len(watcher.Config.Repositories[0].Actions) != 4 || len(live.current().Repositories[0].Actions) != 4 {
 		t.Fatalf("replacement selection was not applied: worker=%v commands=%v", owner.Executor != initialWorker, watcher.SelectedCommands)
 	}
 	data, err = os.ReadFile(report)
@@ -341,6 +352,47 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	if len(startup.Selection.Commands) != 2 || len(startup.Selection.Main.AlwaysOnSkills) != 1 ||
 		startup.Selection.Main.AlwaysOnSkills[0] != skills.BuiltinAntiPromptInjection {
 		t.Fatalf("replacement child received commands=%v always-on=%v", startup.Selection.Commands, startup.Selection.Main.AlwaysOnSkills)
+	}
+	firstReplacement := owner.Executor
+	skillDir := filepath.Join(home, ".agents", "skills", "newly-installed")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: newly-installed\n---\nReview code.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"url":"` + availableSkill + `","commit":"` + strings.Repeat("a", 40) + `"}`)
+	if err := os.WriteFile(filepath.Join(skillDir, ".minion-install.json"), metadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, installed, err := skills.InstalledPathFor(availableSkill, "codex"); err != nil || !installed {
+		t.Fatalf("new skill was not installed: installed=%t error=%v", installed, err)
+	}
+	if _, installed, err := skills.InstalledPathFor(unavailableSkill, "codex"); err != nil || installed {
+		t.Fatalf("later skill must remain unavailable: installed=%t error=%v", installed, err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.AIInstructions = "Use the newly installed skill."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor == firstReplacement || !watcher.SelectedCommands["available"] || watcher.SelectedCommands["unavailable"] ||
+		owner.AIInstructions != "Use the newly installed skill." || live.current().AIInstructions != owner.AIInstructions {
+		t.Fatalf("later unavailable command suppressed refresh: worker=%v commands=%v", owner.Executor != firstReplacement, watcher.SelectedCommands)
+	}
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup = action.WorkerStartup{}
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if len(startup.Selection.Commands) != 3 || len(startup.Selection.Commands["available"].Skills) != 1 ||
+		startup.Selection.Commands["available"].Skills[0] != availableSkill {
+		t.Fatalf("new child did not receive installed skill: commands=%v", startup.Selection.Commands)
 	}
 	cancel()
 	<-finished
