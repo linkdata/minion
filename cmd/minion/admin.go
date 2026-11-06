@@ -180,10 +180,8 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 		if candidate := covered(host); candidate != "" {
 			return candidate
 		}
-		if localhostOK {
-			if candidate := covered("localhost"); candidate != "" {
-				return candidate
-			}
+		if candidate := covered("localhost"); candidate != "" {
+			return candidate
 		}
 	}
 	for _, name := range certificate.Leaf.DNSNames {

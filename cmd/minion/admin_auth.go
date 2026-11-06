@@ -169,11 +169,6 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
-			if len(access.accounts) != 0 {
-				w.Header().Set("Cache-Control", "no-store")
-				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
-				return
-			}
 			guestAdmissionUnavailable(w)
 			return
 		}

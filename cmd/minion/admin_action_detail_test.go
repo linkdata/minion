@@ -146,7 +146,7 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 	}
 	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
 	body := view.Body.String()
-	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl`, `<textarea`, `readonly aria-labelledby="record-caption-0"`, `id="record-caption-0"`, `>Received report`, `aria-labelledby="record-caption-0"`, `id="diagnostic-caption-0"`, `>Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
+	for _, want := range []string{"Critic approved; no blockers reported", "Stopped after approval", "Received record coverage marker is present", "text truncated", "Worker diagnostics are executor-reported", "Original deadline", "Remaining budget", "&lt;script&gt;", `<dl`, `<textarea`, `readonly aria-labelledby="record-caption-0"`, `id="record-caption-0"`, `>Received report`, `id="diagnostic-caption-0"`, `>Worker diagnostic`, `aria-labelledby="diagnostic-caption-0"`, "\nsecond line"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("detail missing %q: %s", want, body)
 		}
@@ -155,6 +155,36 @@ func TestAdminActionDetailAuthorizedEscapedAndBounded(t *testing.T) {
 		!strings.Contains(body, `<meta name="jawsKey"`) || !strings.Contains(body, `/jaws/.tail/`) ||
 		strings.Contains(body, `<script>alert`) || strings.Contains(body, "<img src=x") || len(body) > 20<<10 {
 		t.Fatalf("detail not safe and bounded: status=%d bytes=%d body=%s", view.Code, len(body), body)
+	}
+}
+
+func TestAdminActionDetailPreservesInitialEvidenceNewline(t *testing.T) {
+	handler, root, cookie := detailTestActive(t)
+	const evidence = "\nleading line"
+	detailTestRecords(t, root, evidence, true)
+	detailTestFile(t, root, "reviews", "attempt-1.json", map[string]any{
+		"identity": detailTestIdentity(), "source_ref": detailTestSource, "review_claim_origin": "executor_reported",
+		"critic_max_rounds": 3,
+		"calls":             []any{detailTestMain(1), detailTestCall(false, false, true, true), detailTestMain(2)},
+		"refutations":       []any{map[string]any{"round": 2, "text": evidence}},
+	})
+	detailTestFile(t, root, "worker-diagnostics", "attempt-1.json", map[string]any{
+		"identity": detailTestIdentity(), "source_ref": detailTestSource,
+		"worker_reported_failure":     map[string]any{"message": evidence, "observed_message": evidence},
+		"worker_reported_diagnostics": []any{map[string]any{"code": "worker", "message": evidence}},
+	})
+	view := adminResponse(handler, http.MethodGet, "/admin/actions/attempt-1", nil, cookie, "")
+	if view.Code != http.StatusOK {
+		t.Fatalf("detail status=%d: %s", view.Code, view.Body.String())
+	}
+	for _, label := range []string{
+		`aria-labelledby="refutation-caption-0"`, `aria-labelledby="record-caption-0"`,
+		`aria-label="Worker-reported failure"`, `aria-label="Worker-observed failure"`,
+		`aria-labelledby="diagnostic-caption-0"`,
+	} {
+		if want := label + ">\n\nleading line</textarea>"; !strings.Contains(view.Body.String(), want) {
+			t.Errorf("detail missing initial evidence newline after %s: %s", label, view.Body.String())
+		}
 	}
 }
 

@@ -98,18 +98,13 @@ func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
 	}
 }
 
-func TestOAuthOnlyHomeOmitsAdminLogin(t *testing.T) {
+func TestOAuthOnlyAdminErrorOmitsAdminLogin(t *testing.T) {
 	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}
 	handler, _, _ := testOAuthAdminHandler(t, cfg, nil)
 	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
 		t.Fatalf("user login: status=%d cookies=%v", page.Code, page.Result().Cookies())
-	}
-	home := adminResponse(handler, http.MethodGet, "/", nil, page.Result().Cookies()[0], "")
-	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/auth/login"`) ||
-		strings.Contains(home.Body.String(), `href="/admin/login"`) {
-		t.Fatalf("OAuth-only home: status=%d body=%q", home.Code, home.Body.String())
 	}
 	denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, page.Result().Cookies()[0], "")
 	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `href="/"`) ||

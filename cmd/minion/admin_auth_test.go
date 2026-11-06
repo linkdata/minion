@@ -542,6 +542,9 @@ func TestSignedInPublicPagesAreNotGuestLimited(t *testing.T) {
 			t.Fatalf("OAuth account page status=%d", page.Code)
 		}
 	}
+	if page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie); page.Code != http.StatusOK {
+		t.Fatalf("fifth OAuth account page status=%d", page.Code)
+	}
 	r := httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)
 	r.RemoteAddr = "192.0.2.7:12345"
 	r.AddCookie(cookie)
@@ -567,6 +570,9 @@ func TestSignedInPublicPagesAreNotGuestLimited(t *testing.T) {
 			t.Fatalf("admin account page status=%d", page.Code)
 		}
 	}
+	if page := userUsageRequest(handler, http.MethodGet, "/admin/login", "", adminCookie); page.Code != http.StatusOK {
+		t.Fatalf("fifth admin account page status=%d", page.Code)
+	}
 	if page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", adminCookie); page.Code != http.StatusOK {
 		t.Fatalf("OAuth login page for admin: status=%d body=%q", page.Code, page.Body.String())
 	}
@@ -587,8 +593,8 @@ func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
 	}
 	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if denied.Code != http.StatusSeeOther || denied.Header().Get("Location") != "/admin/login" ||
-		denied.Header().Get("Cache-Control") != "no-store" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" ||
+		len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")

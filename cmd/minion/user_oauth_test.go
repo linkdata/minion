@@ -132,6 +132,10 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if auth == nil || len(auth.providers) != 1 {
 		t.Fatal("GitHub sign-in not configured")
 	}
+	if head := adminResponse(handler, http.MethodHead, "/auth/login", nil, nil, ""); head.Code != http.StatusOK ||
+		head.Body.Len() != 0 || len(head.Result().Cookies()) != 0 || jw.SessionCount() != 0 {
+		t.Fatalf("OAuth login HEAD: status=%d cookies=%v sessions=%d body=%q", head.Code, head.Result().Cookies(), jw.SessionCount(), head.Body.String())
+	}
 	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 ||
 		!strings.Contains(page.Body.String(), `name="jawsKey"`) ||
@@ -143,7 +147,7 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 		t.Fatalf("OAuth sign-in Bootstrap asset: status=%d", asset.Code)
 	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, page.Result().Cookies()[0], "")
-	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/auth/login"`) ||
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/auth/login">User sign in</a>`) ||
 		strings.Contains(home.Body.String(), `href="/admin/login"`) ||
 		!strings.Contains(home.Body.String(), `name="jawsKey"`) {
 		t.Fatalf("OAuth-only home: status=%d body=%q", home.Code, home.Body.String())
@@ -206,7 +210,7 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 		t.Fatalf("same-provider JaWS error: status=%d content-type=%q body=%q", denied.Code, denied.Header().Get("Content-Type"), denied.Body.String())
 	}
 	if home := adminResponse(handler, http.MethodGet, "/", nil, signed, ""); home.Code != http.StatusOK ||
-		!strings.Contains(home.Body.String(), `href="/auth/login"`) ||
+		!strings.Contains(home.Body.String(), `href="/auth/login">Your account</a>`) ||
 		strings.Contains(home.Body.String(), `href="/admin/login"`) {
 		t.Fatalf("signed-in OAuth home: status=%d body=%q", home.Code, home.Body.String())
 	}
@@ -235,7 +239,8 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	reopened := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
 	if reopened.Code != http.StatusOK || len(reopened.Result().Cookies()) != 1 ||
 		reopened.Result().Cookies()[0].Value == signed.Value ||
-		!strings.Contains(reopened.Body.String(), `href="/auth/login"`) || strings.Contains(reopened.Body.String(), "Signed in with github") {
+		!strings.Contains(reopened.Body.String(), `href="/auth/login">User sign in</a>`) ||
+		strings.Contains(reopened.Body.String(), "Your account") {
 		t.Fatalf("guest home after logout: status=%d cookies=%v body=%q", reopened.Code, reopened.Result().Cookies(), reopened.Body.String())
 	}
 	if loginPage := adminResponse(handler, http.MethodGet, "/auth/login", nil, reopened.Result().Cookies()[0], ""); loginPage.Code != http.StatusOK || !strings.Contains(loginPage.Body.String(), "Sign in with GitHub") {
@@ -246,26 +251,6 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	}
 	if _, err := os.Stat(auth.links.path); !os.IsNotExist(err) {
 		t.Fatalf("unlinked login wrote durable links: %v", err)
-	}
-}
-
-func TestOAuthSignedInHomeOffersAdminSignIn(t *testing.T) {
-	cfg := config.AdminConfig{
-		Administrators: []config.AdminAccount{testAdminAccount()},
-		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
-			RedirectURL: "https://admin.example/auth/github/callback"},
-	}
-	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
-	key := (userIdentity{Provider: "github", Host: "github.com", Subject: "42"}).key()
-	cookie := userUsageCookie(t, jw, key, false)
-	if account := userUsageRequest(handler, http.MethodGet, "/auth/login", "", cookie); account.Code != http.StatusOK ||
-		!strings.Contains(account.Body.String(), "Signed in with github") {
-		t.Fatalf("OAuth account page: status=%d body=%q", account.Code, account.Body.String())
-	}
-	home := userUsageRequest(handler, http.MethodGet, "/", "", cookie)
-	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `href="/admin/login"`) ||
-		!strings.Contains(home.Body.String(), `href="/auth/login"`) {
-		t.Fatalf("signed-in combined home: status=%d body=%q", home.Code, home.Body.String())
 	}
 }
 
@@ -516,21 +501,23 @@ func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
 	}
 	close(start)
 	workers.Wait()
-	if count := jw.SessionCount(); count > maxGuestAdmissionSessions {
-		t.Fatalf("concurrent guests consumed admin reserve: sessions=%d", count)
+	if count := jw.SessionCount(); count != maxGuestAdmissionSessions {
+		t.Fatalf("concurrent guest sessions=%d, want %d", count, maxGuestAdmissionSessions)
 	}
+	admitted := 0
 	for i, response := range responses {
-		if response.Code == http.StatusSeeOther && paths[i%len(paths)] == "/" &&
-			response.Header().Get("Location") == "/admin/login" && len(response.Result().Cookies()) == 0 {
-			continue
-		}
 		want := http.StatusOK
 		if paths[i%len(paths)] == "/auth/github/login" {
 			want = http.StatusFound
 		}
-		if response.Code != want && response.Code != http.StatusServiceUnavailable {
+		if response.Code == want {
+			admitted++
+		} else if response.Code != http.StatusServiceUnavailable {
 			t.Fatalf("concurrent guest %d (%s): status=%d", i, paths[i%len(paths)], response.Code)
 		}
+	}
+	if admitted != 2 {
+		t.Fatalf("concurrent guest admissions=%d, want 2", admitted)
 	}
 	if admin := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); admin.Code != http.StatusOK {
 		t.Fatalf("admin login after guest burst: status=%d sessions=%d", admin.Code, jw.SessionCount())
