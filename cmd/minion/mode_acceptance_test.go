@@ -209,6 +209,9 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		if store == nil {
+			return
+		}
 		if err := store.Close(); err != nil {
 			t.Error(err)
 		}
