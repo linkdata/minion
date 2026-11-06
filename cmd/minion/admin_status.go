@@ -122,10 +122,6 @@ func adminStatusHandler(jw *jaws.Jaws, owner *action.Orchestrator, current func(
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
-		if current == nil {
-			http.Error(w, "Status unavailable", http.StatusServiceUnavailable)
-			return
-		}
 		view := statusView(owner, current())
 		if check {
 			view.Check = checkGitHubAuth(r.Context(), owner)

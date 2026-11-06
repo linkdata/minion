@@ -179,10 +179,6 @@ func adminConfigurationHandler(jw *jaws.Jaws, snapshot func() adminConfigSnapsho
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
-		if snapshot == nil || page != "users" && page != "repositories" && page != "skills" {
-			http.Error(w, "Configuration page unavailable", http.StatusServiceUnavailable)
-			return
-		}
 		ui.Handler(jw, name, configurationView(snapshot())).ServeHTTP(w, r)
 	})
 }

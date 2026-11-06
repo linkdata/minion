@@ -1,6 +1,9 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -293,7 +296,49 @@ func TestAdminRepositoryActionReenablePreflightsRemote(t *testing.T) {
 	}
 }
 
-func adminPreflightOwner(t *testing.T, archived bool) *action.Orchestrator {
+func TestAdminRepositoryActionsRejectStalePreflight(t *testing.T) {
+	_, path := liveConfigFixture(t, false)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Commands = map[string]config.CommandMapping{
+			"review":  {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"audit":   {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		}
+		cfg.Repositories[0].Actions = []string{"review", "audit"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := adminPreflightOwner(t, false, func() {
+		if err := live.save(func(cfg *config.Config) error {
+			cfg.Repositories[0].Actions = []string{"review"}
+			return nil
+		}); err != nil {
+			t.Errorf("concurrent command removal: %v", err)
+		}
+	})
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, owner)
+	form := url.Values{"name": {"owner/repo"}, "actions": {"review", "audit", "comment"}}
+	r := httptest.NewRequest(http.MethodPost, "/admin/repositories/actions", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "Repository commands changed; reload and try again") {
+		t.Fatalf("stale repository edit: status=%d body=%q", w.Code, w.Body.String())
+	}
+	saved, _ := configForAdminTest(t, path).Repository("owner/repo")
+	if len(saved.Actions) != 1 || saved.Actions[0] != "review" {
+		t.Fatalf("stale edit restored removed command: %v", saved.Actions)
+	}
+}
+
+func adminPreflightOwner(t *testing.T, archived bool, onNotifications ...func()) *action.Orchestrator {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fixture-token" {
@@ -303,6 +348,9 @@ func adminPreflightOwner(t *testing.T, archived bool) *action.Orchestrator {
 		}
 		switch r.URL.Path {
 		case "/repos/owner/repo/notifications":
+			if len(onNotifications) != 0 {
+				onNotifications[0]()
+			}
 			_, _ = w.Write([]byte(`[]`))
 		case "/repos/owner/repo":
 			if archived {
@@ -368,6 +416,111 @@ func TestAdminSkillTrailingSlashDoesNotReinstallActiveSource(t *testing.T) {
 	post("/admin/skills/remove", "always", http.StatusSeeOther, "")
 	if got := configForAdminTest(t, path).AlwaysOnSkills; len(got) != 0 {
 		t.Fatalf("slash-terminated source was not removed: %v", got)
+	}
+}
+
+func TestAdminSkillPromotionInstallsOnlyMissingCriticCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	const source = "https://github.com/owner/project/tree/main/skills/shared"
+	const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	codexDir := filepath.Join(home, ".agents", "skills", "shared")
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldSkill := []byte("Active Codex instructions.\n")
+	oldMetadata := []byte(`{"url":"` + source + `","commit":"` + sha + `"}`)
+	for name, content := range map[string][]byte{"SKILL.md": oldSkill, ".minion-install.json": oldMetadata} {
+		if err := os.WriteFile(filepath.Join(codexDir, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"bot_login":"bot","adversarial":"claude","claude":{"effort":"high"},"commands":{"review":{"action":"review","skills":["builtin://anti-prompt-injection","` + source + `"]}},"repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, installed, err := skills.InstalledPathFor(source, "codex"); err != nil || !installed {
+		t.Fatalf("active Codex skill is unavailable: %t, %v", installed, err)
+	}
+	if _, installed, err := skills.InstalledPathFor(source, "claude"); err != nil || installed {
+		t.Fatalf("Claude skill should be missing: %t, %v", installed, err)
+	}
+	const claudeSkill = "New Claude instructions.\n"
+	var archive bytes.Buffer
+	gzipWriter := gzip.NewWriter(&archive)
+	tarWriter := tar.NewWriter(gzipWriter)
+	if err := tarWriter.WriteHeader(&tar.Header{Name: "archive/skills/shared/SKILL.md", Mode: 0o600, Size: int64(len(claudeSkill))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tarWriter.Write([]byte(claudeSkill)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gzipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	previousTransport := http.DefaultTransport
+	var requests []string
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host != "api.github.com" {
+			t.Errorf("unexpected skill host %q", request.URL.Host)
+		}
+		requests = append(requests, request.URL.Path)
+		recorder := httptest.NewRecorder()
+		switch request.URL.Path {
+		case "/repos/owner/project/commits/main":
+			_, _ = recorder.WriteString(`{"sha":"` + sha + `"}`)
+		case "/repos/owner/project/tarball/" + sha:
+			_, _ = recorder.Write(archive.Bytes())
+		default:
+			t.Errorf("unexpected skill download %q", request.URL.Path)
+			recorder.WriteHeader(http.StatusNotFound)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, nil)
+	form := url.Values{"target": {"always"}, "url": {source}}
+	request := httptest.NewRequest(http.MethodPost, "/admin/skills/add", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusSeeOther {
+		t.Fatalf("promote skill: status=%d body=%q", response.Code, response.Body.String())
+	}
+	if len(requests) != 2 || requests[0] != "/repos/owner/project/commits/main" || requests[1] != "/repos/owner/project/tarball/"+sha {
+		t.Fatalf("skill downloads = %v", requests)
+	}
+	for name, want := range map[string][]byte{"SKILL.md": oldSkill, ".minion-install.json": oldMetadata} {
+		got, err := os.ReadFile(filepath.Join(codexDir, name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("active Codex %s changed: %q, %v", name, got, err)
+		}
+	}
+	claudePath, installed, err := skills.InstalledPathFor(source, "claude")
+	if err != nil || !installed {
+		t.Fatalf("Claude skill was not installed: %q, %t, %v", claudePath, installed, err)
+	}
+	if got, err := os.ReadFile(claudePath); err != nil || string(got) != claudeSkill {
+		t.Fatalf("Claude skill content = %q, %v", got, err)
+	}
+	if got := configForAdminTest(t, path).AlwaysOnSkills; len(got) == 0 || got[len(got)-1] != source {
+		t.Fatalf("skill promotion was not saved: %v", got)
 	}
 }
 

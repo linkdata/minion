@@ -2,6 +2,7 @@ package skills
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -313,6 +314,51 @@ func TestInstallWholeSubtreesForBothAgents(t *testing.T) {
 	}
 	if _, installed, err := InstalledPath(testURL); err != nil || !installed {
 		t.Fatalf("installed skill unavailable: %t, %v", installed, err)
+	}
+}
+
+func TestInstallForLeavesOtherProviderUntouched(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	codexDir := filepath.Join(home, ".agents", "skills", "review")
+	if err := os.MkdirAll(codexDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldSkill := []byte("Existing Codex skill.\n")
+	oldMetadata := []byte(`{"url":"` + testURL + `","commit":"` + testSHA + `"}`)
+	if err := os.WriteFile(filepath.Join(codexDir, "SKILL.md"), oldSkill, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexDir, installMetadataName), oldMetadata, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive := tarball(t, []archiveEntry{{name: "prefix/skills/review/SKILL.md", body: "New Claude skill."}})
+	i, commits, archives := testInstaller(t, home, archive)
+	if err := i.install(t.Context(), []string{testURL}, "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if *commits != 1 || *archives != 1 {
+		t.Fatalf("downloads = %d commits, %d archives; want one each", *commits, *archives)
+	}
+	for name, want := range map[string][]byte{"SKILL.md": oldSkill, installMetadataName: oldMetadata} {
+		got, err := os.ReadFile(filepath.Join(codexDir, name))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("Codex %s changed: %q, %v", name, got, err)
+		}
+	}
+	claudePath, installed, err := InstalledPathFor(testURL, "claude")
+	if err != nil || !installed {
+		t.Fatalf("Claude skill was not installed: %q, %t, %v", claudePath, installed, err)
+	}
+	got, err := os.ReadFile(claudePath)
+	if err != nil || string(got) != "New Claude skill." {
+		t.Fatalf("Claude skill content = %q, %v", got, err)
+	}
+	for _, parent := range []string{".agents", ".claude"} {
+		entries, err := os.ReadDir(filepath.Join(home, parent))
+		if err != nil || len(entries) != 1 || entries[0].Name() != "skills" {
+			t.Fatalf("%s left staging files: %v, %v", parent, entries, err)
+		}
 	}
 }
 

@@ -169,6 +169,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if err := validateAdminActions(current, actions, repo.Actions); err != nil {
 			return err
 		}
+		originalActions := slices.Clone(repo.Actions)
 		for _, action := range actions {
 			if slices.Contains(repo.Actions, action) {
 				continue
@@ -187,6 +188,9 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		return live.save(func(cfg *config.Config) error {
 			for i := range cfg.Repositories {
 				if strings.EqualFold(cfg.Repositories[i].Name, name) {
+					if !slices.Equal(cfg.Repositories[i].Actions, originalActions) {
+						return errors.New("Repository commands changed; reload and try again")
+					}
 					if err := validateAdminActions(*cfg, actions, cfg.Repositories[i].Actions); err != nil {
 						return err
 					}
@@ -242,33 +246,36 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			return err
 		}
 		current := live.snapshot().Config
-		needsInstall := false
 		providers := []string{current.Main}
-		if target == "always" {
+		if target == "always" && current.Adversarial != current.Main {
 			providers = append(providers, current.Adversarial)
 		}
+		var missing []string
 		for _, provider := range providers {
 			if provider == "" {
 				continue
 			}
 			_, installed, err := skills.InstalledPathFor(source, provider)
-			if err != nil {
-				if !errors.Is(err, skills.ErrSourceMismatch) {
-					return fmt.Errorf("Check installed skill: %w", err)
-				}
-				needsInstall = true
+			if err != nil && !errors.Is(err, skills.ErrSourceMismatch) {
+				return fmt.Errorf("Check installed skill: %w", err)
+			}
+			if installed {
 				continue
 			}
-			needsInstall = needsInstall || !installed
-		}
-		if needsInstall {
-			if adminHasSkillSource(current, source) || adminHasSkillSource(live.current(), source) {
-				return errors.New("Skill is already configured but missing for a selected AI; install configured skills after active actions finish, then retry")
-			}
-			if adminHasSkillName(live.current(), name) {
+			if activeSource := adminActiveSkillSource(live.current(), provider, name); activeSource != "" {
+				if activeSource == source {
+					return errors.New("Skill is already configured but missing for a selected AI; install configured skills after active actions finish, then retry")
+				}
 				return errors.New("A skill with this name is still active from another source; wait for active actions to finish before replacing it")
 			}
+			missing = append(missing, provider)
+		}
+		if len(missing) == 2 {
 			if err := skills.Install(ctx, []string{source}); err != nil {
+				return fmt.Errorf("Install skill: %w", err)
+			}
+		} else if len(missing) == 1 {
+			if err := skills.InstallFor(ctx, source, missing[0]); err != nil {
 				return fmt.Errorf("Install skill: %w", err)
 			}
 		}
@@ -378,34 +385,29 @@ func validateAdminActions(cfg config.Config, actions, existing []string) error {
 	return nil
 }
 
-func adminHasSkillSource(cfg config.Config, source string) bool {
-	if slices.Contains(cfg.AlwaysOnSkills, source) {
-		return true
-	}
-	for _, command := range cfg.Commands {
-		if slices.Contains(command.Skills, source) {
-			return true
-		}
-	}
-	return false
-}
-
-func adminHasSkillName(cfg config.Config, name string) bool {
-	for _, source := range cfg.AlwaysOnSkills {
-		configured, _ := skills.Name(source) // Validated configuration.
-		if strings.EqualFold(configured, name) {
-			return true
-		}
-	}
-	for _, command := range cfg.Commands {
-		for _, source := range command.Skills {
-			configured, _ := skills.Name(source)
+func adminActiveSkillSource(cfg config.Config, provider, name string) string {
+	find := func(sources []string) string {
+		for _, source := range sources {
+			configured, _ := skills.Name(source) // Validated configuration.
 			if strings.EqualFold(configured, name) {
-				return true
+				return source
+			}
+		}
+		return ""
+	}
+	if provider == cfg.Main || provider == cfg.Adversarial {
+		if source := find(cfg.AlwaysOnSkills); source != "" {
+			return source
+		}
+	}
+	if provider == cfg.Main {
+		for _, command := range cfg.Commands {
+			if source := find(command.Skills); source != "" {
+				return source
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 func editAdminSkills(cfg *config.Config, target string, change func([]string) ([]string, error)) error {
