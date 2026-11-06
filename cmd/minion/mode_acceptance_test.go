@@ -182,6 +182,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2, Actions: []string{"comment"},
 			AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}}}
 	cfg.Codex.APIKey = offlineModeSelectedAPIKey
+	cfg.Claude.APIKey = "fixture-unselected-key"
 	t.Setenv("GH_TOKEN", "offline-token")
 	t.Setenv("CODEX_API_KEY", "fixture-ambient-codex-key")
 	for _, name := range []string{"GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "OPENAI_API_KEY",
