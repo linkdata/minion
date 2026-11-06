@@ -25,6 +25,35 @@ import (
 	"github.com/linkdata/minion/internal/state"
 )
 
+func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
+	current := config.Config{
+		Commands: map[string]config.CommandMapping{
+			"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"review":  {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}},
+			"fix":     {Action: "fix", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		},
+		Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment"}}},
+	}
+	selected := map[string]bool{"comment": true, "review": true}
+	reenabled := current
+	reenabled.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "review"}}}
+	if !sameSkillConfig(current, reenabled) || !hasNewCommand(current, reenabled) || hasUnselectedCommand(selected, reenabled) {
+		t.Fatal("re-enabling a frozen command incorrectly requires remote restart")
+	}
+	newCommand := current
+	newCommand.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "fix"}}}
+	if !sameSkillConfig(current, newCommand) || !hasUnselectedCommand(selected, newCommand) {
+		t.Fatal("unselected command bypassed remote restart")
+	}
+	unsupported := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
+		"comment":        {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
+	if hasUnselectedCommand(map[string]bool{"comment": true}, unsupported) {
+		t.Fatal("unchanged provider-unsupported command incorrectly requires remote restart")
+	}
+}
+
 func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testing.T) {
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))

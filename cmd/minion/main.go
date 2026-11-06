@@ -315,6 +315,21 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 func runMonitorLoopWithConfigUpdates(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool, configUpdates <-chan struct{}) int {
 	pendingConfigUpdate := false
 	for {
+		if ctx.Err() != nil {
+			return 0
+		}
+		select {
+		case <-configUpdates:
+			pendingConfigUpdate = true
+			configUpdates = nil
+		default:
+		}
+		if ctx.Err() != nil {
+			return 0
+		}
+		if pendingConfigUpdate && store.Data.Accepted == nil {
+			return monitorConfigChanged
+		}
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -352,6 +367,9 @@ func runMonitorLoopWithConfigUpdates(ctx context.Context, watcher *monitor.Monit
 			pendingConfigUpdate = true
 			configUpdates = nil
 		default:
+		}
+		if ctx.Err() != nil {
+			return 0
 		}
 		if pendingConfigUpdate && store.Data.Accepted == nil {
 			return monitorConfigChanged

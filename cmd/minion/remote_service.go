@@ -9,9 +9,22 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
+
+func hasUnselectedCommand(selected map[string]bool, cfg config.Config) bool {
+	for _, repo := range cfg.Repositories {
+		for _, name := range repo.Actions {
+			mapping := cfg.Commands[name]
+			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && !selected[name] {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func attachSelectedRemoteWorker(owner *action.Orchestrator, watcher *monitor.Monitor) (*action.RemoteEndpoint, error) {
 	if owner == nil || watcher == nil || watcher.Config.RemoteExecutor == nil {
@@ -90,7 +103,7 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 			return code
 		}
 		cfg, generation := live.next()
-		if !sameSkillConfig(watcher.Config, cfg) || hasNewCommand(watcher.Config, cfg) {
+		if !sameSkillConfig(watcher.Config, cfg) || hasUnselectedCommand(watcher.SelectedCommands, cfg) {
 			err := errors.New("remote worker selection cannot change while connected")
 			live.applied(watcher.Config, generation, err)
 			logger.Printf("activate admin config: %s", monitor.InertLogText(err.Error()))

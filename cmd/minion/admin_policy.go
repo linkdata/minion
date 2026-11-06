@@ -38,7 +38,10 @@ func policyView(snapshot adminConfigSnapshot) adminPolicyView {
 		view.Instructions = action.DefaultAIInstructions
 	}
 	for _, requester := range cfg.RequesterPolicies {
-		row := adminRoundOverride{Name: requester.Login, ID: requester.ID, Value: cfg.RequiredCleanRounds(0, requester.ID), Set: requester.RequiredCleanRounds != nil}
+		if requester.RequiredCleanRounds == nil {
+			continue
+		}
+		row := adminRoundOverride{Name: requester.Login, ID: requester.ID, Value: *requester.RequiredCleanRounds}
 		view.Requesters = append(view.Requesters, row)
 	}
 	for _, repo := range cfg.Repositories {

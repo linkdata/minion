@@ -18,15 +18,16 @@ var errAdminRestartRequired = errors.New("configuration changed outside the admi
 // adminLiveConfig keeps disk writes and the running worker's configuration distinct.
 // The monitor applies saved edits only between iterations, after an accepted action ends.
 type adminLiveConfig struct {
-	path       string
-	mu         sync.RWMutex
-	active     config.Config
-	desired    config.Config
-	disk       config.Config
-	generation uint64
-	pending    bool
-	lastError  string
-	updates    chan struct{}
+	path           string
+	mu             sync.RWMutex
+	active         config.Config
+	desired        config.Config
+	disk           config.Config
+	remoteSelected map[string]bool
+	generation     uint64
+	pending        bool
+	lastError      string
+	updates        chan struct{}
 }
 
 func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error) {
@@ -39,7 +40,18 @@ func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error
 	if !sameFixedConfig(cfg, resolved) {
 		return nil, errAdminRestartRequired
 	}
-	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, updates: make(chan struct{}, 1)}, nil
+	selected := make(map[string]bool)
+	if cfg.RemoteExecutor != nil {
+		for _, repo := range cfg.Repositories {
+			for _, name := range repo.Actions {
+				mapping := cfg.Commands[name]
+				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) {
+					selected[name] = true
+				}
+			}
+		}
+	}
+	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, remoteSelected: selected, updates: make(chan struct{}, 1)}, nil
 }
 
 func (a *adminLiveConfig) current() config.Config {
@@ -191,7 +203,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 			return errAdminRestartRequired
 		}
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
-		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasNewCommand(a.desired, activate)) {
+		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate)) {
 			return errors.New("this change requires restarting the remote worker")
 		}
 		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
@@ -220,7 +232,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	applyRuntimeModels(&activate, a.active)
 	before, _ := json.Marshal(a.desired)
 	after, _ := json.Marshal(activate)
-	if bytes.Equal(before, after) {
+	if bytes.Equal(before, after) && a.lastError == "" {
 		return nil
 	}
 	a.desired = activate

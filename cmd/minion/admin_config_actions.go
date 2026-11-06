@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
@@ -23,6 +24,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 	if live == nil {
 		return
 	}
+	var skillMu sync.Mutex
 	mux.Handle("POST /admin/users/add", adminConfigPost("/admin/users", []string{"repository", "login"}, "", func(ctx context.Context, values url.Values) error {
 		repoName, login := strings.ToLower(values.Get("repository")), strings.ToLower(values.Get("login"))
 		if !workspace.ValidRepository(repoName) || !validAdminGitHubLogin(login) {
@@ -211,9 +213,13 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		if len(source) > config.MaxSkillURLBytes {
 			return errors.New("Skill URL is too long")
 		}
-		if _, err := skills.Name(source); err != nil {
+		name, err := skills.Name(source)
+		if err != nil {
 			return fmt.Errorf("Invalid skill URL: %w", err)
 		}
+		source = strings.TrimSuffix(source, "/")
+		skillMu.Lock()
+		defer skillMu.Unlock()
 		if live.snapshot().Remote {
 			return errors.New("Skill changes require restarting the remote worker")
 		}
@@ -248,6 +254,9 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			if adminHasSkillSource(current, source) || adminHasSkillSource(live.current(), source) {
 				return errors.New("Skill is already configured but missing for a selected AI; install configured skills after active actions finish, then retry")
 			}
+			if adminHasSkillName(live.current(), name) {
+				return errors.New("A skill with this name is still active from another source; wait for active actions to finish before replacing it")
+			}
 			if err := skills.Install(ctx, []string{source}); err != nil {
 				return fmt.Errorf("Install skill: %w", err)
 			}
@@ -256,9 +265,15 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 	}))
 	mux.Handle("POST /admin/skills/remove", adminConfigPost("/admin/skills", []string{"target", "url"}, "", func(_ context.Context, values url.Values) error {
 		target, source := values.Get("target"), values.Get("url")
-		if len(source) > config.MaxSkillURLBytes || source == "" {
-			return errors.New("Invalid skill URL")
+		if len(source) > config.MaxSkillURLBytes {
+			return errors.New("Skill URL is too long")
 		}
+		if _, err := skills.Name(source); err != nil {
+			return fmt.Errorf("Invalid skill URL: %w", err)
+		}
+		source = strings.TrimSuffix(source, "/")
+		skillMu.Lock()
+		defer skillMu.Unlock()
 		return live.save(func(cfg *config.Config) error {
 			return editAdminSkills(cfg, target, func(urls []string) ([]string, error) {
 				for i, configured := range urls {
@@ -339,6 +354,24 @@ func adminHasSkillSource(cfg config.Config, source string) bool {
 	for _, command := range cfg.Commands {
 		if slices.Contains(command.Skills, source) {
 			return true
+		}
+	}
+	return false
+}
+
+func adminHasSkillName(cfg config.Config, name string) bool {
+	for _, source := range cfg.AlwaysOnSkills {
+		configured, _ := skills.Name(source) // Validated configuration.
+		if strings.EqualFold(configured, name) {
+			return true
+		}
+	}
+	for _, command := range cfg.Commands {
+		for _, source := range command.Skills {
+			configured, _ := skills.Name(source)
+			if strings.EqualFold(configured, name) {
+				return true
+			}
 		}
 	}
 	return false

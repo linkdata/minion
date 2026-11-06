@@ -32,6 +32,66 @@ func (*blockedConfigUpdateHandler) Execute(context.Context, monitor.Job) error {
 	return errors.New("unexpected selected execution")
 }
 
+func TestRunMonitorLoopConfigUpdatePrecedesFirstPoll(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+		handler := &blockedConfigUpdateHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		watcher := &monitor.Monitor{Handler: handler, SelectedExecutorID: "local"}
+		updates := make(chan struct{}, 1)
+		updates <- struct{}{}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan int, 1)
+		go func() {
+			result <- runMonitorLoopWithConfigUpdates(ctx, watcher, store, true, nil, log.New(io.Discard, "", 0), false, updates)
+		}()
+		synctest.Wait()
+		select {
+		case code := <-result:
+			if code != monitorConfigChanged {
+				t.Fatalf("queued update returned %d, want config change", code)
+			}
+		case <-handler.entered:
+			cancel()
+			close(handler.release)
+			synctest.Wait()
+			t.Fatal("monitor polled with stale configuration before applying queued update")
+		default:
+			t.Fatal("monitor neither applied the update nor entered its first poll")
+		}
+	})
+}
+
+func TestRunMonitorLoopCancellationWinsQueuedUpdate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+		handler := &blockedConfigUpdateHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		watcher := &monitor.Monitor{Handler: handler, SelectedExecutorID: "local"}
+		updates := make(chan struct{}, 1)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan int, 1)
+		go func() {
+			result <- runMonitorLoopWithConfigUpdates(ctx, watcher, store, true, nil, log.New(io.Discard, "", 0), false, updates)
+		}()
+		<-handler.entered
+		updates <- struct{}{}
+		cancel()
+		close(handler.release)
+		synctest.Wait()
+		select {
+		case code := <-result:
+			if code != 0 {
+				t.Fatalf("cancellation with queued update returned %d, want clean shutdown", code)
+			}
+		default:
+			t.Fatal("monitor did not stop after cancellation")
+		}
+	})
+}
+
 func TestRunMonitorLoopConfigUpdateWakesScheduledSleep(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

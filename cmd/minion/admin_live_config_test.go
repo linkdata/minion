@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,114 @@ func TestAdminLiveConfigRejectsRemoteCommandExpansion(t *testing.T) {
 		return nil
 	}); err == nil {
 		t.Fatal("remote worker gained a command without re-selection")
+	}
+}
+
+func TestAdminLiveConfigAllowsRemotePolicySaveWithUnsupportedAction(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Main = "claude"
+		cfg.Repositories[0].Actions = []string{"review", "security-audit"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.remoteSelected["security-audit"] || !live.remoteSelected["review"] {
+		t.Fatalf("remote selection = %v", live.remoteSelected)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Use the configured review style."
+		return nil
+	}); err != nil {
+		t.Fatalf("unrelated policy save was blocked by unsupported action: %v", err)
+	}
+	if !live.snapshot().Pending || live.snapshot().Config.AIInstructions != "Use the configured review style." {
+		t.Fatal("policy save was not staged for activation")
+	}
+}
+
+func TestAdminLiveConfigAllowsRemoteSelectedCommandReenable(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Repositories[0].Actions = []string{"review", "fix"}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = []string{"review"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	selected, generation := live.next()
+	live.applied(selected, generation, nil)
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = []string{"review", "fix"}
+		return nil
+	}); err != nil {
+		t.Fatalf("re-enabling frozen remote command: %v", err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = []string{"review", "fix", "audit"}
+		return nil
+	}); err == nil {
+		t.Fatal("new remote command bypassed frozen worker selection")
+	}
+}
+
+func TestAdminLiveConfigRetriesFailedActivation(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	edit := func(cfg *config.Config) error {
+		cfg.AIInstructions = "Check the task."
+		return nil
+	}
+	if err := live.save(edit); err != nil {
+		t.Fatal(err)
+	}
+	<-live.updates
+	selected, generation := live.next()
+	live.applied(live.current(), generation, errors.New("temporary worker failure"))
+	if live.snapshot().Pending || live.snapshot().Error == "" {
+		t.Fatal("failed activation was not reported")
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(edit); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().Pending || live.snapshot().Error != "" {
+		t.Fatal("resubmitted configuration did not queue a retry")
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("retry did not wake the monitor")
+	}
+	current, retryGeneration := live.next()
+	if retryGeneration <= generation || current.AIInstructions != selected.AIInstructions {
+		t.Fatal("retry did not retain the saved configuration")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("retry rewrote unchanged JSON: %v", err)
 	}
 }
 

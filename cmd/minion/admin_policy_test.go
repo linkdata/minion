@@ -21,6 +21,16 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 	if view.Global != 1 || view.Custom || view.Instructions != action.DefaultAIInstructions {
 		t.Fatalf("default policy = %+v", view)
 	}
+	cfg := live.snapshot().Config
+	rounds := 3
+	cfg.RequesterPolicies = []config.RequesterPolicy{
+		{Login: "inherited", ID: 7},
+		{Login: "custom", ID: 8, RequiredCleanRounds: &rounds},
+	}
+	view = policyView(adminConfigSnapshot{Config: cfg})
+	if len(view.Requesters) != 1 || view.Requesters[0].Name != "custom" || view.Requesters[0].Value != rounds {
+		t.Fatalf("requester overrides = %+v", view.Requesters)
+	}
 	view.Instructions = `<script>alert("x")</script>`
 	view.Custom = true
 	var body bytes.Buffer
@@ -32,6 +42,7 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body.String(), "&lt;script&gt;") || strings.Contains(body.String(), "<script>alert") ||
+		strings.Contains(body.String(), "@inherited") || !strings.Contains(body.String(), "@custom") ||
 		!strings.Contains(body.String(), "/admin/policy/instructions/reset") {
 		t.Fatalf("instructions page is unsafe or lacks reset: %s", body.String())
 	}

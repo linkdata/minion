@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,10 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
+	"github.com/linkdata/minion/internal/skills"
 )
 
 func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
@@ -153,6 +156,120 @@ func TestAdminRepositoryActionExpansionRequiresRemoteRestart(t *testing.T) {
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "restarting the remote worker") {
 		t.Fatalf("remote action expansion: status=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestAdminSkillTrailingSlashDoesNotReinstallActiveSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("https_proxy", "http://127.0.0.1:1")
+	const source = "https://github.com/owner/project/tree/main/skills/other"
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"bot_login":"bot","commands":{"review":{"action":"review","skills":["builtin://anti-prompt-injection"]}},"always_on_skills":["` + source + `"],"repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, nil)
+	post := func(route, target string, want int, message string) {
+		t.Helper()
+		form := url.Values{"target": {target}, "url": {source + "/"}}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		r := httptest.NewRequest(http.MethodPost, route, strings.NewReader(form.Encode())).WithContext(ctx)
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != want || !strings.Contains(w.Body.String(), message) {
+			t.Fatalf("POST %s: status=%d body=%q", route, w.Code, w.Body.String())
+		}
+	}
+	post("/admin/skills/add", "always", http.StatusConflict, "already configured for this target")
+	post("/admin/skills/add", "command:review", http.StatusConflict, "already configured but missing")
+	if got := configForAdminTest(t, path).AlwaysOnSkills; len(got) != 1 || got[0] != source {
+		t.Fatalf("active source changed after rejected add: %v", got)
+	}
+	post("/admin/skills/remove", "always", http.StatusSeeOther, "")
+	if got := configForAdminTest(t, path).AlwaysOnSkills; len(got) != 0 {
+		t.Fatalf("slash-terminated source was not removed: %v", got)
+	}
+}
+
+func TestAdminSkillAddWaitsForActiveSameNameSource(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("https_proxy", "http://127.0.0.1:1")
+	const oldSource = "https://github.com/old/project/tree/main/skills/shared"
+	const newSource = "https://github.com/new/project/tree/main/skills/shared"
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := `{"bot_login":"bot","adversarial":"claude","claude":{"effort":"high"},"commands":{"review":{"action":"review","skills":["builtin://anti-prompt-injection"]}},"always_on_skills":["` + oldSource + `"],"repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(home, ".claude", "skills", "shared")
+	if err := os.MkdirAll(installed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installed, "SKILL.md"), []byte("---\nname: shared\n---\nOld instructions.\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"url":"` + oldSource + `","commit":"` + strings.Repeat("a", 40) + `"}`
+	if err := os.WriteFile(filepath.Join(installed, ".minion-install.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, present, err := skills.InstalledPathFor(oldSource, "claude"); err != nil || !present {
+		t.Fatalf("old critic skill is not installed: %t, %v", present, err)
+	}
+	if _, present, err := skills.InstalledPathFor(newSource, "codex"); err != nil || present {
+		t.Fatalf("new main skill should be missing: %t, %v", present, err)
+	}
+	if err := live.save(func(cfg *config.Config) error { cfg.AlwaysOnSkills = []string{}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().Pending || len(live.current().AlwaysOnSkills) != 1 || len(live.snapshot().Config.AlwaysOnSkills) != 0 {
+		t.Fatal("old skill must remain active until the monitor applies its removal")
+	}
+	mux := http.NewServeMux()
+	registerAdminConfigActions(mux, live, nil)
+	form := url.Values{"target": {"command:review"}, "url": {newSource}}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	r := httptest.NewRequest(http.MethodPost, "/admin/skills/add", strings.NewReader(form.Encode())).WithContext(ctx)
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "still active from another source") {
+		t.Fatalf("pending same-name replacement: status=%d body=%q", w.Code, w.Body.String())
+	}
+	if body, err := os.ReadFile(filepath.Join(installed, "SKILL.md")); err != nil || !strings.Contains(string(body), "Old instructions.") {
+		t.Fatalf("active critic skill was replaced: %q, %v", body, err)
+	}
+	if got := configForAdminTest(t, path).Commands["review"].Skills; len(got) != 1 || got[0] != "builtin://anti-prompt-injection" {
+		t.Fatalf("rejected replacement was saved: %v", got)
 	}
 }
 
