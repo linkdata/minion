@@ -146,6 +146,45 @@ func TestGitHubCloneRequiresConfiguredToken(t *testing.T) {
 	}
 }
 
+func TestConfiguredTokenReachesCloneFetchAndPush(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
+	}
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, "pr.txt"), "PR head\n")
+	head := fixture.commit("refs/pull/7/head", "PR head")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(t.TempDir(), "git-credentials")
+	fakeOnPath(t, "git", `#!/bin/sh
+for arg do
+  case "$arg" in
+    clone|fetch|push) printf '%s %s\n' "$arg" "$MINION_GITHUB_TOKEN" >> `+shellQuote(log)+`; break ;;
+  esac
+done
+exec `+shellQuote(realGit)+` "$@"
+`)
+	const token = "configured-github-token"
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true, token))
+	fixture.keepCheckout(clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head, token))
+	const branch = "minion/fix-token"
+	if err := checkout.NewBranch(t.Context(), branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.Import(t.Context(), fixture.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.commitAndPush(t.Context(), fixture.remote, branch, "bot", "fix", testCommitDate, func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(log)
+	if err != nil || string(got) != "clone "+token+"\nclone "+token+"\nfetch "+token+"\npush "+token+"\n" {
+		t.Fatalf("Git credential handoff = %q: %v", got, err)
+	}
+}
+
 func TestGitErrorLabelsCommandAfterConfigOptions(t *testing.T) {
 	fixture := newFixture(t)
 	_, err := runGit(t.Context(), fixture.checkout.path,
