@@ -183,7 +183,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		if access.rejectRotatedCookie(w, r) {
 			return
 		}
-		if oauth != nil && jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
 			w.WriteHeader(http.StatusServiceUnavailable)

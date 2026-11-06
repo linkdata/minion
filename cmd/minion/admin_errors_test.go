@@ -116,6 +116,11 @@ func TestOAuthOnlyHomeOmitsAdminLogin(t *testing.T) {
 		strings.Contains(home.Body.String(), `href="/admin/login"`) {
 		t.Fatalf("OAuth-only home: status=%d body=%q", home.Code, home.Body.String())
 	}
+	denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, page.Result().Cookies()[0], "")
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `href="/"`) ||
+		strings.Contains(denied.Body.String(), `href="/admin/login"`) {
+		t.Fatalf("OAuth-only error links to unavailable admin login: status=%d body=%q", denied.Code, denied.Body.String())
+	}
 }
 
 func TestAdminErrorWithoutSessionIsStatusOnly(t *testing.T) {

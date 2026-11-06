@@ -355,24 +355,15 @@ func (a *oauthAccess) logout(w http.ResponseWriter, r *http.Request, admin *admi
 	admin.sessionAdmissionMu.Lock()
 	a.linkMu.Lock()
 	sess := a.jaws.GetSession(r)
-	account, _ := a.currentUser(sess)
-	rotated := false
 	if sess == nil {
-		sess, rotated = admin.rotatedSessionForLogout(r)
-		if sess != nil {
-			account, _ = a.currentUser(sess)
-		}
+		sess, _ = admin.rotatedSessionForLogout(r)
 	}
-	if account != "" || rotated && sess != nil {
+	if sess != nil {
 		admin.markSignedOutCookie(sess.CookieValue())
 		sess.Close()
 	}
 	a.linkMu.Unlock()
 	admin.sessionAdmissionMu.Unlock()
-	if account == "" && !rotated {
-		w.WriteHeader(http.StatusForbidden)
-		return
-	}
 	if sess != nil {
 		for _, p := range a.providers {
 			p.server.Logout(sess, r)

@@ -251,11 +251,46 @@ func TestGitHubOAuthSignInWithoutLocalAdmin(t *testing.T) {
 	if loginPage := adminResponse(handler, http.MethodGet, "/auth/login", nil, reopened.Result().Cookies()[0], ""); loginPage.Code != http.StatusOK || !strings.Contains(loginPage.Body.String(), "Sign in with GitHub") {
 		t.Fatalf("guest OAuth login after logout: status=%d body=%q", loginPage.Code, loginPage.Body.String())
 	}
-	if denied := adminResponse(handler, http.MethodPost, "/auth/logout", nil, reopened.Result().Cookies()[0], "https://admin.example"); denied.Code != http.StatusSeeOther || denied.Header().Get("Location") != "/auth/login?error=request" || denied.Body.Len() != 0 {
-		t.Fatalf("guest logout error: status=%d body=%q", denied.Code, denied.Body.String())
+	if guestLogout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, reopened.Result().Cookies()[0], "https://admin.example"); guestLogout.Code != http.StatusSeeOther || guestLogout.Header().Get("Location") != "/" || jw.GetSession(requestWithCookie(reopened.Result().Cookies()[0])) != nil {
+		t.Fatalf("guest logout: status=%d location=%q", guestLogout.Code, guestLogout.Header().Get("Location"))
 	}
 	if _, err := os.Stat(auth.links.path); !os.IsNotExist(err) {
 		t.Fatalf("unlinked login wrote durable links: %v", err)
+	}
+}
+
+func TestOAuthLogoutClosesSessionAfterLinkStoreWriteFailure(t *testing.T) {
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/github/callback"}}
+	handler, jw, auth := testOAuthAdminHandler(t, cfg, nil)
+	request := httptest.NewRequest(http.MethodGet, "https://admin.example/auth/login", nil)
+	response := httptest.NewRecorder()
+	sess := jw.NewSession(response, request)
+	if sess == nil || len(response.Result().Cookies()) != 1 {
+		t.Fatal("could not create OAuth session")
+	}
+	provider := auth.providers[0].server
+	sess.Set(provider.SessionKey, map[string]any{"iss": "https://github.com", "sub": "42"})
+	sess.Set("oauth2authexpiry.github", time.Now().Add(time.Hour))
+	if account, _ := auth.currentUser(sess); account == "" {
+		t.Fatal("OAuth session was not authenticated before storage failure")
+	}
+	auth.links.mu.Lock()
+	auth.links.bad = errors.New("save user links: injected write failure")
+	auth.links.mu.Unlock()
+	if account, _ := auth.currentUser(sess); account != "" {
+		t.Fatalf("fault-injected link store resolved account %q", account)
+	}
+	cookie := response.Result().Cookies()[0]
+	logout := adminResponse(handler, http.MethodPost, "/auth/logout", nil, cookie, "https://admin.example")
+	if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 0 ||
+		jw.GetSession(requestWithCookie(cookie)) != nil || sess.Get(provider.SessionKey) != nil {
+		t.Fatalf("storage-failure logout: status=%d location=%q cookies=%v session=%v claims=%v",
+			logout.Code, logout.Header().Get("Location"), logout.Result().Cookies(), jw.GetSession(requestWithCookie(cookie)), sess.Get(provider.SessionKey))
+	}
+	missing := adminResponse(handler, http.MethodPost, "/auth/logout", nil, nil, "https://admin.example")
+	if missing.Code != http.StatusSeeOther || missing.Header().Get("Location") != "/" || len(missing.Result().Cookies()) != 0 {
+		t.Fatalf("sessionless logout: status=%d location=%q cookies=%v", missing.Code, missing.Header().Get("Location"), missing.Result().Cookies())
 	}
 }
 

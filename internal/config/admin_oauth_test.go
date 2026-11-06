@@ -46,6 +46,21 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 			t.Errorf("loopback HTTP OAuth on %s: %v", tc.listen, err)
 		}
 	}
+	for _, tc := range []struct{ listen, host string }{
+		{"127.0.0.1:8377", "127.0.0.2"},
+		{"127.0.0.1:8377", "[::1]"},
+		{"127.0.0.2:8377", "localhost"},
+		{"[::1]:8377", "localhost"},
+	} {
+		unbound := valid()
+		unbound.Admin.Listen = tc.listen
+		unbound.Admin.TLSCertFile, unbound.Admin.TLSKeyFile = "", ""
+		unbound.Admin.GitHubOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/github/callback"
+		unbound.Admin.GitLabOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/gitlab/callback"
+		if err := unbound.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP host must match admin.listen") {
+			t.Errorf("unbound HTTP callback %s for %s: %v", tc.host, tc.listen, err)
+		}
+	}
 	defaultHTTPPort := valid()
 	defaultHTTPPort.Admin.Listen = "127.0.0.1:80"
 	defaultHTTPPort.Admin.TLSCertFile, defaultHTTPPort.Admin.TLSKeyFile = "", ""

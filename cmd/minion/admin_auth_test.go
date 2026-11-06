@@ -187,11 +187,7 @@ func TestOldCookieLogoutFromDifferentIPKeepsPasswordSession(t *testing.T) {
 			if jw.GetSession(requestWithCookie(current)) == nil {
 				t.Fatal("old cookie from another IP revoked the current session")
 			}
-			wantLocation := "/"
-			if path == "/auth/logout" {
-				wantLocation = "/auth/login?error=request"
-			}
-			if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != wantLocation {
+			if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" {
 				t.Fatalf("cross-IP logout: status=%d location=%q", logout.Code, logout.Header().Get("Location"))
 			}
 			valid := adminResponse(handler, http.MethodPost, path, nil, guest, "https://admin.example")
@@ -712,17 +708,28 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 	}
 }
 
-func TestHomeWithoutOAuthUsesFullSessionCapacity(t *testing.T) {
+func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	jw.MaxSessionsPerIP = 0
-	for jw.SessionCount() < maxOAuthAdmissionSessions {
+	for jw.SessionCount() < maxOAuthAdmissionSessions-2 {
 		if jw.NewSession(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://admin.example/", nil)) == nil {
 			t.Fatal("could not fill guest sessions")
 		}
 	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions+1 {
+	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
 		t.Fatalf("admin-only home: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
+	}
+	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
+	}
+	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxOAuthAdmissionSessions-1 {
+		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
+	}
+	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxOAuthAdmissionSessions {
+		t.Fatalf("admin sign-in at home reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
 	}
 }
 

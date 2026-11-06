@@ -478,7 +478,7 @@ func (c *Config) Validate(configDir string) error {
 		if err != nil || number == 0 {
 			return errors.New("admin.listen requires a numeric port from 1 to 65535")
 		}
-		if err := admin.validateOAuth(number); err != nil {
+		if err := admin.validateOAuth(host, number); err != nil {
 			return err
 		}
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {

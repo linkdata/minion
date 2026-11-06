@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func (a *AdminConfig) validateOAuth(listenPort uint64) error {
+func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error {
 	var cookieHost string
 	for _, entry := range []struct {
 		name, callbackPath string
@@ -41,6 +41,12 @@ func (a *AdminConfig) validateOAuth(listenPort uint64) error {
 			}
 			if listenPort != redirectPort {
 				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
+			}
+			callbackIP, _ := netip.ParseAddr(redirect.Hostname())
+			listenIP, _ := netip.ParseAddr(listenHost)
+			if !(callbackIP.IsValid() && callbackIP == listenIP ||
+				strings.EqualFold(redirect.Hostname(), "localhost") && listenHost == "127.0.0.1") {
+				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
 			}
 		}
 		if cookieHost != "" && !strings.EqualFold(cookieHost, redirect.Hostname()) {

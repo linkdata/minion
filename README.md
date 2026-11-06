@@ -106,7 +106,7 @@ Run `-check` while the persistent service is stopped; it takes the state lock. I
 
 Normal startup and `-check` verify Git's minimum version and run a bounded private synthetic offline bundle/import/index round trip under `work_root`, before AI or GitHub preflight. The check uses Minion's production Git paths with synthetic local files; it reads no project repository, fetches nothing and runs no model. A failed version or capability check stops startup with its cause. This proves the installed host Git operations exercised by the check, not every repository's compatibility, future executable immutability, account/API availability or Git execution inside an AI sandbox. Operators still provision tools and pinned skills. Recovery of a previously assigned or terminal accepted action can run before new-work preflight, using GitHub and any needed local Git or audit tools without starting a worker; new work still requires the normal checks. Install-only, usage and locked one-pass shortcuts do not gain this Git requirement.
 
-Minion runs as a persistent service on Linux, macOS, and Windows, with one selected local executor child. Add `-oneshot` for one cron-friendly polling pass. `-mode=orchestrate` selects the same service path explicitly:
+By default, Minion runs as a persistent service on Linux, macOS, and Windows, with one selected local executor child. Add `-oneshot` for one cron-friendly polling pass. `-mode=orchestrate` selects the same service path explicitly:
 
 ```sh
 ./bin/minion -config ./config.local.json
@@ -149,7 +149,7 @@ To enable user sign-in, register OAuth applications with the providers and add e
 }
 ```
 
-`gitlab_oauth.base_url` defaults to `https://gitlab.com`; it can name an HTTPS GitLab instance that supports OpenID Connect. The two callbacks must stay distinct. For local development without admin TLS, use HTTP callbacks on `localhost` with the same port as `admin.listen`. Open Minion's logged `localhost` URL so the browser sends its session cookie to the callback.
+`gitlab_oauth.base_url` defaults to `https://gitlab.com`; it can name an HTTPS GitLab instance that supports OpenID Connect. The two callbacks must stay distinct. For local development without admin TLS, use the listener's loopback IP and port in both HTTP callbacks. With the default `127.0.0.1` listener, `localhost` also works; open Minion's logged URL so the browser sends its session cookie to the callback.
 
 Open `/auth/login` to sign in with either provider and link the other account. Each linked account can contain at most one GitHub identity and one GitLab identity, even across GitLab hosts. Links are saved in `<state_path>.link`; back up this owner-only file with the state file. GitHub identity uses its numeric account ID; GitLab uses the OpenID Connect subject. GitHub requests `read:user`; GitLab requests `openid email`. Names and email addresses are labels, never ownership proof. Sign-in alone grants no repository access or GitLab action discovery. A linked account stays one account regardless of which provider is used next. Provider sign-in does not grant admin access; the local password account controls the admin dashboard.
 
