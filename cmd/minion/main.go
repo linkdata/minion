@@ -306,7 +306,14 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	return runOrchestrateMode(ctx, orchestrator, watcher, store, !*oneshot, logger, path, 2*time.Minute)
 }
 
+const monitorConfigChanged = 3
+
 func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool) int {
+	return runMonitorLoopWithConfigUpdates(ctx, watcher, store, loop, workerExited, logger, stopAfterAccepted, nil)
+}
+
+func runMonitorLoopWithConfigUpdates(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, workerExited <-chan struct{}, logger *log.Logger, stopAfterAccepted bool, configUpdates <-chan struct{}) int {
+	pendingConfigUpdate := false
 	for {
 		next, err := watcher.RunOnce(ctx, store)
 		if err != nil {
@@ -337,6 +344,17 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 		}
 		if !loop {
 			return 0
+		}
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-configUpdates:
+			pendingConfigUpdate = true
+			configUpdates = nil
+		default:
+		}
+		if pendingConfigUpdate && store.Data.Accepted == nil {
+			return monitorConfigChanged
 		}
 		wait := time.Until(next)
 		if wait < time.Second {
@@ -373,6 +391,16 @@ func runMonitorLoop(ctx context.Context, watcher *monitor.Monitor, store *state.
 			}
 			logger.Print("selected worker exited")
 			return 1
+		case <-configUpdates:
+			timer.Stop()
+			if ctx.Err() != nil {
+				return 0
+			}
+			if store.Data.Accepted == nil {
+				return monitorConfigChanged
+			}
+			pendingConfigUpdate = true
+			configUpdates = nil
 		case <-timer.C:
 		}
 	}
@@ -403,6 +431,8 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		Main:                  cfg.Main,
 		Adversarial:           cfg.Adversarial,
 		CriticStopping:        cfg.CriticStopping,
+		CleanCriticRounds:     cfg.RequiredCleanRounds,
+		AIInstructions:        cfg.AIInstructions,
 		AlwaysOnSkills:        cfg.AlwaysOnSkills,
 		CodexModel:            cfg.Codex.Model,
 		CodexEffort:           cfg.Codex.ReasoningEffort,

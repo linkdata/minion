@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -20,6 +22,36 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
+
+func writeModeConfig(t *testing.T, cfg config.Config) (config.Config, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loaded, path
+}
+
+func freeAdminListen(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
 
 func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
@@ -151,7 +183,8 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 	t.Cleanup(server.Close)
 	client := github.New("fixture-token")
 	client.HTTPClient, client.BaseURL = server.Client(), server.URL
-	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: client, BotID: 8}
+	watcher := &monitor.Monitor{Config: config.Config{BotLogin: "bot", Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2}}}, GitHub: client, BotID: 8}
 	if adminSetup == "occupied" {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
@@ -160,10 +193,11 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		t.Cleanup(func() { _ = listener.Close() })
 		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
 	} else if adminSetup == "active" {
-		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()}}
+		watcher.Config.Admin = &config.AdminConfig{Listen: freeAdminListen(t), Administrators: []config.AdminAccount{testAdminAccount()}}
 	} else if adminSetup == "placeholder" {
-		watcher.Config.Admin = &config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: config.AdminPasswordHashPlaceholder}}}
+		watcher.Config.Admin = &config.AdminConfig{Listen: freeAdminListen(t), Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: config.AdminPasswordHashPlaceholder}}}
 	}
+	watcher.Config, watcher.ConfigPath = writeModeConfig(t, watcher.Config)
 	var output strings.Builder
 	if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(&output, "", 0), "", 0); code != 1 {
 		t.Fatalf("orchestrate startup should fail after reconciliation: code=%d", code)

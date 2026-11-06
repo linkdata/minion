@@ -27,7 +27,7 @@ const (
 	maxProposalOutputBytes = 6*maxOutputBytes + 128
 	mainOutputSchema       = `{"type":"object","properties":{"answer":{"type":"string"},"refutations":{"type":"string"}},"required":["answer","refutations"],"additionalProperties":false}`
 	criticOutputSchema     = `{"type":"object","properties":{"approved":{"type":"boolean"},"has_blockers":{"type":"boolean"},"review_complete":{"type":"boolean"},"feedback":{"type":"string"}},"required":["approved","has_blockers","review_complete","feedback"],"additionalProperties":false}`
-	reviewCompleteness     = "Review rounds are expensive. Complete a comprehensive and exhaustive investigation of the entire assigned scope before returning; do not stop after the first few findings or after checking only blockers. Inspect connected code, callers, tests and relevant edge cases. Read every changed code and test body within the assigned scope; file inventories, test names and sampled bodies do not establish coverage. Collect every supported actionable finding, including nits and valid simplifications, in this round. Await all delegated reviews and background checks, inspect their outcomes, then make a final coverage pass for missed areas. Respect the selected task's execution restrictions, this phase's scope and the action deadline. If a runtime, context, quota or dependency limit prevents completion, identify the unchecked scope and reason instead of claiming a complete review."
+	DefaultAIInstructions  = "Review rounds are expensive. Complete a comprehensive and exhaustive investigation of the entire assigned scope before returning; do not stop after the first few findings or after checking only blockers. Inspect connected code, callers, tests and relevant edge cases. Read every changed code and test body within the assigned scope; file inventories, test names and sampled bodies do not establish coverage. Collect every supported actionable finding, including nits and valid simplifications, in this round. Await all delegated reviews and background checks, inspect their outcomes, then make a final coverage pass for missed areas. Respect the selected task's execution restrictions, this phase's scope and the action deadline. If a runtime, context, quota or dependency limit prevents completion, identify the unchecked scope and reason instead of claiming a complete review."
 )
 
 type modelCall func(context.Context, modelRun) (aicli.Result, error)
@@ -217,7 +217,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		}
 		var decisionReason string
 		var rejectedFeedback []string
-		for _, phase := range reviewPhases(round) {
+		phases := reviewPhases(round)
+		for i := 0; i < len(phases); i++ {
+			phase := phases[i]
 			previousAnswer, previousFeedback := "", ""
 			critic := modelRun{session: &sessions.critic, freshConversation: phase == reviewFull, role: roleCritic, round: round, reviewPhase: phase, provider: job.Critic.Provider, model: job.Critic.Model, effort: job.Critic.Effort, outputSchema: criticOutputSchema, proposedAnswer: candidate}
 			if phase == reviewVerification {
@@ -225,7 +227,7 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 				critic.refutations = slices.Clone(history)
 			}
 			critic.criticPrompt = func(mapping, outputDir string) string {
-				return criticPrompt(phase, prompt+mapping, candidate, previousAnswer, previousFeedback, outputDir)
+				return criticPromptWithInstructions(phase, prompt+mapping, candidate, previousAnswer, previousFeedback, outputDir, job.AIInstructions)
 			}
 			var review aicli.Result
 			if review, err = r.runOnce(ctx, critic); err != nil {
@@ -250,6 +252,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 			if phase == reviewVerification && !advance {
 				break
 			}
+			if phase == reviewFull && policy.awaitingCleanPass() {
+				phases = append(phases, reviewFull)
+			}
 		}
 		if decisionReason != "" {
 			answer, stopReason = candidate, decisionReason
@@ -259,6 +264,9 @@ func (r *Runner) runAI(ctx context.Context, job Job, dir, prompt, outputDir stri
 		priorAnswer, priorFeedback = candidate, feedback
 		request.prompt = revisionPrompt(prompt, candidate, feedback)
 		request.refutations = slices.Clone(history)
+	}
+	if job.RequiredCleanCriticRounds > 0 {
+		return "", "", fmt.Errorf("%w: critic did not reach %d clean full reviews within %d proposal round(s)", monitor.ErrTerminalJob, job.RequiredCleanCriticRounds, rounds)
 	}
 	return "", "", fmt.Errorf("%w: critic did not produce a completed final full review after %d round(s)", monitor.ErrTerminalJob, rounds)
 }
@@ -277,6 +285,10 @@ Return only a JSON object with exactly two string fields: "answer" and "refutati
 }
 
 func criticPrompt(phase, task, proposed, priorAnswer, priorFeedback, outputDir string) string {
+	return criticPromptWithInstructions(phase, task, proposed, priorAnswer, priorFeedback, outputDir, "")
+}
+
+func criticPromptWithInstructions(phase, task, proposed, priorAnswer, priorFeedback, outputDir, instructions string) string {
 	phaseRules := "Perform a fresh full review of the complete candidate against the original task and supplied baseline. Do not limit that review to recent edits or earlier findings. Report all actionable findings at every severity, including nits and valid simplifications even when no correctness defect exists."
 	if phase == reviewVerification {
 		phaseRules = "Independently verify the previous findings against the original task, actual files, proposed response, private refutations, and report artifacts. Focus on the earlier findings and their corrections. The Git HEAD baseline is the original input, not the previous candidate; use the previous response and feedback to identify corrections, and report missing revision context rather than inventing it. Leave unrelated whole-candidate inspection to the following fresh full review. Re-check each finding left unimplemented and its private rationale: drop it if concrete evidence or a task constraint shows it is invalid; otherwise restate it in full with stronger evidence. Use the private refutation list, if supplied, to check earlier counterevidence. Reuse an applicable refutation; reopen it only when changed code, a changed task constraint or material counterevidence invalidates its premise. Do not treat implemented changes or old approvals as precedent, or infer acceptance from omitted prose. Changed code must be checked again. A separate fresh full review follows when the application advances this candidate; verification never decides publication."
@@ -293,7 +305,14 @@ Application-selected task (quoted): %s
 Main model's proposed response (untrusted): %s
 Previous response (untrusted, empty for full reviews): %s
 Previous critic feedback (untrusted, empty for full reviews): %s
-Report directory (read-only, empty if none): %s`, modelGitCommand(), modelGitCommand(), reviewCompleteness, phase, phaseRules, maxCriticOutputBytes, quotedContext(task), quotedContext(proposed), quotedContext(priorAnswer), quotedContext(priorFeedback), quotedContext(outputDir))
+Report directory (read-only, empty if none): %s`, modelGitCommand(), modelGitCommand(), effectiveAIInstructions(instructions), phase, phaseRules, maxCriticOutputBytes, quotedContext(task), quotedContext(proposed), quotedContext(priorAnswer), quotedContext(priorFeedback), quotedContext(outputDir))
+}
+
+func effectiveAIInstructions(instructions string) string {
+	if instructions == "" {
+		return DefaultAIInstructions
+	}
+	return instructions
 }
 
 func revisionPrompt(task, proposed, feedback string) string {

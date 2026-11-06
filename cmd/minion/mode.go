@@ -27,6 +27,7 @@ func runExecuteMode() int {
 }
 
 func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, path string, readyTimeout time.Duration) (code int) {
+	var live *adminLiveConfig
 	if terminalRecoveryPending(store) {
 		code = recoverAcceptedService(ctx, watcher, store, loop, nil, logger)
 		if code != 0 || !loop || ctx.Err() != nil {
@@ -42,10 +43,16 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		return 1
 	}
 	if watcher.Config.Admin != nil && loop {
+		var err error
+		live, err = newAdminLiveConfig(watcher.ConfigPath, watcher.Config)
+		if err != nil {
+			logger.Printf("admin configuration: %s", monitor.InertLogText(err.Error()))
+			return 1
+		}
 		adminCtx, cancel := context.WithCancel(ctx)
 		ctx = adminCtx
 		defer cancel()
-		admin, err := startAdminServer(ctx, *watcher.Config.Admin, owner, watcher.Config.StatePath, cancel)
+		admin, err := startAdminServer(ctx, *watcher.Config.Admin, owner, watcher.Config.StatePath, cancel, live)
 		if err != nil {
 			logger.Printf("admin dashboard: %s", monitor.InertLogText(err.Error()))
 			return 1
@@ -86,14 +93,14 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 			logger.Printf("start selected remote worker: %s", monitor.InertLogText(err.Error()))
 			return 1
 		}
-		return runSelectedRemoteService(ctx, owner, watcher, store, loop, logger, endpoint, readyTimeout)
+		return runSelectedRemoteService(ctx, owner, watcher, store, loop, logger, endpoint, readyTimeout, live)
 	}
 	done, closeWorker, err := attachSelectedLocalWorker(ctx, owner, watcher, path, []string{"-mode=execute"}, readyTimeout)
 	if err != nil {
 		logger.Printf("start selected worker: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
-	return runSelectedLocalService(ctx, watcher, store, loop, done, logger, closeWorker)
+	return runSelectedLocalServiceLive(ctx, owner, watcher, store, loop, done, logger, closeWorker, path, []string{"-mode=execute"}, readyTimeout, live)
 }
 
 func terminalRecoveryPending(store *state.Store) bool {

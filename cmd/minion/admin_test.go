@@ -340,8 +340,9 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = store.Close() })
-				admin := &config.AdminConfig{Listen: "127.0.0.1:0",
+				admin := &config.AdminConfig{Listen: freeAdminListen(t),
 					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"}}
+				admin.GitHubOAuth.RedirectURL = "http://" + admin.Listen + "/auth/github/callback"
 				choice := config.RoleModelConfig{Model: "approved", Effort: "low"}
 				if enabled {
 					admin.UserModelChoices = &config.UserModelChoices{Main: []config.RoleModelConfig{choice}}
@@ -354,7 +355,10 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				watcher := &monitor.Monitor{Config: config.Config{StatePath: statePath, Admin: admin}}
+				cfg, path := writeModeConfig(t, config.Config{BotLogin: "bot", StatePath: statePath, Admin: admin,
+					Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+					Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2}}})
+				watcher := &monitor.Monitor{Config: cfg, ConfigPath: path}
 				if code := runOrchestrateMode(t.Context(), nil, watcher, store, loop, log.New(io.Discard, "", 0), "", time.Second); code != 1 {
 					t.Fatalf("missing owner did not stop startup: %d", code)
 				}

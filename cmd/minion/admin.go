@@ -34,7 +34,7 @@ type adminServer struct {
 	preferences   *userLinks
 }
 
-func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func()) (*adminServer, error) {
+func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func(), liveConfigs ...*adminLiveConfig) (*adminServer, error) {
 	service := &webserv.Config{Address: cfg.Listen}
 	var fallbackTLS *tls.Config
 	var certificate tls.Certificate
@@ -86,7 +86,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		_ = listener.Close()
 		return nil, err
 	}
-	handler, err := newAdminHandler(jw, cfg, owner, oauth)
+	handler, err := newAdminHandler(jw, cfg, owner, oauth, liveConfigs...)
 	if err != nil {
 		jw.Close()
 		_ = listener.Close()

@@ -126,7 +126,7 @@ func httpJobBound(job Job) int64 {
 	for _, value := range []string{
 		job.Identity.JobID, job.Identity.AttemptID, job.Identity.ExecutorID,
 		job.Identity.Repository, job.Identity.Requester, job.Identity.SubjectType,
-		job.Command, string(job.Action), job.Title, job.Description, job.Notes,
+		job.Command, string(job.Action), job.Title, job.Description, job.Notes, job.AIInstructions,
 		job.Source.Head, job.Source.Base, job.Source.MergeBase,
 	} {
 		text(value)

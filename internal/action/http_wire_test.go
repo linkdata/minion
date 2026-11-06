@@ -120,7 +120,7 @@ func TestHTTPDecodeBoundsContainersBeforeTypedAllocation(t *testing.T) {
 }
 
 func TestHTTPJobBoundCoversEncodedJobAndAssignmentEnvelope(t *testing.T) {
-	for _, shape := range []string{"comment", "comparison", "roles and identity", "escaped text", "long paths", "maximum path counts", "base64 padding"} {
+	for _, shape := range []string{"comment", "comparison", "roles and identity", "escaped text", "escaped AI instructions", "long paths", "maximum path counts", "base64 padding"} {
 		t.Run(shape, func(t *testing.T) {
 			job := testJob(command.Review)
 			switch shape {
@@ -144,6 +144,8 @@ func TestHTTPJobBoundCoversEncodedJobAndAssignmentEnvelope(t *testing.T) {
 				job.Title = strings.Repeat("<&>\x01", maxActionTitleBytes/4)
 				job.Description = strings.Repeat("\x00<&>\"\\\n\u2028\u2029", 4096)
 				job.Notes = strings.Repeat("\x01", 32<<10)
+			case "escaped AI instructions":
+				job.AIInstructions = strings.Repeat("\x01", config.MaxAIInstructionsBytes)
 			case "long paths", "maximum path counts":
 				count := 32
 				if shape == "maximum path counts" {

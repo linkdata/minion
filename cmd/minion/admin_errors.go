@@ -33,6 +33,7 @@ func adminBrowserRoute(r *http.Request) bool {
 type adminErrorWriter struct {
 	http.ResponseWriter
 	status int
+	body   []byte
 }
 
 func (w *adminErrorWriter) WriteHeader(status int) {
@@ -50,6 +51,9 @@ func (w *adminErrorWriter) Write(body []byte) (int, error) {
 		w.status = http.StatusOK
 	}
 	if w.status >= http.StatusBadRequest {
+		if w.status == http.StatusConflict && len(w.body) < 512 {
+			w.body = append(w.body, body[:min(len(body), 512-len(w.body))]...)
+		}
 		return len(body), nil
 	}
 	return w.ResponseWriter.Write(body)
@@ -120,8 +124,14 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 			}
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		status := http.StatusText(capture.status)
+		if capture.status == http.StatusConflict && r.Method == http.MethodPost && a.sessionUsername(sess) != "" {
+			if reason := strings.TrimSpace(string(capture.body)); reason != "" {
+				status = reason
+			}
+		}
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: http.StatusText(capture.status), AdminLogin: len(a.accounts) != 0 && a.sessionUsername(sess) == ""}).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: status, AdminLogin: len(a.accounts) != 0 && a.sessionUsername(sess) == ""}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)

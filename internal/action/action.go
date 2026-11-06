@@ -57,6 +57,8 @@ type Orchestrator struct {
 	WorkRoot                  string
 	Main, Adversarial         string
 	CriticStopping            config.CriticStopping
+	CleanCriticRounds         func(repoID, requesterID int64) int
+	AIInstructions            string
 	AlwaysOnSkills            []string
 	CodexModel, CodexEffort   string
 	ClaudeModel, ClaudeEffort string

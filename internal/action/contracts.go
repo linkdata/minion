@@ -19,7 +19,7 @@ import (
 )
 
 // ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 21
+const ProtocolVersion = 22
 
 const (
 	maxDiagnostics            = 100
@@ -51,6 +51,7 @@ type RoleSettings struct {
 
 const maxActionTitleBytes = 256 * utf8.UTFMax // Allow 256 four-byte code points.
 const maxAuditArtifactBytes = 5 << 20
+const maxCriticCalls = config.MaxCriticMaxRounds*(config.MaxCriticMaxRounds+2) - 1
 
 type Job struct {
 	Version         int                `json:"version"`
@@ -60,6 +61,7 @@ type Job struct {
 	Title           string             `json:"title,omitempty"`
 	Description     string             `json:"description,omitempty"`
 	Notes           string             `json:"notes,omitempty"`
+	AIInstructions  string             `json:"ai_instructions,omitempty"`
 	Source          workspace.Snapshot `json:"source"`
 	Main            RoleSettings       `json:"main"`
 	Critic          *RoleSettings      `json:"critic,omitempty"`
@@ -68,6 +70,7 @@ type Job struct {
 	CriticNonblockingRounds int `json:"critic_nonblocking_rounds"`
 	// CriticConsecutiveNoBlockerRounds is resolved; zero bypasses only the streak requirement.
 	CriticConsecutiveNoBlockerRounds int `json:"critic_consecutive_no_blocker_rounds"`
+	RequiredCleanCriticRounds        int `json:"required_clean_critic_rounds,omitempty"`
 	// RuntimeBudget is remaining execution time; HTTP subtracts validation and transit time before Runner admission.
 	RuntimeBudget time.Duration `json:"runtime_budget_ns"`
 	// InactivityTimeout bounds the gap between actual executor progress events.
@@ -206,6 +209,9 @@ func (j Job) Validate() error {
 	if len(j.Title) > maxActionTitleBytes || len(j.Description) > workspace.MaxBytes || len(j.Notes) > workspace.MaxBytes || len(j.Title)+len(j.Description)+len(j.Notes) > workspace.MaxBytes || !utf8.ValidString(j.Title) || !utf8.ValidString(j.Description) || !utf8.ValidString(j.Notes) {
 		return errors.New("action text is invalid or exceeds limits")
 	}
+	if len(j.AIInstructions) > config.MaxAIInstructionsBytes || !utf8.ValidString(j.AIInstructions) || strings.ContainsRune(j.AIInstructions, 0) {
+		return errors.New("AI instructions are invalid or exceed limits")
+	}
 	if err := j.Main.Validate(); err != nil {
 		return err
 	}
@@ -228,6 +234,10 @@ func (j Job) Validate() error {
 	invalidStreak := j.CriticConsecutiveNoBlockerRounds < 0 || j.CriticConsecutiveNoBlockerRounds > config.MaxCriticConsecutiveNoBlockerRounds
 	if unexpectedRounds || invalidRounds || invalidStreak {
 		return errors.New("invalid critic round limit")
+	}
+	if j.RequiredCleanCriticRounds < 0 || j.RequiredCleanCriticRounds > config.MaxCriticMaxRounds ||
+		j.RequiredCleanCriticRounds > 0 && (j.Critic == nil || j.Action != command.Fix) {
+		return errors.New("invalid required clean critic rounds")
 	}
 	if len(j.Source.Repository) == 0 {
 		return errors.New("action requires a complete repository bundle")
@@ -407,11 +417,13 @@ func (r Result) validateCalls(j Job, complete bool) error {
 		if i > 0 && j.Critic != nil {
 			previous := r.Calls[i-1]
 			if call.Role == roleMain {
-				validOrder = previous.Role == roleCritic && previous.ReviewComplete && (previous.NoBlockers || previous.HasBlockers) && !advanceToFull && stopReason == "" && call.Round == previous.Round+1 && call.ReviewPhase == ""
+				validOrder = previous.Role == roleCritic && previous.ReviewComplete && (previous.NoBlockers || previous.HasBlockers) && !advanceToFull && !policy.awaitingCleanPass() && stopReason == "" && call.Round == previous.Round+1 && call.ReviewPhase == ""
 			} else if previous.Role == roleMain {
 				validOrder = call.Round == previous.Round && call.ReviewPhase == reviewPhases(call.Round)[0]
 			} else {
-				validOrder = previous.ReviewPhase == reviewVerification && advanceToFull && call.Round == previous.Round && call.ReviewPhase == reviewFull
+				validOrder = previous.ReviewPhase == reviewVerification && advanceToFull && call.Round == previous.Round && call.ReviewPhase == reviewFull ||
+					previous.ReviewPhase == reviewFull && previous.Approved && policy.awaitingCleanPass() && stopReason == "" &&
+						call.Round == previous.Round && call.ReviewPhase == reviewFull
 			}
 		}
 		invalidVerdict := ((call.Approved || call.NoBlockers || call.HasBlockers || call.ReviewComplete) && call.Role != roleCritic) ||

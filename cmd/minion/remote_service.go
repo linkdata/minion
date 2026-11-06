@@ -48,7 +48,7 @@ func loadTLSCertificate(kind, certFile, keyFile string) (tls.Certificate, error)
 	return certificate, nil
 }
 
-func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, endpoint *action.RemoteEndpoint, readyTimeout time.Duration) (code int) {
+func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, endpoint *action.RemoteEndpoint, readyTimeout time.Duration, liveConfigs ...*adminLiveConfig) (code int) {
 	if endpoint == nil {
 		logger.Print("selected remote worker is missing")
 		return 1
@@ -76,5 +76,30 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 		logger.Printf("wait for selected remote worker: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
-	return runMonitorLoop(ctx, watcher, store, loop, endpoint.Done(), logger, false)
+	var live *adminLiveConfig
+	if len(liveConfigs) != 0 {
+		live = liveConfigs[0]
+	}
+	for {
+		var updates <-chan struct{}
+		if live != nil {
+			updates = live.updates
+		}
+		code = runMonitorLoopWithConfigUpdates(ctx, watcher, store, loop, endpoint.Done(), logger, false, updates)
+		if code != monitorConfigChanged {
+			return code
+		}
+		cfg, generation := live.next()
+		if !sameSkillConfig(watcher.Config, cfg) || hasNewCommand(watcher.Config, cfg) {
+			err := errors.New("remote worker selection cannot change while connected")
+			live.applied(watcher.Config, generation, err)
+			logger.Printf("activate admin config: %s", monitor.InertLogText(err.Error()))
+			continue
+		}
+		watcher.Config = cfg
+		owner.AIInstructions = cfg.AIInstructions
+		owner.CleanCriticRounds = cfg.RequiredCleanRounds
+		bindPublicationValidation(owner, watcher)
+		live.applied(cfg, generation, nil)
+	}
 }

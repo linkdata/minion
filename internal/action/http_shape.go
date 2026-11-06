@@ -43,7 +43,7 @@ func httpCallShape(call CallUsage) error {
 }
 
 func httpCallCheckpointShape(checkpoint CallCheckpoint) error {
-	if checkpoint.Ordinal < 1 || checkpoint.Ordinal > 3*config.MaxCriticMaxRounds-1 {
+	if checkpoint.Ordinal < 1 || checkpoint.Ordinal > maxCriticCalls {
 		return errHTTPShape
 	}
 	return httpCallShape(checkpoint.Call)
@@ -53,7 +53,7 @@ func httpReviewShape(review ReviewCheckpoint) error {
 	if err := httpBindingShape(httpBinding{review.Version, review.Identity, review.SourceRef}); err != nil {
 		return err
 	}
-	if len(review.Calls) > 3*config.MaxCriticMaxRounds-1 || len(review.Refutations) > config.MaxCriticMaxRounds-1 || !boundedText(review.CriticStopReason, 32) {
+	if len(review.Calls) > maxCriticCalls || len(review.Refutations) > config.MaxCriticMaxRounds-1 || !boundedText(review.CriticStopReason, 32) {
 		return errHTTPShape
 	}
 	for _, call := range review.Calls {

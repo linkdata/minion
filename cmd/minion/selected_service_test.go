@@ -250,6 +250,105 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 	}
 }
 
+func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
+	cfg := selectedServiceTestConfig(t)
+	cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = 1, 2
+	cfg.AlwaysOnSkills = []string{}
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(configPath, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MINION_SELECTED_SERVICE_HELPER", "ready")
+	report := filepath.Join(t.TempDir(), "startup.json")
+	t.Setenv("MINION_SELECTED_SERVICE_REPORT", report)
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	logger := log.New(io.Discard, "", 0)
+	owner := newOrchestrator(cfg, nil, store, logger, nil)
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: configPath, Logger: logger}
+	args := []string{"-test.run=^TestSelectedLocalServiceChild$"}
+	done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, os.Args[0], args, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeWorker() })
+	initialWorker := owner.Executor
+	if !watcher.SelectedCommands["comment"] || watcher.SelectedCommands["review"] {
+		t.Fatalf("initial commands = %v", watcher.SelectedCommands)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].Actions = []string{"comment", "review"}
+		next.AlwaysOnSkills = []string{skills.BuiltinAntiPromptInjection}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	finished := make(chan struct{})
+	var code int
+	go func() {
+		code = runSelectedLocalServiceLive(ctx, owner, watcher, store, true, done, logger, closeWorker, os.Args[0], args, 5*time.Second, live)
+		close(finished)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(10 * time.Second):
+			t.Error("selected service did not stop")
+		}
+	})
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for live.snapshot().Pending {
+		select {
+		case <-ticker.C:
+		case <-finished:
+			t.Fatalf("selected service exited before activating config: code=%d", code)
+		case <-deadline.C:
+			t.Fatal("selected service did not activate config")
+		}
+	}
+	if got := live.snapshot().Error; got != "" {
+		t.Fatal(got)
+	}
+	if owner.Executor == initialWorker || !watcher.SelectedCommands["review"] || !watcher.SelectedCommands["comment"] ||
+		len(watcher.Config.Repositories[0].Actions) != 2 || len(live.current().Repositories[0].Actions) != 2 {
+		t.Fatalf("replacement selection was not applied: worker=%v commands=%v", owner.Executor != initialWorker, watcher.SelectedCommands)
+	}
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var startup action.WorkerStartup
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if len(startup.Selection.Commands) != 2 || len(startup.Selection.Main.AlwaysOnSkills) != 1 ||
+		startup.Selection.Main.AlwaysOnSkills[0] != skills.BuiltinAntiPromptInjection {
+		t.Fatalf("replacement child received commands=%v always-on=%v", startup.Selection.Commands, startup.Selection.Main.AlwaysOnSkills)
+	}
+	cancel()
+	<-finished
+	if code != 0 {
+		t.Fatalf("selected service exited %d", code)
+	}
+}
+
 func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	cfg := selectedServiceTestConfig(t)

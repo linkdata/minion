@@ -84,6 +84,21 @@ func TestReviewPromptsRequireCompleteInvestigationInEveryPhase(t *testing.T) {
 	}
 }
 
+func TestCustomAIInstructionsReplaceBuiltInGuidance(t *testing.T) {
+	job := testJob(command.Comment)
+	job.AIInstructions = "Use the operator's concise working guidance."
+	main, err := actionPrompt(t.Context(), job, "/source", "/context", "/reports", "/installed/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	critic := criticPromptWithInstructions(reviewFull, main, "candidate", "", "", "", job.AIInstructions)
+	for _, prompt := range []string{main, critic} {
+		if !strings.Contains(prompt, job.AIInstructions) || strings.Contains(prompt, DefaultAIInstructions) {
+			t.Fatalf("custom guidance did not replace built-in text: %s", prompt)
+		}
+	}
+}
+
 func TestCriticSchemaRequiresReviewCoverage(t *testing.T) {
 	var schema struct {
 		Properties map[string]struct{ Type string }

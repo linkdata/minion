@@ -8,56 +8,68 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// AddRepository preserves existing settings and atomically appends a repository.
-//
-// The caller must hold the state lock to serialize minion's config writes.
-func AddRepository(path string, repo Repository) (added Repository, err error) {
+var updateMu sync.Mutex
+
+// Update validates and atomically saves a change to the JSON configuration.
+// It serializes Minion's config writers; callers still need the state lock when
+// coordinating a write with monitor state.
+func Update(path string, mutate func(*Config) error) (candidate Config, err error) {
+	if mutate == nil {
+		return Config{}, errors.New("config mutation is required")
+	}
+	updateMu.Lock()
+	defer updateMu.Unlock()
+
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
 	target, err := workspace.CanonicalPath(abs)
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
 	data, err := os.ReadFile(target)
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
-	cfg, err := decode(bytes.NewReader(data))
+	candidate, err = decode(bytes.NewReader(data))
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
-	for _, existing := range cfg.Repositories {
-		if strings.EqualFold(existing.Name, repo.Name) {
-			if err := cfg.Validate(filepath.Dir(abs)); err != nil {
-				return Repository{}, err
-			}
-			existing, _ = cfg.Repository(repo.Name)
-			return existing, nil
-		}
-	}
-	repo.Name = strings.ToLower(repo.Name)
-	cfg.Repositories = append(cfg.Repositories, repo)
-	// Encode before validation resolves paths and fills defaults.
-	updated, err := json.MarshalIndent(cfg, "", "  ")
+	before, err := json.Marshal(candidate)
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
-	if err := cfg.Validate(filepath.Dir(abs)); err != nil {
-		return Repository{}, err
+	if err := mutate(&candidate); err != nil {
+		return Config{}, err
+	}
+	after, err := json.Marshal(candidate)
+	if err != nil {
+		return Config{}, err
+	}
+	updated, err := json.MarshalIndent(candidate, "", "  ")
+	if err != nil {
+		return Config{}, err
+	}
+	// Validate only after encoding, which must not persist resolved paths or defaults.
+	if err := candidate.Validate(filepath.Dir(abs)); err != nil {
+		return Config{}, err
+	}
+	if bytes.Equal(before, after) {
+		return candidate, nil
 	}
 	info, err := os.Stat(target)
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
 	f, err := os.CreateTemp(filepath.Dir(target), ".config-*")
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
 	defer func() {
 		if removeErr := os.Remove(f.Name()); !errors.Is(removeErr, os.ErrNotExist) {
@@ -73,22 +85,41 @@ func AddRepository(path string, repo Repository) (added Repository, err error) {
 	}
 	err = errors.Join(err, f.Close())
 	if err != nil {
-		return
+		return Config{}, err
 	}
 	current, err := os.ReadFile(target)
 	if err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
 	if !bytes.Equal(data, current) {
-		return Repository{}, fmt.Errorf("config changed while adding %s; retry", repo.Name)
+		return Config{}, fmt.Errorf("config changed while updating; retry")
 	}
 	if err := os.Rename(f.Name(), target); err != nil {
-		return Repository{}, err
+		return Config{}, err
 	}
 	if dir, openErr := os.Open(filepath.Dir(target)); openErr == nil {
 		dir.Sync()  //nolint:errcheck // -- Directory sync is best effort after replacement; some filesystems do not support it.
 		dir.Close() //nolint:errcheck // -- The read-only directory has no pending writes; its sync is best effort.
 	}
-	added = cfg.Repositories[len(cfg.Repositories)-1]
-	return
+	return candidate, nil
+}
+
+// AddRepository preserves existing settings and atomically appends a repository.
+// The caller must hold the state lock to serialize this write with monitor state.
+func AddRepository(path string, repo Repository) (Repository, error) {
+	cfg, err := Update(path, func(cfg *Config) error {
+		for _, existing := range cfg.Repositories {
+			if strings.EqualFold(existing.Name, repo.Name) {
+				return nil
+			}
+		}
+		repo.Name = strings.ToLower(repo.Name)
+		cfg.Repositories = append(cfg.Repositories, repo)
+		return nil
+	})
+	if err != nil {
+		return Repository{}, err
+	}
+	added, _ := cfg.Repository(repo.Name)
+	return added, nil
 }

@@ -9,8 +9,10 @@
   "critic_stopping": {
     "max_rounds": 5,
     "nonblocking_after_round": null,
-    "consecutive_no_blocker_rounds": null
+    "consecutive_no_blocker_rounds": null,
+    "required_clean_rounds": 1
   },
+  "ai_instructions": "",
   "codex": {
     "api_key": ""
   },
