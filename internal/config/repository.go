@@ -105,7 +105,7 @@ func Update(path string, mutate func(*Config) error) (candidate Config, err erro
 }
 
 // AddRepository preserves existing settings and atomically appends a repository.
-// The caller must hold the state lock to serialize this write with monitor state.
+// Update serializes config writes; the monitor saves invitation cursors separately.
 func AddRepository(path string, repo Repository) (Repository, error) {
 	cfg, err := Update(path, func(cfg *Config) error {
 		for _, existing := range cfg.Repositories {
