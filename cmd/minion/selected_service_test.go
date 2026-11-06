@@ -435,6 +435,87 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	}
 }
 
+func TestSelectedLocalServiceFailedActivationBlocksOldPolicy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		live, _ := liveConfigFixture(t, false)
+		initial := live.current()
+		if err := live.save(func(cfg *config.Config) error {
+			cfg.Repositories[0].DenyAllActors = true
+			cfg.AlwaysOnSkills = []string{}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+		logger := log.New(io.Discard, "", 0)
+		owner := newOrchestrator(initial, nil, store, logger, nil)
+		owner.Main = "claude" // Force WorkerSelection to reject the saved Codex configuration.
+		handler := &blockedConfigUpdateHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		watcher := &monitor.Monitor{Config: initial, Handler: handler, SelectedExecutorID: "local", SelectedCommands: map[string]bool{"review": true}, BeforeAccept: live.admit}
+		done := make(chan struct{})
+		ctx, cancel := context.WithCancel(t.Context())
+		finished := make(chan int, 1)
+		go func() {
+			finished <- runSelectedLocalServiceLive(ctx, owner, watcher, store, true, done, logger, func() error { return nil }, "", nil, 0, live)
+		}()
+		stopped, releaseClosed := false, false
+		defer func() {
+			cancel()
+			if !releaseClosed {
+				close(handler.release)
+			}
+			if !stopped {
+				<-finished
+			}
+		}()
+		synctest.Wait()
+		if live.snapshot().Error == "" {
+			t.Fatal("failed activation was not reported")
+		}
+		select {
+		case <-handler.entered:
+			t.Fatal("monitor reentered under the old requester policy")
+		default:
+		}
+		select {
+		case code := <-finished:
+			stopped = true
+			t.Fatalf("service exited instead of waiting for a new edit: %d", code)
+		default:
+		}
+		owner.Main = "codex"
+		if err := live.save(func(cfg *config.Config) error {
+			cfg.AlwaysOnSkills = initial.AlwaysOnSkills
+			cfg.AIInstructions = "Apply the saved requester restriction."
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		select {
+		case <-handler.entered:
+		case code := <-finished:
+			stopped = true
+			t.Fatalf("service exited before retrying the saved edit: %d", code)
+		default:
+			t.Fatal("new admin edit did not resume monitor discovery")
+		}
+		if !watcher.Config.Repositories[0].DenyAllActors || live.snapshot().Pending || live.snapshot().Error != "" {
+			t.Fatalf("old requester policy resumed after retry: active=%+v snapshot=%+v", watcher.Config.Repositories[0], live.snapshot())
+		}
+		cancel()
+		close(handler.release)
+		releaseClosed = true
+		synctest.Wait()
+		code := <-finished
+		stopped = true
+		if code != 0 {
+			t.Fatalf("canceling failed activation returned %d", code)
+		}
+	})
+}
+
 func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	cfg := selectedServiceTestConfig(t)

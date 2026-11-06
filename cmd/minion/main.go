@@ -330,14 +330,28 @@ func runMonitorLoopWithConfigUpdates(ctx context.Context, watcher *monitor.Monit
 		if pendingConfigUpdate && store.Data.Accepted == nil {
 			return monitorConfigChanged
 		}
+		watcher.ConfigUpdates = configUpdates
 		next, err := watcher.RunOnce(ctx, store)
+		workerUnavailable := workerExited != nil && ctx.Err() == nil &&
+			(errors.Is(err, action.ErrLocalWorkerUnavailable) || errors.Is(err, action.ErrRemoteWorkerUnavailable))
+		fatal := !loop || errors.Is(err, monitor.ErrAcceptanceState) || workerUnavailable
+		if errors.Is(err, monitor.ErrConfigUpdatePending) && !fatal && store.Data.Accepted == nil {
+			if ctx.Err() != nil {
+				return 0
+			}
+			select {
+			case <-configUpdates:
+			default:
+			}
+			return monitorConfigChanged
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				logger.Printf("poll interrupted: %s", monitor.InertLogText(err.Error()))
 			} else {
 				logger.Printf("poll: %s", monitor.InertLogText(err.Error()))
 			}
-			if !loop || errors.Is(err, monitor.ErrAcceptanceState) || workerExited != nil && ctx.Err() == nil && (errors.Is(err, action.ErrLocalWorkerUnavailable) || errors.Is(err, action.ErrRemoteWorkerUnavailable)) {
+			if fatal {
 				return 1
 			}
 		}
@@ -421,6 +435,23 @@ func runMonitorLoopWithConfigUpdates(ctx context.Context, watcher *monitor.Monit
 			configUpdates = nil
 		case <-timer.C:
 		}
+	}
+}
+
+func waitForConfigRetry(ctx context.Context, updates, workerExited <-chan struct{}) int {
+	select {
+	case <-ctx.Done():
+		return 0
+	case <-workerExited:
+		if ctx.Err() != nil {
+			return 0
+		}
+		return 1
+	case <-updates:
+		if ctx.Err() != nil {
+			return 0
+		}
+		return monitorConfigChanged
 	}
 }
 

@@ -117,15 +117,19 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			code = 1
 		}
 	}()
+	retryConfig := false // A retry wake goes straight to activation, before another poll.
 	for {
-		var updates <-chan struct{}
-		if live != nil {
-			updates = live.updates
+		if !retryConfig {
+			var updates <-chan struct{}
+			if live != nil {
+				updates = live.updates
+			}
+			code = runMonitorLoopWithConfigUpdates(ctx, watcher, store, loop, done, logger, false, updates)
+			if code != monitorConfigChanged {
+				return code
+			}
 		}
-		code = runMonitorLoopWithConfigUpdates(ctx, watcher, store, loop, done, logger, false, updates)
-		if code != monitorConfigChanged {
-			return code
-		}
+		retryConfig = false
 		cfg, generation := live.next()
 		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || selectedCommandsChanged(cfg, watcher.SelectedCommands)
 		if !refresh {
@@ -143,6 +147,10 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			owner.Commands, owner.AlwaysOnSkills = oldCommands, oldSkills
 			logger.Printf("activate admin skill change: %s", monitor.InertLogText(err.Error()))
 			live.applied(oldCfg, generation, err)
+			if code = waitForConfigRetry(ctx, live.updates, done); code != monitorConfigChanged {
+				return code
+			}
+			retryConfig = true
 			continue
 		}
 		if err := closeWorker(); err != nil {
@@ -172,5 +180,9 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			logger.Printf("restore selected worker: %s", monitor.InertLogText(rollbackErr.Error()))
 			return 1
 		}
+		if code = waitForConfigRetry(ctx, live.updates, done); code != monitorConfigChanged {
+			return code
+		}
+		retryConfig = true
 	}
 }

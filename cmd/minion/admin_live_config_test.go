@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 )
 
@@ -37,6 +38,24 @@ func liveConfigFixture(t *testing.T, remote bool) (*adminLiveConfig, string) {
 		t.Fatal(err)
 	}
 	return live, path
+}
+
+func TestAdminLiveConfigAdmitRejectsPendingUpdate(t *testing.T) {
+	live, _ := liveConfigFixture(t, false)
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Read carefully."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	err := live.admit(func() error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, monitor.ErrConfigUpdatePending) || called {
+		t.Fatalf("accepted after saved update: called=%t error=%v", called, err)
+	}
 }
 
 func TestAdminLiveConfigPersistsThenAppliesAtBoundary(t *testing.T) {

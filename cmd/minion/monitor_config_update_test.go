@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -16,6 +17,16 @@ import (
 type blockedConfigUpdateHandler struct {
 	entered chan struct{}
 	release chan struct{}
+}
+
+type joinedConfigUpdateHandler struct{}
+
+func (*joinedConfigUpdateHandler) WaitCapacity(context.Context) error {
+	return errors.Join(monitor.ErrAcceptanceState, monitor.ErrConfigUpdatePending)
+}
+
+func (*joinedConfigUpdateHandler) Execute(context.Context, monitor.Job) error {
+	return errors.New("unexpected selected execution")
 }
 
 // clearAcceptedOnRetryContext models recovery clearing the accepted action on
@@ -80,6 +91,15 @@ func TestRunMonitorLoopConfigUpdatePrecedesFirstPoll(t *testing.T) {
 			t.Fatal("monitor neither applied the update nor entered its first poll")
 		}
 	})
+}
+
+func TestRunMonitorLoopAcceptanceStateWinsConfigUpdate(t *testing.T) {
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	watcher := &monitor.Monitor{Handler: &joinedConfigUpdateHandler{}, SelectedExecutorID: "local"}
+	if code := runMonitorLoopWithConfigUpdates(t.Context(), watcher, store, true, nil, log.New(io.Discard, "", 0), false, nil); code != 1 {
+		t.Fatalf("uncertain acceptance with queued update returned %d, want fatal exit", code)
+	}
 }
 
 func TestRunMonitorLoopCancellationWinsQueuedUpdate(t *testing.T) {
@@ -162,6 +182,37 @@ func TestRunMonitorLoopConfigUpdateWaitsForIteration(t *testing.T) {
 			}
 		default:
 			t.Fatal("config update was not observed after iteration")
+		}
+	})
+}
+
+func TestRunMonitorLoopConfigUpdateWakesRemoteCapacity(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now})
+		handler := &blockedConfigUpdateHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		watcher := &monitor.Monitor{
+			Config:             config.Config{RemoteExecutor: &config.RemoteExecutorConfig{}},
+			Handler:            handler,
+			SelectedExecutorID: "remote",
+		}
+		updates := make(chan struct{}, 1)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan int, 1)
+		go func() {
+			result <- runMonitorLoopWithConfigUpdates(ctx, watcher, store, true, nil, log.New(io.Discard, "", 0), false, updates)
+		}()
+		<-handler.entered
+		updates <- struct{}{}
+		synctest.Wait()
+		select {
+		case code := <-result:
+			if code != monitorConfigChanged || store.Data.Accepted != nil || !store.Data.NextPollAt.Equal(now) {
+				t.Fatalf("remote capacity update returned %d with accepted=%v, next=%s", code, store.Data.Accepted, store.Data.NextPollAt)
+			}
+		default:
+			t.Fatal("config update did not wake remote capacity wait")
 		}
 	})
 }

@@ -49,6 +49,7 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 			logger.Printf("admin configuration: %s", monitor.InertLogText(err.Error()))
 			return 1
 		}
+		watcher.BeforeAccept = live.admit
 		adminCtx, cancel := context.WithCancel(ctx)
 		ctx = adminCtx
 		defer cancel()

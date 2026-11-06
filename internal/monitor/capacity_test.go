@@ -134,6 +134,41 @@ func TestRunOnceCancellationWhileIdlePreservesDiscoveryState(t *testing.T) {
 	})
 }
 
+func TestRunOnceRemoteCapacityWakesForConfigUpdate(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now().UTC()
+		store := openState(t, now.Add(-time.Minute))
+		store.Data.NextInviteCheckAt = now.Add(time.Hour)
+		if err := store.Save(); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(t)
+		cfg.RemoteExecutor = &config.RemoteExecutorConfig{}
+		handler := &heldCapacityHandler{entered: make(chan struct{}), release: make(chan struct{})}
+		defer close(handler.release)
+		updates := make(chan struct{}, 1)
+		m := &Monitor{Config: cfg, GitHub: &fakeGitHub{}, Handler: handler, SelectedExecutorID: "remote", ConfigUpdates: updates}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() { _, err := m.RunOnce(ctx, store); result <- err }()
+		<-handler.entered
+		updates <- struct{}{}
+		synctest.Wait()
+		select {
+		case err := <-result:
+			if !errors.Is(err, ErrConfigUpdatePending) {
+				t.Fatalf("config update during remote capacity wait: %v", err)
+			}
+		default:
+			t.Fatal("config update did not interrupt remote capacity wait")
+		}
+		if handler.cancels.Load() != 1 || !store.Data.NextPollAt.IsZero() || store.Data.Accepted != nil {
+			t.Fatalf("capacity wait or discovery state was not clean: cancels=%d state=%+v", handler.cancels.Load(), store.Data)
+		}
+	})
+}
+
 func TestRunOnceWaitsAfterEachPersistedAction(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	for _, test := range []struct {

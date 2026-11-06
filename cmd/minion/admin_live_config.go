@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/monitor"
 )
 
 var errAdminRestartRequired = errors.New("configuration changed outside the admin UI; restart Minion before editing here")
@@ -58,6 +59,16 @@ func (a *adminLiveConfig) current() config.Config {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.active
+}
+
+func (a *adminLiveConfig) admit(accept func() error) error {
+	// A completed save must not be followed by an acceptance under the old policy.
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.pending {
+		return monitor.ErrConfigUpdatePending
+	}
+	return accept()
 }
 
 func (a *adminLiveConfig) snapshot() adminConfigSnapshot {

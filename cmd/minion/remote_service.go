@@ -93,20 +93,28 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 	if len(liveConfigs) != 0 {
 		live = liveConfigs[0]
 	}
+	retryConfig := false // A retry wake goes straight to activation, before another poll.
 	for {
-		var updates <-chan struct{}
-		if live != nil {
-			updates = live.updates
+		if !retryConfig {
+			var updates <-chan struct{}
+			if live != nil {
+				updates = live.updates
+			}
+			code = runMonitorLoopWithConfigUpdates(ctx, watcher, store, loop, endpoint.Done(), logger, false, updates)
+			if code != monitorConfigChanged {
+				return code
+			}
 		}
-		code = runMonitorLoopWithConfigUpdates(ctx, watcher, store, loop, endpoint.Done(), logger, false, updates)
-		if code != monitorConfigChanged {
-			return code
-		}
+		retryConfig = false
 		cfg, generation := live.next()
 		if !sameSkillConfig(watcher.Config, cfg) || hasUnselectedCommand(watcher.SelectedCommands, cfg) {
 			err := errors.New("remote worker selection cannot change while connected")
 			live.applied(watcher.Config, generation, err)
 			logger.Printf("activate admin config: %s", monitor.InertLogText(err.Error()))
+			if code = waitForConfigRetry(ctx, live.updates, endpoint.Done()); code != monitorConfigChanged {
+				return code
+			}
+			retryConfig = true
 			continue
 		}
 		watcher.Config = cfg
