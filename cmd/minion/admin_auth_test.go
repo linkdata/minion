@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os/exec"
 	"path/filepath"
@@ -132,6 +133,111 @@ func TestAdminOldCookieLogoutRevokesPasswordSession(t *testing.T) {
 	}
 	if jw.GetSession(requestWithCookie(rotated)) != nil {
 		t.Fatal("old-cookie admin logout left the rotated session alive")
+	}
+}
+
+func TestOldCookieLogoutRevokesLatestPasswordSession(t *testing.T) {
+	for _, path := range []string{"/admin/logout", "/auth/logout"} {
+		t.Run(path, func(t *testing.T) {
+			cfg := config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}, GitHubOAuth: &config.OAuthClient{
+				ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
+			handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+			guest := adminGuestCookie(t, handler)
+			login := func(cookie *http.Cookie) *http.Cookie {
+				t.Helper()
+				response := adminResponse(handler, http.MethodPost, "/admin/login",
+					url.Values{"username": {"operator"}, "password": {"correct-password"}}, cookie, "https://admin.example")
+				if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
+					t.Fatalf("admin login: status=%d cookies=%v", response.Code, response.Result().Cookies())
+				}
+				return response.Result().Cookies()[0]
+			}
+			first := login(guest)
+			latest := login(first)
+			logout := adminResponse(handler, http.MethodPost, path, nil, guest, "https://admin.example")
+			if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != "/" {
+				t.Fatalf("old-cookie logout: status=%d location=%q", logout.Code, logout.Header().Get("Location"))
+			}
+			if jw.GetSession(requestWithCookie(latest)) != nil {
+				t.Fatal("old-cookie logout left the latest password session alive")
+			}
+		})
+	}
+}
+
+func TestOldCookieLogoutFromDifferentIPKeepsPasswordSession(t *testing.T) {
+	for _, path := range []string{"/admin/logout", "/auth/logout"} {
+		t.Run(path, func(t *testing.T) {
+			cfg := config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}, GitHubOAuth: &config.OAuthClient{
+				ClientID: "app", ClientSecret: "secret", RedirectURL: "https://admin.example/auth/github/callback"}}
+			handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+			guest := adminGuestCookie(t, handler)
+			login := adminResponse(handler, http.MethodPost, "/admin/login",
+				url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "https://admin.example")
+			if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+				t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
+			}
+			current := login.Result().Cookies()[0]
+			request := httptest.NewRequest(http.MethodPost, "https://admin.example"+path, nil)
+			request.RemoteAddr = "198.51.100.9:1234"
+			request.Header.Set("Origin", "https://admin.example")
+			request.AddCookie(guest)
+			logout := httptest.NewRecorder()
+			handler.ServeHTTP(logout, request)
+			if jw.GetSession(requestWithCookie(current)) == nil {
+				t.Fatal("old cookie from another IP revoked the current session")
+			}
+			wantLocation := "/"
+			if path == "/auth/logout" {
+				wantLocation = "/auth/login?error=request"
+			}
+			if logout.Code != http.StatusSeeOther || logout.Header().Get("Location") != wantLocation {
+				t.Fatalf("cross-IP logout: status=%d location=%q", logout.Code, logout.Header().Get("Location"))
+			}
+			valid := adminResponse(handler, http.MethodPost, path, nil, guest, "https://admin.example")
+			if valid.Code != http.StatusSeeOther || jw.GetSession(requestWithCookie(current)) != nil {
+				t.Fatalf("same-IP logout: status=%d live=%t", valid.Code, jw.GetSession(requestWithCookie(current)) != nil)
+			}
+		})
+	}
+}
+
+func TestOldCookieLogoutUsesJaWSTrustedForwardedIP(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	jw.TrustForwardedHeaders = true
+	guest := adminGuestCookie(t, handler)
+	login := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "https://admin.example")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
+	}
+	current := login.Result().Cookies()[0]
+	request := httptest.NewRequest(http.MethodPost, "https://admin.example/admin/logout", nil)
+	request.RemoteAddr = "198.51.100.9:1234"
+	request.Header.Set("Origin", "https://admin.example")
+	request.Header.Set("X-Forwarded-For", "192.0.2.1")
+	request.AddCookie(guest)
+	logout := httptest.NewRecorder()
+	handler.ServeHTTP(logout, request)
+	if logout.Code != http.StatusSeeOther || jw.GetSession(requestWithCookie(current)) != nil {
+		t.Fatalf("trusted proxy logout: status=%d live=%t", logout.Code, jw.GetSession(requestWithCookie(current)) != nil)
+	}
+}
+
+func TestSamePeerIPMatchesJaWSBinding(t *testing.T) {
+	for _, tc := range []struct {
+		sessionIP, remoteAddr string
+		want                  bool
+	}{
+		{"192.0.2.1", "192.0.2.1:1234", true},
+		{"192.0.2.1", "[::ffff:192.0.2.1]:1234", true},
+		{"127.0.0.1", "[::1]:1234", true},
+		{"192.0.2.1", "198.51.100.9:1234", false},
+		{"192.0.2.1", "invalid", false},
+	} {
+		if got := samePeerIP(netip.MustParseAddr(tc.sessionIP), tc.remoteAddr); got != tc.want {
+			t.Errorf("samePeerIP(%q, %q) = %t, want %t", tc.sessionIP, tc.remoteAddr, got, tc.want)
+		}
 	}
 }
 

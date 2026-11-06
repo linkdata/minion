@@ -10,6 +10,7 @@ import (
 )
 
 func (a *AdminConfig) validateOAuth(listenPort uint64) error {
+	var cookieHost string
 	for _, entry := range []struct {
 		name, callbackPath string
 		client             *OAuthClient
@@ -42,6 +43,10 @@ func (a *AdminConfig) validateOAuth(listenPort uint64) error {
 				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
 			}
 		}
+		if cookieHost != "" && !strings.EqualFold(cookieHost, redirect.Hostname()) {
+			return errors.New("admin OAuth redirect_url hosts must match for the session cookie")
+		}
+		cookieHost = redirect.Hostname()
 		if entry.name == "github_oauth" {
 			if client.BaseURL != "" {
 				return errors.New("admin.github_oauth base_url is fixed to https://github.com")

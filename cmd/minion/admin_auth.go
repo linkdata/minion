@@ -6,7 +6,9 @@ import (
 	"errors"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -75,6 +77,7 @@ type rotatedCookie struct {
 	until       time.Time
 	pending     int
 	signedOut   bool
+	originIP    netip.Addr
 	replacement *jaws.Session
 }
 
@@ -455,12 +458,65 @@ func (a *adminAccess) rotatedSessionForLogout(r *http.Request) (*jaws.Session, b
 	if err != nil {
 		return nil, false
 	}
-	state, known := a.rotatedCookies[sha256.Sum256([]byte(cookie.Value))]
-	if !known || state.pending == 0 && !time.Now().Before(state.until) {
+	value := cookie.Value
+	var chain []string
+	var sess *jaws.Session
+	var pendingIP netip.Addr
+	pending := false
+	for range maxRotatedCookies {
+		state, known := a.rotatedCookies[sha256.Sum256([]byte(value))]
+		if !known || state.pending == 0 && !time.Now().Before(state.until) {
+			break
+		}
+		chain = append(chain, value)
+		if state.replacement == nil {
+			pending = state.pending > 0
+			pendingIP = state.originIP
+			break
+		}
+		sess = state.replacement
+		value = sess.CookieValue()
+	}
+	if len(chain) == 0 {
 		return nil, false
 	}
-	a.markSignedOutCookie(cookie.Value)
-	return state.replacement, true
+	if pending {
+		// A callback can be between closing its old session and publishing the new one.
+		// shortcut: pending logout cannot validate forwarded IPs; revisit if Minion enables trusted proxy headers.
+		if a.jaws.TrustForwardedHeaders || !samePeerIP(pendingIP, r.RemoteAddr) {
+			return nil, false
+		}
+	} else {
+		if sess == nil {
+			return nil, false
+		}
+		probe := r.Clone(r.Context())
+		probe.Header.Del("Cookie")
+		probe.AddCookie(&http.Cookie{Name: a.jaws.CookieName, Value: sess.CookieValue()})
+		if a.jaws.GetSession(probe) != sess {
+			return nil, false
+		}
+	}
+	for _, value := range chain {
+		a.markSignedOutCookie(value)
+	}
+	return sess, true
+}
+
+// samePeerIP matches JaWS peer binding when forwarded headers are not trusted.
+func samePeerIP(sessionIP netip.Addr, remoteAddr string) bool {
+	if !sessionIP.IsValid() {
+		return false
+	}
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		remoteAddr = host
+	}
+	peerIP, err := netip.ParseAddr(remoteAddr)
+	if err != nil {
+		return false
+	}
+	sessionIP, peerIP = sessionIP.Unmap(), peerIP.Unmap()
+	return sessionIP.Compare(peerIP) == 0 || sessionIP.IsLoopback() && peerIP.IsLoopback()
 }
 
 func (a *adminAccess) recordOAuthRotation(sess *jaws.Session, r *http.Request) {
@@ -505,6 +561,7 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 	}
 	key := sha256.Sum256([]byte(value))
 	state := a.rotatedCookies[key]
+	state.originIP = old.IP()
 	state.pending++
 	a.rotatedCookies[key] = state
 	a.sessionAdmissionMu.Unlock()
@@ -607,12 +664,15 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Sign-in temporarily unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	key := sha256.Sum256([]byte(previousCookie))
+	state := a.rotatedCookies[key]
+	state.originIP = previous.IP()
+	a.rotatedCookies[key] = state
 	previous.Clear()
 	previous.Close()
 	sess := a.jaws.NewSession(w, r)
 	if sess != nil {
 		sess.Set(adminSessionKey, username)
-		key := sha256.Sum256([]byte(previousCookie))
 		state := a.rotatedCookies[key]
 		state.replacement = sess
 		a.rotatedCookies[key] = state

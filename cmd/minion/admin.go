@@ -69,7 +69,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
 	if cfg.TLSCertFile != "" {
-		service.ListenURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate)
+		service.ListenURL = certifiedListenURL(service.ListenURL, listener.Addr().String(), &certificate, cfg)
 	} else {
 		service.ListenURL = plainAdminListenURL(service.ListenURL, listener.Addr().String(), cfg)
 	}
@@ -141,12 +141,25 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	return a, nil
 }
 
-func certifiedListenURL(rawURL, address string, certificate *tls.Certificate) string {
+func certifiedListenURL(rawURL, address string, certificate *tls.Certificate, cfg config.AdminConfig) string {
 	rawURL = strings.Replace(rawURL, "http://", "https://", 1)
 	parsed, parseErr := url.Parse(rawURL)
 	host, port, err := net.SplitHostPort(address)
 	if parseErr != nil || err != nil || certificate.Leaf == nil {
 		return ""
+	}
+	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
+		if client == nil {
+			continue
+		}
+		callback, err := url.Parse(client.RedirectURL)
+		if err != nil || callback.Scheme != "https" {
+			continue
+		}
+		if certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
+			return ""
+		}
+		return (&url.URL{Scheme: "https", Host: callback.Host}).String()
 	}
 	if certificate.Leaf.VerifyHostname(parsed.Hostname()) == nil {
 		return rawURL

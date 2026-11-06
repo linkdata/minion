@@ -398,12 +398,21 @@ func TestCertifiedListenURL(t *testing.T) {
 		{address: "127.0.0.1:8080", listenURL: "http://localhost:8080", certificateNames: []string{"*.example"}},
 	} {
 		certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: test.certificateNames, IPAddresses: test.certificateIPs}}
-		if got := certifiedListenURL(test.listenURL, test.address, certificate); got != test.want {
+		if got := certifiedListenURL(test.listenURL, test.address, certificate, config.AdminConfig{}); got != test.want {
 			t.Errorf("TLS URL for %s = %q, want %q", test.address, got, test.want)
 		}
 	}
-	if got := certifiedListenURL("http://localhost:8080", "127.0.0.1:8080", &tls.Certificate{}); got != "" {
+	if got := certifiedListenURL("http://localhost:8080", "127.0.0.1:8080", &tls.Certificate{}, config.AdminConfig{}); got != "" {
 		t.Errorf("URL without parsed certificate = %q, want none", got)
+	}
+	callback := config.AdminConfig{GitHubOAuth: &config.OAuthClient{RedirectURL: "https://login.example:8443/auth/github/callback"}}
+	certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"first.example", "login.example"}}}
+	if got := certifiedListenURL("https://first.example:8080", "127.0.0.1:8080", certificate, callback); got != "https://login.example:8443" {
+		t.Errorf("OAuth URL = %q, want callback origin", got)
+	}
+	certificate.Leaf.DNSNames = []string{"first.example"}
+	if got := certifiedListenURL("https://first.example:8080", "127.0.0.1:8080", certificate, callback); got != "" {
+		t.Errorf("uncovered OAuth URL = %q, want none", got)
 	}
 }
 
