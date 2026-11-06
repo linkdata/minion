@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -199,6 +200,10 @@ func (e *HTTPExecutor) execute(ctx context.Context, stopBudget time.Duration, jo
 	tx.credentials = e.credentials
 	tx.recordRoot = e.workRoot
 	tx.recordSecrets = []string{e.credentials.CodexAPIKey, e.credentials.CodexNativeAPIKey, e.credentials.CodexAccessToken, e.credentials.ClaudeAPIKey}
+	if checkpoints, ok := sink.(*executionCheckpoints); ok && checkpoints.owner != nil {
+		tx.recordSecrets = append(tx.recordSecrets, checkpoints.owner.trustedSecrets()...)
+	}
+	slices.SortFunc(tx.recordSecrets, func(a, b string) int { return len(b) - len(a) })
 	e.active, e.status, e.statusAt = tx, Status{}, time.Time{}
 	if state != nil {
 		state.admitted = true
@@ -919,11 +924,12 @@ func (tx *httpTransaction) appendStatusLogs(status Status, logs []attemptRecord,
 			return highest, errAttemptRecordConflict
 		}
 	}
+	secrets := tx.recordSecrets
+	if bearerToken != "" {
+		secrets = append(slices.Clone(secrets), bearerToken)
+		slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
+	}
 	for _, record := range logs {
-		secrets := tx.recordSecrets
-		if bearerToken != "" {
-			secrets = append(secrets, bearerToken)
-		}
 		var err error
 		highest, err = tx.records.Append(record, secrets...)
 		if err != nil {

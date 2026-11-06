@@ -115,7 +115,7 @@ func testExecuteOrdersCheckpoints(t *testing.T, overHTTP, capped bool) {
 	responses := make([]string, len(expected))
 	prompts := make([]string, len(expected))
 	agents := []string{"session-main", "session-critic-1", "session-main", "session-critic-1", "session-critic-2"}
-	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture"), BotLogin: "bot", BotID: 8, Usage: store, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0),
+	e := Orchestrator{WorkRoot: work, GitHub: testGitHub(server, "fixture-github-bot-secret"), BotLogin: "bot", BotID: 8, Usage: store, Store: openState(t, time.Now()), Logger: log.New(&journal, "", 0),
 		Main: "codex", Adversarial: "claude", CodexModel: mainModel, CodexEffort: "high", ClaudeModel: criticModel, ClaudeEffort: "medium",
 		CriticStopping: config.CriticStopping{MaxRounds: maxRounds, NonblockingAfterRound: &zero, ConsecutiveNoBlockerRounds: &zero},
 		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},

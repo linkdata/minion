@@ -29,7 +29,7 @@ func (e *Orchestrator) PublishRecovered(ctx context.Context, request monitor.Job
 		if resultErr == nil {
 			e.CompleteTerminalUsage(request, "succeeded", time.Now().UTC())
 		}
-		resultErr = redactActionError(resultErr, append(e.Runner.secretValues(), e.GitHub.Token())...)
+		resultErr = redactActionError(resultErr, e.trustedSecrets()...)
 	}()
 	ctx, cancel := context.WithTimeout(ctx, cmp.Or(e.MaxRuntime, config.DefaultMaxRuntime))
 	defer cancel()

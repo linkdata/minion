@@ -265,9 +265,10 @@ func TestPrivateReviewRetrySyncsIdenticalRecord(t *testing.T) {
 func TestPrivateReviewRetentionRejectsCurrentConfiguredKeys(t *testing.T) {
 	const codexKey = "fixture-codex-secret"
 	const claudeKey = "fixture-claude-secret"
+	const botKey = "fixture-github-bot-secret"
 	for _, test := range []struct {
 		name, text string
-	}{{"codex", codexKey}, {"claude HTML entity", "fixture-claude-&#x73;ecret"}} {
+	}{{"codex", codexKey}, {"claude HTML entity", "fixture-claude-&#x73;ecret"}, {"bot HTML entity", "fixture-github-bot-&#x73;ecret"}} {
 		t.Run(test.name, func(t *testing.T) {
 			job := withClaudeCritic(testJob(command.Comment))
 			result := privateReviewResult(job)
@@ -283,10 +284,11 @@ func TestPrivateReviewRetentionRejectsCurrentConfiguredKeys(t *testing.T) {
 				t.Fatal(err)
 			}
 			e.Runner.Codex.APIKey, e.Runner.Claude.APIKey = codexKey, claudeKey
+			e.GitHub = github.New(botKey)
 			result.Refutations[0].Text = test.text
 			err = e.retainReviewEvidence(job, result)
 			after, readErr := os.ReadFile(path)
-			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || strings.Contains(err.Error(), codexKey) || strings.Contains(err.Error(), claudeKey) || strings.Contains(err.Error(), "&#x73;ecret") || readErr != nil || !bytes.Equal(before, after) {
+			if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "configured provider key") || strings.Contains(err.Error(), codexKey) || strings.Contains(err.Error(), claudeKey) || strings.Contains(err.Error(), botKey) || strings.Contains(err.Error(), "&#x73;ecret") || readErr != nil || !bytes.Equal(before, after) {
 				t.Fatalf("key-bearing final review changed accepted prefix: error=%v read=%v", err, readErr)
 			}
 			writes := 0
@@ -295,7 +297,7 @@ func TestPrivateReviewRetentionRejectsCurrentConfiguredKeys(t *testing.T) {
 				http.Error(w, "unexpected GitHub request", http.StatusInternalServerError)
 			}))
 			defer server.Close()
-			e.GitHub = testGitHub(server, "token")
+			e.GitHub = testGitHub(server, botKey)
 			if err := e.publish(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrTerminalJob) || writes != 0 {
 				t.Fatalf("key-bearing final review reached GitHub: error=%v writes=%d", err, writes)
 			}

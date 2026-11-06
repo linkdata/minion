@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/github"
 )
 
 func httpTestRecord(job Job, sequence uint64, text string) attemptRecord {
@@ -337,6 +338,37 @@ func TestHTTPStatusRedactsAuthenticatedBearerToken(t *testing.T) {
 	}
 	if saved := httpTestRecords(t, root, job); bytes.Contains(saved, []byte(token)) || !bytes.Contains(saved, []byte("[redacted]")) {
 		t.Fatalf("bearer token was not redacted: %q", saved)
+	}
+	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
+	if got := f.result(t); got.err != nil {
+		t.Fatal(got.err)
+	}
+}
+
+func TestHTTPStatusRedactsConfiguredBotToken(t *testing.T) {
+	const key = "fixture-github-bot-secret"
+	const providerKey = "fixture-github"
+	owner := newExecutionAdapterFixture(t, testJob(command.Comment))
+	owner.owner.GitHub = github.New(key)
+	f := newHTTPServerTestWithStopServerRoot(t, t.Context(), owner.job, owner.sink, nil,
+		func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, 0, owner.owner.WorkRoot,
+		WorkerCredentials{CodexAPIKey: providerKey})
+	assignment := f.pull(t)
+	if assignment.Credentials.CodexAPIKey != providerKey || strings.Contains(assignment.Credentials.CodexAPIKey, key) {
+		t.Fatalf("worker assignment gained the bot credential: %+v", assignment.Credentials)
+	}
+	status := Status{Version: ProtocolVersion, Identity: owner.job.Identity, SourceRef: owner.job.Source.Head,
+		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
+	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{httpTestRecord(owner.job, 1, "token="+key)}}, http.StatusOK, 1); ack.LogSequence != 1 {
+		t.Fatalf("bot token record highwater = %d", ack.LogSequence)
+	}
+	status.Sequence, status.LogSequence = 2, 2
+	if ack := f.ack(t, "/status", httpObservation{Status: status, Logs: []attemptRecord{httpTestRecord(owner.job, 2, "provider="+providerKey)}}, http.StatusOK, 2); ack.LogSequence != 2 {
+		t.Fatalf("provider credential record highwater = %d", ack.LogSequence)
+	}
+	if saved := httpTestRecords(t, owner.owner.WorkRoot, owner.job); bytes.Contains(saved, []byte(key)) || bytes.Contains(saved, []byte("bot-secret")) ||
+		bytes.Contains(saved, []byte(providerKey)) || bytes.Count(saved, []byte("[redacted]")) != 2 {
+		t.Fatalf("bot token was not redacted from requester-visible status: %q", saved)
 	}
 	f.ack(t, "/outcome", f.outcome(1, nil), http.StatusOK, 1)
 	if got := f.result(t); got.err != nil {

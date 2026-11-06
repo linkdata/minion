@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/usage"
@@ -23,13 +24,26 @@ import (
 )
 
 func TestHostileHTTPReviewCannotRetainConfiguredProviderKey(t *testing.T) {
-	const key = "fixture-claude-secret"
+	testHostileHTTPReviewCannotRetainConfiguredKey(t, "fixture-claude-secret", false)
+}
+
+func TestHostileHTTPReviewCannotRetainConfiguredBotToken(t *testing.T) {
+	testHostileHTTPReviewCannotRetainConfiguredKey(t, "fixture-github-bot-secret", true)
+}
+
+func testHostileHTTPReviewCannotRetainConfiguredKey(t *testing.T, key string, bot bool) {
+	t.Helper()
 	owner := newExecutionAdapterFixture(t, withClaudeCritic(testJob(command.Comment)))
-	owner.owner.Runner.Claude.APIKey = key
+	if bot {
+		owner.owner.GitHub = github.New(key)
+	} else {
+		owner.owner.Runner.Claude.APIKey = key
+	}
 	f := newHTTPServerTest(t, t.Context(), owner.job, owner.sink, nil)
 	f.pull(t)
 	result := privateReviewResult(owner.job)
-	result.Refutations[0].Text = "private fixture-claude-&#x73;ecret"
+	encoded := strings.Replace(key, "secret", "&#x73;ecret", 1)
+	result.Refutations[0].Text = "private " + encoded
 	sequence := uint64(1)
 	f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(nil, nil, "")}, http.StatusOK, sequence)
 	sequence++
@@ -47,7 +61,7 @@ func TestHostileHTTPReviewCannotRetainConfiguredProviderKey(t *testing.T) {
 			status = http.StatusInternalServerError
 		}
 		ack := f.ack(t, "/review", httpReview{Sequence: sequence, Checkpoint: owner.review(result.Calls[:i+1], refs, "")}, status, sequence)
-		if i == 2 && (ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) || strings.Contains(ack.Failure.err().Error(), key) || strings.Contains(ack.Failure.err().Error(), "&#x73;ecret")) {
+		if i == 2 && (ack.Failure == nil || !errors.Is(ack.Failure.err(), monitor.ErrTerminalJob) || strings.Contains(ack.Failure.err().Error(), key) || strings.Contains(ack.Failure.err().Error(), encoded)) {
 			t.Fatalf("key-bearing review was acknowledged or echoed: %+v", ack)
 		}
 		sequence++
@@ -64,7 +78,7 @@ func TestHostileHTTPReviewCannotRetainConfiguredProviderKey(t *testing.T) {
 	outcome.Result = Result{Version: owner.job.Version, Identity: owner.job.Identity, SourceRef: owner.job.Source.Head, Calls: result.Calls[:3]}
 	f.ack(t, "/outcome", outcome, http.StatusOK, sequence)
 	got := f.result(t)
-	if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), "&#x73;ecret") {
+	if err := owner.sink.finish(got.result, got.err); !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), key) || strings.Contains(err.Error(), encoded) {
 		t.Fatalf("rejected review escaped final error: %v", err)
 	}
 	if err := owner.owner.retainReviewEvidence(owner.job, owner.sink.failureEvidence()); err != nil {
@@ -78,13 +92,16 @@ func TestHostileHTTPReviewCannotRetainConfiguredProviderKey(t *testing.T) {
 func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	const codexKey = "fixture-codex-secret"
 	const claudeKey = "fixture-claude-secret"
+	const botKey = "fixture-github-bot-secret"
 	for _, tc := range []struct {
 		name, content string
 		audit         bool
 	}{
 		{name: "answer with other provider key", content: "public " + claudeKey},
 		{name: "encoded answer key", content: `public fixture-claude-\u0073ecret`},
+		{name: "answer with bot token", content: "public " + botKey},
 		{name: "audit mixed safe and HTML-entity artifact", content: "public fixture-codex-&#x73;ecret", audit: true},
+		{name: "audit with bot token artifact", content: "public fixture-github-bot-&#x73;ecret", audit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.audit {
@@ -112,7 +129,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 			if tc.audit {
 				name, action, skill = "security-audit", command.SecurityAudit, testAuditSkillURL
 			}
-			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot",
+			e := &Orchestrator{WorkRoot: workRoot, Usage: &usage.Store{Dir: usageDir}, GitHub: testGitHub(server, botKey), BotID: 8, BotLogin: "bot",
 				Runner:   Runner{Codex: config.CodexConfig{APIKey: codexKey}, Claude: config.ClaudeConfig{APIKey: claudeKey}},
 				Commands: map[string]config.CommandMapping{name: {Action: string(action), Skills: []string{skill}}},
 			}
@@ -180,7 +197,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 				}
 				for _, file := range files {
 					data, err := os.ReadFile(filepath.Join(paths[0], file.Name()))
-					if err != nil || containsConfiguredKey(data, codexKey) || containsConfiguredKey(data, claudeKey) {
+					if err != nil || containsConfiguredKey(data, codexKey) || containsConfiguredKey(data, claudeKey) || containsConfiguredKey(data, botKey) {
 						t.Fatalf("private audit retained a configured key in %q: %v", file.Name(), err)
 					}
 				}
@@ -195,7 +212,7 @@ func TestHostileHTTPResultCannotPublishConfiguredProviderKey(t *testing.T) {
 	}
 }
 
-func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
+func TestHostileHTTPFixEntityBotTokenCannotPublish(t *testing.T) {
 	const key = "fixture-secret"
 	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("source\n")})
 	var writes atomic.Int32
@@ -214,7 +231,7 @@ func TestHostileHTTPFixEntityKeyCannotPublish(t *testing.T) {
 	e := &Orchestrator{
 		WorkRoot: t.TempDir(), Store: openState(t, time.Now()), Usage: &usage.Store{Dir: usageDir},
 		BotID:  8,
-		GitHub: testGitHub(server, "token"), BotLogin: "bot", Runner: Runner{Codex: config.CodexConfig{APIKey: key}},
+		GitHub: testGitHub(server, key), BotLogin: "bot",
 		Commands: map[string]config.CommandMapping{"fix": {Action: string(command.Fix), Skills: []string{skills.BuiltinAntiPromptInjection}}},
 	}
 	e.Executor = executorFunc(func(ctx context.Context, job Job, checkpoints Checkpoints) (Result, error) {

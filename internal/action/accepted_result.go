@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -146,7 +147,7 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	}
 	published, err := projectPublication(c.job, result)
 	if err == nil {
-		err = rejectConfiguredKeyPublication(published, result.Changes, c.owner.Runner.secretValues()...)
+		err = rejectConfiguredKeyPublication(published, result.Changes, c.owner.trustedSecrets()...)
 	}
 	if err == nil {
 		err = rejectPublishedRefutations(c.job, result, published)
@@ -187,6 +188,22 @@ func (c *executionCheckpoints) ReceiveCompletedResult(result Result) error {
 	}
 	if err := record.Validate(); err != nil {
 		return c.fail(fmt.Errorf("%w: accepted result record: %w", monitor.ErrTerminalJob, err))
+	}
+	workerText := []string{result.Answer}
+	for _, diagnostic := range result.Diagnostics {
+		workerText = append(workerText, diagnostic.Code, diagnostic.Message)
+	}
+	for _, refutation := range result.Refutations {
+		workerText = append(workerText, refutation.Text)
+	}
+	textData, err := json.Marshal(workerText)
+	if err != nil {
+		return c.fail(fmt.Errorf("%w: encode accepted result text: %w", monitor.ErrTerminalJob, err))
+	}
+	for _, secret := range c.owner.trustedSecrets() {
+		if secret != "" && containsConfiguredKey(textData, secret) {
+			return c.fail(fmt.Errorf("%w: accepted result contains a configured credential", monitor.ErrTerminalJob))
+		}
 	}
 	data, err := httpEncode(record, int(AcceptedResultMaxBytes))
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -95,6 +96,14 @@ func TestActionRedactsOverlappingNativeCredentials(t *testing.T) {
 	}
 	if err := redactActionError(errors.New("prefix-shared-secret-suffix"), runner.secretValues()...); err == nil || err.Error() != "[redacted]" {
 		t.Fatalf("overlapping native credential escaped error: %v", err)
+	}
+}
+
+func TestTrustedErrorRedactionPrefersLongerBotToken(t *testing.T) {
+	owner := &Orchestrator{Runner: Runner{Codex: config.CodexConfig{APIKey: "ghp_"}}, GitHub: github.New("ghp_ABC")}
+	err := redactActionError(errors.New("credential ghp_ABC"), owner.trustedSecrets()...)
+	if err == nil || err.Error() != "credential [redacted]" {
+		t.Fatalf("bot token fragment escaped error: %v", err)
 	}
 }
 

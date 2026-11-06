@@ -41,7 +41,7 @@ func (e *Orchestrator) retainReviewEvidence(job Job, result Result) error {
 	if job.Critic == nil {
 		return nil
 	}
-	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger, e.Runner.secretValues()...); err != nil {
+	if err := saveReviewEvidence(e.WorkRoot, job, result, e.Logger, e.trustedSecrets()...); err != nil {
 		return retainedRecordFailure("retain private review evidence", err)
 	}
 	return nil

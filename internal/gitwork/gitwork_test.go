@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -88,6 +89,26 @@ func TestGitFailureRedactsConfiguredToken(t *testing.T) {
 	_, err := runGitWithToken(t.Context(), t.TempDir(), "configured-secret", "clone")
 	if err == nil || strings.Contains(err.Error(), "configured-secret") || !strings.Contains(err.Error(), "[redacted]") {
 		t.Fatalf("Git diagnostic was not redacted: %v", err)
+	}
+}
+
+func TestGitFailureRedactsTokenAtDiagnosticCutoff(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
+	}
+	const token = "configured-secret"
+	const cutoff = 8
+	const useful = "\nuseful Git failure\n"
+	padding := bounded.DiagnosticBytes - (len(token) - cutoff) - len(useful)
+	bin := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$MINION_GITHUB_TOKEN\" >&2\nhead -c %d /dev/zero | tr '\\000' x >&2\nprintf '\\nuseful Git failure\\n' >&2\nexit 9\n", padding)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := runGitWithToken(t.Context(), t.TempDir(), token, "clone")
+	if err == nil || strings.Contains(err.Error(), token[cutoff:]) || !strings.Contains(err.Error(), "useful Git failure") || len(err.Error()) > bounded.DiagnosticBytes+256 {
+		t.Fatalf("cut Git diagnostic exposed token or lost useful suffix: %v", err)
 	}
 }
 

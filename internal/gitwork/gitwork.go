@@ -422,14 +422,14 @@ func runGitInputToEnvWithToken(ctx context.Context, dir string, stdin io.Reader,
 	cmd := gitCommand(ctx, binary, dir, append(cleanGitEnvironment(), extraEnv...), append(gitArgs, args...)...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
-	diagnostic := bounded.Buffer{Limit: bounded.DiagnosticBytes}
+	var diagnostic bounded.Tail
 	cmd.Stderr = &diagnostic
 	if err := executil.Run(cmd); err != nil {
 		operation := args[0]
 		for i := 0; i+2 < len(args) && args[i] == "-c"; i += 2 {
 			operation = args[i+2]
 		}
-		return gitFailure("git", operation, aicli.RedactText(diagnostic.String(), token), ctx.Err(), err)
+		return gitFailure("git", operation, aicli.RedactTail(&diagnostic, token), ctx.Err(), err)
 	}
 	return nil
 }

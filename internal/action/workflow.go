@@ -339,7 +339,7 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 	if err != nil {
 		return publication{}, errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
-	if err := rejectConfiguredKeyPublication(published, result.Changes, e.Runner.secretValues()...); err != nil {
+	if err := rejectConfiguredKeyPublication(published, result.Changes, e.trustedSecrets()...); err != nil {
 		return publication{}, errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
 	if err := rejectPublishedRefutations(p.job, result, published); err != nil {
@@ -487,7 +487,7 @@ func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) e
 	}
 	var safe []workspace.File
 	for _, file := range result.Artifacts {
-		if artifactContainsConfiguredKey(file, e.Runner.secretValues()...) || validateResultArtifacts(p.job, append(safe, file), false) != nil {
+		if artifactContainsConfiguredKey(file, e.trustedSecrets()...) || validateResultArtifacts(p.job, append(safe, file), false) != nil {
 			continue
 		}
 		safe = append(safe, file)
