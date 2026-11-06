@@ -373,15 +373,30 @@ func TestOAuthOldCookieLogoutRevokesRotatedSession(t *testing.T) {
 				if jw.GetSession(requestWithCookie(rotated)) != nil {
 					t.Fatal("logout returned before closing the rotated session")
 				}
+				home := adminResponse(handler, http.MethodGet, "/", nil, guest, "")
+				if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 ||
+					home.Result().Cookies()[0].Value == rotated.Value {
+					t.Fatalf("home after logout: status=%d cookies=%v", home.Code, home.Result().Cookies())
+				}
 				if !callbackFirst {
 					releaseOnce.Do(func() { close(release) })
 					callback = <-done
 				}
-				if callback.Code != http.StatusFound && callback.Code != http.StatusSeeOther || len(callback.Result().Cookies()) == 0 {
+				if callback.Code != http.StatusFound && callback.Code != http.StatusSeeOther {
 					t.Fatalf("OAuth callback: status=%d cookies=%v", callback.Code, callback.Result().Cookies())
+				}
+				wantCookies := 0
+				if callbackFirst {
+					wantCookies = 1
+				}
+				if len(callback.Result().Cookies()) != wantCookies {
+					t.Fatalf("OAuth callback after logout: cookies=%v, want %d", callback.Result().Cookies(), wantCookies)
 				}
 				if jw.GetSession(requestWithCookie(rotated)) != nil {
 					t.Fatal("old-cookie logout left the rotated session alive")
+				}
+				if jw.GetSession(requestWithCookie(home.Result().Cookies()[0])) == nil {
+					t.Fatal("late callback displaced the new home guest session")
 				}
 			})
 		}
@@ -462,6 +477,23 @@ func TestOAuthPendingRotationLogoutChecksClientIP(t *testing.T) {
 				t.Fatal("same-IP logout left the pending OAuth session alive")
 			}
 		})
+	}
+}
+
+func TestOAuthCallbackWriterPreservesOtherCookies(t *testing.T) {
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(jw.Close)
+	key := sha256.Sum256([]byte("signed-out"))
+	admin := &adminAccess{jaws: jw, rotatedCookies: map[[32]byte]rotatedCookie{key: {signedOut: true}}}
+	response := httptest.NewRecorder()
+	response.Header().Add("Set-Cookie", jw.CookieName+"=closed; Path=/")
+	response.Header().Add("Set-Cookie", "oauth_state=done; Path=/auth")
+	(&oauthCallbackWriter{ResponseWriter: response, admin: admin, key: key}).WriteHeader(http.StatusSeeOther)
+	if cookies := response.Result().Cookies(); len(cookies) != 1 || cookies[0].Name != "oauth_state" {
+		t.Fatalf("callback cookies after sign-out: %v", cookies)
 	}
 }
 
@@ -998,8 +1030,8 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("callback did not finish after provider resumed")
 	}
-	if home := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 {
-		t.Fatalf("canceled callback restored cookie mark: status=%d cookies=%v", home.Code, home.Result().Cookies())
+	if home := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); home.Code != http.StatusConflict || len(home.Result().Cookies()) != 0 {
+		t.Fatalf("canceled callback minted another guest: status=%d cookies=%v", home.Code, home.Result().Cookies())
 	}
 	lateKey := (userIdentity{Provider: "gitlab", Host: strings.TrimPrefix(issuer.URL, "https://"), Subject: "team:42/member"}).key()
 	if saved, err := openUserLinks(auth.links.path); err != nil || saved.account(lateKey) != lateKey {

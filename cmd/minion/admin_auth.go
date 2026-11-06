@@ -77,6 +77,7 @@ type rotatedCookie struct {
 	until       time.Time
 	pending     int
 	signedOut   bool
+	homeIssued  bool
 	originIP    netip.Addr
 	replacement *jaws.Session
 }
@@ -183,6 +184,21 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		if access.rejectRotatedCookie(w, r) {
 			return
 		}
+		var signedOutKey [32]byte
+		signedOutHome := false
+		if cookie, err := r.Cookie(jw.CookieName); err == nil {
+			signedOutKey = sha256.Sum256([]byte(cookie.Value))
+			state := access.rotatedCookies[signedOutKey]
+			if state.signedOut && time.Now().Before(state.until) {
+				if state.homeIssued {
+					// shortcut: a lost first response delays retry until expiry; revisit if immediate retry matters.
+					// A second guest cookie could overwrite a newer sign-in response.
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+				signedOutHome = true
+			}
+		}
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxOAuthAdmissionSessions-1 {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Retry-After", "60")
@@ -190,6 +206,11 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 			return
 		}
 		home.ServeHTTP(w, r)
+		if signedOutHome && jw.GetSession(r) != nil {
+			state := access.rotatedCookies[signedOutKey]
+			state.homeIssued = true
+			access.rotatedCookies[signedOutKey] = state
+		}
 	})
 	mux.HandleFunc("HEAD /{$}", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
@@ -541,6 +562,41 @@ func (a *adminAccess) recordOAuthRotation(sess *jaws.Session, r *http.Request) {
 	}
 }
 
+type oauthCallbackWriter struct {
+	http.ResponseWriter
+	admin     *adminAccess
+	key       [32]byte
+	committed bool
+}
+
+func (w *oauthCallbackWriter) WriteHeader(status int) {
+	if w.committed {
+		return
+	}
+	w.committed = true
+	w.admin.sessionAdmissionMu.Lock()
+	defer w.admin.sessionAdmissionMu.Unlock()
+	if w.admin.rotatedCookies[w.key].signedOut {
+		header := w.Header()
+		cookies := header.Values("Set-Cookie")
+		header.Del("Set-Cookie")
+		for _, line := range cookies {
+			name, _, _ := strings.Cut(line, "=")
+			if strings.TrimSpace(name) != w.admin.jaws.CookieName {
+				header.Add("Set-Cookie", line)
+			}
+		}
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *oauthCallbackWriter) Write(body []byte) (int, error) {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(body)
+}
+
 // serveOAuthCallback holds the old cookie out of guest admission until every callback using it finishes.
 func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	original := r.Clone(r.Context()) // JaWS adds the rotated cookie to r during the callback.
@@ -589,7 +645,11 @@ func (a *adminAccess) serveOAuthCallback(w http.ResponseWriter, r *http.Request,
 		}
 		a.sessionAdmissionMu.Unlock()
 	}()
-	next.ServeHTTP(w, r)
+	callback := &oauthCallbackWriter{ResponseWriter: w, admin: a, key: key}
+	next.ServeHTTP(callback, r)
+	if !callback.committed {
+		callback.WriteHeader(http.StatusOK)
+	}
 }
 
 func (a *adminAccess) reserveAttempt(username string) bool {

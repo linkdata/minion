@@ -136,6 +136,36 @@ func TestAdminOldCookieLogoutRevokesPasswordSession(t *testing.T) {
 	}
 }
 
+func TestSignedOutCookieMintsOnlyOneHomeGuest(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
+	guest := adminGuestCookie(t, handler)
+	login := func(cookie *http.Cookie) *http.Cookie {
+		t.Helper()
+		response := adminResponse(handler, http.MethodPost, "/admin/login",
+			url.Values{"username": {"operator"}, "password": {"correct-password"}}, cookie, "https://admin.example")
+		if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
+			t.Fatalf("admin login: status=%d cookies=%v", response.Code, response.Result().Cookies())
+		}
+		return response.Result().Cookies()[0]
+	}
+	signed := login(guest)
+	if logout := adminResponse(handler, http.MethodPost, "/admin/logout", nil, signed, "https://admin.example"); logout.Code != http.StatusSeeOther {
+		t.Fatalf("admin logout: status=%d", logout.Code)
+	}
+	first := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
+	if first.Code != http.StatusOK || len(first.Result().Cookies()) != 1 {
+		t.Fatalf("first home: status=%d cookies=%v", first.Code, first.Result().Cookies())
+	}
+	second := adminResponse(handler, http.MethodGet, "/", nil, signed, "")
+	if second.Code != http.StatusConflict || len(second.Result().Cookies()) != 0 || second.Body.Len() != 0 {
+		t.Fatalf("stale home: status=%d cookies=%v", second.Code, second.Result().Cookies())
+	}
+	latest := login(first.Result().Cookies()[0])
+	if jw.GetSession(requestWithCookie(latest)) == nil {
+		t.Fatal("delayed stale home response displaced the new admin session")
+	}
+}
+
 func TestOldCookieLogoutRevokesLatestPasswordSession(t *testing.T) {
 	for _, path := range []string{"/admin/logout", "/auth/logout"} {
 		t.Run(path, func(t *testing.T) {

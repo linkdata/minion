@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -196,6 +197,10 @@ func plainAdminListenURL(rawURL, address string, cfg config.AdminConfig) string 
 	if err != nil {
 		return rawURL
 	}
+	listenPort, err := strconv.Atoi(port)
+	if err != nil {
+		return rawURL
+	}
 	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
 		if client == nil {
 			continue
@@ -208,7 +213,7 @@ func plainAdminListenURL(rawURL, address string, cfg config.AdminConfig) string 
 		if callbackPort == "" {
 			callbackPort = "80"
 		}
-		if callbackPort == port {
+		if number, err := strconv.Atoi(callbackPort); err == nil && number == listenPort {
 			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
 		}
 	}
