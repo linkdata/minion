@@ -158,12 +158,15 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 		}
 		return (&url.URL{Scheme: "https", Host: callback.Host}).String()
 	}
+	if boundIP == nil {
+		return ""
+	}
+	localhostOK := boundIP.IsUnspecified() || boundIP.Equal(net.IPv4(127, 0, 0, 1)) || boundIP.Equal(net.IPv6loopback)
 	covered := func(name string) string {
-		if strings.EqualFold(name, "localhost") && boundIP != nil && !boundIP.IsUnspecified() &&
-			!boundIP.Equal(net.IPv4(127, 0, 0, 1)) && !boundIP.Equal(net.IPv6loopback) {
+		if strings.EqualFold(name, "localhost") && !localhostOK {
 			return ""
 		}
-		if name == "" || strings.Contains(name, "*") || certificate.Leaf.VerifyHostname(name) != nil {
+		if strings.Contains(name, "*") || certificate.Leaf.VerifyHostname(name) != nil {
 			return ""
 		}
 		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
@@ -173,11 +176,11 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 			return candidate
 		}
 	}
-	if ip := boundIP; ip != nil && !ip.IsUnspecified() {
+	if !boundIP.IsUnspecified() {
 		if candidate := covered(host); candidate != "" {
 			return candidate
 		}
-		if ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback) {
+		if localhostOK {
 			if candidate := covered("localhost"); candidate != "" {
 				return candidate
 			}
@@ -188,7 +191,7 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 			return candidate
 		}
 	}
-	if ip := boundIP; ip != nil && ip.IsUnspecified() {
+	if boundIP.IsUnspecified() {
 		for _, address := range certificate.Leaf.IPAddresses {
 			if candidate := covered(address.String()); candidate != "" {
 				return candidate

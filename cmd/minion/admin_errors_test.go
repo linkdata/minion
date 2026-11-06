@@ -176,8 +176,9 @@ func TestAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	guest := adminGuestCookie(t, handler)
 	for range 2 {
 		notice := adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")
-		if notice.Code != http.StatusForbidden || notice.Header().Get("Content-Type") != "text/html; charset=utf-8" {
-			t.Fatalf("available guest notice: status=%d type=%q", notice.Code, notice.Header().Get("Content-Type"))
+		if notice.Code != http.StatusForbidden || notice.Header().Get("Content-Type") != "text/html; charset=utf-8" ||
+			strings.Contains(notice.Body.String(), `href="/admin/login"`) {
+			t.Fatalf("available guest notice: status=%d type=%q body=%q", notice.Code, notice.Header().Get("Content-Type"), notice.Body.String())
 		}
 	}
 	limited := adminResponse(handler, http.MethodGet, "/admin/usage", nil, guest, "")

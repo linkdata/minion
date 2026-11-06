@@ -160,16 +160,20 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		guestMu = &oauth.admissionMu
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		sess := jw.GetSession(r)
 		if access.sessionUsername(sess) != "" {
 			dashboard.ServeHTTP(w, r)
 			return
 		}
+		closeUnreadAdminBody(w, r)
 		guestMu.Lock()
 		defer guestMu.Unlock()
-		sess = jw.GetSession(r)
-		if sess == nil && jw.SessionCount() >= maxGuestPageSessions {
+		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
+			if len(access.accounts) != 0 {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+				return
+			}
 			guestAdmissionUnavailable(w)
 			return
 		}

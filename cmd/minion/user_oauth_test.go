@@ -520,6 +520,10 @@ func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
 		t.Fatalf("concurrent guests consumed admin reserve: sessions=%d", count)
 	}
 	for i, response := range responses {
+		if response.Code == http.StatusSeeOther && paths[i%len(paths)] == "/" &&
+			response.Header().Get("Location") == "/admin/login" && len(response.Result().Cookies()) == 0 {
+			continue
+		}
 		want := http.StatusOK
 		if paths[i%len(paths)] == "/auth/github/login" {
 			want = http.StatusFound

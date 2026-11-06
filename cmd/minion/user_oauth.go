@@ -269,7 +269,7 @@ func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	closeUnreadAdminBody(w, r)
 	sess := a.jaws.GetSession(r)
 	account, provider := a.currentUser(sess)
-	if account == "" && len(sess.Requests()) >= maxGuestPageRequests {
+	if account == "" && sess.Get(adminSessionKey) == nil && len(sess.Requests()) >= maxGuestPageRequests {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusTooManyRequests)
 		return

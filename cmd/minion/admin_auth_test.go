@@ -527,7 +527,7 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 	}
 }
 
-func TestSignedInOAuthPublicPagesAreNotGuestLimited(t *testing.T) {
+func TestSignedInPublicPagesAreNotGuestLimited(t *testing.T) {
 	cfg := config.AdminConfig{
 		Administrators: []config.AdminAccount{testAdminAccount()},
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
@@ -560,6 +560,16 @@ func TestSignedInOAuthPublicPagesAreNotGuestLimited(t *testing.T) {
 	if login := userUsageRequest(handler, http.MethodGet, "/admin/login", "", cookie); login.Code != http.StatusOK {
 		t.Fatalf("admin login for OAuth user: status=%d body=%q", login.Code, login.Body.String())
 	}
+	adminCookie := userUsageCookie(t, jw, "", true)
+	for range maxGuestPageRequests {
+		page := userUsageRequest(handler, http.MethodGet, "/admin/login", "", adminCookie)
+		if page.Code != http.StatusOK {
+			t.Fatalf("admin account page status=%d", page.Code)
+		}
+	}
+	if page := userUsageRequest(handler, http.MethodGet, "/auth/login", "", adminCookie); page.Code != http.StatusOK {
+		t.Fatalf("OAuth login page for admin: status=%d body=%q", page.Code, page.Body.String())
+	}
 }
 
 func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
@@ -577,12 +587,48 @@ func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
 	}
 	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+	if denied.Code != http.StatusSeeOther || denied.Header().Get("Location") != "/admin/login" ||
+		denied.Header().Get("Cache-Control") != "no-store" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
 	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("admin sign-in at home reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
+	}
+}
+
+func TestHomeSharesOAuthGuestAdmissionLock(t *testing.T) {
+	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+		RedirectURL: "https://admin.example/auth/github/callback"}}
+	handler, _, auth := testOAuthAdminHandler(t, cfg, nil)
+	auth.admissionMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			auth.admissionMu.Unlock()
+		}
+	}()
+	started := make(chan struct{})
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		close(started)
+		done <- adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	}()
+	<-started
+	select {
+	case <-done:
+		t.Fatal("home bypassed OAuth guest admission lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	auth.admissionMu.Unlock()
+	locked = false
+	select {
+	case response := <-done:
+		if response.Code != http.StatusOK || len(response.Result().Cookies()) != 1 {
+			t.Fatalf("home after admission unlock: status=%d cookies=%v", response.Code, response.Result().Cookies())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("home did not resume after admission unlock")
 	}
 }
 
@@ -721,6 +767,10 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	if !jw.MakeAuth(jaWSRequest).IsAdmin() {
 		t.Fatal("JaWS template authorization did not use the admin session")
 	}
+	session := jaWSRequest.Session()
+	if session == nil || session.Get(adminSessionKey) != "operator" {
+		t.Fatal("admin session did not contain the signed-in identity")
+	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatalf("cross-origin logout: status=%d hasHSTS=%t", response.Code, response.Header().Get("Strict-Transport-Security") != "")
 	}
@@ -736,6 +786,9 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	}
 	if jw.MakeAuth(jaWSRequest).IsAdmin() {
 		t.Fatal("revoked JaWS request retained admin template authorization")
+	}
+	if session.Get(adminSessionKey) != nil {
+		t.Fatal("logout retained the admin identity in the closed session")
 	}
 	if response := adminResponse(handler, http.MethodPost, "/jaws/invalid-key", nil, cookie, ""); response.Code != http.StatusForbidden {
 		t.Errorf("revoked POST /jaws/invalid-key: status=%d, want 403", response.Code)
