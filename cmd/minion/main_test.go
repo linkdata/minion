@@ -116,7 +116,7 @@ func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
 				}
 			})
 			code, output := runStartupFixture(t, cfg)
-			if code != 0 || !strings.Contains(output, "another run is active") || strings.Contains(output, claudeUnixSocketWarning) {
+			if code != 1 || !strings.Contains(output, state.ErrLocked.Error()) || strings.Contains(output, claudeUnixSocketWarning) {
 				t.Fatalf("locked startup warned before admission: exit=%d log=%q", code, output)
 			}
 			cfg.StatePath = filepath.Join(t.TempDir(), "active-state.json")
