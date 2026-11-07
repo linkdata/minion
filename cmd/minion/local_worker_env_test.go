@@ -7,7 +7,7 @@ import (
 
 func TestSelectedWorkerEnv(t *testing.T) {
 	seeded := map[string]string{
-		"GH_TOKEN": "parent-gh", "GITHUB_TOKEN": "parent-github", "Gh_ToKeN": "mixed-gh", "gItHuB_tOkEn": "mixed-github",
+		"GH_TOKEN": "parent-gh", "GITHUB_TOKEN": "parent-github", "Gh_ToKeN": "mixed-gh", "gItHuB_tOkEn": "mixed-github", "MINION_GITHUB_TOKEN": "parent-minion",
 		"GH_ENTERPRISE_TOKEN": "parent-enterprise-gh", "GITHUB_ENTERPRISE_TOKEN": "parent-enterprise-github",
 		"CODEX_API_KEY": "codex-key", "CODEX_ACCESS_TOKEN": "codex-token", "OPENAI_API_KEY": "openai-key",
 		"ANTHROPIC_API_KEY": "claude-key", "ANTHROPIC_AUTH_TOKEN": "claude-auth", "CLAUDE_CODE_OAUTH_TOKEN": "claude-token",

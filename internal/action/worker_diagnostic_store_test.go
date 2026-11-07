@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -67,6 +68,37 @@ func TestWorkerDiagnosticsStayInPrivateAttemptRecord(t *testing.T) {
 	result.Diagnostics[1].Message = "different report"
 	if err := owner.retainWorkerDiagnostics(job, result, failure); !errors.Is(err, monitor.ErrTerminalJob) {
 		t.Fatalf("conflicting worker record was accepted: %v", err)
+	}
+}
+
+func TestWorkerDiagnosticsRejectConfiguredBotToken(t *testing.T) {
+	const key = "fixture-github-bot-secret"
+	for _, tc := range []struct {
+		name        string
+		diagnostics []Diagnostic
+		failure     *httpFailure
+	}{
+		{name: "diagnostic", diagnostics: []Diagnostic{{Code: "worker", Message: "fixture-github-bot-&#x73;ecret"}}},
+		{name: "failure", failure: &httpFailure{Message: key}},
+		{name: "observed failure", failure: &httpFailure{Message: "worker failed", ObservedMessage: key}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			job := testJob(command.Comment)
+			owner := Orchestrator{WorkRoot: t.TempDir(), GitHub: github.New(key)}
+			result := Result{Version: job.Version, Identity: job.Identity, SourceRef: job.Source.Head, Diagnostics: tc.diagnostics}
+			var runErr error
+			if tc.failure != nil {
+				runErr = tc.failure.workerErr()
+			}
+			err := owner.retainWorkerDiagnostics(job, result, runErr)
+			if !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), key) {
+				t.Fatalf("bot token reached worker diagnostic retention: %v", err)
+			}
+			path := filepath.Join(owner.WorkRoot, "worker-diagnostics", job.Identity.AttemptID+".json")
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("bot token reached worker diagnostic record: %v", err)
+			}
+		})
 	}
 }
 

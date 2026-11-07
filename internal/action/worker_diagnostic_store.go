@@ -71,6 +71,11 @@ func (e *Orchestrator) retainWorkerDiagnosticsWithCaptureUpgradeLocked(job Job, 
 	if err != nil {
 		return fmt.Errorf("%w: encode private worker diagnostics: %w", monitor.ErrTerminalJob, err)
 	}
+	for _, secret := range e.trustedSecrets() {
+		if secret != "" && containsConfiguredKey(data, secret) {
+			return fmt.Errorf("%w: worker diagnostics contain a configured credential", monitor.ErrTerminalJob)
+		}
+	}
 	path := filepath.Join(root, job.Identity.AttemptID+".json")
 	previous, err := workspace.ReadRegular(path, workspace.MaxBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

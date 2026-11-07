@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -95,6 +96,13 @@ type Orchestrator struct {
 
 var _ monitor.StoredResultPublisher = (*Orchestrator)(nil)
 
+// trustedSecrets includes the bot credential only in parent-side checks.
+func (e *Orchestrator) trustedSecrets() []string {
+	secrets := append(e.Runner.secretValues(), e.GitHub.Token())
+	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
+	return secrets
+}
+
 // StopCleanupVerified reports whether the selected worker returned without a
 // quarantined or unclean attempt. Execute has returned before this is called.
 func (e *Orchestrator) StopCleanupVerified() bool {
@@ -113,12 +121,12 @@ func (e *Orchestrator) WaitCapacity(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("%w: selected executor readiness is unavailable", monitor.ErrAcceptanceState)
 	}
-	return redactActionError(ready.WaitCapacity(ctx), e.Runner.secretValues()...)
+	return redactActionError(ready.WaitCapacity(ctx), e.trustedSecrets()...)
 }
 
 func (e *Orchestrator) Execute(ctx context.Context, job monitor.Job) (resultErr error) {
 	defer func() {
-		resultErr = redactActionError(resultErr, e.Runner.secretValues()...)
+		resultErr = redactActionError(resultErr, e.trustedSecrets()...)
 	}()
 	if !e.assignmentRequired {
 		return fmt.Errorf("%w: selected assignment checkpoint is unavailable", monitor.ErrAcceptanceState)

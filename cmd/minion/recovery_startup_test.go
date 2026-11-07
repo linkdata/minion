@@ -134,7 +134,7 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 		return slices.Clone(requests), reply, publications
 	}
 
-	cfg := config.Config{BotLogin: "bot", StatePath: statePath, WorkRoot: root,
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "offline-token"}, StatePath: statePath, WorkRoot: root,
 		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
 		AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"},

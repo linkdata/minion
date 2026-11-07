@@ -41,7 +41,7 @@ func TestRestoreCheckoutUsesPinnedSourceAfterDefaultBranchMoves(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restored, err := RestoreCheckout(ctx, t.TempDir(), snapshot)
+	restored, err := RestoreCheckout(ctx, t.TempDir(), snapshot, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestRestoreCheckoutRejectsChangedPinnedFilesAndCleansUp(t *testing.T) {
 	}
 	snapshot.Files[0].Data = []byte("changed")
 	root := t.TempDir()
-	checkout, err := RestoreCheckout(t.Context(), root, snapshot)
+	checkout, err := RestoreCheckout(t.Context(), root, snapshot, "")
 	if err == nil || checkout != nil || !strings.Contains(err.Error(), "source files differ from pinned repository") {
 		t.Fatalf("changed source returned checkout=%v error=%v", checkout, err)
 	}

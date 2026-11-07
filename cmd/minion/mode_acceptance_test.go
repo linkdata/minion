@@ -174,7 +174,7 @@ func TestExecuteModeOfflinePublicationAndRestart(t *testing.T) {
 	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
 	approved := config.RoleModelConfig{Model: "main-1", Effort: "low"}
 	cfg := config.Config{WorkRoot: filepath.Join(base, "work"), StatePath: statePath,
-		BotLogin: "linkdataminion", Main: "codex",
+		BotLogin: "linkdataminion", GitHub: config.GitHubConfig{Token: "offline-token"}, Main: "codex",
 		Admin: &config.AdminConfig{Listen: "127.0.0.1:0",
 			GitHubOAuth:      &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
 			UserModelChoices: &config.UserModelChoices{Main: []config.RoleModelConfig{approved}}},

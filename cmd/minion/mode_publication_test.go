@@ -58,7 +58,7 @@ func TestStartupReconcilesIssuedWriteAfterGitPreflightFailure(t *testing.T) {
 	t.Setenv("GH_TOKEN", "fixture-token")
 	at := time.Now().UTC().Add(-time.Minute)
 	statePath := filepath.Join(t.TempDir(), "state.json")
-	cfg := config.Config{BotLogin: "bot", StatePath: statePath, WorkRoot: t.TempDir(),
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "fixture-token"}, StatePath: statePath, WorkRoot: t.TempDir(),
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "o/r", ID: 1, OwnerID: 2}},
 	}

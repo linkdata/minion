@@ -61,7 +61,7 @@ func TestServiceRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 
 	cfg := config.Config{
-		BotLogin: "bot", StatePath: statePath, WorkRoot: root,
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "offline-token"}, StatePath: statePath, WorkRoot: root,
 		Admin: &config.AdminConfig{Listen: "127.0.0.1:8377",
 			TLSCertFile: filepath.Join(root, "missing-cert.pem"), TLSKeyFile: filepath.Join(root, "missing-key.pem")},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},

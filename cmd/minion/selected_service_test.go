@@ -196,6 +196,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 	for _, mode := range []string{"ready", "reject-before-pull"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg := selectedServiceTestConfig(t)
+			cfg.GitHub.Token = "fixture-github-bot-secret"
 			report := filepath.Join(t.TempDir(), "startup.json")
 			t.Setenv("MINION_SELECTED_SERVICE_HELPER", mode)
 			t.Setenv("MINION_SELECTED_SERVICE_REPORT", report)
@@ -211,7 +212,7 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "unselected-claude-token")
 			var logs bytes.Buffer
 			logger := log.New(&logs, "", 0)
-			owner := newOrchestrator(cfg, nil, nil, logger, nil)
+			owner := newOrchestrator(cfg, github.New(cfg.GitHub.Token), nil, logger, nil)
 			watcher := &monitor.Monitor{Config: cfg, Logger: logger}
 			done, closeWorker, err := attachSelectedLocalWorker(t.Context(), owner, watcher, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second)
 			if mode == "reject-before-pull" {
@@ -233,6 +234,9 @@ func TestAttachSelectedLocalWorkerFreezesStartupAndOwnsClose(t *testing.T) {
 			data, err := os.ReadFile(report)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte(cfg.GitHub.Token)) {
+				t.Fatal("local worker startup contained the bot credential")
 			}
 			var startup action.WorkerStartup
 			if err := json.Unmarshal(data, &startup); err != nil {
@@ -1125,16 +1129,16 @@ func TestSelectedLocalServiceChild(t *testing.T) {
 	if mode == "" {
 		return
 	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var startup action.WorkerStartup
-	if err := json.NewDecoder(os.Stdin).Decode(&startup); err != nil {
+	if err := json.Unmarshal(data, &startup); err != nil {
 		t.Fatal(err)
 	}
 	if os.Getenv("GH_TOKEN") != "" || os.Getenv("GITHUB_TOKEN") != "" || os.Getenv("GH_ENTERPRISE_TOKEN") != "" || os.Getenv("GITHUB_ENTERPRISE_TOKEN") != "" || os.Getenv("OPENAI_API_KEY") != "" || os.Getenv("ANTHROPIC_API_KEY") != "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") != "" || os.Getenv("CLAUDE_CODE_OAUTH_TOKEN") != "" || os.Getenv("CODEX_API_KEY") != "" || os.Getenv("CODEX_ACCESS_TOKEN") != "" {
 		t.Fatal("selected child inherited parent or unselected provider credentials")
-	}
-	data, err := json.Marshal(startup)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if err := os.WriteFile(os.Getenv("MINION_SELECTED_SERVICE_REPORT"), data, 0600); err != nil {
 		t.Fatal(err)

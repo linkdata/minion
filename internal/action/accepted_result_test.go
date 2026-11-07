@@ -696,6 +696,49 @@ func TestSelectedInvalidPublicationReturnsKnownResultWithoutSuccessACK(t *testin
 	}
 }
 
+func TestSelectedResultDoesNotRetainConfiguredBotToken(t *testing.T) {
+	const key = "fixture-github-bot-secret"
+	for _, tc := range []struct {
+		name   string
+		action command.Action
+		set    func(*Result)
+	}{
+		{name: "diagnostic", action: command.Comment, set: func(r *Result) {
+			r.Diagnostics = []Diagnostic{{Code: "worker", Message: "fixture-github-bot-&#x73;ecret"}}
+		}},
+		{name: "unused fix summary", action: command.Fix, set: func(r *Result) {
+			r.Answer = key
+			r.Changes = []workspace.Change{{Path: "source.txt", Mode: workspace.Regular, Data: []byte("safe change\n")}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, store, _ := selectedHTTPResultFixtureForJob(t, testJob(tc.action), nil)
+			checkpoints := f.tx.sink.(*executionCheckpoints)
+			checkpoints.owner.GitHub = github.New(key)
+			if tc.action == command.Fix {
+				checkpoints.fixDestination = &FixDestination{RepositoryID: f.job.Identity.RepositoryID,
+					DefaultBranch: "main", Visibility: "public", ForkID: 4, ForkFullName: "bot/repo"}
+			}
+			outcome := completeHTTPResult(t, f)
+			tc.set(&outcome.Result)
+			if err := outcome.Result.Validate(f.job); err != nil {
+				t.Fatalf("invalid fixture result: %v", err)
+			}
+			ack := f.request("/outcome", outcome)
+			if ack.err != nil || ack.status != http.StatusInternalServerError || ack.ack.Failure == nil || !ack.ack.Failure.Terminal ||
+				strings.Contains(ack.ack.Failure.Message, key) {
+				t.Fatalf("bot token result received a successful or revealing ACK: %+v", ack)
+			}
+			if got := f.result(t); !errors.Is(got.err, monitor.ErrTerminalJob) || strings.Contains(got.err.Error(), key) {
+				t.Fatalf("bot token result was accepted: %v", got.err)
+			}
+			if saved, err := store.HasAcceptedResult(); err != nil || saved {
+				t.Fatalf("bot token reached accepted result: saved=%t error=%v", saved, err)
+			}
+		})
+	}
+}
+
 func TestSelectedHTTPOutcomeRejectsChangedAttemptAndSaveFailure(t *testing.T) {
 	for _, change := range []string{"foreign attempt", "changed deadline", "save failure"} {
 		t.Run(change, func(t *testing.T) {

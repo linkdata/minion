@@ -1,5 +1,8 @@
 {
   "bot_login": "example-bot",
+  "github": {
+    "token": ""
+  },
   "admin": {
     "listen": "127.0.0.1:8377",
     "administrators": [{"username": "admin", "password_hash": "PASTE_GENERATED_HASH_HERE"}]

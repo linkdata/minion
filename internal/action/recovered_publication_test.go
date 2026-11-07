@@ -490,7 +490,7 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotID: 8, BotLogin: "bot", WorkRoot: t.TempDir(),
 		Runner: Runner{Codex: config.CodexConfig{APIKey: "configured-secret"}, runModel: forbidModel(t)}}
 	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrTerminalJob) ||
-		!strings.Contains(err.Error(), "configured provider key") || writes.Load() != 0 {
+		!strings.Contains(err.Error(), "configured credential") || writes.Load() != 0 {
 		t.Fatalf("invalid no-change result was published: writes=%d error=%v", writes.Load(), err)
 	}
 }
@@ -498,7 +498,7 @@ func TestPublishRecoveredNoChangeFixStillValidatesPublication(t *testing.T) {
 func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 	base, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")})
 	root := t.TempDir()
-	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true, "fixture-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +561,7 @@ func TestPublishRecoveredFixUsesPinnedSourceAfterDefaultMoves(t *testing.T) {
 func TestPublishRecoveredFixRevalidatesBeforePush(t *testing.T) {
 	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")})
 	root := t.TempDir()
-	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true, "fixture-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +617,7 @@ func TestPublishRecoveredFixRevalidatesBeforePush(t *testing.T) {
 func TestPublishRecoveredFixReconcilesLostPushResponseWithoutSecondPush(t *testing.T) {
 	_, _, remote := gitFixtureRemote(t, workspace.File{Path: "source.txt", Mode: workspace.Regular, Data: []byte("before\n")})
 	root := t.TempDir()
-	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true)
+	checkout, err := gitwork.Clone(t.Context(), root, "o/r", "main", true, "fixture-token")
 	if err != nil {
 		t.Fatal(err)
 	}

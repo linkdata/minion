@@ -12,7 +12,7 @@ import (
 
 // RestoreCheckout recreates a trusted fix checkout from the pinned Job source.
 // It does not fetch a branch that may have moved since the action ran.
-func RestoreCheckout(ctx context.Context, workRoot string, snapshot workspace.Snapshot) (_ *Checkout, err error) {
+func RestoreCheckout(ctx context.Context, workRoot string, snapshot workspace.Snapshot, token string) (_ *Checkout, err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("restore checkout: %w", err)
@@ -45,7 +45,7 @@ func RestoreCheckout(ctx context.Context, workRoot string, snapshot workspace.Sn
 	if _, err := runGit(ctx, path, "config", "--local", "--unset", "protocol.allow"); err != nil {
 		return nil, err
 	}
-	checkout := &Checkout{path: path, expectedHead: snapshot.Head}
+	checkout := &Checkout{path: path, expectedHead: snapshot.Head, githubToken: token}
 	if err := checkout.recordConfig(); err != nil {
 		return nil, err
 	}

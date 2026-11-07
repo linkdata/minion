@@ -16,7 +16,7 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BotLogin != "example-bot" || len(cfg.InvitationOwners) != 0 ||
+	if cfg.BotLogin != "example-bot" || cfg.GitHub.Token != "" || len(cfg.InvitationOwners) != 0 ||
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" || cfg.Claude.AllowAllUnixSockets ||
@@ -28,7 +28,30 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
-		t.Fatalf("checked-in configuration differs from expected sample: %+v", cfg)
+		t.Fatal("checked-in configuration differs from expected sample")
+	}
+}
+
+func TestGitHubTokenValidation(t *testing.T) {
+	config := Config{BotLogin: "bot", Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+	if err := config.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.RequireGitHubToken(); err == nil || !strings.Contains(err.Error(), "github.token") {
+		t.Fatalf("missing bot credential: %v", err)
+	}
+	config.GitHub.Token = "bot-token"
+	if err := config.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.RequireGitHubToken(); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"two words", "line\nbreak", "nul\x00byte", "vertical\vtab", "form\ffeed", "nonbreaking\u00a0space"} {
+		config.GitHub.Token = token
+		if err := config.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "github.token") {
+			t.Fatalf("accepted invalid GitHub token %q: %v", token, err)
+		}
 	}
 }
 

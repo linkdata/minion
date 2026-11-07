@@ -136,7 +136,7 @@ func TestCloneRejectsShallowSource(t *testing.T) {
 	fixture := newFixture(t)
 	writeFile(t, filepath.Join(fixture.remote, "shallow"), fixture.base+"\n")
 	root := t.TempDir()
-	checkout, err := cloneFromURL(t.Context(), root, fixture.remote, "main", true)
+	checkout, err := cloneFromURL(t.Context(), root, fixture.remote, "main", true, "")
 	if checkout != nil || err == nil || !strings.Contains(err.Error(), "source repository is shallow") {
 		t.Fatalf("shallow source returned checkout=%v error=%v", checkout, err)
 	}
@@ -258,7 +258,7 @@ func TestSnapshotReusesValidatedTreesByCommit(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "tree-calls")
 	script := "#!/bin/sh\nfor arg do if [ \"$arg\" = ls-tree ]; then printf x >> " + shellQuote(marker) + "; fi; done\nexec " + shellQuote(realGit) + " \"$@\"\n"
 	fakeOnPath(t, "git", script)
-	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true))
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true, ""))
 	for i := 0; i < 2; i++ {
 		if _, err := checkout.Snapshot(t.Context()); err != nil {
 			t.Fatal(err)

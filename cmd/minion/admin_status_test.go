@@ -19,6 +19,7 @@ import (
 func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 	cfg := config.Config{
 		BotLogin: "fixture-bot", Main: "codex", Adversarial: "claude",
+		GitHub:         config.GitHubConfig{Token: "secret-github-token"},
 		Codex:          config.CodexConfig{Model: "gpt-test", ReasoningEffort: "medium", APIKey: "secret-codex-key"},
 		Claude:         config.ClaudeConfig{Model: "sonnet-test", Effort: "high", APIKey: "secret-claude-key"},
 		Admin:          &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
@@ -44,7 +45,7 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 			t.Fatalf("status page missing %q: %s", want, body.String())
 		}
 	}
-	for _, secret := range []string{"secret-codex-key", "secret-claude-key", "secret-password-hash"} {
+	for _, secret := range []string{"secret-github-token", "secret-codex-key", "secret-claude-key", "secret-password-hash"} {
 		if strings.Contains(body.String(), secret) {
 			t.Fatalf("status page exposed %q", secret)
 		}

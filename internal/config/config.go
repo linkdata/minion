@@ -153,6 +153,11 @@ type OAuthClient struct {
 	BaseURL string `json:"base_url,omitempty"`
 }
 
+// GitHubConfig holds the bot account credential used by the orchestrator.
+type GitHubConfig struct {
+	Token string `json:"token"`
+}
+
 // CodexConfig contains authentication, model settings, and job skill paths.
 type CodexConfig struct {
 	Model           string `json:"model,omitempty"`
@@ -243,7 +248,8 @@ func (s CriticStopping) Resolve() (maxRounds, nonblockingAfterRound, consecutive
 
 // Config defines monitored repositories and the commands they accept.
 type Config struct {
-	BotLogin string `json:"bot_login"`
+	BotLogin string       `json:"bot_login"`
+	GitHub   GitHubConfig `json:"github,omitzero"`
 	// Main selects codex or claude; an empty value selects codex.
 	Main string `json:"main,omitempty"`
 	// Adversarial optionally selects a read-only critic.
@@ -400,6 +406,15 @@ func validModelSetting(value string) bool {
 	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && strings.IndexFunc(value, unicode.IsSpace) < 0
 }
 
+// RequireGitHubToken checks the credential needed by the orchestrator.
+// Install-only and remote worker configurations do not need one.
+func (c Config) RequireGitHubToken() error {
+	if c.GitHub.Token == "" {
+		return errors.New("github.token is required for GitHub operations")
+	}
+	return nil
+}
+
 // Validate checks configuration and resolves paths relative to configDir.
 //
 // It normalizes repository names, account logins, identity pin keys, and skill URLs.
@@ -409,6 +424,9 @@ func (c *Config) Validate(configDir string) error {
 	}
 	if strings.ContainsAny(c.BotLogin, " /\\@") {
 		return fmt.Errorf("invalid bot_login %q", c.BotLogin)
+	}
+	if strings.IndexFunc(c.GitHub.Token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return errors.New("github.token must not contain whitespace or control characters")
 	}
 	c.Main = strings.TrimSpace(c.Main)
 	if c.Main == "" {

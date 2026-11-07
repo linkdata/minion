@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
-	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/config"
@@ -183,12 +182,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if client != nil {
 			return true
 		}
-		token, err := githubToken(ctx)
-		if err != nil {
+		if err := cfg.RequireGitHubToken(); err != nil {
 			logger.Printf("GitHub authentication: %v", err)
 			return false
 		}
-		candidate := github.New(token)
+		candidate := github.New(cfg.GitHub.Token)
 		user, err = candidate.AuthenticatedUser(ctx)
 		if err != nil {
 			logger.Printf("GitHub identity check: %v", err)
@@ -544,30 +542,6 @@ func logCommandSkills(cfg config.Config, logger *log.Logger) {
 			logger.Printf("command %s: skills installed", command)
 		}
 	}
-}
-
-func githubToken(ctx context.Context) (string, error) {
-	if token := strings.TrimSpace(os.Getenv("GH_TOKEN")); token != "" {
-		return token, nil
-	}
-	if token := strings.TrimSpace(os.Getenv("GITHUB_TOKEN")); token != "" {
-		return token, nil
-	}
-	binary, err := aicli.AbsoluteExecutable("gh")
-	if err != nil {
-		return "", err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	output, err := aicli.Probe(ctx, binary, "gh", []string{"auth", "token", "--hostname", "github.com"}, "", nil, "", "")
-	if err != nil {
-		return "", fmt.Errorf("gh auth token failed: %w", err)
-	}
-	token := strings.TrimSpace(string(output))
-	if token == "" {
-		return "", errors.New("gh auth token returned an empty token")
-	}
-	return token, nil
 }
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {

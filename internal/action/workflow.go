@@ -138,9 +138,9 @@ func (e *Orchestrator) prepare(ctx context.Context, request monitor.Job) (prepar
 		return nil, err
 	}
 	if pullHead != "" {
-		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead)
+		p.checkout, err = gitwork.ClonePullRequest(ctx, e.WorkRoot, repo.FullName, request.Number, branch, pullHead, e.GitHub.Token())
 	} else {
-		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, false)
+		p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, branch, false, e.GitHub.Token())
 	}
 	if err != nil {
 		return nil, err
@@ -339,7 +339,7 @@ func (e *Orchestrator) preparePublication(ctx context.Context, p *preparedAction
 	if err != nil {
 		return publication{}, errors.Join(fmt.Errorf("%w: publication projection: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
-	if err := rejectConfiguredKeyPublication(published, result.Changes, e.Runner.secretValues()...); err != nil {
+	if err := rejectConfiguredKeyPublication(published, result.Changes, e.trustedSecrets()...); err != nil {
 		return publication{}, errors.Join(fmt.Errorf("%w: invalid action result: %w", monitor.ErrTerminalJob, err), e.retainIncompleteAudit(p, result))
 	}
 	if err := rejectPublishedRefutations(p.job, result, published); err != nil {
@@ -436,12 +436,12 @@ func rejectConfiguredKeyPublication(published publication, changes []workspace.C
 			continue
 		}
 		if containsConfiguredKey([]byte(published.answer), key) {
-			return errors.New("answer contains a configured provider key")
+			return errors.New("answer contains a configured credential")
 		}
 	}
 	for _, file := range published.artifacts {
 		if artifactContainsConfiguredKey(file, keys...) {
-			return errors.New("audit artifact contains a configured provider key")
+			return errors.New("audit artifact contains a configured credential")
 		}
 	}
 	return nil
@@ -487,7 +487,7 @@ func (e *Orchestrator) retainIncompleteAudit(p *preparedAction, result Result) e
 	}
 	var safe []workspace.File
 	for _, file := range result.Artifacts {
-		if artifactContainsConfiguredKey(file, e.Runner.secretValues()...) || validateResultArtifacts(p.job, append(safe, file), false) != nil {
+		if artifactContainsConfiguredKey(file, e.trustedSecrets()...) || validateResultArtifacts(p.job, append(safe, file), false) != nil {
 			continue
 		}
 		safe = append(safe, file)
@@ -643,7 +643,7 @@ func (e *Orchestrator) prepareFix(ctx context.Context, p *preparedAction) (*prep
 	if err := e.checkGitHubContext(request, "", content.BodyText); err != nil {
 		return nil, err
 	}
-	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, true)
+	p.checkout, err = gitwork.Clone(ctx, e.WorkRoot, repo.FullName, repo.DefaultBranch, true, e.GitHub.Token())
 	if err != nil {
 		return nil, err
 	}

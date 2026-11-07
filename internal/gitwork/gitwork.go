@@ -46,18 +46,12 @@ var (
 	ErrUnsupportedSource = errors.New("source tree is unsupported")
 )
 
-func resolveCredentialHelperGH() string {
-	path, err := aicli.AbsoluteExecutable("gh")
-	if err != nil {
-		return ""
-	}
-	// Multicall launchers can select an app from the symlink name in argv[0].
-	return path
-}
+const githubCredentialHelper = `credential.https://github.com.helper=!f() { if [ "$1" = get ]; then printf 'username=x-access-token\npassword=%s\n' "$MINION_GITHUB_TOKEN"; fi; }; f`
 
 // Checkout owns the trusted orchestration clone; models receive separate source snapshots.
 type Checkout struct {
 	path           string
+	githubToken    string
 	configDigest   [sha256.Size]byte
 	expectedHead   string
 	comparisonBase string
@@ -65,30 +59,36 @@ type Checkout struct {
 }
 
 // Clone pins the repository's default branch in an isolated directory.
-// The Git remote is always derived from a validated owner/name; GitHub CLI's
-// credential helper supplies authentication without embedding a token in URLs.
+// The Git remote is always derived from a validated owner/name; Git's
+// credential helper uses the supplied token without embedding it in URLs.
 // Clones complete history; checkoutFiles materializes the trusted fix worktree.
-func Clone(ctx context.Context, workRoot, repo, defaultBranch string, checkoutFiles bool) (*Checkout, error) {
+func Clone(ctx context.Context, workRoot, repo, defaultBranch string, checkoutFiles bool, token string) (*Checkout, error) {
+	if token == "" {
+		return nil, errors.New("GitHub token is required for clone")
+	}
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
 	}
-	return cloneFromURL(ctx, workRoot, url, defaultBranch, checkoutFiles)
+	return cloneFromURL(ctx, workRoot, url, defaultBranch, checkoutFiles, token)
 }
 
 // ClonePullRequest pins the verified PR head without materializing its worktree. Full base history
 // is cloned for comparison and model use, without validating or materializing the unused base tip tree.
-func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA string) (*Checkout, error) {
+func ClonePullRequest(ctx context.Context, workRoot, repo string, number int, baseRef, expectedHeadSHA, token string) (*Checkout, error) {
+	if token == "" {
+		return nil, errors.New("GitHub token is required for clone")
+	}
 	url, err := repositoryURL(repo)
 	if err != nil {
 		return nil, err
 	}
-	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA)
+	return clonePullRequestFromURL(ctx, workRoot, url, number, baseRef, expectedHeadSHA, token)
 }
 
 // URL constructors let local fixtures exercise production preparation without network calls.
-func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, checkoutFiles bool) (*Checkout, error) {
-	c, err := cloneRepository(ctx, workRoot, url, defaultBranch)
+func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, checkoutFiles bool, token string) (*Checkout, error) {
+	c, err := cloneRepository(ctx, workRoot, url, defaultBranch, token)
 	if err != nil {
 		return nil, err
 	}
@@ -102,14 +102,14 @@ func cloneFromURL(ctx context.Context, workRoot, url, defaultBranch string, chec
 	return c, nil
 }
 
-func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA string) (*Checkout, error) {
+func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number int, baseRef, expectedHeadSHA, token string) (*Checkout, error) {
 	if number <= 0 {
 		return nil, fmt.Errorf("invalid pull request number %d", number)
 	}
 	if !workspace.ValidSHA(expectedHeadSHA) {
 		return nil, fmt.Errorf("invalid expected pull request SHA %q", expectedHeadSHA)
 	}
-	c, err := cloneRepository(ctx, workRoot, url, baseRef)
+	c, err := cloneRepository(ctx, workRoot, url, baseRef, token)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func clonePullRequestFromURL(ctx context.Context, workRoot, url string, number i
 }
 
 // cloneRepository fetches complete history and configures a trusted checkout before materialization.
-func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string) (_ *Checkout, err error) {
+func cloneRepository(ctx context.Context, workRoot, url, defaultBranch, token string) (_ *Checkout, err error) {
 	if err := validateBranch(defaultBranch); err != nil {
 		return nil, err
 	}
@@ -140,10 +140,10 @@ func cloneRepository(ctx context.Context, workRoot, url, defaultBranch string) (
 	}()
 
 	// Disable local clone shortcuts so file inputs (including fixtures) cannot share objects with the checkout.
-	if _, err := runGit(ctx, workRoot, "clone", "--template=", "--reject-shallow", "--no-local", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
+	if _, err := runGitWithToken(ctx, workRoot, token, "clone", "--template=", "--reject-shallow", "--no-local", "--no-checkout", "--branch", defaultBranch, "--", url, path); err != nil {
 		return nil, err
 	}
-	c := &Checkout{path: path}
+	c := &Checkout{path: path, githubToken: token}
 	if err := disableAttributes(filepath.Join(c.path, ".git")); err != nil {
 		return nil, err
 	}
@@ -186,7 +186,7 @@ func (c *Checkout) Close() error {
 // The fetched head must match the API observation, so a changed PR is not reviewed as another commit.
 func (c *Checkout) checkoutPullRequest(ctx context.Context, number int, baseRef, expectedHeadSHA string) error {
 	const headDest = "refs/remotes/minion/pr-head"
-	if _, err := runGit(ctx, c.path, "fetch", "--no-tags", "--force", "--", "origin",
+	if _, err := runGitWithToken(ctx, c.path, c.githubToken, "fetch", "--no-tags", "--force", "--", "origin",
 		"+refs/pull/"+strconv.Itoa(number)+"/head:"+headDest); err != nil {
 		return err
 	}
@@ -302,7 +302,7 @@ func (c *Checkout) commitAndPush(ctx context.Context, pushURL, branch, botLogin,
 	if err := beforePush(c.expectedHead); err != nil {
 		return fmt.Errorf("record commit before push: %w", err)
 	}
-	_, err = runGit(ctx, c.path, "push", "--no-verify", "--force-with-lease=refs/heads/"+branch+":", "--", pushURL, "HEAD:refs/heads/"+branch)
+	_, err = runGitWithToken(ctx, c.path, c.githubToken, "push", "--no-verify", "--force-with-lease=refs/heads/"+branch+":", "--", pushURL, "HEAD:refs/heads/"+branch)
 	return err
 }
 
@@ -376,8 +376,12 @@ func (c *Checkout) ready() error {
 }
 
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	return runGitWithToken(ctx, dir, "", args...)
+}
+
+func runGitWithToken(ctx context.Context, dir, token string, args ...string) (string, error) {
 	var output bytes.Buffer
-	if err := runGitInputTo(ctx, dir, nil, &output, args...); err != nil {
+	if err := runGitInputToEnvWithToken(ctx, dir, nil, &output, nil, token, args...); err != nil {
 		return "", err
 	}
 	// Unicode whitespace is valid in refnames; remove only Git line endings.
@@ -396,6 +400,10 @@ func runGitInputTo(ctx context.Context, dir string, stdin io.Reader, stdout io.W
 }
 
 func runGitInputToEnv(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, extraEnv []string, args ...string) error {
+	return runGitInputToEnvWithToken(ctx, dir, stdin, stdout, extraEnv, "", args...)
+}
+
+func runGitInputToEnvWithToken(ctx context.Context, dir string, stdin io.Reader, stdout io.Writer, extraEnv []string, token string, args ...string) error {
 	binary, err := aicli.AbsoluteExecutable("git")
 	if err != nil {
 		return err
@@ -407,20 +415,21 @@ func runGitInputToEnv(ctx context.Context, dir string, stdin io.Reader, stdout i
 		"-c", "push.gpgSign=false",
 		"-c", "submodule.recurse=false",
 	}
-	if helper := resolveCredentialHelperGH(); helper != "" {
-		gitArgs = append(gitArgs, "-c", credentialHelperConfig(helper))
+	if token != "" {
+		gitArgs = append(gitArgs, "-c", githubCredentialHelper)
+		extraEnv = append(extraEnv, "MINION_GITHUB_TOKEN="+token)
 	}
 	cmd := gitCommand(ctx, binary, dir, append(cleanGitEnvironment(), extraEnv...), append(gitArgs, args...)...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
-	diagnostic := bounded.Buffer{Limit: bounded.DiagnosticBytes}
+	var diagnostic bounded.Tail
 	cmd.Stderr = &diagnostic
 	if err := executil.Run(cmd); err != nil {
 		operation := args[0]
 		for i := 0; i+2 < len(args) && args[i] == "-c"; i += 2 {
 			operation = args[i+2]
 		}
-		return gitFailure("git", operation, diagnostic.String(), ctx.Err(), err)
+		return gitFailure("git", operation, aicli.RedactTail(&diagnostic, token), ctx.Err(), err)
 	}
 	return nil
 }
@@ -487,15 +496,12 @@ func gitFileMode() string {
 	return "true"
 }
 
-func credentialHelperConfig(path string) string {
-	return "credential.helper=!" + aicli.ShellQuote(filepath.ToSlash(path)) + " auth git-credential"
-}
-
 func cleanGitEnvironment() []string {
 	var env []string
 	for _, entry := range os.Environ() {
 		key, _, ok := strings.Cut(entry, "=")
-		if !ok || strings.HasPrefix(strings.ToUpper(key), "GIT_") || strings.EqualFold(key, "GCM_INTERACTIVE") || strings.EqualFold(key, "GH_PROMPT_DISABLED") || strings.EqualFold(key, "LC_ALL") || strings.EqualFold(key, "PATH") {
+		upper := strings.ToUpper(key)
+		if !ok || strings.HasPrefix(upper, "GIT_") || strings.HasPrefix(upper, "GH_") || strings.HasPrefix(upper, "GITHUB_") || upper == "MINION_GITHUB_TOKEN" || strings.EqualFold(key, "GCM_INTERACTIVE") || strings.EqualFold(key, "LC_ALL") || strings.EqualFold(key, "PATH") {
 			continue
 		}
 		env = append(env, entry)
@@ -508,6 +514,6 @@ func cleanGitEnvironment() []string {
 func hardeningEnv() []string {
 	return append(aicli.ModelGitEnvironment(),
 		"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS="+os.DevNull,
-		"GCM_INTERACTIVE=never", "GH_PROMPT_DISABLED=1", "LC_ALL=C",
+		"GCM_INTERACTIVE=never", "LC_ALL=C",
 	)
 }

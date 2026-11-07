@@ -770,7 +770,7 @@ func rejectConfiguredKeyChanges(changes []workspace.Change, keys ...string) erro
 	for _, change := range changes {
 		for _, key := range keys {
 			if key != "" && (containsConfiguredKey([]byte(change.Path), key) || containsConfiguredKey(change.Data, key)) {
-				return errors.New("fix change contains a configured provider key")
+				return errors.New("fix change contains a configured credential")
 			}
 		}
 	}

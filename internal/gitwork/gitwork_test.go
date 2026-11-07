@@ -12,62 +12,20 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
 var testCommitDate = time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 
-func TestResolveCredentialHelperPreservesSymlinkName(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX symlinked shell launcher fixture is unavailable on native Windows")
-	}
-	gitPath, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal("git is unavailable")
-	}
-	bin := t.TempDir()
-	launcher := filepath.Join(bin, "launcher")
-	if err := os.WriteFile(launcher, []byte("#!/bin/sh\n[ \"${0##*/}\" = gh ] || exit 9\nprintf 'username=trusted\\npassword=test\\n'\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	ghPath := filepath.Join(bin, "gh")
-	if err := os.Symlink(launcher, ghPath); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin)
-	got := resolveCredentialHelperGH()
-	if got != ghPath {
-		t.Fatalf("credential helper = %q, want symlink path %q", got, ghPath)
-	}
-	cmd := exec.Command(gitPath, "-c", "credential.helper=", "-c", credentialHelperConfig(got), "credential", "fill")
-	cmd.Dir = t.TempDir()
-	cmd.Env = cleanGitEnvironment()
-	cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
-	output, err := cmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(output), "username=trusted") {
-		t.Fatalf("symlinked credential helper failed: %s: %v", output, err)
-	}
-}
-
-func TestResolveCredentialHelperRejectsRelativePath(t *testing.T) {
-	checkout := t.TempDir()
-	name := "gh"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	if err := os.WriteFile(filepath.Join(checkout, name), []byte("#!/bin/sh\nexit 99\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Chdir(checkout)
-	t.Setenv("PATH", ".")
-	if got := resolveCredentialHelperGH(); got != "" {
-		t.Fatalf("relative credential helper was selected: %q", got)
-	}
-}
-
 func TestCleanGitEnvironmentStripsCaseVariantOverrides(t *testing.T) {
 	t.Setenv("git_config_global", "/hostile/config")
 	t.Setenv("gIt_askpass", "/hostile/askpass")
+	t.Setenv("Gh_ToKeN", "/hostile/gh-token")
+	t.Setenv("GH_CONFIG_DIR", "/hostile/gh-config")
+	t.Setenv("gItHuB_tOkEn", "/hostile/github-token")
+	t.Setenv("GITHUB_ENTERPRISE_TOKEN", "/hostile/enterprise-token")
+	t.Setenv("MINION_GITHUB_TOKEN", "/hostile/minion-token")
 	t.Setenv("Path", "/hostile/path")
 	for _, entry := range cleanGitEnvironment() {
 		if strings.Contains(entry, "/hostile/") {
@@ -76,74 +34,81 @@ func TestCleanGitEnvironmentStripsCaseVariantOverrides(t *testing.T) {
 	}
 }
 
-func TestGitCredentialHelperIgnoresCheckoutRelativePath(t *testing.T) {
+func TestGitCredentialHelperUsesOnlyConfiguredGitHubToken(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell launchers and colon-separated PATH fixture are unavailable on native Windows")
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
 	}
-	realGit, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatal("git is unavailable")
-	}
-	checkout := t.TempDir()
-	trustedBin := filepath.Join(t.TempDir(), "trusted' bin")
-	if err := os.Mkdir(trustedBin, 0700); err != nil {
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "gh-invoked")
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\ntouch \"$MINION_TEST_GH_MARKER\"\nexit 9\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(checkout, "tools"), 0700); err != nil {
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MINION_TEST_GH_MARKER", marker)
+	t.Setenv("GH_TOKEN", "ambient-gh")
+	t.Setenv("GITHUB_TOKEN", "ambient-github")
+	t.Setenv("MINION_GITHUB_TOKEN", "ambient-minion")
+	global := filepath.Join(t.TempDir(), "global.gitconfig")
+	if err := os.WriteFile(global, []byte("[credential]\n\thelper = !f() { echo username=ambient; echo password=ambient; }; f\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	for path, username := range map[string]string{
-		filepath.Join(trustedBin, "gh"):        "trusted",
-		filepath.Join(checkout, "gh"):          "planted",
-		filepath.Join(checkout, "tools", "gh"): "planted",
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	for _, test := range []struct {
+		host string
+		want string
+	}{
+		{host: "github.com", want: "username=x-access-token\npassword=configured-token\n"},
+		{host: "example.invalid"},
 	} {
-		content := "#!/bin/sh\nprintf 'username=" + username + "\\npassword=test\\n'\n"
-		if err := os.WriteFile(path, []byte(content), 0700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for name, path := range map[string]string{
-		"empty entry":            ":" + trustedBin,
-		"empty PATH":             "",
-		"relative entry":         "tools:" + trustedBin,
-		"all relative":           ".:tools",
-		"absolute checkout path": checkout + ":" + trustedBin,
-	} {
-		t.Run(name, func(t *testing.T) {
-			wantPath := trustedBin
-			if name == "empty PATH" || name == "all relative" {
-				var canonical []string
-				for _, dir := range []string{"/usr/local/bin", "/usr/bin", "/bin"} {
-					resolved, err := aicli.ResolvePath(dir)
-					if err != nil {
-						t.Fatal(err)
-					}
-					canonical = append(canonical, resolved)
+		t.Run(test.host, func(t *testing.T) {
+			var output strings.Builder
+			err := runGitInputToEnvWithToken(t.Context(), t.TempDir(), strings.NewReader("protocol=https\nhost="+test.host+"\n\n"), &output, nil, "configured-token", "credential", "fill")
+			if test.want == "" {
+				if err == nil || output.Len() != 0 {
+					t.Fatalf("other host received credentials: %q: %v", output.String(), err)
 				}
-				wantPath = strings.Join(canonical, string(os.PathListSeparator))
-			} else if name == "absolute checkout path" {
-				wantPath = checkout + string(os.PathListSeparator) + trustedBin
+			} else if err != nil || !strings.Contains(output.String(), test.want) || strings.Contains(output.String(), "ambient") {
+				t.Fatalf("configured Git credential = %q: %v", output.String(), err)
 			}
-			if got := aicli.SafePath(path); got != wantPath {
-				t.Fatalf("aicli.SafePath(%q) = %q, want %q", path, got, wantPath)
-			}
-			t.Setenv("PATH", path)
-			cmd := exec.Command(realGit, "-c", "credential.helper=", "-c", credentialHelperConfig(filepath.Join(trustedBin, "gh")), "credential", "fill")
-			cmd.Dir = checkout
-			cmd.Env = cleanGitEnvironment()
-			validPath := false
-			for _, entry := range cmd.Env {
-				validPath = validPath || strings.HasPrefix(entry, "PATH=") && entry != "PATH="
-			}
-			if !validPath {
-				t.Fatal("clean Git environment has no usable PATH")
-			}
-			cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\n\n")
-			output, err := cmd.CombinedOutput()
-			if err != nil || !strings.Contains(string(output), "username=trusted") || strings.Contains(string(output), "planted") {
-				t.Fatalf("credential helper resolved through %q: %s: %v", path, output, err)
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("gh was invoked: %v", err)
 			}
 		})
+	}
+}
+
+func TestGitFailureRedactsConfiguredToken(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nprintf 'fatal: %s\\n' \"$MINION_GITHUB_TOKEN\" >&2\nexit 9\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := runGitWithToken(t.Context(), t.TempDir(), "configured-secret", "clone")
+	if err == nil || strings.Contains(err.Error(), "configured-secret") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("Git diagnostic was not redacted: %v", err)
+	}
+}
+
+func TestGitFailureRedactsTokenAtDiagnosticCutoff(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
+	}
+	const token = "configured-secret"
+	const cutoff = 8
+	const useful = "\nuseful Git failure\n"
+	padding := bounded.DiagnosticBytes - (len(token) - cutoff) - len(useful)
+	bin := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$MINION_GITHUB_TOKEN\" >&2\nhead -c %d /dev/zero | tr '\\000' x >&2\nprintf '\\nuseful Git failure\\n' >&2\nexit 9\n", padding)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := runGitWithToken(t.Context(), t.TempDir(), token, "clone")
+	if err == nil || strings.Contains(err.Error(), token[cutoff:]) || !strings.Contains(err.Error(), "useful Git failure") || len(err.Error()) > bounded.DiagnosticBytes+256 {
+		t.Fatalf("cut Git diagnostic exposed token or lost useful suffix: %v", err)
 	}
 }
 
@@ -167,8 +132,56 @@ func TestRepositoryAndRefValidation(t *testing.T) {
 			t.Errorf("validateBranch(%q) should fail", branch)
 		}
 	}
-	if _, err := cloneFromURL(t.Context(), t.TempDir(), filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true); err == nil || !strings.Contains(err.Error(), "invalid branch") {
+	if _, err := cloneFromURL(t.Context(), t.TempDir(), filepath.Join(t.TempDir(), "missing.git"), "bad..branch", true, ""); err == nil || !strings.Contains(err.Error(), "invalid branch") {
 		t.Fatalf("cloneFromURL invalid default branch error = %v", err)
+	}
+}
+
+func TestGitHubCloneRequiresConfiguredToken(t *testing.T) {
+	if _, err := Clone(t.Context(), t.TempDir(), "owner/repo", "main", false, ""); err == nil || !strings.Contains(err.Error(), "GitHub token is required") {
+		t.Fatalf("Clone without token = %v", err)
+	}
+	if _, err := ClonePullRequest(t.Context(), t.TempDir(), "owner/repo", 7, "main", strings.Repeat("a", 40), ""); err == nil || !strings.Contains(err.Error(), "GitHub token is required") {
+		t.Fatalf("ClonePullRequest without token = %v", err)
+	}
+}
+
+func TestConfiguredTokenReachesCloneFetchAndPush(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell fixture is unavailable on native Windows")
+	}
+	fixture := newFixture(t)
+	writeFile(t, filepath.Join(fixture.source, "pr.txt"), "PR head\n")
+	head := fixture.commit("refs/pull/7/head", "PR head")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(t.TempDir(), "git-credentials")
+	fakeOnPath(t, "git", `#!/bin/sh
+for arg do
+  case "$arg" in
+    clone|fetch|push) printf '%s %s\n' "$arg" "$MINION_GITHUB_TOKEN" >> `+shellQuote(log)+`; break ;;
+  esac
+done
+exec `+shellQuote(realGit)+` "$@"
+`)
+	const token = "configured-github-token"
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true, token))
+	fixture.keepCheckout(clonePullRequestFromURL(t.Context(), t.TempDir(), fixture.remote, 7, "main", head, token))
+	const branch = "minion/fix-token"
+	if err := checkout.NewBranch(t.Context(), branch); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.Import(t.Context(), fixture.base, []workspace.Change{{Path: "fix.txt", Mode: workspace.Regular, Data: []byte("fixed\n")}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkout.commitAndPush(t.Context(), fixture.remote, branch, "bot", "fix", testCommitDate, func(string) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(log)
+	if err != nil || string(got) != "clone "+token+"\nclone "+token+"\nfetch "+token+"\npush "+token+"\n" {
+		t.Fatalf("Git credential handoff = %q: %v", got, err)
 	}
 }
 
@@ -284,7 +297,7 @@ func TestCheckoutPullRequestRejectsOversizedHeadMetadata(t *testing.T) {
 	head := fixture.git(fixture.source, "rev-parse", "HEAD")
 	blob := fixture.git(fixture.source, "rev-parse", "HEAD:new.dat")
 	fixture.git(fixture.source, "push", fixture.remote, "HEAD:refs/pull/7/head")
-	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true))
+	checkout := fixture.keepCheckout(cloneFromURL(t.Context(), t.TempDir(), fixture.remote, "main", true, ""))
 	if err := checkout.checkoutPullRequest(t.Context(), 7, "main", head); !errors.Is(err, ErrCheckoutTooLarge) {
 		t.Fatalf("oversized PR error = %v, want checkout limit", err)
 	}
@@ -299,7 +312,7 @@ func TestCloneFailureRemovesOwnedDirectoryAndPreservesCause(t *testing.T) {
 	root := t.TempDir()
 	// A failed clone can leave data inside the directory it was given.
 	fakeOnPath(t, "git", "#!/bin/sh\nfor arg do destination=$arg; done\nprintf retained > \"$destination/partial\"\nprintf 'clone fixture failure' >&2\nexit 7\n")
-	checkout, err := cloneRepository(t.Context(), root, fixture.remote, "main")
+	checkout, err := cloneRepository(t.Context(), root, fixture.remote, "main", "")
 	var exit *exec.ExitError
 	if checkout != nil || !errors.As(err, &exit) || exit.ExitCode() != 7 || !strings.Contains(err.Error(), "clone fixture failure") {
 		t.Fatalf("failed clone lost its cause: checkout=%v error=%v", checkout, err)
@@ -340,7 +353,7 @@ func TestNewBranchPreservesOmittedGitlinkAndSymlink(t *testing.T) {
 	if got := fixture.git("", "--git-dir="+fixture.remote, "ls-tree", "refs/heads/"+branch, "omitted-link"); got != "120000 blob "+linkBlob+"\tomitted-link" {
 		t.Fatalf("published symlink changed: %q", got)
 	}
-	restored := fixture.keepCheckout(RestoreCheckout(ctx, t.TempDir(), snapshot))
+	restored := fixture.keepCheckout(RestoreCheckout(ctx, t.TempDir(), snapshot, ""))
 	const restoredBranch = "minion/fix-restored-gitlink"
 	if err := restored.NewBranch(ctx, restoredBranch); err != nil {
 		t.Fatal(err)
@@ -576,12 +589,12 @@ func (f gitFixture) git(dir string, args ...string) string {
 
 func (f gitFixture) clone() *Checkout {
 	f.t.Helper()
-	return f.keepCheckout(cloneFromURL(f.t.Context(), f.t.TempDir(), f.remote, "main", true))
+	return f.keepCheckout(cloneFromURL(f.t.Context(), f.t.TempDir(), f.remote, "main", true, ""))
 }
 
 func (f gitFixture) clonePullRequest(head string) *Checkout {
 	f.t.Helper()
-	return f.keepCheckout(clonePullRequestFromURL(f.t.Context(), f.t.TempDir(), f.remote, 7, "main", head))
+	return f.keepCheckout(clonePullRequestFromURL(f.t.Context(), f.t.TempDir(), f.remote, 7, "main", head, ""))
 }
 
 func (f gitFixture) keepCheckout(checkout *Checkout, err error) *Checkout {

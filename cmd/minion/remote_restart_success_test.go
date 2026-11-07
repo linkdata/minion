@@ -41,6 +41,7 @@ func TestRemoteRestartDeliversOriginalAcceptanceOnFreshPull(t *testing.T) {
 	cfg.Codex.APIKey = ""
 	cfg.WorkRoot, cfg.StatePath = filepath.Join(base, "work"), filepath.Join(base, "state.json")
 	cfg.BotLogin = "linkdataminion"
+	cfg.GitHub.Token = "offline-token"
 	cfg.Repositories[0].Name, cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = "o/r", 1, 2
 	cfg.Repositories[0].AllowedActors = []string{"writer"}
 	cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
