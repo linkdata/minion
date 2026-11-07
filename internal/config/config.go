@@ -425,8 +425,8 @@ func (c *Config) Validate(configDir string) error {
 	if strings.ContainsAny(c.BotLogin, " /\\@") {
 		return fmt.Errorf("invalid bot_login %q", c.BotLogin)
 	}
-	if strings.ContainsAny(c.GitHub.Token, " \t\r\n\x00") {
-		return errors.New("github.token must not contain whitespace or NUL")
+	if strings.IndexFunc(c.GitHub.Token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return errors.New("github.token must not contain whitespace or control characters")
 	}
 	c.Main = strings.TrimSpace(c.Main)
 	if c.Main == "" {

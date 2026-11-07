@@ -47,7 +47,7 @@ func TestGitHubTokenValidation(t *testing.T) {
 	if err := config.RequireGitHubToken(); err != nil {
 		t.Fatal(err)
 	}
-	for _, token := range []string{"two words", "line\nbreak", "nul\x00byte"} {
+	for _, token := range []string{"two words", "line\nbreak", "nul\x00byte", "vertical\vtab", "form\ffeed", "nonbreaking\u00a0space"} {
 		config.GitHub.Token = token
 		if err := config.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "github.token") {
 			t.Fatalf("accepted invalid GitHub token %q: %v", token, err)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -353,9 +354,22 @@ func TestHTTPStatusRedactsConfiguredBotToken(t *testing.T) {
 	f := newHTTPServerTestWithStopServerRoot(t, t.Context(), owner.job, owner.sink, nil,
 		func(h http.Handler) *httptest.Server { return httptest.NewTestServer(t, h) }, 0, owner.owner.WorkRoot,
 		WorkerCredentials{CodexAPIKey: providerKey})
-	assignment := f.pull(t)
-	if assignment.Credentials.CodexAPIKey != providerKey || strings.Contains(assignment.Credentials.CodexAPIKey, key) {
-		t.Fatalf("worker assignment gained the bot credential: %+v", assignment.Credentials)
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: owner.job.Identity.ExecutorID}, httpControlBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := f.server.Client().Post(f.server.URL+"/next", "application/json", bytes.NewReader(pull))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	assignmentBytes, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != http.StatusOK || bytes.Contains(assignmentBytes, []byte(key)) {
+		t.Fatalf("worker assignment exposed the bot credential: status=%d error=%v", response.StatusCode, err)
+	}
+	var assignment httpAssignment
+	if err := httpDecode(bytes.NewReader(assignmentBytes), httpJobBytes, &assignment); err != nil || !sameAssignmentJob(owner.job, assignment.Job) || assignment.Credentials.CodexAPIKey != providerKey {
+		t.Fatalf("worker assignment changed: error=%v credentials=%+v", err, assignment.Credentials)
 	}
 	status := Status{Version: ProtocolVersion, Identity: owner.job.Identity, SourceRef: owner.job.Source.Head,
 		Sequence: 1, LogSequence: 1, WorkerState: "busy", Phase: "prepare"}
