@@ -28,6 +28,62 @@ func occupiedAdminAddress(t *testing.T) string {
 	return listener.Addr().String()
 }
 
+func TestSetupWaitsForPendingDurableWork(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	address := occupiedAdminAddress(t)
+	for _, kind := range []string{"empty", "accepted", "publication"} {
+		t.Run(kind, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "state", "state.json")
+			at := time.Now().UTC().Add(-time.Minute)
+			if kind != "empty" {
+				store, err := state.Open(statePath, at)
+				if err != nil {
+					t.Fatal(err)
+				}
+				switch kind {
+				case "accepted":
+					accepted := dashboardTestAccepted(at)
+					accepted.Assigned = true
+					store.Data.Accepted = accepted
+					store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(*accepted)
+				case "publication":
+					store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+						AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8,
+						Repository: "owner/repo", Number: 7, Marker: "<!-- linkdataminion:issued-job -->",
+						Since: at, StartedAt: at, Deadline: at.Add(time.Minute), Status: state.PublicationWritePending,
+					}
+				}
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := config.Config{StatePath: statePath, WorkRoot: t.TempDir(),
+				Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
+				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{}}
+			code, output := runStartupFixtureWithRun(t, cfg, func() int {
+				return runWithGitCheck(func(context.Context, string) error { return nil })
+			})
+			wantSetup := kind == "empty"
+			if code != 1 || strings.Contains(output, "setup UI:") != wantSetup ||
+				!wantSetup && !strings.Contains(output, "GitHub authentication:") {
+				t.Fatalf("setup with %s state: code=%d log=%q", kind, code, output)
+			}
+			reopened, err := state.Open(statePath, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+			if kind == "accepted" && reopened.Data.Accepted == nil ||
+				kind == "publication" && reopened.Data.PublicationWrites["issued-job"].Status != state.PublicationWritePending {
+				t.Fatalf("pending %s state was lost: %+v", kind, reopened.Data)
+			}
+		})
+	}
+}
+
 func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	address := occupiedAdminAddress(t)

@@ -165,10 +165,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
 	}
-	if cfg.Admin != nil && !*check && !*oneshot && (cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0) {
-		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
-	}
-	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
@@ -186,11 +182,31 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("state: %v", err)
 		return 1
 	}
+	pendingDurableWork := func() bool {
+		if store.Data.Accepted != nil {
+			return true
+		}
+		for _, write := range store.Data.PublicationWrites {
+			if write.Status == state.PublicationWritePending {
+				return true
+			}
+		}
+		return false
+	}
+	if cfg.Admin != nil && !*check && !*oneshot && !pendingDurableWork() &&
+		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0) {
+		if err := store.Close(); err != nil {
+			logger.Printf("close state before setup: %v", err)
+			return 1
+		}
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
 	defer func() {
 		if err := store.Close(); err != nil {
 			logger.Printf("close state: %v", err)
 		}
 	}()
+	logCommandSkills(cfg, logger)
 	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
 		logger.Print(claudeUnixSocketWarning)
 	}
@@ -233,13 +249,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return true
 	}
 	recoverySetup := func() int {
-		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil || store.Data.Accepted != nil {
+		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil || pendingDurableWork() {
 			return 1
-		}
-		for _, write := range store.Data.PublicationWrites {
-			if write.Status == state.PublicationWritePending {
-				return 1
-			}
 		}
 		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")
 		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)

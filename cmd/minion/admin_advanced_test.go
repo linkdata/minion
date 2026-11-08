@@ -3,12 +3,15 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -90,6 +93,85 @@ func TestAdvancedConfigMasksSecretsAndStagesOnlyKeys(t *testing.T) {
 		if info.Mode().Perm() != 0o640 {
 			t.Fatalf("config permissions changed: mode=%v", info.Mode())
 		}
+	}
+}
+
+func TestAdvancedConfigRoutesRequireAdminAndSaveMaskedForm(t *testing.T) {
+	account := testAdminAccount()
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "github-secret"},
+		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{account}},
+		Codex: config.CodexConfig{APIKey: "codex-secret"}, Commands: map[string]config.CommandMapping{},
+		AlwaysOnSkills: []string{}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, *loaded.Admin, nil, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	if denied := adminResponse(handler, http.MethodGet, "/admin/config", nil, nil, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("anonymous config page status=%d", denied.Code)
+	}
+	cookie := dashboardTestCookie(t, handler)
+	page := adminResponse(handler, http.MethodGet, "/admin/config", nil, cookie, "")
+	body := page.Body.String()
+	if page.Code != http.StatusOK || page.Header().Get("Cache-Control") != "no-store" ||
+		!strings.Contains(body, `name="jawsKey"`) || !strings.Contains(body, advancedSecretMarker) ||
+		!strings.Contains(body, advancedPasswordMarker) || strings.Contains(body, "github-secret") ||
+		strings.Contains(body, "codex-secret") || strings.Contains(body, account.PasswordHash) {
+		t.Fatalf("masked config page: status=%d body=%q", page.Code, body)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.AIInstructions = "new instructions"
+	data, err = json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"version": {view.Version}, "config": {string(data)}}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/config", form, nil, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("anonymous config POST status=%d", denied.Code)
+	}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/config", form, cookie, "https://other.example"); denied.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin config POST status=%d", denied.Code)
+	}
+	if saved := adminResponse(handler, http.MethodPost, "/admin/config", form, cookie, "https://admin.example"); saved.Code != http.StatusSeeOther || saved.Header().Get("Location") != "/admin/config" {
+		t.Fatalf("valid config POST: status=%d location=%q body=%q", saved.Code, saved.Header().Get("Location"), saved.Body.String())
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.AIInstructions != "new instructions" || saved.GitHub.Token != cfg.GitHub.Token ||
+		saved.Codex.APIKey != cfg.Codex.APIKey || saved.Admin.Administrators[0].PasswordHash != account.PasswordHash {
+		t.Fatal("config route changed the wrong fields or lost masked secrets")
 	}
 }
 
