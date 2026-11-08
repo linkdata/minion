@@ -52,6 +52,34 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 	}
 }
 
+func TestAdminPolicyShowsRestartRequired(t *testing.T) {
+	live, _ := liveConfigFixture(t, false)
+	live.mu.Lock()
+	live.restartRequired = true
+	live.mu.Unlock()
+	view := policyView(live.snapshot())
+	if !view.RestartRequired {
+		t.Fatal("policy view lost restart state")
+	}
+	var body bytes.Buffer
+	page := struct {
+		Dot                adminPolicyView
+		HeadHTML, TailHTML template.HTML
+	}{Dot: view}
+	if err := adminPolicyHTML.ExecuteTemplate(&body, "admin policy", page); err != nil {
+		t.Fatal(err)
+	}
+	text := body.String()
+	start := strings.Index(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`)
+	end := strings.Index(text, `</fieldset>`)
+	lastForm := strings.Index(text, `action="/admin/policy/instructions/reset"`)
+	if !strings.Contains(text, "Saved configuration requires a Minion restart") ||
+		!strings.Contains(text, `<a href="/admin/config">Configuration</a>`) ||
+		start < 0 || end <= start || lastForm < start || lastForm >= end {
+		t.Fatalf("policy offered unusable controls without restart guidance: %s", text)
+	}
+}
+
 func TestAdminPolicyNoCriticDefaultSurvivesSave(t *testing.T) {
 	_, path := liveConfigFixture(t, false)
 	cfg, err := config.Update(path, func(cfg *config.Config) error {

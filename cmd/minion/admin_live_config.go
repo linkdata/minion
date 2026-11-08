@@ -15,7 +15,7 @@ import (
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-var errAdminRestartRequired = errors.New("configuration changed outside the admin UI; restart Minion before editing here")
+var errAdminRestartRequired = errors.New("configuration requires a restart before further live edits")
 
 // adminLiveConfig keeps disk writes and the running worker's configuration distinct.
 // The monitor applies saved edits only between iterations, after an accepted action ends.
@@ -82,7 +82,7 @@ func (a *adminLiveConfig) admit(accept func() error) error {
 func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
+	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, RestartRequired: a.restartRequired, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
 }
 
 func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostSupported bool) {

@@ -64,6 +64,26 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 			}
 		})
 	}
+	page.Dot = configurationView(adminConfigSnapshot{Config: cfg, RestartRequired: true})
+	for _, tc := range []struct{ page, action string }{
+		{"admin users", `action="/admin/users/add"`},
+		{"admin repositories", `action="/admin/repositories/add"`},
+		{"admin skills", `action="/admin/skills/add"`},
+	} {
+		var body bytes.Buffer
+		if err := adminConfigurationHTML.ExecuteTemplate(&body, tc.page, page); err != nil {
+			t.Fatal(err)
+		}
+		text := body.String()
+		start := strings.Index(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`)
+		end := strings.LastIndex(text, `</fieldset>`)
+		action := strings.Index(text, tc.action)
+		if !strings.Contains(text, "Saved configuration requires a Minion restart") ||
+			!strings.Contains(text, `<a href="/admin/config">Configuration</a>`) ||
+			start < 0 || end <= start || action < start || action >= end {
+			t.Fatalf("%s offered unusable controls without restart guidance: %s", tc.page, text)
+		}
+	}
 	page.Dot = configurationView(adminConfigSnapshot{Config: cfg, Remote: true})
 	var remote bytes.Buffer
 	if err := adminConfigurationHTML.ExecuteTemplate(&remote, "admin skills", page); err != nil {

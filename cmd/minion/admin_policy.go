@@ -24,16 +24,17 @@ type adminProviderAuth struct {
 }
 
 type adminPolicyView struct {
-	Global       int
-	Max          int
-	Critic       bool
-	Requesters   []adminRoundOverride
-	Repositories []adminRoundOverride
-	Providers    []adminProviderAuth
-	Instructions string
-	Custom       bool
-	Pending      bool
-	Error        string
+	Global          int
+	Max             int
+	Critic          bool
+	Requesters      []adminRoundOverride
+	Repositories    []adminRoundOverride
+	Providers       []adminProviderAuth
+	Instructions    string
+	Custom          bool
+	Pending         bool
+	RestartRequired bool
+	Error           string
 }
 
 func policyView(snapshot adminConfigSnapshot) adminPolicyView {
@@ -43,7 +44,7 @@ func policyView(snapshot adminConfigSnapshot) adminPolicyView {
 		global = *cfg.CriticStopping.RequiredCleanRounds
 	}
 	view := adminPolicyView{Global: global, Max: config.MaxCriticMaxRounds,
-		Critic: cfg.Adversarial != "", Pending: snapshot.Pending, Error: snapshot.Error,
+		Critic: cfg.Adversarial != "", Pending: snapshot.Pending, RestartRequired: snapshot.RestartRequired, Error: snapshot.Error,
 		Instructions: cfg.AIInstructions, Custom: cfg.AIInstructions != ""}
 	view.Providers = []adminProviderAuth{
 		{Name: "Codex", Provider: "codex", Configured: cfg.Codex.APIKey != "", MaxBytes: config.MaxProviderAPIKeyBytes - len(cfg.Claude.APIKey)},
@@ -73,9 +74,11 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
 <body>{{template "admin-nav" $}}<main class="container py-4">
   <div class="border-bottom mb-4"><h1>AI policy</h1><p class="text-body-secondary">Clean critic reviews required before a fix branch and reply can be published. Repository overrides take priority over requester defaults, then the global setting.</p></div>
   {{with .Dot}}
+  {{if .RestartRequired}}<p role="status" class="alert alert-info">Saved configuration requires a Minion restart. Use <a href="/admin/config">Configuration</a> to stage further edits.</p>{{end}}
   {{if .Pending}}<p role="status" class="alert alert-info">A configuration change is pending activation.</p>{{end}}
   {{if .Error}}<p role="alert" class="alert alert-danger">Latest change failed: {{.Error}}</p>{{end}}
   {{if not .Critic}}<p class="alert alert-warning">No critic is configured. Configure one on the <a href="/admin/config">Configuration</a> page and restart Minion to enable clean-review requirements.</p>{{end}}
+  <fieldset class="border-0 p-0 m-0 w-100" {{if .RestartRequired}}disabled{{end}}>
   <section class="border rounded p-3 mb-3"><h2 class="h5">AI authentication</h2><p class="small text-body-secondary">Set a provider API key for new actions. An empty key uses the executor host's saved CLI login or API-key environment variable. Existing keys are never shown here.</p>
     {{range .Providers}}<div class="border-top py-3"><h3 class="h6">{{.Name}}</h3><p>{{if .Configured}}Minion API key configured.{{else}}Using saved CLI login or host API-key environment.{{end}}</p>
       <form method="post" action="/admin/policy/{{.Provider}}/key" class="d-flex flex-wrap align-items-end gap-2">
@@ -114,7 +117,7 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
     <p>{{if .Custom}}Custom instructions are active.{{else}}Using the built-in default.{{end}}</p>
     <form method="post" action="/admin/policy/instructions"><label class="d-grid gap-1">Instructions<textarea class="form-control font-monospace" name="instructions" rows="12" maxlength="16384" required>{{.Instructions}}</textarea><small class="text-body-secondary">Limit: 16,384 UTF-8 bytes. Some characters use more than one byte.</small></label><button class="btn btn-primary mt-3" type="submit">Save instructions</button></form>
     <form method="post" action="/admin/policy/instructions/reset" class="mt-2"><button class="btn btn-outline-light" type="submit">Reset to built-in default</button></form>
-  </section>{{end}}
+  </section></fieldset>{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
 func adminPolicyHandler(jw *jaws.Jaws, snapshot func() adminConfigSnapshot) http.Handler {
