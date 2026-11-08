@@ -47,6 +47,10 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	if loginPage.Code != http.StatusOK || len(loginPage.Result().Cookies()) != 1 {
 		t.Fatalf("setup login page status=%d cookies=%v", loginPage.Code, loginPage.Result().Cookies())
 	}
+	if home := adminResponse(handler, http.MethodGet, "/", nil, loginPage.Result().Cookies()[0], ""); home.Code != http.StatusOK ||
+		!strings.Contains(home.Body.String(), "Sign in as admin to save the bot account and first repository") {
+		t.Fatalf("signed-out setup home status=%d body=%q", home.Code, home.Body.String())
+	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
 		"username": {"admin"}, "password": {"correct-password"},
 	}, loginPage.Result().Cookies()[0], "")
@@ -54,8 +58,14 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("setup login status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
 	cookie := login.Result().Cookies()[0]
+	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, cookie, ""); page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), "Open home page") {
+		t.Fatalf("signed-in setup login page status=%d body=%q", page.Code, page.Body.String())
+	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Save setup") ||
+		!strings.Contains(home.Body.String(), "Save the bot account and first repository below") ||
+		strings.Contains(home.Body.String(), "Sign in as admin to save") ||
 		strings.Contains(home.Body.String(), "secret-token") {
 		t.Fatalf("setup form status=%d body=%q", home.Code, home.Body.String())
 	}

@@ -27,7 +27,7 @@ var headHTML string
 var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin</title></head>
 <body><main class="container py-5">
 {{if .Dot.SignedIn}}
-<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open dashboard</a></p>
+<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open home page</a></p>
 <form method="post" action="/admin/logout"><button class="btn btn-outline-light">Sign out</button></form>
 {{else if .Dot.PasswordSet}}
 <h1 class="h3 mb-3">Minion admin</h1>
@@ -51,7 +51,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, add the <code>admin</code> account under <code>admin.administrators</code> if absent, set its <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
 {{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. Create the <code>work_root</code> directory (default <code>var/work</code>), install skills with <code>minion -install-skills</code>, then restart Minion. No jobs run during setup.</p>
-{{else}}<p role="status">Setup is incomplete. Sign in as admin to save the bot account and first repository. No jobs run during setup.</p>
+{{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the bot account and first repository below.{{else}}Sign in as admin to save the bot account and first repository.{{end}} No jobs run during setup.</p>
 {{if .Dot.SignedAdmin}}
 <form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
 <label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>

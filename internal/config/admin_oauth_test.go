@@ -7,6 +7,33 @@ import (
 	"testing"
 )
 
+func TestWebservAddressBracketValidation(t *testing.T) {
+	for _, test := range []struct {
+		address string
+		tls     bool
+		valid   bool
+	}{
+		{"[::1", false, false},
+		{"[]", true, false},
+		{"[]:9000", true, false},
+		{"[localhost]", true, false},
+		{"[::1]", false, true},
+		{"[::1]:9000", false, true},
+		{"[localhost]:9000", true, true},
+	} {
+		t.Run(test.address, func(t *testing.T) {
+			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: test.address}}
+			if test.tls {
+				cfg.Admin.WebservCertDir = "/certs"
+			}
+			err := cfg.Validate(t.TempDir())
+			if (err == nil) != test.valid {
+				t.Fatalf("-address %q validity=%t: %v", test.address, test.valid, err)
+			}
+		})
+	}
+}
+
 func TestOAuthClientConfigValidation(t *testing.T) {
 	valid := func() Config {
 		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", GitHubOAuth: &OAuthClient{
