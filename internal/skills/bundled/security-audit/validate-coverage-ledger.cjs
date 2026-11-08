@@ -8,7 +8,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
-const { hasDuplicateObjectKeys } = require("./strict-json-keys.cjs");
+const { objectKeyError } = require("./strict-json-keys.cjs");
 
 // Conservative bounds apply before JSON.parse and again to the parsed document.
 const LIMITS = Object.freeze({
@@ -899,8 +899,9 @@ function run(file) {
     return 1;
   }
   try {
-    if (hasDuplicateObjectKeys(contents)) {
-      console.error("Failed to parse coverage ledger: duplicate object keys");
+    const keyError = objectKeyError(contents);
+    if (keyError) {
+      console.error(`Failed to parse coverage ledger: ${keyError}`);
       return 1;
     }
     ledger = JSON.parse(contents);

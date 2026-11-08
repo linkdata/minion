@@ -1,7 +1,7 @@
 "use strict";
 
-// JSON.parse discards earlier object keys; check them before parsing the document.
-function hasDuplicateObjectKeys(contents) {
+// JSON.parse discards earlier object keys; audit object field names are ASCII.
+function objectKeyError(contents) {
   const containers = [];
   let stringStart = -1;
   let escaped = false;
@@ -19,9 +19,11 @@ function hasDuplicateObjectKeys(contents) {
           let next = index + 1;
           while (next < contents.length && " \t\r\n".includes(contents[next])) next++;
           if (contents[next] === ":") {
-            const key = JSON.parse(contents.slice(stringStart, index + 1)).toLowerCase();
-            if (keys.has(key)) return true;
-            keys.add(key);
+            const key = JSON.parse(contents.slice(stringStart, index + 1));
+            if (/[^\x00-\x7F]/.test(key)) return "non-ASCII object key";
+            const folded = key.toLowerCase();
+            if (keys.has(folded)) return "duplicate object keys";
+            keys.add(folded);
           }
         }
         stringStart = -1;
@@ -36,7 +38,7 @@ function hasDuplicateObjectKeys(contents) {
       containers.pop();
     }
   }
-  return false;
+  return null;
 }
 
-module.exports = { hasDuplicateObjectKeys };
+module.exports = { objectKeyError };

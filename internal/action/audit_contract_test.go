@@ -338,7 +338,7 @@ func TestCompleteAuditRequiresArchitectureText(t *testing.T) {
 	}
 }
 
-func TestBundledAuditValidatorsRejectDuplicateObjectKeys(t *testing.T) {
+func TestBundledAuditValidatorsRejectInvalidObjectKeys(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
 	}
@@ -346,12 +346,16 @@ func TestBundledAuditValidatorsRejectDuplicateObjectKeys(t *testing.T) {
 	if err != nil {
 		t.Skip("audit validator requires node")
 	}
-	for _, test := range []struct{ name, script, content string }{
-		{"ledger", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","status":"covered"`, 1)},
-		{"ledger escaped key", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","\u0073tatus":"covered"`, 1)},
-		{"finding", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"verdict":"rejected","verdict":"confirmed"`, 1)},
-		{"finding escaped key", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"verdict":"rejected","\u0076erdict":"confirmed"`, 1)},
-		{"nested finding", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"overall_severity":"medium"`, `"overall_severity":"low","overall_severity":"medium"`, 1)},
+	for _, test := range []struct{ name, script, content, want string }{
+		{"ledger", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","status":"covered"`, 1), "duplicate object keys"},
+		{"ledger escaped key", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","\u0073tatus":"covered"`, 1), "duplicate object keys"},
+		{"ledger non-ASCII key", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","ſtatus":"covered"`, 1), "non-ASCII object key"},
+		{"ledger escaped non-ASCII key", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","\u017ftatus":"covered"`, 1), "non-ASCII object key"},
+		{"finding", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"verdict":"rejected","verdict":"confirmed"`, 1), "duplicate object keys"},
+		{"finding escaped key", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"verdict":"rejected","\u0076erdict":"confirmed"`, 1), "duplicate object keys"},
+		{"finding non-ASCII key", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"severity":{`, `"severity":{},"ſeverity":{`, 1), "non-ASCII object key"},
+		{"finding escaped non-ASCII key", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"severity":{`, `"severity":{},"\u017feverity":{`, 1), "non-ASCII object key"},
+		{"nested finding", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"overall_severity":"medium"`, `"overall_severity":"low","overall_severity":"medium"`, 1), "duplicate object keys"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			file := filepath.Join(t.TempDir(), "audit.json")
@@ -360,9 +364,23 @@ func TestBundledAuditValidatorsRejectDuplicateObjectKeys(t *testing.T) {
 			}
 			script := filepath.Join("..", "skills", "bundled", "security-audit", test.script)
 			output, err := exec.CommandContext(t.Context(), node, script, file).CombinedOutput()
-			if err == nil || !strings.Contains(string(output), "duplicate object keys") {
-				t.Fatalf("validator accepted duplicate key: output=%q error=%v", output, err)
+			if err == nil || !strings.Contains(string(output), test.want) {
+				t.Fatalf("validator accepted invalid key: output=%q error=%v", output, err)
 			}
 		})
+	}
+}
+
+func TestAuditJSONRejectsNonASCIIObjectKeys(t *testing.T) {
+	for _, source := range []string{
+		`{"status":"planned","ſtatus":"covered"}`,
+		`{"status":"planned","\u017ftatus":"covered"}`,
+	} {
+		if err := rejectDuplicateAuditJSONKeys([]byte(source)); err == nil || !strings.Contains(err.Error(), "non-ASCII object key") {
+			t.Fatalf("non-ASCII key was accepted: source=%q error=%v", source, err)
+		}
+	}
+	if err := rejectDuplicateAuditJSONKeys([]byte(`{"status":"café"}`)); err != nil {
+		t.Fatalf("Unicode value was rejected: %v", err)
 	}
 }

@@ -153,7 +153,7 @@ func rejectDuplicateAuditJSONKeys(data []byte, canonicalKeys ...string) error {
 	}
 	canonical := make(map[string]string, len(canonicalKeys))
 	for _, key := range canonicalKeys {
-		canonical[workspace.FoldPath(key)] = key
+		canonical[strings.ToLower(key)] = key
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var visit func() error
@@ -174,7 +174,12 @@ func rejectDuplicateAuditJSONKeys(data []byte, canonicalKeys ...string) error {
 				if !ok {
 					return errors.New("audit JSON object key is invalid")
 				}
-				folded := workspace.FoldPath(key)
+				for _, r := range key {
+					if r > unicode.MaxASCII {
+						return errors.New("audit JSON has non-ASCII object key")
+					}
+				}
+				folded := strings.ToLower(key)
 				if want := canonical[folded]; want != "" && key != want {
 					return fmt.Errorf("audit JSON uses noncanonical key %q", key)
 				}
