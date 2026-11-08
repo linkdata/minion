@@ -221,7 +221,7 @@ func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
 	}
 }
 
-func TestRemoteChoicePreflightReconcilesLostACKResponse(t *testing.T) {
+func TestRemoteChoicePreflightReturnsLostACKResponse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
 	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
@@ -289,8 +289,8 @@ func TestRemoteChoicePreflightReconcilesLostACKResponse(t *testing.T) {
 		}
 		return response, nil
 	})}
-	if err := PreflightRemoteChoices(ctx, client, "https://worker.invalid", "remote", false); err != nil {
-		t.Fatalf("lost ACK response stopped worker after parent commit: %v", err)
+	if err := PreflightRemoteChoices(ctx, client, "https://worker.invalid", "remote", false); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("lost ACK response error = %v, want unexpected EOF", err)
 	}
 	if err := <-updated; err != nil {
 		t.Fatalf("candidate was not committed: %v", err)
@@ -298,8 +298,8 @@ func TestRemoteChoicePreflightReconcilesLostACKResponse(t *testing.T) {
 	executor.mu.Lock()
 	got, pending, gate := executor.credentials, executor.preflightPending, executor.choicesFetched
 	executor.mu.Unlock()
-	if !dropped || fetches != 2 || got != candidate || pending || !gate {
-		t.Fatalf("ACK reconciliation: dropped=%t fetches=%d credentials=%+v pending=%t gate=%t", dropped, fetches, got, pending, gate)
+	if !dropped || fetches != 1 || got != candidate || pending || !gate {
+		t.Fatalf("ACK failure: dropped=%t fetches=%d credentials=%+v pending=%t gate=%t", dropped, fetches, got, pending, gate)
 	}
 }
 

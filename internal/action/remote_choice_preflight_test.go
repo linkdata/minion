@@ -333,7 +333,7 @@ func TestRemoteChoicePreflightBoundsUnresponsiveResponse(t *testing.T) {
 	})
 }
 
-func TestRemoteChoicePreflightBoundsAllRetries(t *testing.T) {
+func TestRemoteChoicePreflightReturnsACKErrorWithoutRetry(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		selection, err := httpEncode(remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
 			Refresh: true, PreflightGeneration: 1}, httpControlBytes)
@@ -362,11 +362,11 @@ func TestRemoteChoicePreflightBoundsAllRetries(t *testing.T) {
 			finished <- preflightRemoteChoices(t.Context(), client, "https://example.test", "remote", false, remoteChoicePreflightTimeout)
 		}()
 		synctest.Wait()
-		if err := <-finished; !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("retry budget error = %v, want deadline", err)
+		if err := <-finished; !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("ACK error = %v, want unexpected EOF", err)
 		}
-		if elapsed := time.Since(started); elapsed != remoteChoicePreflightTimeout {
-			t.Fatalf("retry budget elapsed %s, want %s", elapsed, remoteChoicePreflightTimeout)
+		if elapsed := time.Since(started); elapsed != 40*time.Second {
+			t.Fatalf("ACK elapsed %s, want 40s without another fetch", elapsed)
 		}
 	})
 }

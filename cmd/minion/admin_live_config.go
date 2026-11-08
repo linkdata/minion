@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
@@ -53,14 +54,14 @@ func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error
 		for _, repo := range cfg.Repositories {
 			for _, name := range repo.Actions {
 				mapping := cfg.Commands[name]
-				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() {
+				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() && mapping.Action != string(command.SecurityAudit) {
 					selected[name] = true
 				}
 			}
 		}
 	}
 	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, remoteSelected: selected,
-		remoteAuditHostSupported: true, updates: make(chan struct{}, 1)}, nil
+		updates: make(chan struct{}, 1)}, nil
 }
 
 func (a *adminLiveConfig) current() config.Config {
@@ -219,6 +220,16 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 			return errAdminRestartRequired
 		}
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
+		if activate.RemoteExecutor != nil && !a.remoteAuditHostSupported {
+			for _, repo := range activate.Repositories {
+				previous, _ := a.desired.Repository(repo.Name)
+				for _, name := range repo.Actions {
+					if activate.Commands[name].Action == string(command.SecurityAudit) && !slices.Contains(previous.Actions, name) {
+						return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
+					}
+				}
+			}
+		}
 		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
 			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}

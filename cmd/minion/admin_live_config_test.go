@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -211,6 +212,42 @@ func TestAdminLiveConfigAllowsPolicySaveWithUnsupportedRemoteAudit(t *testing.T)
 	}
 	if !live.snapshot().Pending || live.snapshot().RemoteCommands["security-audit"] {
 		t.Fatal("unsupported audit appeared in selected commands")
+	}
+}
+
+func TestAdminLiveConfigHidesRemoteAuditUntilWorkerCapabilityKnown(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Repositories[0].Actions = []string{"review", "security-audit"}
+		cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "owner/second", ID: 12, OwnerID: 22, Actions: []string{"review"}})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Commands["security-audit"].SupportedOnHost() {
+		t.Skip("security audit is unavailable on this host")
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.snapshot().RemoteCommands["security-audit"] || slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") {
+		t.Fatal("remote audit was offered before the worker reported its capability")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[1].Actions = []string{"review", "security-audit"}
+		return nil
+	}); err == nil {
+		t.Fatal("remote audit was added before the worker reported its capability")
+	}
+	saved, err := config.Load(path)
+	if err != nil || slices.Contains(saved.Repositories[1].Actions, "security-audit") {
+		t.Fatalf("rejected remote audit changed the saved repository: %v", err)
+	}
+	live.setRemoteSelected(map[string]bool{"review": true, "security-audit": true}, true)
+	if !slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") {
+		t.Fatal("supported remote audit was not offered after worker connection")
 	}
 }
 

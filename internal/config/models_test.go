@@ -140,6 +140,20 @@ func TestLoadProviderAPIKeys(t *testing.T) {
 	if err != nil || cfg.Codex.APIKey != "dummy-codex-key" || cfg.Claude.APIKey != "dummy-claude-key" {
 		t.Fatalf("API keys not loaded: %v", err)
 	}
+	atLimit := strings.Repeat("x", MaxProviderAPIKeyBytes)
+	cfg.Codex.APIKey, cfg.Claude.APIKey = atLimit, atLimit
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatalf("two independent maximum-length keys rejected: %v", err)
+	}
+	cfg.Codex.APIKey = atLimit + "x"
+	if err := cfg.Validate(t.TempDir()); err == nil {
+		t.Fatal("oversized Codex key accepted")
+	}
+	cfg.Codex.APIKey, cfg.Claude.APIKey = atLimit, atLimit+"x"
+	if err := cfg.Validate(t.TempDir()); err == nil {
+		t.Fatal("oversized Claude key accepted")
+	}
+	cfg.Codex.APIKey, cfg.Claude.APIKey = "dummy-codex-key", "dummy-claude-key"
 	for _, bad := range []string{"dummy secret", "dummy\tsecret", "dummy\rsecret", "dummy\nsecret", "dummy\x00secret"} {
 		for _, provider := range []string{"codex", "claude"} {
 			invalid := cfg

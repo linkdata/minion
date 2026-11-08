@@ -101,7 +101,7 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	// Reserve time to acknowledge a changed credential before the overall preflight expires.
 	probeCtx, stopProbe := context.WithTimeout(preflightCtx, timeout-min(httpControlTimeout, timeout/2))
 	defer stopProbe()
-	for attempt := 0; attempt < 3; attempt++ {
+	for range 3 {
 		var selection remoteChoicePreflight
 		fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
 		err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
@@ -141,13 +141,7 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 			continue // A timed-out candidate was rolled back while this worker validated it.
 		}
 		if err != nil {
-			if preflightCtx.Err() != nil {
-				return preflightCtx.Err()
-			}
-			if attempt == 2 {
-				return err
-			}
-			continue // The parent may have committed the ACK before its response was lost.
+			return err
 		}
 		if ack.Kind != "preflight" || ack.Failure != nil {
 			return errors.New("remote preflight acknowledgement differs")

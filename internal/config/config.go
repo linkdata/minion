@@ -62,7 +62,7 @@ const (
 	MaxModelSettingBytes       = 128
 	MaxUserModelChoicesPerRole = 16
 	MaxAIInstructionsBytes     = 16 << 10
-	MaxProviderAPIKeyBytes     = 8 << 10
+	MaxProviderAPIKeyBytes     = 256
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -529,11 +529,11 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.AIInstructions) > MaxAIInstructionsBytes || !utf8.ValidString(c.AIInstructions) || strings.ContainsRune(c.AIInstructions, 0) {
 		return fmt.Errorf("ai_instructions must be at most %d UTF-8 bytes without NUL", MaxAIInstructionsBytes)
 	}
-	if len(c.Codex.APIKey)+len(c.Claude.APIKey) > MaxProviderAPIKeyBytes ||
+	if len(c.Codex.APIKey) > MaxProviderAPIKeyBytes || len(c.Claude.APIKey) > MaxProviderAPIKeyBytes ||
 		!utf8.ValidString(c.Codex.APIKey) || !utf8.ValidString(c.Claude.APIKey) ||
 		strings.IndexFunc(c.Codex.APIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 ||
 		strings.IndexFunc(c.Claude.APIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		return fmt.Errorf("provider api_key must be valid UTF-8, at most %d bytes combined, and contain no whitespace or control characters", MaxProviderAPIKeyBytes)
+		return fmt.Errorf("provider api_key must be valid UTF-8, at most %d bytes per key, and contain no whitespace or control characters", MaxProviderAPIKeyBytes)
 	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)

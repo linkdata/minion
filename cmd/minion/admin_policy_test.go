@@ -331,7 +331,8 @@ func TestAdminPolicyAPIKeysAreEditableWithoutRenderingSecrets(t *testing.T) {
 	}
 	page := adminResponse(handler, http.MethodGet, "/admin/policy", nil, cookie, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `type="password" name="api_key"`) ||
-		!strings.Contains(page.Body.String(), `maxlength="`+strconv.Itoa(config.MaxProviderAPIKeyBytes-len(saved.Codex.APIKey))+`"`) ||
+		strings.Count(page.Body.String(), `maxlength="`+strconv.Itoa(config.MaxProviderAPIKeyBytes)+`"`) != 2 ||
+		!strings.Contains(page.Body.String(), "256 bytes per key") ||
 		!strings.Contains(page.Body.String(), "/admin/policy/codex/key/clear") || !strings.Contains(page.Body.String(), "/admin/policy/claude/key/clear") {
 		t.Fatalf("API key controls missing: status=%d body=%q", page.Code, page.Body.String())
 	}
@@ -345,10 +346,6 @@ func TestAdminPolicyAPIKeysAreEditableWithoutRenderingSecrets(t *testing.T) {
 		if response.Code != http.StatusConflict || invalid != "" && strings.Contains(response.Body.String(), invalid) {
 			t.Fatalf("invalid API key: status=%d body=%q", response.Code, response.Body.String())
 		}
-	}
-	tooLargeWithCodex := strings.Repeat("x", config.MaxProviderAPIKeyBytes-len(saved.Codex.APIKey)+1)
-	if response := post("/admin/policy/claude/key", url.Values{"api_key": {tooLargeWithCodex}}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "bytes combined") {
-		t.Fatalf("second key exceeded shared budget: status=%d body=%q", response.Code, response.Body.String())
 	}
 	if got := configForAdminTest(t, path); got.Codex.APIKey != saved.Codex.APIKey || got.Claude.APIKey != saved.Claude.APIKey {
 		t.Fatal("rejected key replaced a configured key")

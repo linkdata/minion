@@ -207,7 +207,6 @@ function canonicalKey(value) {
 
 function collectDataLimitErrors(value, location = "$data") {
   const stack = [{ value, location, depth: value !== null && typeof value === "object" ? 1 : 0 }];
-  const seen = new WeakSet();
 
   while (stack.length > 0) {
     const current = stack.pop();
@@ -215,11 +214,6 @@ function collectDataLimitErrors(value, location = "$data") {
     if (current.depth > LIMITS.nestingDepth) {
       return [escapeUnsafeDiagnosticCharacters(`${current.location}: exceeds ${LIMITS.nestingDepth} level nesting depth limit`)];
     }
-    if (seen.has(current.value)) {
-      return [escapeUnsafeDiagnosticCharacters(`${current.location}: input must not contain repeated or cyclic object references`)];
-    }
-    seen.add(current.value);
-
     if (Array.isArray(current.value)) {
       if (current.value.length > LIMITS.arrayItems) {
         return [escapeUnsafeDiagnosticCharacters(`${current.location}: exceeds ${LIMITS.arrayItems} item array limit`)];
