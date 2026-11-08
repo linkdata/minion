@@ -203,7 +203,7 @@ func TestRemoteAuditCapabilityIsFrozenAcrossPreflightAndPull(t *testing.T) {
 	}
 }
 
-func TestRemoteRejectedCredentialKeepsGateClosedUntilRollbackPreflight(t *testing.T) {
+func TestRemoteRejectedCredentialRestoresPriorPullGate(t *testing.T) {
 	executor, err := NewHTTPExecutor("remote")
 	if err != nil {
 		t.Fatal(err)
@@ -254,17 +254,23 @@ func TestRemoteRejectedCredentialKeepsGateClosedUntilRollbackPreflight(t *testin
 	if status := post("/preflight", pull, &candidate); status != http.StatusOK || !candidate.Refresh || candidate.Credentials.CodexAPIKey != "bad-key" {
 		t.Fatalf("candidate fetch: status=%d selection=%+v", status, candidate)
 	}
+	var ack httpAcknowledgement
+	if status := post("/next", pull, &ack); status != http.StatusPreconditionRequired {
+		t.Fatalf("pull during candidate preflight status=%d", status)
+	}
 	failed := pull
 	failed.PreflightGeneration, failed.PreflightResult = candidate.PreflightGeneration, "failed"
-	var ack httpAcknowledgement
 	if status := post("/preflight", failed, &ack); status != http.StatusOK {
 		t.Fatalf("failed validation ACK status=%d", status)
 	}
 	if err := <-updated; err == nil {
 		t.Fatal("rejected credential became active")
 	}
-	if status := post("/next", pull, &ack); status != http.StatusPreconditionRequired {
-		t.Fatalf("pull before rollback preflight status=%d", status)
+	executor.mu.Lock()
+	gate, pending := executor.choicesFetched, executor.preflightPending
+	executor.mu.Unlock()
+	if !gate || pending {
+		t.Fatalf("prior pull gate was not restored: gate=%t pending=%t", gate, pending)
 	}
 	failed.PreflightResult = "ok" // The successful ACK for the discarded generation must be stale.
 	if status := post("/preflight", failed, &ack); status != http.StatusPreconditionRequired {
@@ -272,7 +278,7 @@ func TestRemoteRejectedCredentialKeepsGateClosedUntilRollbackPreflight(t *testin
 	}
 	var restored remoteChoicePreflight
 	if status := post("/preflight", pull, &restored); status != http.StatusOK || restored.Refresh || restored.Credentials != old || !executor.choicesFetched {
-		t.Fatalf("rollback preflight: status=%d selection=%+v gate=%t", status, restored, executor.choicesFetched)
+		t.Fatalf("restored selection: status=%d selection=%+v gate=%t", status, restored, executor.choicesFetched)
 	}
 }
 

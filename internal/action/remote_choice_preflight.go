@@ -101,56 +101,51 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	// Reserve time to acknowledge a changed credential before the overall preflight expires.
 	probeCtx, stopProbe := context.WithTimeout(preflightCtx, timeout-min(httpControlTimeout, timeout/2))
 	defer stopProbe()
-	for {
-		var selection remoteChoicePreflight
-		fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
-		err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
-		stopFetch()
-		if err != nil {
-			return err
-		}
-		if selection.Version != ProtocolVersion || selection.ExecutorID != executorID || selection.Refresh && selection.PreflightGeneration == 0 {
-			return errors.New("remote preflight version, executor or generation differs")
-		}
-		validationCtx := preflightCtx
-		if selection.Refresh {
-			validationCtx = probeCtx
-		}
-		validationErr := validateRemoteSelection(validationCtx, selection, allowAllUnixSockets)
-		if !selection.Refresh {
-			return validationErr
-		}
-		if preflightCtx.Err() != nil {
-			return preflightCtx.Err()
-		}
-		result := "ok"
-		if validationErr != nil {
-			result = "failed"
-		}
-		ackBody, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
-			AuditHostSupported: auditSupportedOnHost(), PreflightGeneration: selection.PreflightGeneration,
-			PreflightResult: result}, httpControlBytes)
-		if err != nil {
-			return err
-		}
-		var ack httpAcknowledgement
-		ackCtx, stopACK := context.WithTimeout(preflightCtx, httpControlTimeout)
-		err = transport.post(ackCtx, "preflight", ackBody, httpControlBytes, &ack, httpBinding{}, 0)
-		stopACK()
-		if errors.Is(err, ErrRemotePreflightRequired) {
-			continue // A timed-out candidate was rolled back while this worker validated it.
-		}
-		if err != nil {
-			return err
-		}
-		if ack.Kind != "preflight" || ack.Failure != nil {
-			return errors.New("remote preflight acknowledgement differs")
-		}
-		if validationErr == nil {
-			return ctx.Err()
-		}
-		// The parent restored old credentials after rejecting this candidate.
+	var selection remoteChoicePreflight
+	fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
+	err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
+	stopFetch()
+	if err != nil {
+		return err
 	}
+	if selection.Version != ProtocolVersion || selection.ExecutorID != executorID || selection.Refresh && selection.PreflightGeneration == 0 {
+		return errors.New("remote preflight version, executor or generation differs")
+	}
+	validationCtx := preflightCtx
+	if selection.Refresh {
+		validationCtx = probeCtx
+	}
+	validationErr := validateRemoteSelection(validationCtx, selection, allowAllUnixSockets)
+	if !selection.Refresh {
+		return validationErr
+	}
+	if preflightCtx.Err() != nil {
+		return preflightCtx.Err()
+	}
+	result := "ok"
+	if validationErr != nil {
+		result = "failed"
+	}
+	ackBody, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
+		AuditHostSupported: auditSupportedOnHost(), PreflightGeneration: selection.PreflightGeneration,
+		PreflightResult: result}, httpControlBytes)
+	if err != nil {
+		return err
+	}
+	var ack httpAcknowledgement
+	ackCtx, stopACK := context.WithTimeout(preflightCtx, httpControlTimeout)
+	err = transport.post(ackCtx, "preflight", ackBody, httpControlBytes, &ack, httpBinding{}, 0)
+	stopACK()
+	if errors.Is(err, ErrRemotePreflightRequired) {
+		return ctx.Err() // The rejected candidate was rolled back; the pull gate decides whether another preflight is needed.
+	}
+	if err != nil {
+		return err
+	}
+	if ack.Kind != "preflight" || ack.Failure != nil {
+		return errors.New("remote preflight acknowledgement differs")
+	}
+	return ctx.Err()
 }
 
 func validateRemoteSelection(ctx context.Context, selection remoteChoicePreflight, allowAllUnixSockets bool) error {

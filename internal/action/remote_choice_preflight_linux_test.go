@@ -158,7 +158,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 	}
 }
 
-func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
+func TestRemoteRejectedCredentialKeepsWorkerReadyForCorrection(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
 	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
@@ -166,7 +166,7 @@ func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
 	}
 	script := strings.Replace(preflightCodexCLI,
 		"    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,",
-		"    IFS= read -r request || exit 1\n    case \"$request\" in\n      *bad-key*) printf '%s\\n' '{\"id\":0,\"error\":{\"message\":\"rejected\"}}'; exit 1 ;;\n      *) printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}' ;;\n    esac\n    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,", 1)
+		"    IFS= read -r request || exit 1\n    case \"$request\" in\n      *bad-key*|*old-key*) printf '%s\\n' '{\"id\":0,\"error\":{\"message\":\"rejected\"}}'; exit 1 ;;\n      *) printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}' ;;\n    esac\n    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,", 1)
 	if script == preflightCodexCLI {
 		t.Fatal("Codex fixture did not install key check")
 	}
@@ -190,25 +190,28 @@ func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	updated := make(chan error, 1)
-	go func() {
-		updated <- executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{CodexAPIKey: "bad-key"})
-	}()
-	for {
-		executor.mu.Lock()
-		pending, changed := executor.preflightPending, executor.changed
-		executor.mu.Unlock()
-		if pending {
-			break
-		}
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			t.Fatal("candidate was not staged")
+	stage := func(key string) <-chan error {
+		updated := make(chan error, 1)
+		go func() {
+			updated <- executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{CodexAPIKey: key})
+		}()
+		for {
+			executor.mu.Lock()
+			pending, changed := executor.preflightPending, executor.changed
+			executor.mu.Unlock()
+			if pending {
+				return updated
+			}
+			select {
+			case <-changed:
+			case <-ctx.Done():
+				t.Fatal("candidate was not staged")
+			}
 		}
 	}
+	updated := stage("bad-key")
 	if err := PreflightRemoteChoices(ctx, server.Client(), server.URL, "remote", false); err != nil {
-		t.Fatalf("rollback was not preflighted: %v (%v)", err, errors.Unwrap(err))
+		t.Fatalf("rejected candidate ended worker preflight: %v (%v)", err, errors.Unwrap(err))
 	}
 	if err := <-updated; err == nil || !strings.Contains(err.Error(), "rejected changed provider credentials") {
 		t.Fatalf("rejected candidate was accepted: %v", err)
@@ -219,58 +222,39 @@ func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
 	if got != old || pending || !gate {
 		t.Fatalf("rollback state: credentials=%+v pending=%t gate=%t", got, pending, gate)
 	}
-}
-
-func TestRemoteChoicePreflightChecksRestoredSelectionAfterThreeRejectedCredentials(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("CODEX_HOME", t.TempDir())
-	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
-		t.Setenv(key, "")
-	}
-	script := strings.Replace(preflightCodexCLI,
-		"    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,",
-		"    IFS= read -r request || exit 1\n    case \"$request\" in\n      *bad-key*) printf '%s\\n' '{\"id\":0,\"error\":{\"message\":\"rejected\"}}'; exit 1 ;;\n      *) printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}' ;;\n    esac\n    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,", 1)
-	if script == preflightCodexCLI {
-		t.Fatal("Codex fixture did not install key check")
-	}
-	fakeOnPath(t, "codex", script)
-	fetches, rejected := 0, 0
-	client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
-		var pull httpPull
-		if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil {
-			return nil, err
+	worker := NewRemoteRunner(t.TempDir())
+	next := make(chan error, 1)
+	go func() { next <- RunHTTPLoop(ctx, server.Client(), server.URL, "remote", worker) }()
+	for {
+		executor.mu.Lock()
+		pull, changed := executor.pull, executor.changed
+		executor.mu.Unlock()
+		if pull {
+			break
 		}
-		var value any
-		if pull.PreflightResult != "" {
-			rejected++
-			if pull.PreflightGeneration != uint64(rejected) || pull.PreflightResult != "failed" {
-				t.Fatalf("rejected generation %d: %+v", rejected, pull)
-			}
-			value = httpAcknowledgement{Kind: "preflight"}
-		} else {
-			fetches++
-			selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
-				Main:        RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
-				Credentials: WorkerCredentials{CodexAPIKey: "old-key"}}
-			if fetches <= 3 {
-				selection.Refresh = true
-				selection.PreflightGeneration = uint64(fetches)
-				selection.Credentials.CodexAPIKey = fmt.Sprintf("bad-key-%d", fetches)
-			}
-			value = selection
+		select {
+		case err := <-next:
+			t.Fatalf("worker left restored pull gate: %v", err)
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("worker did not hold an idle pull after rejection")
 		}
-		body, err := httpEncode(value, httpControlBytes)
-		if err != nil {
-			return nil, err
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
-			Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
-	})}
-	if err := preflightRemoteChoices(t.Context(), client, "https://example.test", "remote", false, 10*time.Second); err != nil {
-		t.Fatalf("restored selection preflight: %v", err)
 	}
-	if fetches != 4 || rejected != 3 {
-		t.Fatalf("preflight requests: fetches=%d rejected=%d, want 4 and 3", fetches, rejected)
+	corrected := stage("good-key")
+	if err := <-next; !errors.Is(err, ErrRemotePreflightRequired) {
+		t.Fatalf("worker did not retire idle pull for correction: %v", err)
+	}
+	if err := PreflightRemoteChoices(ctx, server.Client(), server.URL, "remote", false); err != nil {
+		t.Fatalf("corrected candidate preflight: %v", err)
+	}
+	if err := <-corrected; err != nil {
+		t.Fatalf("corrected credential was not activated: %v", err)
+	}
+	executor.mu.Lock()
+	got, pending, gate = executor.credentials, executor.preflightPending, executor.choicesFetched
+	executor.mu.Unlock()
+	if got.CodexAPIKey != "good-key" || pending || !gate {
+		t.Fatalf("corrected state: credentials=%+v pending=%t gate=%t", got, pending, gate)
 	}
 }
 

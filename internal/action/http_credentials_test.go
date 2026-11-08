@@ -189,7 +189,7 @@ func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
 		t.Fatalf("stale validation acknowledged: status=%d", status)
 	}
 	executor.mu.Lock()
-	oldCredential, gateOpen := executor.credentials, executor.choicesFetched
+	oldCredential, gateOpen := executor.credentials, executor.choicesFetched && !executor.preflightPending
 	executor.mu.Unlock()
 	if oldCredential.CodexAPIKey != "old-key" || gateOpen {
 		t.Fatal("candidate became active before matching validation")

@@ -173,7 +173,6 @@ func (e *HTTPExecutor) updateIdleWorkerCredentials(ctx context.Context, credenti
 	e.preflightCandidate = credentials
 	e.preflightPending = true
 	e.preflightFetched = false
-	e.choicesFetched = false
 	e.preflightWait = make(chan error, 1)
 	wait := e.preflightWait
 	e.pullGeneration++
@@ -208,7 +207,6 @@ func (e *HTTPExecutor) rejectRemotePreflightLocked(err error) {
 	e.preflightReporting = false
 	e.preflightCandidate = WorkerCredentials{}
 	e.preflightGeneration++
-	e.choicesFetched = false
 	if e.preflightWait != nil {
 		e.preflightWait <- err
 		e.preflightWait = nil
@@ -602,7 +600,7 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		e.mu.Unlock()
 		return
 	}
-	if e.remoteChoices != nil && !e.choicesFetched {
+	if e.remoteChoices != nil && (!e.choicesFetched || e.preflightPending) {
 		status := http.StatusConflict
 		if e.preflightGeneration != 0 {
 			status = http.StatusPreconditionRequired
