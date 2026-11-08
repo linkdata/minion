@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -27,6 +28,7 @@ var auditValidators = []struct{ script, artifact string }{
 }
 
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
+var auditBlockFile = regexp.MustCompile(`^[A-Z][A-Z0-9-]*\.md$`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -708,8 +710,12 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		if !assignedClass {
 			return errors.New("audit coverage-ledger.json has attack class without an assigned block")
 		}
+		// shortcut: custom skill files are unavailable here; check exact block names when trusted skill contents are available.
 		for _, block := range unit.ExcludedBlocks {
-			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) {
+			file, section, hasSection := strings.Cut(block.Block, "#")
+			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) ||
+				!hasSection || !auditBlockFile.MatchString(file) || !auditVisibleText(section) || strings.TrimSpace(section) != section ||
+				block.Block == ordinaryBlock || slices.Contains(unit.SelectedCompanionBlocks, block.Block) {
 				return errors.New("audit coverage-ledger.json has invalid excluded block")
 			}
 		}

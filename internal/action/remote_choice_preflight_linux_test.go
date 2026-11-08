@@ -221,6 +221,88 @@ func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
 	}
 }
 
+func TestRemoteChoicePreflightReconcilesLostACKResponse(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
+		t.Setenv(key, "")
+	}
+	script := strings.Replace(preflightCodexCLI,
+		"    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,",
+		"    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}'\n    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,", 1)
+	if script == preflightCodexCLI {
+		t.Fatal("Codex fixture did not install key check")
+	}
+	fakeOnPath(t, "codex", script)
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = executor.Close() })
+	if err := executor.SetWorkerCredentials(WorkerCredentials{CodexAPIKey: "old-key"}); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+	executor.choicesFetched = true
+	executor.auditHostSupported = auditSupportedOnHost()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	candidate := WorkerCredentials{CodexAPIKey: "new-key"}
+	updated := make(chan error, 1)
+	go func() { updated <- executor.updateIdleWorkerCredentials(ctx, candidate) }()
+	for {
+		executor.mu.Lock()
+		pending, changed := executor.preflightPending, executor.changed
+		executor.mu.Unlock()
+		if pending {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("candidate was not staged")
+		}
+	}
+	fetches, dropped := 0, false
+	client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		_ = request.Body.Close()
+		request.Body = io.NopCloser(bytes.NewReader(body))
+		var pull httpPull
+		if err := httpDecode(bytes.NewReader(body), httpControlBytes, &pull); err != nil {
+			return nil, err
+		}
+		writer := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+		executor.ServeHTTP(writer, request)
+		response := writer.Result()
+		if pull.PreflightResult != "" && !dropped {
+			dropped = true
+			_ = response.Body.Close()
+			return nil, io.ErrUnexpectedEOF
+		}
+		if pull.PreflightResult == "" {
+			fetches++
+		}
+		return response, nil
+	})}
+	if err := PreflightRemoteChoices(ctx, client, "https://worker.invalid", "remote", false); err != nil {
+		t.Fatalf("lost ACK response stopped worker after parent commit: %v", err)
+	}
+	if err := <-updated; err != nil {
+		t.Fatalf("candidate was not committed: %v", err)
+	}
+	executor.mu.Lock()
+	got, pending, gate := executor.credentials, executor.preflightPending, executor.choicesFetched
+	executor.mu.Unlock()
+	if !dropped || fetches != 2 || got != candidate || pending || !gate {
+		t.Fatalf("ACK reconciliation: dropped=%t fetches=%d credentials=%+v pending=%t gate=%t", dropped, fetches, got, pending, gate)
+	}
+}
+
 func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())

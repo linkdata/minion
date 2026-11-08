@@ -592,6 +592,12 @@ func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
+	decision := reopened.Data.TerminalDecisions[f.job.Identity.JobID]
+	decision.DecidedAt = time.Now().UTC().Add(time.Minute) // Simulate a clock rollback after the previous process exited.
+	reopened.Data.TerminalDecisions[f.job.Identity.JobID] = decision
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
 	restarted := *f.owner
 	restarted.Executor, restarted.Store, restarted.remoteAttachedAt, restarted.retiredProviderKeys = nil, reopened, time.Time{}, nil
 	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
@@ -600,6 +606,9 @@ func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
 	f.outcome.Result.Diagnostics[0].Message = "late " + oldKey
 	f.outcome.Failure.Message = "failed " + oldKey
 	_, client, origin := lateOutcomeEndpoint(t, &restarted)
+	if !decision.DecidedAt.After(restarted.remoteAttachedAt) {
+		t.Fatalf("clock rollback was not simulated: decision=%s attach=%s", decision.DecidedAt, restarted.remoteAttachedAt)
+	}
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("first late receipt after restart status=%d", status)
 	}

@@ -29,6 +29,7 @@ func TestBundledAuditValidatorCoverageRules(t *testing.T) {
 	const companionBlocks = `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline","WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF","WEB-PROTOCOL-AND-AUTH.md#Universal moves","WEB-PROTOCOL-AND-AUTH.md#Validation rules"]`
 	companionWithContext := strings.Replace(companionClass, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, companionBlocks, 1)
 	ordinaryWithContext := strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, companionBlocks, 1)
+	validExcluded := strings.Replace(auditCoveredLedgerFixture, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"ATTACK-CLASSES.md#Injection","reason":"Outside this boundary."}]`, 1)
 	companionContext := strings.ReplaceAll(companionClass, "Ordinary CSRF", "Core discipline")
 	companionContext = strings.ReplaceAll(companionContext, "Ordinary%20CSRF", "Core%20discipline")
 	archived := auditArchivedCoveredBlockedLedgerFixture()
@@ -45,6 +46,10 @@ func TestBundledAuditValidatorCoverageRules(t *testing.T) {
 		{name: "archived owner has no check", ledger: missingArchivedOwner, wantError: "assigned agent must own a local check"},
 		{name: "archived check owner reused", ledger: reusedArchivedCheck, wantError: "prior assignment owner evidence"},
 		{name: "ordinary with companion", ledger: ordinaryWithContext, valid: true},
+		{name: "valid excluded block", ledger: validExcluded, valid: true},
+		{name: "unknown excluded block", ledger: strings.Replace(validExcluded, "ATTACK-CLASSES.md#Injection", "ATTACK-CLASSES.md#Imaginary", 1), wantError: "block is absent"},
+		{name: "assigned ordinary excluded", ledger: strings.Replace(validExcluded, "ATTACK-CLASSES.md#Injection", "ATTACK-CLASSES.md#Access control", 1), wantError: "block is also selected"},
+		{name: "selected companion excluded", ledger: strings.Replace(ordinaryWithContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF","reason":"Outside this boundary."}]`, 1), wantError: "block is also selected"},
 		{name: "companion-only class", ledger: companionWithContext, valid: true},
 		{name: "ordinary with companion without context", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1), wantError: "class requires Core discipline"},
 		{name: "companion without context", ledger: companionClass, wantError: "class requires Core discipline"},
@@ -141,7 +146,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		})
 	}
 	withContext := strings.Replace(validLedger, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline","WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF","WEB-PROTOCOL-AND-AUTH.md#Universal moves","WEB-PROTOCOL-AND-AUTH.md#Validation rules"]`, 1)
-	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
+	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"ATTACK-CLASSES.md#Injection","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
 		name, ledger, findings, report, want string
 	}{
@@ -164,6 +169,10 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "excluded unit declares exhausted critic budget", ledger: incompleteExcluded, want: "incomplete audit budget"},
 		{name: "archived attempt declares unaffordable budget", ledger: incompleteArchive, want: "incomplete audit budget"},
 		{name: "covered with populated context", ledger: withContext},
+		{name: "malformed excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "Companion B", 1), want: "invalid excluded block"},
+		{name: "custom excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "CUSTOM-AUDIT.md#New class", 1)},
+		{name: "assigned ordinary excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "ATTACK-CLASSES.md#Access control", 1), want: "invalid excluded block"},
+		{name: "selected companion excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF", 1), want: "invalid excluded block"},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
 		{name: "covered with lifecycle", ledger: withLifecycle},
 		{name: "invisible surface label", ledger: strings.Replace(validLedger, `"surface":"Source"`, `"surface":"\u200b"`, 1), want: "lacks unique coverage identity"},

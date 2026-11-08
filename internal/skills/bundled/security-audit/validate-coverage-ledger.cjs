@@ -487,7 +487,11 @@ function validateExcludedBlocks(value, location, errors) {
       errors.push(`${base}: expected object`);
       return;
     }
-    if (!isVisibleText(entry.block)) errors.push(`${base}.block: invalid text`);
+    if (!isVisibleText(entry.block)) {
+      errors.push(`${base}.block: invalid text`);
+    } else if (!hasClassBlock(entry.block, true) && !hasClassBlock(entry.block, false)) {
+      errors.push(`${base}.block: block is absent from its class file`);
+    }
     if (!isVisibleText(entry.reason)) errors.push(`${base}.reason: invalid text`);
     if (typeof entry.block === "string" && seen.has(entry.block)) errors.push(`${base}.block: duplicate entry`);
     if (typeof entry.block === "string") seen.add(entry.block);
@@ -765,7 +769,7 @@ function collectUnitErrors(unit, index) {
   if (Array.isArray(unit.selected_companion_blocks) && Array.isArray(unit.excluded_blocks)) {
     const selected = new Set(unit.selected_companion_blocks);
     unit.excluded_blocks.forEach((entry, blockIndex) => {
-      if (isObject(entry) && selected.has(entry.block)) {
+      if (isObject(entry) && (selected.has(entry.block) || entry.block === unit.ordinary_attack_class_block)) {
         errors.push(`${base}.excluded_blocks[${blockIndex}].block: block is also selected`);
       }
     });

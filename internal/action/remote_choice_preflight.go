@@ -136,7 +136,13 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 			continue // A timed-out candidate was rolled back while this worker validated it.
 		}
 		if err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if attempt == 2 {
+				return err
+			}
+			continue // The parent may have committed the ACK before its response was lost.
 		}
 		if ack.Kind != "preflight" || ack.Failure != nil {
 			return errors.New("remote preflight acknowledgement differs")

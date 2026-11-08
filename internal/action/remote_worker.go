@@ -79,6 +79,16 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	}
 	executor.remoteChoices = &selection
 	if e.remoteAttachedAt.IsZero() {
+		if e.Store != nil {
+			saved, err := e.Store.ReadSavedDurable()
+			if err != nil {
+				return nil, nil, fmt.Errorf("read terminal decisions before remote attach: %w", err)
+			}
+			e.remotePriorDecisions = make(map[string]string, len(saved.TerminalDecisions))
+			for jobID, decision := range saved.TerminalDecisions {
+				e.remotePriorDecisions[jobID] = decision.AttemptID
+			}
+		}
 		e.remoteAttachedAt = time.Now().UTC()
 	}
 	executor.lateOutcome = func(outcome httpOutcome) error { return e.receiveLateOutcome(remote.ExecutorID, outcome) }
