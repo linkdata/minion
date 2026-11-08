@@ -123,6 +123,7 @@ func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutco
 		t.Fatal(err)
 	}
 	f.owner.Store, f.owner.ExecutorID, f.owner.remoteSelected, f.owner.assignmentRequired = store, "remote", true, true
+	f.owner.remoteAttachedAt = time.Now().UTC() // This fixture's remote owner predates the terminal decision.
 	f.owner.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	f.sink.assignmentContext = t.Context()
@@ -341,7 +342,7 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store = nil, reopened
+	restarted.Executor, restarted.Store, restarted.remoteAttachedAt = nil, reopened, time.Time{}
 	f.owner = &restarted
 	_, client, origin = lateOutcomeEndpoint(t, f.owner)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
@@ -557,14 +558,13 @@ func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store = nil, reopened
+	restarted.Executor, restarted.Store, restarted.remoteAttachedAt = nil, reopened, time.Time{}
 	_, client, origin := lateOutcomeEndpoint(t, &restarted)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("first late receipt after restart status=%d", status)
 	}
-	data, err := os.ReadFile(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
-	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
-		t.Fatalf("post-restart diagnostic missing: %q error=%v", data, err)
+	if _, err := os.Stat(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pre-restart worker text was retained: %v", err)
 	}
 	record, found, err := restarted.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || record.Status != "failed" || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
@@ -573,6 +573,52 @@ func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
 	}
 	if saved, err := reopened.HasAcceptedResult(); err != nil || saved || reopened.Data.Accepted != nil {
 		t.Fatalf("post-restart late answer became publishable: saved=%t accepted=%+v error=%v", saved, reopened.Data.Accepted, err)
+	}
+}
+
+func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
+	const oldKey = "fixture-retired-provider-key"
+	f := newLateOutcomeFixture(t, true)
+	f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: oldKey}, config.ClaudeConfig{})
+	f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: "fixture-current-provider-key"}, config.ClaudeConfig{})
+	if err := f.finish(errors.New("lost outcome")); err == nil {
+		t.Fatal("final usage status lost action error")
+	}
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(f.statePath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted := *f.owner
+	restarted.Executor, restarted.Store, restarted.remoteAttachedAt, restarted.retiredProviderKeys = nil, reopened, time.Time{}, nil
+	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
+		t.Fatalf("restart retained the old key: %q", got)
+	}
+	f.outcome.Result.Diagnostics[0].Message = "late " + oldKey
+	f.outcome.Failure.Message = "failed " + oldKey
+	_, client, origin := lateOutcomeEndpoint(t, &restarted)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("first late receipt after restart status=%d", status)
+	}
+	if _, err := os.Stat(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rotated key reached worker diagnostics: %v", err)
+	}
+	record, found, err := restarted.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+		t.Fatalf("safe late usage was lost: record=%+v found=%t error=%v", record, found, err)
+	}
+	summary := reopened.Data.TerminalDecisions[f.job.Identity.JobID].Summary
+	detail, found, err := restarted.UserActionDetail(f.job.Identity.AttemptID, time.Now(), summary)
+	if err != nil || !found || strings.Contains(detail.WorkerFailure+detail.WorkerObservedFailure+detail.WorkerNotice, oldKey) {
+		t.Fatalf("rotated key reached requester detail: detail=%+v found=%t error=%v", detail, found, err)
+	}
+	for _, diagnostic := range detail.Diagnostics {
+		if strings.Contains(diagnostic.Text, oldKey) {
+			t.Fatalf("rotated key reached requester diagnostic: %+v", diagnostic)
+		}
 	}
 }
 

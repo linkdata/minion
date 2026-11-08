@@ -46,6 +46,7 @@ var modelLineBreaks = strings.NewReplacer(
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
 	retiredProviderKeys []retiredProviderKey
+	remoteAttachedAt    time.Time
 	attemptID           string
 	usageCheckpoint     *usageCheckpoint
 	lateUsageSave       func(usage.Record) error              // Test seam for an ambiguous late receipt save.

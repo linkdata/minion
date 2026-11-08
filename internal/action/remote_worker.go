@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -77,6 +78,9 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 		return nil, nil, err
 	}
 	executor.remoteChoices = &selection
+	if e.remoteAttachedAt.IsZero() {
+		e.remoteAttachedAt = time.Now().UTC()
+	}
 	executor.lateOutcome = func(outcome httpOutcome) error { return e.receiveLateOutcome(remote.ExecutorID, outcome) }
 	endpoint, err := ListenRemoteExecution(executor, remote.Listen, certificate, remote.Token)
 	if err != nil {
