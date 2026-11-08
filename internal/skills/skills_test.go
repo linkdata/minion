@@ -391,6 +391,63 @@ func TestInstallBuiltinForBothAgentsWithoutNetwork(t *testing.T) {
 	}
 }
 
+func TestInstallBundledDefaultsWithoutNetwork(t *testing.T) {
+	home := t.TempDir()
+	setTestHome(t, home)
+	urls := []string{
+		"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail",
+		"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review",
+		"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-audit",
+		"https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman",
+		"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit",
+	}
+	// A missing HTTP client makes any attempted download fail this test.
+	if err := (&installer{home: home}).install(t.Context(), urls); err != nil {
+		t.Fatal(err)
+	}
+	for _, url := range urls {
+		name, err := Name(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, provider := range []string{"codex", "claude"} {
+			path, installed, err := InstalledPathFor(url, provider)
+			if err != nil || !installed {
+				t.Fatalf("%s %s installation = %q, %t, %v", provider, name, path, installed, err)
+			}
+			dir := filepath.Dir(path)
+			metadata, err := os.ReadFile(filepath.Join(dir, installMetadataName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded struct {
+				URL, Commit string
+			}
+			if err := json.Unmarshal(metadata, &recorded); err != nil || recorded.URL != url || recorded.Commit != bundledCommits[url] {
+				t.Fatalf("%s %s metadata = %q, %v", provider, name, metadata, err)
+			}
+			for _, file := range append([]string{"SKILL.md", "LICENSE"}, map[string][]string{
+				"caveman":        {"LICENSE-MIT", "LICENSING.md", "NOTICE", "README.md"},
+				"security-audit": {"HUNTING.md", "report-schema.json", "validate-findings.cjs", "validate-coverage-ledger.cjs"},
+			}[name]...) {
+				if data, err := os.ReadFile(filepath.Join(dir, file)); err != nil || len(data) == 0 {
+					t.Fatalf("%s %s %s = %d bytes, %v", provider, name, file, len(data), err)
+				}
+			}
+			if name == "security-audit" {
+				entries, err := os.ReadDir(dir)
+				if err != nil || len(entries) != 20 { // Runtime skill files, LICENSE, and install metadata.
+					t.Fatalf("%s security-audit files = %d, %v", provider, len(entries), err)
+				}
+			}
+		}
+	}
+	other := "https://github.com/other/ponytail/tree/main/skills/ponytail"
+	if _, installed, err := InstalledPathFor(other, "codex"); !errors.Is(err, ErrSourceMismatch) || installed {
+		t.Fatalf("other source = %t, %v; want source mismatch", installed, err)
+	}
+}
+
 func TestInstallRejectsUnsafeArchiveWithoutReplacingSkill(t *testing.T) {
 	for _, tt := range []struct {
 		name, path string

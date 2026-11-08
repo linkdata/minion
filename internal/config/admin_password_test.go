@@ -21,7 +21,7 @@ func testAdminPasswordHash(password string) string {
 func TestAdminPasswordHash(t *testing.T) {
 	hash := testAdminPasswordHash("correct horse battery staple")
 	salt := base64.RawStdEncoding.EncodeToString([]byte("0123456789abcdef"))
-	account := AdminAccount{Username: "operator", PasswordHash: hash}
+	account := AdminAccount{Username: "admin", PasswordHash: hash}
 	if !account.VerifyPassword("correct horse battery staple") || account.VerifyPassword("wrong") {
 		t.Fatal("Argon2id password verification changed")
 	}
@@ -66,12 +66,15 @@ func TestAdminAccountsValidation(t *testing.T) {
 		invalid  bool
 	}{
 		{name: "no default account"},
-		{name: "valid", accounts: []AdminAccount{{Username: "operator", PasswordHash: hash}}},
+		{name: "unset password", accounts: []AdminAccount{{Username: "admin"}}},
+		{name: "valid", accounts: []AdminAccount{{Username: "admin", PasswordHash: hash}}},
 		{name: "sample placeholder", accounts: []AdminAccount{{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder}}},
 		{name: "invalid placeholder", accounts: []AdminAccount{{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder + "!"}}, invalid: true},
 		{name: "empty username", accounts: []AdminAccount{{PasswordHash: hash}}, invalid: true},
-		{name: "duplicate username", accounts: []AdminAccount{{Username: "Operator", PasswordHash: hash}, {Username: "operator", PasswordHash: hash}}, invalid: true},
-		{name: "plaintext", accounts: []AdminAccount{{Username: "operator", PasswordHash: "secret password"}}, invalid: true},
+		{name: "other username", accounts: []AdminAccount{{Username: "operator", PasswordHash: hash}}, invalid: true},
+		{name: "uppercase username", accounts: []AdminAccount{{Username: "Admin", PasswordHash: hash}}, invalid: true},
+		{name: "multiple accounts", accounts: []AdminAccount{{Username: "admin", PasswordHash: hash}, {Username: "admin", PasswordHash: hash}}, invalid: true},
+		{name: "plaintext", accounts: []AdminAccount{{Username: "admin", PasswordHash: "secret password"}}, invalid: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{Administrators: test.accounts},
@@ -89,7 +92,7 @@ func TestAdminAccountsValidation(t *testing.T) {
 
 func TestAdminAccountsDoNotRelaxPublicTLSRequirement(t *testing.T) {
 	cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
-		Listen: "0.0.0.0:8377", Administrators: []AdminAccount{{Username: "operator", PasswordHash: testAdminPasswordHash("password")}},
+		Listen: "0.0.0.0:8377", Administrators: []AdminAccount{{Username: "admin", PasswordHash: testAdminPasswordHash("password")}},
 	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "outside literal loopback requires tls_cert_file and tls_key_file") {
 		t.Fatal("public admin without TLS did not report the expected error")
@@ -99,7 +102,7 @@ func TestAdminAccountsDoNotRelaxPublicTLSRequirement(t *testing.T) {
 func TestLoadAdminAccount(t *testing.T) {
 	hash := testAdminPasswordHash("correct horse battery staple")
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := fmt.Sprintf(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}],"admin":{"administrators":[{"username":"operator","password_hash":%q}]}}`, hash)
+	data := fmt.Sprintf(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}],"admin":{"administrators":[{"username":"admin","password_hash":%q}]}}`, hash)
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +114,7 @@ func TestLoadAdminAccount(t *testing.T) {
 		t.Fatal("expected one loaded admin account")
 	}
 	account := cfg.Admin.Administrators[0]
-	if account.Username != "operator" || account.PasswordHash != hash ||
+	if account.Username != "admin" || account.PasswordHash != hash ||
 		!account.VerifyPassword("correct horse battery staple") || account.VerifyPassword("wrong") {
 		t.Fatal("loaded admin account does not verify its configured password")
 	}

@@ -61,21 +61,7 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 			return nil, nil, err
 		}
 	}
-	credentials := WorkerCredentials{}
-	uses := func(provider string) bool {
-		return e.mainProvider() == provider || e.Adversarial == provider
-	}
-	if uses("codex") {
-		credentials.CodexAPIKey = e.Runner.Codex.APIKey
-		if credentials.CodexAPIKey == "" {
-			credentials.CodexNativeAPIKey = e.Runner.Codex.NativeAPIKey
-			credentials.CodexAccessToken = e.Runner.Codex.NativeAccessToken
-		}
-	}
-	if uses("claude") {
-		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
-	}
-	if err := executor.SetWorkerCredentials(credentials); err != nil {
+	if err := executor.SetWorkerCredentials(e.workerCredentials(e.mainProvider(), e.Adversarial)); err != nil {
 		return nil, nil, err
 	}
 	selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: remote.ExecutorID,
@@ -101,6 +87,15 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	e.remoteSelected = true
 	e.assignmentRequired = true
 	return commands, endpoint, nil
+}
+
+// UpdateRemoteWorkerCredentials updates the next assignment after the current action ends.
+func (e *Orchestrator) UpdateRemoteWorkerCredentials() error {
+	worker, ok := e.Executor.(*remoteWorker)
+	if !ok {
+		return errors.New("remote worker is not selected")
+	}
+	return worker.executor.updateIdleWorkerCredentials(e.workerCredentials(e.mainProvider(), e.Adversarial))
 }
 
 // WaitCapacity checks the live held pull, not a prior worker announcement.

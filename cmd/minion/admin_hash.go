@@ -58,6 +58,10 @@ func runHashMode() int {
 }
 
 func readAdminPassword(fd int) (password string, err error) {
+	return readAdminPasswordWithPrompt(fd, "Password to hash: ")
+}
+
+func readAdminPasswordWithPrompt(fd int, prompt string) (password string, err error) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -85,7 +89,7 @@ func readAdminPassword(fd int) (password string, err error) {
 		}
 		close(done)
 	}()
-	if _, err := fmt.Fprint(os.Stderr, "Password to hash: "); err != nil {
+	if _, err := fmt.Fprint(os.Stderr, prompt); err != nil {
 		return "", err
 	}
 	// x/term.NewTerminal.ReadPassword stalls on a valid U+FFFD rune.

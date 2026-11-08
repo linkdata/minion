@@ -6,8 +6,16 @@ import (
 	"path/filepath"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func ambientAPIKey(settings config.ClaudeConfig) config.ClaudeConfig {
+	if settings.APIKey == "" {
+		settings.APIKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	return settings
+}
 
 // authentication keeps the key outside every tool-readable directory. A fresh
 // config directory also prevents stored gateway credentials overriding the key.

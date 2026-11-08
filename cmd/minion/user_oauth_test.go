@@ -464,7 +464,7 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 	}
 	admin := adminGuestCookie(t, handler)
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"username": {"operator"}, "password": {"correct-password"},
+		"username": {"admin"}, "password": {"correct-password"},
 	}, admin, "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("admin login after OAuth saturation: status=%d cookies=%v", login.Code, login.Result().Cookies())
@@ -695,7 +695,7 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	go func() {
 		close(rotationStarted)
 		rotatedResult <- adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-			"username": {"operator"}, "password": {"correct-password"},
+			"username": {"admin"}, "password": {"correct-password"},
 		}, cookie, "")
 	}()
 	<-rotationStarted

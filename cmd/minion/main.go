@@ -49,8 +49,18 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	oneshot := flag.Bool("oneshot", false, "run one polling pass, then exit; default is a continuous service")
 	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
 	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
+	address := flag.String("address", "", "webserv listen address for the admin UI")
+	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
+	webUser := flag.String("user", "", "webserv user to switch to after opening the listener")
+	dataDir := flag.String("datadir", "", "webserv data directory")
+	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
+	webservFlagsUsed := *address != "" || *certDir != "" || *webUser != "" || *dataDir != "" || *listenURL != ""
+	if webservFlagsUsed && (*mode != "orchestrate" || *oneshot || *installSkills) {
+		logger.Print("webserv flags require orchestrate mode with the admin UI running")
+		return 2
+	}
 	if flag.NArg() != 0 {
 		if *mode == "hash" {
 			logger.Print("-mode=hash prompts for a password; do not pass it as an argument")
@@ -117,9 +127,20 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("config: %v", err)
 		return 2
 	}
-	cfg, err := config.Load(loadedPath)
+	if _, err := createInitialConfig(loadedPath, logger); err != nil {
+		logger.Printf("create config: %v", err)
+		return 2
+	}
+	cfg, err := config.LoadWithAdminRuntime(loadedPath, config.AdminConfig{
+		WebservAddress: *address, WebservCertDir: *certDir, WebservUser: *webUser,
+		WebservDataDir: *dataDir, WebservListenURL: *listenURL,
+	})
 	if err != nil {
 		logger.Printf("config: %v", err)
+		return 2
+	}
+	if webservFlagsUsed && cfg.Admin == nil {
+		logger.Print("webserv flags require an admin block in the config")
 		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -138,6 +159,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
+	}
+	if cfg.Admin != nil && !*check && !*oneshot && (cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0) {
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 	}
 	logCommandSkills(cfg, logger)
 	checkWorkRoot := func() error {
@@ -217,8 +241,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && !*oneshot {
-			if _, err := loadTLSCertificate("admin", cfg.Admin.TLSCertFile, cfg.Admin.TLSKeyFile); err != nil {
+		if cfg.Admin != nil && !*oneshot {
+			if err := checkAdminServerConfig(*cfg.Admin); err != nil {
 				logger.Printf("admin TLS preflight: %v", err)
 				return false
 			}
@@ -456,7 +480,11 @@ func waitForConfigRetry(ctx context.Context, updates, workerExited <-chan struct
 
 func newOrchestrator(cfg config.Config, client *github.Client, store *state.Store, logger *log.Logger, checkWorkRoot func() error) *action.Orchestrator {
 	codexAuth := config.CodexConfig{APIKey: cfg.Codex.APIKey}
-	if codexAuth.APIKey == "" {
+	claudeKey := cfg.Claude.APIKey
+	if cfg.RemoteExecutor == nil && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+		claudeKey = claudeRunnerKey(claudeKey)
+	}
+	if codexAuth.APIKey == "" && cfg.RemoteExecutor == nil {
 		codexAuth.NativeAPIKey = cfg.Codex.NativeAPIKey
 		codexAuth.NativeAccessToken = cfg.Codex.NativeAccessToken
 		if cfg.Main == "codex" || cfg.Adversarial == "codex" {
@@ -493,7 +521,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
 			Codex:  codexAuth,
-			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
+			Claude: config.ClaudeConfig{APIKey: claudeKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
 			Logger: logger,
 		},
 	}

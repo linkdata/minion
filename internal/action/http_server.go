@@ -152,6 +152,20 @@ func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error
 	return nil
 }
 
+// updateIdleWorkerCredentials changes only future remote assignments.
+func (e *HTTPExecutor) updateIdleWorkerCredentials(credentials WorkerCredentials) error {
+	if err := credentials.validate(); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.credentialsSet || e.remoteChoices == nil || e.active != nil || e.closed || e.unavailable {
+		return errors.New("remote worker credentials cannot change while active or unavailable")
+	}
+	e.credentials = credentials
+	return nil
+}
+
 func (e *HTTPExecutor) notifyLocked() {
 	close(e.changed)
 	e.changed = make(chan struct{})

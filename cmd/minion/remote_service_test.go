@@ -139,6 +139,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		next.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
 		next.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
 		next.AIInstructions = "Read the selected task carefully."
+		next.Codex.APIKey = "remote-next-job-key"
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -156,6 +157,9 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		owner.AIInstructions != "Read the selected task carefully." || len(watcher.Config.Repositories[0].AllowedActors) != 1 ||
 		watcher.Config.Repositories[0].AllowedActors[0] != "writer" || owner.CleanCriticRounds == nil || owner.CleanCriticRounds(1, 7) != 2 {
 		t.Fatalf("remote policy was not activated: current=%+v worker=%+v owner=%+v", live.current(), watcher.Config, owner)
+	}
+	if owner.Runner.Codex.APIKey != "remote-next-job-key" {
+		t.Fatal("remote worker key was not activated")
 	}
 	<-endpoint.Done()
 	got := <-pullDone

@@ -671,18 +671,43 @@ func TestChildEnvironmentRejectsCredentials(t *testing.T) {
 	}
 }
 
-func TestCredentialEnvironmentStopsCLI(t *testing.T) {
+func TestAmbientAPIKeyUsesPrivateHelper(t *testing.T) {
+	const key = "ambient-claude-test-key"
+	binary := fakeExecutable(t, "claude", `
+[ -z "$ANTHROPIC_API_KEY" ] && [ -n "$CLAUDE_CONFIG_DIR" ] || exit 91
+printf '%s\n' "$@" > "$0.args"
+cat >/dev/null
+printf '%s\n' '`+successfulResult+`'
+`)
+	t.Setenv("ANTHROPIC_API_KEY", key)
+	var session Session
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	result, err := session.Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
+	if err != nil || result.Answer != "final answer" {
+		t.Fatalf("ambient API key run: result=%+v err=%v", result, err)
+	}
+	if session.authDir == "" || readFile(t, filepath.Join(session.authDir, "api-key")) != key ||
+		strings.Contains(readFile(t, binary+".args"), key) || !strings.Contains(readFile(t, binary+".args"), "apiKeyHelper") {
+		t.Fatal("ambient key did not use the private helper")
+	}
+}
+
+func TestOAuthEnvironmentStillStopsCLI(t *testing.T) {
 	binary := fakeExecutable(t, "claude", "touch \"$0.called\"\nexit 99\n")
-	t.Setenv("ANTHROPIC_API_KEY", "dummy-secret")
-	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-		t.Fatalf("Validate accepted environment credentials: %v", err)
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "dummy-secret")
+	if _, err := Validate(t.Context(), config.ClaudeConfig{}); err == nil || !strings.Contains(err.Error(), "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Fatalf("Validate accepted OAuth environment credentials: %v", err)
 	}
 	result, err := Run(t.Context(), t.TempDir(), "task", false, "", config.ClaudeConfig{})
-	if err == nil || !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
-		t.Fatalf("Run accepted environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
+	if err == nil || !strings.Contains(err.Error(), "CLAUDE_CODE_OAUTH_TOKEN") || !result.UsageComplete || result.Tokens != (usage.Tokens{}) || result.Answer != "" {
+		t.Fatalf("Run accepted OAuth environment credentials or lost complete zero usage: result=%+v err=%v", result, err)
 	}
 	if _, err := os.Stat(binary + ".called"); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("CLI launched with credentials: %v", err)
+		t.Fatalf("CLI launched with OAuth environment credentials: %v", err)
 	}
 }
 

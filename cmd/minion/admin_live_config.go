@@ -19,20 +19,25 @@ var errAdminRestartRequired = errors.New("configuration changed outside the admi
 // adminLiveConfig keeps disk writes and the running worker's configuration distinct.
 // The monitor applies saved edits only between iterations, after an accepted action ends.
 type adminLiveConfig struct {
-	path           string
-	mu             sync.RWMutex
-	active         config.Config
-	desired        config.Config
-	disk           config.Config
-	remoteSelected map[string]bool
-	generation     uint64
-	pending        bool
-	lastError      string
-	updates        chan struct{}
+	path            string
+	mu              sync.RWMutex
+	active          config.Config
+	desired         config.Config
+	disk            config.Config
+	remoteSelected  map[string]bool
+	generation      uint64
+	pending         bool
+	restartRequired bool
+	lastError       string
+	updates         chan struct{}
 }
 
 func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error) {
-	disk, err := config.Load(path)
+	var runtime config.AdminConfig
+	if cfg.Admin != nil {
+		runtime = *cfg.Admin
+	}
+	disk, err := config.LoadWithAdminRuntime(path, runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -99,6 +104,13 @@ func cloneConfig(cfg config.Config) (config.Config, error) {
 	if err := json.Unmarshal(data, &cloned); err != nil {
 		return config.Config{}, err
 	}
+	if cfg.Admin != nil && cloned.Admin != nil {
+		cloned.Admin.WebservAddress = cfg.Admin.WebservAddress
+		cloned.Admin.WebservCertDir = cfg.Admin.WebservCertDir
+		cloned.Admin.WebservUser = cfg.Admin.WebservUser
+		cloned.Admin.WebservDataDir = cfg.Admin.WebservDataDir
+		cloned.Admin.WebservListenURL = cfg.Admin.WebservListenURL
+	}
 	return cloned, nil
 }
 
@@ -152,8 +164,15 @@ func hasRunnableLocalCommand(cfg config.Config) bool {
 func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.restartRequired {
+		return errors.New("restart Minion before further live edits")
+	}
 	var activate config.Config
-	updated, err := config.Update(a.path, func(raw *config.Config) error {
+	var runtime config.AdminConfig
+	if a.active.Admin != nil {
+		runtime = *a.active.Admin
+	}
+	updated, err := config.UpdateWithAdminRuntime(a.path, runtime, func(raw *config.Config) error {
 		before, err := cloneConfig(*raw)
 		if err != nil {
 			return err
@@ -174,7 +193,9 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		if err := after.Validate(filepath.Dir(a.path)); err != nil {
 			return err
 		}
-		if !sameFixedConfig(before, after) {
+		fixedBefore := before
+		fixedBefore.Codex.APIKey, fixedBefore.Claude.APIKey = after.Codex.APIKey, after.Claude.APIKey
+		if !sameFixedConfig(fixedBefore, after) {
 			return errors.New("this setting requires a restart")
 		}
 		added := make(map[string]bool)
@@ -209,6 +230,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		raw.CriticStopping.RequiredCleanRounds = after.CriticStopping.RequiredCleanRounds
 		raw.AIInstructions = after.AIInstructions
+		raw.Codex.APIKey, raw.Claude.APIKey = after.Codex.APIKey, after.Claude.APIKey
 		return nil
 	})
 	if err != nil {

@@ -17,16 +17,23 @@ type adminRoundOverride struct {
 	Set   bool
 }
 
+type adminProviderAuth struct {
+	Name, Provider string
+	Configured     bool
+}
+
 type adminPolicyView struct {
-	Global       int
-	Max          int
-	Critic       bool
-	Requesters   []adminRoundOverride
-	Repositories []adminRoundOverride
-	Instructions string
-	Custom       bool
-	Pending      bool
-	Error        string
+	Global         int
+	Max            int
+	MaxAPIKeyBytes int
+	Critic         bool
+	Requesters     []adminRoundOverride
+	Repositories   []adminRoundOverride
+	Providers      []adminProviderAuth
+	Instructions   string
+	Custom         bool
+	Pending        bool
+	Error          string
 }
 
 func policyView(snapshot adminConfigSnapshot) adminPolicyView {
@@ -35,9 +42,13 @@ func policyView(snapshot adminConfigSnapshot) adminPolicyView {
 	if cfg.CriticStopping.RequiredCleanRounds != nil {
 		global = *cfg.CriticStopping.RequiredCleanRounds
 	}
-	view := adminPolicyView{Global: global, Max: config.MaxCriticMaxRounds,
+	view := adminPolicyView{Global: global, Max: config.MaxCriticMaxRounds, MaxAPIKeyBytes: config.MaxProviderAPIKeyBytes,
 		Critic: cfg.Adversarial != "", Pending: snapshot.Pending, Error: snapshot.Error,
 		Instructions: cfg.AIInstructions, Custom: cfg.AIInstructions != ""}
+	view.Providers = []adminProviderAuth{
+		{Name: "Codex", Provider: "codex", Configured: cfg.Codex.APIKey != ""},
+		{Name: "Claude", Provider: "claude", Configured: cfg.Claude.APIKey != ""},
+	}
 	if !view.Custom {
 		view.Instructions = action.DefaultAIInstructions
 	}
@@ -65,6 +76,15 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
   {{if .Pending}}<p role="status" class="alert alert-info">A configuration change is pending activation.</p>{{end}}
   {{if .Error}}<p role="alert" class="alert alert-danger">Latest change failed: {{.Error}}</p>{{end}}
   {{if not .Critic}}<p class="alert alert-warning">No critic is configured. Clean-review requirements take effect when a critic is enabled in config.json and Minion restarts.</p>{{end}}
+  <section class="border rounded p-3 mb-3"><h2 class="h5">AI authentication</h2><p class="small text-body-secondary">Set a provider API key for new actions, or use authentication configured directly in its CLI. Existing keys are never shown here.</p>
+    {{range .Providers}}<div class="border-top py-3"><h3 class="h6">{{.Name}}</h3><p>{{if .Configured}}Minion API key configured.{{else}}Using CLI authentication.{{end}}</p>
+      <form method="post" action="/admin/policy/{{.Provider}}/key" class="d-flex flex-wrap align-items-end gap-2">
+        <label class="d-grid gap-1">{{.Name}} API key<input class="form-control" type="password" name="api_key" autocomplete="new-password" maxlength="{{$.Dot.MaxAPIKeyBytes}}" required></label>
+        <button class="btn btn-primary" type="submit">Set {{.Name}} API key</button>
+      </form>
+      {{if .Configured}}<form method="post" action="/admin/policy/{{.Provider}}/key/clear" class="mt-2"><button class="btn btn-outline-light" type="submit">Use {{.Name}} CLI authentication</button></form>{{end}}
+    </div>{{end}}
+  </section>
   <section class="border rounded p-3 mb-3"><h2 class="h5">Global default</h2>
     <form method="post" action="/admin/policy/global" class="d-flex flex-wrap align-items-end gap-2">
       <label class="d-grid gap-1">Required clean reviews<input class="form-control" type="number" name="rounds" min="0" max="{{.Max}}" value="{{.Global}}" required></label>

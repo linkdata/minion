@@ -28,9 +28,10 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 // and missing-session lookup check Run's invocation shapes without inference.
 // Claude owns sandbox enforcement.
 //
-// APIKey overrides environment credentials and stored login. Without it,
-// environment API/OAuth tokens are rejected. Authenticated proxies are rejected.
+// APIKey overrides the standard API-key environment and stored login.
+// OAuth environment tokens and authenticated proxies are rejected.
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
+	settings = ambientAPIKey(settings)
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
 	validated = settings
 	tempRoot, err := CheckHost(ctx, settings.AllowAllUnixSockets)

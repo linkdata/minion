@@ -36,11 +36,11 @@ import (
 // without granting them write access. When OutputSchema is set, the answer
 // contains the CLI's structured JSON result.
 //
-// APIKey overrides environment credentials and stored CLI login through a
-// temporary, tool-inaccessible key helper. Without APIKey, use Claude's stored
-// CLI login; environment API/OAuth tokens are rejected. Authenticated proxies
-// are rejected in either mode.
+// APIKey overrides the standard API-key environment and stored CLI login
+// through a temporary, tool-inaccessible key helper. OAuth environment tokens
+// and authenticated proxies are rejected.
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
+	settings = ambientAPIKey(settings)
 	result.UsageComplete = true
 	defer func() {
 		runError = aicli.RedactError(runError, settings.APIKey)

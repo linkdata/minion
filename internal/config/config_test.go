@@ -11,13 +11,13 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestCheckedInConfigIsSample(t *testing.T) {
+func TestCheckedInConfigIsMinimalDefault(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BotLogin != "example-bot" || cfg.GitHub.Token != "" || len(cfg.InvitationOwners) != 0 ||
-		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
+	if cfg.BotLogin != "" || cfg.GitHub.Token != "" || len(cfg.InvitationOwners) != 0 ||
+		len(cfg.Repositories) != 0 || cfg.Codex.APIKey != "" || cfg.Claude.APIKey != "" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" || cfg.Claude.AllowAllUnixSockets ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
@@ -28,7 +28,48 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
-		t.Fatal("checked-in configuration differs from expected sample")
+		t.Fatal("checked-in configuration differs from expected default")
+	}
+}
+
+func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
+	cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
+		Listen:      "0.0.0.0:8443",
+		GitHubOAuth: &OAuthClient{ClientID: "client", ClientSecret: "secret", RedirectURL: "https://minion.example/auth/github/callback"},
+	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("public listener without TLS was accepted without overrides")
+	}
+	runtime := AdminConfig{WebservCertDir: "/certs", WebservListenURL: "https://minion.example:8443"}
+	loaded, err := LoadWithAdminRuntime(path, runtime)
+	if err != nil || loaded.Admin == nil || loaded.Admin.WebservCertDir != "/certs" {
+		t.Fatalf("effective webserv TLS settings rejected: admin=%+v error=%v", loaded.Admin, err)
+	}
+	if _, err := UpdateWithAdminRuntime(path, runtime, func(cfg *Config) error {
+		cfg.Codex.APIKey = "new-key"
+		return nil
+	}); err != nil {
+		t.Fatalf("save with effective webserv TLS settings: %v", err)
+	}
+	cfg.Admin.Listen = "127.0.0.1:8377"
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080", WebservListenURL: "https://minion.example"})
+	if err != nil {
+		t.Fatalf("HTTPS OAuth behind loopback reverse proxy rejected: %v", err)
 	}
 }
 

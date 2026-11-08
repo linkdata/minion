@@ -19,6 +19,15 @@ var updateMu sync.Mutex
 // It serializes Minion's config writers; callers still need the state lock when
 // coordinating a write with monitor state.
 func Update(path string, mutate func(*Config) error) (candidate Config, err error) {
+	return update(path, nil, mutate)
+}
+
+// UpdateWithAdminRuntime validates a saved edit with active listener overrides.
+func UpdateWithAdminRuntime(path string, runtime AdminConfig, mutate func(*Config) error) (Config, error) {
+	return update(path, &runtime, mutate)
+}
+
+func update(path string, runtime *AdminConfig, mutate func(*Config) error) (candidate Config, err error) {
 	if mutate == nil {
 		return Config{}, errors.New("config mutation is required")
 	}
@@ -41,6 +50,7 @@ func Update(path string, mutate func(*Config) error) (candidate Config, err erro
 	if err != nil {
 		return Config{}, err
 	}
+	applyAdminRuntime(&candidate, runtime)
 	before, err := json.Marshal(candidate)
 	if err != nil {
 		return Config{}, err

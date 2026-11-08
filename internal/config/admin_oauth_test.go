@@ -77,6 +77,11 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if err := defaultHTTPPort.Validate(t.TempDir()); err != nil {
 		t.Fatalf("implicit HTTP port 80: %v", err)
 	}
+	proxiedHTTPS := valid()
+	proxiedHTTPS.Admin.TLSCertFile, proxiedHTTPS.Admin.TLSKeyFile = "", ""
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("HTTPS callback through a reverse proxy: %v", err)
+	}
 	defaultPort := valid()
 	defaultPort.Admin.GitLabOAuth.BaseURL = "https://GITLAB.example:443"
 	if err := defaultPort.Validate(t.TempDir()); err != nil || defaultPort.Admin.GitLabOAuth.BaseURL != "https://gitlab.example" {
@@ -138,8 +143,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://localhost.example/auth/github/callback"
 		}, "redirect_url"},
-		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback" }, "admin TLS"},
-		{"plain listener with HTTPS callback", func(c *Config) { c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", "" }, "admin TLS"},
+		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback" }, "must use HTTPS"},
 		{"public listener without TLS", func(c *Config) {
 			c.Admin.Listen = "0.0.0.0:8377"
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""

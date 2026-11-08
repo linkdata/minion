@@ -60,6 +60,7 @@ const (
 	MaxModelSettingBytes       = 128
 	MaxUserModelChoicesPerRole = 16
 	MaxAIInstructionsBytes     = 16 << 10
+	MaxProviderAPIKeyBytes     = 8 << 10
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -125,6 +126,11 @@ type AdminConfig struct {
 	Listen           string            `json:"listen,omitempty"`
 	TLSCertFile      string            `json:"tls_cert_file,omitempty"`
 	TLSKeyFile       string            `json:"tls_key_file,omitempty"`
+	WebservAddress   string            `json:"-"`
+	WebservCertDir   string            `json:"-"`
+	WebservUser      string            `json:"-"`
+	WebservDataDir   string            `json:"-"`
+	WebservListenURL string            `json:"-"`
 	Administrators   []AdminAccount    `json:"administrators,omitempty"`
 	GitHubOAuth      *OAuthClient      `json:"github_oauth,omitempty"`
 	GitLabOAuth      *OAuthClient      `json:"gitlab_oauth,omitempty"`
@@ -354,6 +360,15 @@ func (c Config) ResolveUserPreferences(preferred UserModelPreferences) (main, cr
 //
 // Relative paths are resolved against the configuration file's directory.
 func Load(path string) (Config, error) {
+	return load(path, nil)
+}
+
+// LoadWithAdminRuntime applies command-line listener settings before validation.
+func LoadWithAdminRuntime(path string, runtime AdminConfig) (Config, error) {
+	return load(path, &runtime)
+}
+
+func load(path string, runtime *AdminConfig) (Config, error) {
 	var cfg Config
 	var err error
 	path, err = filepath.Abs(path)
@@ -369,10 +384,22 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	applyAdminRuntime(&cfg, runtime)
 	if err := cfg.Validate(filepath.Dir(path)); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func applyAdminRuntime(cfg *Config, runtime *AdminConfig) {
+	if runtime == nil || cfg.Admin == nil {
+		return
+	}
+	cfg.Admin.WebservAddress = runtime.WebservAddress
+	cfg.Admin.WebservCertDir = runtime.WebservCertDir
+	cfg.Admin.WebservUser = runtime.WebservUser
+	cfg.Admin.WebservDataDir = runtime.WebservDataDir
+	cfg.Admin.WebservListenURL = runtime.WebservListenURL
 }
 
 func resolveAdminTLSPath(configDir, path string) string {
@@ -419,7 +446,7 @@ func (c Config) RequireGitHubToken() error {
 //
 // It normalizes repository names, account logins, identity pin keys, and skill URLs.
 func (c *Config) Validate(configDir string) error {
-	if c.BotLogin == "" {
+	if c.BotLogin == "" && c.Admin == nil {
 		return fmt.Errorf("bot_login is required")
 	}
 	if strings.ContainsAny(c.BotLogin, " /\\@") {
@@ -472,8 +499,11 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.AIInstructions) > MaxAIInstructionsBytes || !utf8.ValidString(c.AIInstructions) || strings.ContainsRune(c.AIInstructions, 0) {
 		return fmt.Errorf("ai_instructions must be at most %d UTF-8 bytes without NUL", MaxAIInstructionsBytes)
 	}
-	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
-		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
+	if len(c.Codex.APIKey)+len(c.Claude.APIKey) > MaxProviderAPIKeyBytes ||
+		!utf8.ValidString(c.Codex.APIKey) || !utf8.ValidString(c.Claude.APIKey) ||
+		strings.IndexFunc(c.Codex.APIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 ||
+		strings.IndexFunc(c.Claude.APIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return fmt.Errorf("provider api_key must be valid UTF-8, at most %d bytes combined, and contain no whitespace or control characters", MaxProviderAPIKeyBytes)
 	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)
@@ -517,13 +547,11 @@ func (c *Config) Validate(configDir string) error {
 				}
 			}
 		}
-		seen := make(map[string]bool, len(admin.Administrators))
+		if len(admin.Administrators) > 1 || len(admin.Administrators) == 1 && admin.Administrators[0].Username != "admin" {
+			return errors.New("admin.administrators must contain only the admin account")
+		}
 		for _, account := range admin.Administrators {
-			if !workspace.ValidIdentitySegment(account.Username) || seen[strings.ToLower(account.Username)] {
-				return errors.New("admin.administrators username is invalid or duplicated")
-			}
-			seen[strings.ToLower(account.Username)] = true
-			if account.PasswordHash != AdminPasswordHashPlaceholder {
+			if account.PasswordHash != "" && account.PasswordHash != AdminPasswordHashPlaceholder {
 				if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
 					return errors.New("admin.administrators password_hash is invalid")
 				}
@@ -532,23 +560,35 @@ func (c *Config) Validate(configDir string) error {
 		if admin.Listen == "" {
 			admin.Listen = DefaultAdminListen
 		}
-		host, port, err := net.SplitHostPort(admin.Listen)
-		if err != nil {
-			return fmt.Errorf("admin.listen: %w", err)
-		}
-		if strings.HasPrefix(admin.Listen, "[]") {
-			return errors.New("admin.listen empty bracketed host is invalid; use :port")
-		}
-		number, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || number == 0 {
-			return errors.New("admin.listen requires a numeric port from 1 to 65535")
-		}
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
+		host, port, err := net.SplitHostPort(admin.Listen)
+		if err != nil && admin.WebservAddress == "" {
+			return fmt.Errorf("admin.listen: %w", err)
+		}
+		if strings.HasPrefix(admin.Listen, "[]") && admin.WebservAddress == "" {
+			return errors.New("admin.listen empty bracketed host is invalid; use :port")
+		}
+		var number uint64
+		if admin.WebservAddress == "" {
+			number, err = strconv.ParseUint(port, 10, 16)
+			if err != nil || number == 0 {
+				return errors.New("admin.listen requires a numeric port from 1 to 65535")
+			}
+		} else {
+			host = admin.WebservAddress
+			if overrideHost, _, err := net.SplitHostPort(host); err == nil {
+				host = overrideHost
+			}
+			host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		}
 		addr, err := netip.ParseAddr(host)
-		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" {
-			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" && admin.WebservCertDir == "" {
+			if admin.WebservAddress == "" {
+				return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+			}
+			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files")
 		}
 		if err := admin.validateOAuth(host, number); err != nil {
 			return err
@@ -711,7 +751,7 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("start_at must be RFC3339: %w", err)
 		}
 	}
-	if len(c.Repositories) == 0 {
+	if len(c.Repositories) == 0 && c.Admin == nil {
 		return fmt.Errorf("repositories must contain at least one repository")
 	}
 	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)

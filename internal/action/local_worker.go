@@ -136,20 +136,11 @@ func (e *Orchestrator) AttachLocalWorker(ctx context.Context, cfg config.Config,
 	if err != nil {
 		return WorkerSelection{}, nil, nil, err
 	}
-	credentials := WorkerCredentials{}
-	uses := func(provider string) bool {
-		return selected.Main.Provider == provider || selected.Critic != nil && selected.Critic.Provider == provider
+	critic := ""
+	if selected.Critic != nil {
+		critic = selected.Critic.Provider
 	}
-	if uses("codex") {
-		credentials.CodexAPIKey = e.Runner.Codex.APIKey
-		if credentials.CodexAPIKey == "" {
-			credentials.CodexNativeAPIKey = e.Runner.Codex.NativeAPIKey
-			credentials.CodexAccessToken = e.Runner.Codex.NativeAccessToken
-		}
-	}
-	if uses("claude") {
-		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
-	}
+	credentials := e.workerCredentials(selected.Main.Provider, critic)
 	w, err := startLocalWorker(LocalExecutorID, path, args, readyTimeout, credentials, func(cmd *exec.Cmd, access LocalEndpointAccess) error {
 		return configure(cmd, access, selected, credentials)
 	}, e.WorkRoot)

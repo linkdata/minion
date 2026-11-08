@@ -452,6 +452,43 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 		startup.Selection.Commands["available"].Skills[0] != availableSkill {
 		t.Fatalf("new child did not receive installed skill: commands=%v", startup.Selection.Commands)
 	}
+	beforeKeyChange := owner.Executor
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = "configured-next-job-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if owner.Executor == beforeKeyChange || startup.CodexAPIKey != "configured-next-job-key" || owner.Runner.Codex.APIKey != startup.CodexAPIKey {
+		t.Fatal("new model key did not reach replacement worker")
+	}
+	t.Setenv("CODEX_API_KEY", "ambient-next-job-key")
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup = action.WorkerStartup{}
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if startup.CodexAPIKey != "" || startup.CodexNativeAPIKey != "ambient-next-job-key" || owner.Runner.Codex.APIKey != "" {
+		t.Fatal("clearing model key did not restore ambient CLI authentication")
+	}
 	cancel()
 	<-finished
 	if code != 0 {

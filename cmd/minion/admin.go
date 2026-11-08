@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -35,10 +36,18 @@ type adminServer struct {
 }
 
 func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func(), liveConfigs ...*adminLiveConfig) (*adminServer, error) {
-	service := &webserv.Config{Address: cfg.Listen}
+	return startAdminServerWithSetup(ctx, cfg, owner, statePath, onFailure, false, liveConfigs...)
+}
+
+func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owner *action.Orchestrator, statePath string, onFailure func(), setup bool, liveConfigs ...*adminLiveConfig) (*adminServer, error) {
+	if err := validateWebservAdminAddress(cfg); err != nil {
+		return nil, err
+	}
+	service := adminWebservConfig(cfg)
+	cfg.Listen = service.Address
 	var fallbackTLS *tls.Config
 	var certificate tls.Certificate
-	if cfg.TLSCertFile != "" {
+	if cfg.WebservCertDir == "" && cfg.TLSCertFile != "" {
 		var err error
 		certificate, err = loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
@@ -68,25 +77,27 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	if fallbackTLS != nil {
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
-	var entryURL string
-	if cfg.TLSCertFile != "" {
+	entryURL := service.ListenURL
+	if fallbackTLS != nil && cfg.WebservListenURL == "" {
 		entryURL = certifiedListenURL(listener.Addr().String(), &certificate, cfg)
-	} else {
-		entryURL = plainAdminListenURL(listener.Addr().String(), cfg)
 	}
+	service.ListenURL = entryURL
 	jw, err := jaws.New()
 	if err != nil {
 		_ = listener.Close()
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
 	jw.Logger = slog.Default()
-	oauth, err := newOAuthAccess(jw, cfg, statePath, &http.Client{Timeout: 15 * time.Second})
-	if err != nil {
-		jw.Close()
-		_ = listener.Close()
-		return nil, err
+	var oauth *oauthAccess
+	if !setup {
+		oauth, err = newOAuthAccess(jw, cfg, statePath, &http.Client{Timeout: 15 * time.Second})
+		if err != nil {
+			jw.Close()
+			_ = listener.Close()
+			return nil, err
+		}
 	}
-	handler, err := newAdminHandler(jw, cfg, owner, oauth, liveConfigs...)
+	handler, err := newAdminHandlerWithSetupPath(jw, cfg, owner, oauth, setup, statePath, liveConfigs...)
 	if err != nil {
 		jw.Close()
 		_ = listener.Close()
@@ -103,7 +114,7 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 	serveCtx, cancel := context.WithCancel(ctx)
 	signInEnabled := oauth != nil
 	for _, account := range cfg.Administrators {
-		if account.PasswordHash != config.AdminPasswordHashPlaceholder {
+		if account.PasswordHash != "" && account.PasswordHash != config.AdminPasswordHashPlaceholder {
 			signInEnabled = true
 			break
 		}
@@ -140,6 +151,46 @@ func startAdminServer(ctx context.Context, cfg config.AdminConfig, owner *action
 		close(a.serveDone)
 	}()
 	return a, nil
+}
+
+func adminWebservConfig(cfg config.AdminConfig) *webserv.Config {
+	address := cfg.Listen
+	if cfg.WebservAddress != "" {
+		address = cfg.WebservAddress
+	}
+	return &webserv.Config{Address: address, CertDir: cfg.WebservCertDir, User: cfg.WebservUser,
+		DataDir: cfg.WebservDataDir, ListenURL: cfg.WebservListenURL}
+}
+
+func validateWebservAdminAddress(cfg config.AdminConfig) error {
+	if cfg.WebservAddress == "" || cfg.WebservCertDir != "" || cfg.TLSCertFile != "" {
+		return nil
+	}
+	host := cfg.WebservAddress
+	if value, _, err := net.SplitHostPort(host); err == nil {
+		host = value
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !addr.Unmap().IsLoopback() {
+		return errors.New("webserv address outside literal loopback requires a certificate directory or admin TLS files")
+	}
+	return nil
+}
+
+func checkAdminServerConfig(cfg config.AdminConfig) error {
+	if err := validateWebservAdminAddress(cfg); err != nil {
+		return err
+	}
+	if cfg.WebservCertDir != "" {
+		_, _, err := webserv.LoadCert(cfg.WebservCertDir, "", "")
+		return err
+	}
+	if cfg.TLSCertFile != "" {
+		_, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
+		return err
+	}
+	return nil
 }
 
 func certifiedListenURL(address string, certificate *tls.Certificate, cfg config.AdminConfig) string {
@@ -197,16 +248,6 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 		}
 	}
 	return ""
-}
-
-func plainAdminListenURL(address string, cfg config.AdminConfig) string {
-	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
-		if client != nil {
-			callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
-			return (&url.URL{Scheme: "http", Host: callback.Host}).String()
-		}
-	}
-	return "http://" + address
 }
 
 // adminGuard is the single entry gate for all dashboard routes.

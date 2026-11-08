@@ -38,7 +38,7 @@ func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
 
 func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 	t.Parallel()
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, "", nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin"}}}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +48,11 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		}
 	})
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
+	if err != nil || admin.entryURL != "http://localhost:"+port {
 		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	if admin.signInEnabled {
-		t.Fatal("admin sign-in enabled without a configured account or OAuth provider")
+		t.Fatal("admin sign-in enabled without a password or OAuth provider")
 	}
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
@@ -68,7 +68,7 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if home.StatusCode != http.StatusOK || len(home.Cookies()) != 1 ||
-		!strings.Contains(string(homeBody), `disabled>Sign in</button>`) ||
+		!strings.Contains(string(homeBody), "The admin password is not set") ||
 		strings.Contains(string(homeBody), `href="/admin/login"`) || strings.Contains(string(homeBody), `href="/auth/login"`) {
 		t.Fatalf("unconfigured home: status=%d cookies=%v body=%q", home.StatusCode, home.Cookies(), homeBody)
 	}
@@ -92,7 +92,6 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		name, path string
 		upgrade    bool
 	}{
-		{name: "admin login", path: "/admin/login"},
 		{name: "websocket callback", path: "/jaws/test-key", upgrade: true},
 		{name: "OAuth callback", path: "/auth/callback"},
 		{name: "download", path: "/download/report"},
@@ -426,30 +425,6 @@ func TestCertifiedListenURL(t *testing.T) {
 	}
 }
 
-func TestPlainAdminListenURL(t *testing.T) {
-	for _, tc := range []struct {
-		address, callback, want string
-	}{
-		{address: "127.0.0.1:8080", want: "http://127.0.0.1:8080"},
-		{address: "127.0.0.2:8080", want: "http://127.0.0.2:8080"},
-		{address: "[::1]:8080", want: "http://[::1]:8080"},
-		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8080/auth/github/callback", want: "http://127.0.0.1:8080"},
-		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:08080/auth/github/callback", want: "http://127.0.0.1:08080"},
-	} {
-		cfg := config.AdminConfig{}
-		if tc.callback != "" {
-			cfg.GitHubOAuth = &config.OAuthClient{RedirectURL: tc.callback}
-		}
-		if got := plainAdminListenURL(tc.address, cfg); got != tc.want {
-			t.Errorf("plain URL for %s and %s = %q, want %q", tc.address, tc.callback, got, tc.want)
-		}
-	}
-	gitlab := config.AdminConfig{GitLabOAuth: &config.OAuthClient{RedirectURL: "http://127.0.0.1:8080/auth/gitlab/callback"}}
-	if got := plainAdminListenURL("127.0.0.1:8080", gitlab); got != "http://127.0.0.1:8080" {
-		t.Errorf("GitLab plain URL = %q, want callback origin", got)
-	}
-}
-
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
@@ -462,7 +437,11 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://" + leaf.DNSNames[0] + ":" + port; admin.entryURL != want {
 		t.Fatalf("HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)

@@ -26,15 +26,18 @@ var headHTML string
 
 var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin</title></head>
 <body><main class="container py-5">
-{{if .Dot}}
+{{if .Dot.SignedIn}}
 <h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open dashboard</a></p>
 <form method="post" action="/admin/logout"><button class="btn btn-outline-light">Sign out</button></form>
-{{else}}
+{{else if .Dot.PasswordSet}}
 <h1 class="h3 mb-3">Minion admin</h1>
 <form method="post" action="/admin/login" class="vstack gap-3 col-md-6 col-lg-4">
-<label class="form-label">Username <input class="form-control" name="username" autocomplete="username" required></label>
+<input type="hidden" name="username" value="admin">
 <label class="form-label">Password <input class="form-control" name="password" type="password" autocomplete="current-password" required></label>
 <button class="btn btn-primary">Sign in</button></form><script defer src="/admin/login.js"></script>
+{{else}}
+<h1 class="h3 mb-3">Minion admin</h1>
+<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>password_hash</code> for the <code>admin</code> account in your config file, then restart Minion.</p>
 {{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
@@ -43,12 +46,30 @@ var adminLoginJS []byte
 
 var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{template "head.html" $}}<title>Minion</title></head>
 <body><main class="container py-5"><h1>Minion</h1>
-{{if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
+{{if .Dot.SignedAdmin}}<div class="d-flex gap-2 mb-3"><a class="btn btn-outline-light" href="/admin/config">Advanced config</a><form method="post" action="/admin/logout"><button class="btn btn-outline-light">Admin sign out</button></form></div>
+{{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
-{{if not (or .Dot.Admin .Dot.User)}}<p>Sign-in is not configured.</p><button class="btn btn-primary" disabled>Sign in</button>{{end}}
+{{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>password_hash</code> for the <code>admin</code> account in your config file, then restart Minion.</p>{{end}}
+{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. Create the <code>work_root</code> directory (default <code>var/work</code>), install skills with <code>minion -install-skills</code>, then restart Minion. No jobs run during setup.</p>
+{{else}}<p role="status">Setup is incomplete. Sign in as admin to save the bot account and first repository. No jobs run during setup.</p>
+{{if .Dot.SignedAdmin}}
+<form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
+<label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>
+<label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" required></label>
+<label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" required></label>
+<label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" value="{{if .Dot.RepositoryID}}{{.Dot.RepositoryID}}{{end}}" required></label>
+<label class="form-label">Repository owner ID<input class="form-control" name="owner_id" type="number" min="1" value="{{if .Dot.OwnerID}}{{.Dot.OwnerID}}{{end}}" required></label>
+<p class="text-body-secondary">The first repository starts with the review command and no allowed requesters. Add requesters in the admin UI after restarting. Find IDs with <code>gh api repos/OWNER/REPO --jq '{id, owner_id: .owner.id}'</code>.</p>
+<button class="btn btn-primary" type="submit">Save setup</button></form>
+{{end}}{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
-type adminHomeView struct{ Admin, User, SignedUser bool }
+type adminHomeView struct {
+	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete bool
+	BotLogin, Repository                                       string
+	RepositoryID, OwnerID                                      int64
+}
+type adminLoginView struct{ SignedIn, PasswordSet bool }
 
 const (
 	maxAdminSessions          = 512
@@ -85,6 +106,9 @@ type adminAccess struct {
 	jaws         *jaws.Jaws
 	oauth        *oauthAccess
 	actionAccess *userActionAccess
+	setup        bool
+	setupPath    string
+	setupAdmin   config.AdminConfig
 	accounts     map[string]config.AdminAccount
 	dummy        config.AdminAccount
 	mu           sync.Mutex
@@ -94,6 +118,14 @@ type adminAccess struct {
 }
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
+	return newAdminHandlerWithSetup(jw, cfg, owner, oauth, false, liveConfigs...)
+}
+
+func newAdminHandlerWithSetup(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, setup bool, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
+	return newAdminHandlerWithSetupPath(jw, cfg, owner, oauth, setup, "", liveConfigs...)
+}
+
+func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, setup bool, setupPath string, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
 	jw.MaxSessions = maxAdminSessions
 	if err := jw.AddTemplateLookuper(adminDashboardTemplate); err != nil {
 		return nil, err
@@ -122,9 +154,12 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := jw.AddTemplateLookuper(adminPolicyHTML); err != nil {
 		return nil, err
 	}
-	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
+	if err := jw.AddTemplateLookuper(adminAdvancedHTML); err != nil {
+		return nil, err
+	}
+	access := &adminAccess{jaws: jw, oauth: oauth, setup: setup, setupPath: setupPath, setupAdmin: cfg, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
 	for _, account := range cfg.Administrators {
-		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
+		if account.PasswordHash == "" || account.PasswordHash == config.AdminPasswordHashPlaceholder {
 			continue
 		}
 		access.accounts[account.Username] = account
@@ -158,6 +193,10 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	})
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
+	if setup && setupPath != "" {
+		mux.Handle("POST /admin/setup", access.setupPost())
+		registerAdminAdvancedRoutes(mux, jw, setupPath, nil, cfg)
+	}
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
 		access.stop(w, r, owner)
 	})
@@ -169,7 +208,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		sess := jw.GetSession(r)
-		if access.sessionUsername(sess) != "" {
+		if !setup && access.sessionUsername(sess) != "" {
 			dashboard.ServeHTTP(w, r)
 			return
 		}
@@ -196,6 +235,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		mux.Handle("GET /admin/policy", adminPolicyHandler(jw, live.snapshot))
 		registerAdminConfigActions(mux, live, owner)
 		registerAdminPolicyActions(mux, live, owner)
+		registerAdminAdvancedRoutes(mux, jw, live.path, live, cfg)
 	}
 	if oauth != nil && owner != nil {
 		access.actionAccess = &userActionAccess{oauth: oauth, owner: owner}
@@ -292,8 +332,8 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/" {
 		return true
 	}
-	if len(a.accounts) != 0 && r.URL.Path == "/admin/login" &&
-		(r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
+	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodHead ||
+		len(a.accounts) != 0 && r.Method == http.MethodPost) {
 		return true
 	}
 	if len(a.accounts) != 0 && r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
@@ -309,6 +349,13 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	}
 	if strings.HasPrefix(r.URL.Path, "/jaws/") {
 		return a.ownsJaWSRequest(r)
+	}
+	if a.setup {
+		if a.setupPath == "" || a.sessionUsername(a.jaws.GetSession(r)) == "" {
+			return false
+		}
+		return r.Method == http.MethodPost && r.URL.Path == "/admin/setup" ||
+			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost)
 	}
 	return a.sessionUsername(a.jaws.GetSession(r)) != ""
 }
@@ -343,12 +390,22 @@ func (a *adminAccess) ownsJaWSRequest(r *http.Request) bool {
 func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	sess := a.jaws.GetSession(r)
 	signedIn := a.sessionUsername(sess) != ""
-	a.publicPage(w, r, "admin login", signedIn)
+	a.publicPage(w, r, "admin login", adminLoginView{SignedIn: signedIn, PasswordSet: len(a.accounts) != 0})
 }
 
 func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 	account, _ := a.oauth.currentUser(a.jaws.GetSession(r))
-	a.publicPage(w, r, "home", adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil, SignedUser: account != ""})
+	view := adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(a.jaws.GetSession(r)) != "", Setup: a.setup}
+	if a.setup && a.setupPath != "" {
+		if cfg, err := config.LoadWithAdminRuntime(a.setupPath, a.setupAdmin); err == nil {
+			view.BotLogin = cfg.BotLogin
+			view.SetupComplete = cfg.BotLogin != "" && cfg.GitHub.Token != "" && len(cfg.Repositories) != 0
+			if len(cfg.Repositories) != 0 {
+				view.Repository, view.RepositoryID, view.OwnerID = cfg.Repositories[0].Name, cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID
+			}
+		}
+	}
+	a.publicPage(w, r, "home", view)
 }
 
 func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name string, view any) {

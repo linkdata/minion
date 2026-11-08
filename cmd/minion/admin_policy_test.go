@@ -260,3 +260,78 @@ func TestAdminPolicyRoutesRequireAdminAndSaveSettings(t *testing.T) {
 		t.Fatalf("built-in instructions became a custom override: %+v", saved)
 	}
 }
+
+func TestAdminPolicyAPIKeysAreEditableWithoutRenderingSecrets(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, &action.Orchestrator{}, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	cookie := dashboardTestCookie(t, handler)
+	post := func(route string, form url.Values) *httptest.ResponseRecorder {
+		t.Helper()
+		return adminResponse(handler, http.MethodPost, route, form, cookie, "https://admin.example")
+	}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/policy/codex/key", url.Values{"api_key": {"secret"}}, nil, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("anonymous API key change = %d", denied.Code)
+	}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/policy/codex/key", url.Values{"api_key": {"secret"}}, cookie, "https://other.example"); denied.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin API key change = %d", denied.Code)
+	}
+	for _, step := range []struct{ provider, key string }{{"codex", "secret-codex-key"}, {"claude", "secret-claude-key"}} {
+		if response := post("/admin/policy/"+step.provider+"/key", url.Values{"api_key": {step.key}}); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/policy" {
+			t.Fatalf("set %s key: status=%d body=%q", step.provider, response.Code, response.Body.String())
+		}
+	}
+	saved := configForAdminTest(t, path)
+	if saved.Codex.APIKey != "secret-codex-key" || saved.Claude.APIKey != "secret-claude-key" ||
+		live.current().Codex.APIKey != "" || live.current().Claude.APIKey != "" || !live.snapshot().Pending {
+		t.Fatal("saved API keys became active before the monitor boundary or were lost")
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("API key update did not wake the monitor")
+	}
+	page := adminResponse(handler, http.MethodGet, "/admin/policy", nil, cookie, "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `type="password" name="api_key"`) ||
+		!strings.Contains(page.Body.String(), "/admin/policy/codex/key/clear") || !strings.Contains(page.Body.String(), "/admin/policy/claude/key/clear") {
+		t.Fatalf("API key controls missing: status=%d body=%q", page.Code, page.Body.String())
+	}
+	for _, secret := range []string{saved.Codex.APIKey, saved.Claude.APIKey} {
+		if strings.Contains(page.Body.String(), secret) {
+			t.Fatalf("policy page exposed API key %q", secret)
+		}
+	}
+	for _, invalid := range []string{"", "rejected-key with-space", strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)} {
+		response := post("/admin/policy/codex/key", url.Values{"api_key": {invalid}})
+		if response.Code != http.StatusConflict || invalid != "" && strings.Contains(response.Body.String(), invalid) {
+			t.Fatalf("invalid API key: status=%d body=%q", response.Code, response.Body.String())
+		}
+	}
+	if got := configForAdminTest(t, path); got.Codex.APIKey != saved.Codex.APIKey {
+		t.Fatal("rejected key replaced the configured key")
+	}
+	selected, generation := live.next()
+	live.applied(selected, generation, nil)
+	if live.current().Codex.APIKey != saved.Codex.APIKey || live.current().Claude.APIKey != saved.Claude.APIKey {
+		t.Fatal("monitor boundary did not activate API keys")
+	}
+	for _, provider := range []string{"codex", "claude"} {
+		if response := post("/admin/policy/"+provider+"/key/clear", nil); response.Code != http.StatusSeeOther {
+			t.Fatalf("clear %s key: status=%d body=%q", provider, response.Code, response.Body.String())
+		}
+	}
+	if cleared := configForAdminTest(t, path); cleared.Codex.APIKey != "" || cleared.Claude.APIKey != "" ||
+		live.current().Codex.APIKey == "" || live.current().Claude.APIKey == "" || !live.snapshot().Pending {
+		t.Fatal("API key clear was lost or activated before the monitor boundary")
+	}
+}

@@ -86,6 +86,89 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 	}
 }
 
+func TestRemoteCredentialsChangeWhilePullIsHeld(t *testing.T) {
+	job := testJob(command.Comment)
+	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.SetWorkerCredentials(WorkerCredentials{CodexAPIKey: "old-key"}); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{}
+	executor.choicesFetched = true
+	server := httptest.NewServer(executor)
+	client := server.Client()
+	t.Cleanup(func() {
+		client.CloseIdleConnections()
+		_ = executor.Close()
+		server.Close()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	pullBody, err := json.Marshal(httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type pullResult struct {
+		assignment httpAssignment
+		err        error
+	}
+	pulled := make(chan pullResult, 1)
+	go func() {
+		response, err := client.Post(server.URL+"/next", "application/json", bytes.NewReader(pullBody))
+		if err != nil {
+			pulled <- pullResult{err: err}
+			return
+		}
+		defer response.Body.Close()
+		var assignment httpAssignment
+		err = httpDecode(response.Body, httpJobBytes, &assignment)
+		if err == nil && response.StatusCode != http.StatusOK {
+			err = errors.New("pull did not receive an assignment")
+		}
+		pulled <- pullResult{assignment: assignment, err: err}
+	}()
+	for {
+		executor.mu.Lock()
+		pull, changed := executor.pull, executor.changed
+		executor.mu.Unlock()
+		if pull {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("worker did not hold a pull")
+		}
+	}
+	newCredentials := WorkerCredentials{CodexAPIKey: "new-key"}
+	if err := executor.updateIdleWorkerCredentials(newCredentials); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &httpServerTest{executor: executor, server: server, job: job, done: make(chan httpServerTestResult, 1)}
+	go func() {
+		result, err := executor.Execute(ctx, job, runnerExecutionCheckpoints{})
+		fixture.done <- httpServerTestResult{result: result, err: err}
+	}()
+	var got pullResult
+	select {
+	case got = <-pulled:
+	case <-ctx.Done():
+		t.Fatal("held pull did not receive the assignment")
+	}
+	if got.err != nil || got.assignment.Credentials != newCredentials {
+		t.Fatalf("next assignment credentials=%+v error=%v", got.assignment.Credentials, got.err)
+	}
+	if err := executor.updateIdleWorkerCredentials(WorkerCredentials{}); err == nil {
+		t.Fatal("credentials changed during an active assignment")
+	}
+	fixture.ack(t, "/outcome", fixture.outcome(1, nil), http.StatusOK, 1)
+	if got := fixture.result(t); got.err != nil {
+		t.Fatalf("known outcome failed: %v", got.err)
+	}
+}
+
 func TestHTTPAssignmentBoundIncludesCredentialEscaping(t *testing.T) {
 	job := testJob(command.Comment)
 	credentials := WorkerCredentials{CodexAPIKey: strings.Repeat("\x01", 1024)}

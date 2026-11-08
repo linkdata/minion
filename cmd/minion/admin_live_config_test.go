@@ -103,6 +103,25 @@ func TestAdminLiveConfigRejectsRestartOnlyChanges(t *testing.T) {
 	}
 }
 
+func TestAdminLiveConfigRejectsExternalAPIKeyEdit(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Codex.APIKey = "external-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Review carefully."
+		return nil
+	}); !errors.Is(err, errAdminRestartRequired) {
+		t.Fatalf("external API key edit was not detected: %v", err)
+	}
+	if got := configForAdminTest(t, path); got.Codex.APIKey != "external-key" || got.AIInstructions != "" {
+		t.Fatalf("external edit was overwritten: %+v", got)
+	}
+}
+
 func TestAdminLiveConfigRejectsRemoteSkillChanges(t *testing.T) {
 	live, path := liveConfigFixture(t, true)
 	before, err := os.ReadFile(path)

@@ -22,7 +22,7 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 		GitHub:         config.GitHubConfig{Token: "secret-github-token"},
 		Codex:          config.CodexConfig{Model: "gpt-test", ReasoningEffort: "medium", APIKey: "secret-codex-key"},
 		Claude:         config.ClaudeConfig{Model: "sonnet-test", Effort: "high", APIKey: "secret-claude-key"},
-		Admin:          &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
+		Admin:          &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
 		Repositories:   []config.Repository{{Name: "owner/repo", AllowedActors: []string{"alice"}, AllowedActorIDs: map[string]int64{"alice": 7}}},
 		AlwaysOnSkills: []string{"builtin://anti-prompt-injection", "https://github.com/a/b/tree/main/skills/caveman"},
 		Commands:       map[string]config.CommandMapping{"review": {Skills: []string{"https://github.com/a/b/tree/main/skills/caveman", "https://github.com/a/b/tree/main/skills/review"}}},

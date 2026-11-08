@@ -38,7 +38,7 @@ func userUsageCookie(t *testing.T, jw *jaws.Jaws, key string, admin bool) *http.
 		t.Fatal("create JaWS session")
 	}
 	if admin {
-		sess.Set(adminSessionKey, "operator")
+		sess.Set(adminSessionKey, "admin")
 	} else {
 		provider, rest, found := strings.Cut(key, ":")
 		if !found {

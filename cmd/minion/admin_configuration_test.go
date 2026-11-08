@@ -12,7 +12,7 @@ import (
 func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 	cfg := config.Config{
 		Main: "codex", Codex: config.CodexConfig{APIKey: "secret-model-key"},
-		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
+		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
 		Repositories: []config.Repository{
 			{Name: "owner/open", ID: 1, OwnerID: 10, Actions: []string{"review"}},
 			{Name: "owner/closed", ID: 2, OwnerID: 10, DenyAllActors: true, Actions: []string{"review"}},

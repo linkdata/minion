@@ -16,6 +16,29 @@ import (
 
 const modelCatalogue = `{"type":"control_response","response":{"subtype":"success","request_id":"minion-initialize","response":{"models":[{"value":"unresolved"},{"value":"default","resolvedModel":"claude-pinned","supportedEffortLevels":["low","high"]},{"value":"quick","resolvedModel":"claude-small","supportedEffortLevels":["low","high"]}]}}}`
 
+func TestValidateUsesAmbientAPIKey(t *testing.T) {
+	const key = "ambient-claude-test-key"
+	binary := fakeExecutable(t, "claude", `
+[ -z "$ANTHROPIC_API_KEY" ] && [ -n "$CLAUDE_CONFIG_DIR" ] || exit 91
+printf '%s\n' "$@" > "$0.args"
+case " $* " in
+  *' auth status '*) printf '%s\n' '{"loggedIn":true}' ;;
+  *) cat >/dev/null; printf '%s\n' '`+modelCatalogue+`' ;;
+esac
+`)
+	t.Setenv("ANTHROPIC_API_KEY", key)
+	validated, err := Validate(t.Context(), config.ClaudeConfig{})
+	if err != nil || validated.Model != "claude-pinned" || validated.APIKey != key {
+		t.Fatalf("ambient API key validation: %+v, %v", validated, err)
+	}
+	if args := readFile(t, binary+".args"); strings.Contains(args, key) || !strings.Contains(args, "apiKeyHelper") {
+		t.Fatal("ambient key was not isolated in validation")
+	}
+	if got := ambientAPIKey(config.ClaudeConfig{APIKey: "configured-key"}).APIKey; got != "configured-key" {
+		t.Fatalf("configured key lost precedence: %q", got)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	binary := fakeExecutable(t, "claude", `if [ "$3" = 'auth' ]; then
   printf '%s\n' '{"loggedIn":true}'

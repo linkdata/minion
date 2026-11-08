@@ -56,6 +56,21 @@ type WorkerCredentials struct {
 	ClaudeAPIKey      string `json:"claude_api_key,omitempty"`
 }
 
+func (e *Orchestrator) workerCredentials(main, critic string) WorkerCredentials {
+	var credentials WorkerCredentials
+	if main == "codex" || critic == "codex" {
+		credentials.CodexAPIKey = e.Runner.Codex.APIKey
+		if credentials.CodexAPIKey == "" {
+			credentials.CodexNativeAPIKey = e.Runner.Codex.NativeAPIKey
+			credentials.CodexAccessToken = e.Runner.Codex.NativeAccessToken
+		}
+	}
+	if main == "claude" || critic == "claude" {
+		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
+	}
+	return credentials
+}
+
 const maxWorkerCredentialBytes = 8 << 10
 
 func (credentials WorkerCredentials) validate() error {

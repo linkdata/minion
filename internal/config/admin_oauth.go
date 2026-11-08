@@ -31,10 +31,10 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
 			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or literal loopback IP HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
 		}
-		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
-			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
+		if redirect.Scheme == "http" && (a.TLSCertFile != "" || a.WebservCertDir != "") {
+			return fmt.Errorf("admin.%s redirect_url must use HTTPS when the admin listener uses TLS", entry.name)
 		}
-		if redirect.Scheme == "http" {
+		if redirect.Scheme == "http" && a.WebservAddress == "" && a.WebservListenURL == "" {
 			redirectPort := uint64(80)
 			if redirect.Port() != "" {
 				redirectPort, _ = strconv.ParseUint(redirect.Port(), 10, 16) // validOAuthOrigin checked the port.
