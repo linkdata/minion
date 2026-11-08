@@ -465,12 +465,6 @@ function collectUnchecked(value, schema, p) {
   return errors;
 }
 
-function collect(value, schema, p = "$data") {
-  const limitErrors = collectDataLimitErrors(value, p);
-  if (limitErrors.length > 0) return limitErrors;
-  return collectUnchecked(value, schema, p);
-}
-
 function isSafeRelativeSourcePath(value) {
   if (typeof value !== "string" || value.length === 0 || !hasValidUnicodeScalarValues(value) || value.trim() !== value || PATH_FORBIDDEN_CHARACTER.test(value) || value.includes("\\") || value.includes(":")) return false;
   if (path.posix.isAbsolute(value) || path.win32.isAbsolute(value) || /^[A-Za-z]:/.test(value) || value.startsWith("~")) return false;
@@ -762,18 +756,4 @@ function run(file) {
   return 0;
 }
 
-module.exports = {
-  LIMITS,
-  PATH_FORBIDDEN_CHARACTER,
-  UNSAFE_DIAGNOSTIC_CHARACTER,
-  VISIBLE_CONTENT,
-  WINDOWS_RESERVED_COMPONENT,
-  collect,
-  collectFindingSemanticErrors,
-  collectSchemaErrors,
-  hasVisibleProse,
-  isSafeRelativeSourcePath,
-  validateDocument,
-};
-
-if (require.main === module) process.exit(run(process.argv[2]));
+process.exit(run(process.argv[2]));

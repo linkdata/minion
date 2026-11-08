@@ -931,21 +931,4 @@ function run(file) {
   return 0;
 }
 
-module.exports = {
-  LIMITS,
-  PATH_FORBIDDEN_CHARACTER,
-  UNSAFE_DIAGNOSTIC_CHARACTER,
-  VISIBLE_CONTENT,
-  WINDOWS_RESERVED_COMPONENT,
-  canonicalCoverageId,
-  encodeCanonicalRef,
-  hasVisibleProse,
-  isSafeAgentId,
-  isSafeRelativePath,
-  preflightJsonText,
-  readFileWithinLimit,
-  safeQuote,
-  validateDocument,
-};
-
-if (require.main === module) process.exit(run(process.argv[2]));
+process.exit(run(process.argv[2]));
