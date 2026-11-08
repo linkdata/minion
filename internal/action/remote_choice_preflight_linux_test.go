@@ -213,8 +213,8 @@ func TestRemoteRejectedCredentialKeepsWorkerReadyForCorrection(t *testing.T) {
 	if err := PreflightRemoteChoices(ctx, server.Client(), server.URL, "remote", false); err != nil {
 		t.Fatalf("rejected candidate ended worker preflight: %v (%v)", err, errors.Unwrap(err))
 	}
-	if err := <-updated; err == nil || !strings.Contains(err.Error(), "rejected changed provider credentials") {
-		t.Fatalf("rejected candidate was accepted: %v", err)
+	if err := <-updated; err == nil || !strings.Contains(err.Error(), preflightCodexInvocationUnsupported) {
+		t.Fatalf("rejected candidate reason = %v", err)
 	}
 	executor.mu.Lock()
 	got, pending, gate := executor.credentials, executor.preflightPending, executor.choicesFetched

@@ -259,12 +259,21 @@ func TestRemoteRejectedCredentialRestoresPriorPullGate(t *testing.T) {
 		t.Fatalf("pull during candidate preflight status=%d", status)
 	}
 	failed := pull
-	failed.PreflightGeneration, failed.PreflightResult = candidate.PreflightGeneration, "failed"
+	failed.PreflightGeneration, failed.PreflightResult = candidate.PreflightGeneration, "arbitrary worker text"
+	if status := post("/preflight", failed, &ack); status != http.StatusBadRequest {
+		t.Fatalf("untrusted validation message status=%d", status)
+	}
+	select {
+	case err := <-updated:
+		t.Fatalf("untrusted validation message resolved the candidate: %v", err)
+	default:
+	}
+	failed.PreflightResult = preflightCodexLoginUnavailable
 	if status := post("/preflight", failed, &ack); status != http.StatusOK {
 		t.Fatalf("failed validation ACK status=%d", status)
 	}
-	if err := <-updated; err == nil {
-		t.Fatal("rejected credential became active")
+	if err := <-updated; err == nil || !strings.Contains(err.Error(), preflightCodexLoginUnavailable) {
+		t.Fatalf("rejected credential reason = %v", err)
 	}
 	executor.mu.Lock()
 	gate, pending := executor.choicesFetched, executor.preflightPending

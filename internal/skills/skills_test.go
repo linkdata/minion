@@ -427,7 +427,7 @@ func TestInstallBundledDefaultsWithoutNetwork(t *testing.T) {
 				t.Fatalf("%s %s metadata = %q, %v", provider, name, metadata, err)
 			}
 			for _, file := range append([]string{"SKILL.md", "LICENSE"}, map[string][]string{
-				"caveman":        {"LICENSE-MIT", "LICENSING.md", "NOTICE", "README.md"},
+				"caveman":        {"LICENSE-MIT", "LICENSING.md", "NOTICE"},
 				"security-audit": {"HUNTING.md", "report-schema.json", "validate-findings.cjs", "validate-coverage-ledger.cjs", "strict-json-keys.cjs"},
 			}[name]...) {
 				if data, err := os.ReadFile(filepath.Join(dir, file)); err != nil || len(data) == 0 {

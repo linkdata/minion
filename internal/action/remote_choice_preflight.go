@@ -124,7 +124,10 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	}
 	result := "ok"
 	if validationErr != nil {
-		result = "failed"
+		result = validationErr.Error()
+		if !validPreflightMessage(result) {
+			result = "failed"
+		}
 	}
 	ackBody, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
 		AuditHostSupported: auditSupportedOnHost(), PreflightGeneration: selection.PreflightGeneration,

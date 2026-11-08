@@ -512,7 +512,7 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if request.PreflightResult != "" {
-		if request.PreflightResult != "ok" && request.PreflightResult != "failed" {
+		if request.PreflightResult != "ok" && request.PreflightResult != "failed" && !validPreflightMessage(request.PreflightResult) {
 			e.mu.Unlock()
 			httpServerReject(w, "preflight", http.StatusBadRequest, httpBinding{}, 0, errors.New("invalid remote preflight result"))
 			return
@@ -534,8 +534,12 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 		e.preflightReporting = false
 		if writeErr != nil {
 			e.rejectRemotePreflightLocked(writeErr)
-		} else if request.PreflightResult == "failed" {
-			e.rejectRemotePreflightLocked(errors.New("remote worker rejected changed provider credentials"))
+		} else if request.PreflightResult != "ok" {
+			message := "remote worker rejected changed provider credentials"
+			if request.PreflightResult != "failed" {
+				message = "remote worker: " + request.PreflightResult
+			}
+			e.rejectRemotePreflightLocked(errors.New(message))
 		} else {
 			e.credentials = e.preflightCandidate
 			e.preflightCandidate = WorkerCredentials{}
