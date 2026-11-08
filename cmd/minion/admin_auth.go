@@ -50,16 +50,14 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, add the <code>admin</code> account under <code>admin.administrators</code> if absent, set its <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
-{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. Create the <code>work_root</code> directory (default <code>var/work</code>), install skills with <code>minion -install-skills</code>, then restart Minion. No jobs run during setup.</p>
+{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. If a credential was rejected, sign in as admin and correct it in Advanced config. Create the <code>work_root</code> directory (default <code>var/work</code>), install skills with <code>minion -install-skills</code>, then restart Minion. No jobs run during setup or recovery.</p>
 {{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the bot account and first repository below.{{else}}Sign in as admin to save the bot account and first repository.{{end}} No jobs run during setup.</p>
 {{if .Dot.SignedAdmin}}
 <form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
 <label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>
 <label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" required></label>
 <label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" required></label>
-<label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" value="{{if .Dot.RepositoryID}}{{.Dot.RepositoryID}}{{end}}" required></label>
-<label class="form-label">Repository owner ID<input class="form-control" name="owner_id" type="number" min="1" value="{{if .Dot.OwnerID}}{{.Dot.OwnerID}}{{end}}" required></label>
-<p class="text-body-secondary">The first repository starts with the review command and no allowed requesters. Add requesters in the admin UI after restarting. Find IDs with <code>gh api repos/OWNER/REPO --jq '{id, owner_id: .owner.id}'</code>.</p>
+<p class="text-body-secondary">The first repository starts with the review command and no allowed requesters. Add requesters in the admin UI after restarting.</p>
 <button class="btn btn-primary" type="submit">Save setup</button></form>
 {{end}}{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
@@ -67,7 +65,6 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 type adminHomeView struct {
 	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete bool
 	BotLogin, Repository                                       string
-	RepositoryID, OwnerID                                      int64
 }
 type adminLoginView struct{ SignedIn, PasswordSet bool }
 
@@ -408,7 +405,7 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 			view.BotLogin = cfg.BotLogin
 			view.SetupComplete = cfg.BotLogin != "" && cfg.GitHub.Token != "" && len(cfg.Repositories) != 0
 			if len(cfg.Repositories) != 0 {
-				view.Repository, view.RepositoryID, view.OwnerID = cfg.Repositories[0].Name, cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID
+				view.Repository = cfg.Repositories[0].Name
 			}
 		}
 	}

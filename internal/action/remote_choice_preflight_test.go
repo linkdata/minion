@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -328,6 +329,44 @@ func TestRemoteChoicePreflightBoundsUnresponsiveResponse(t *testing.T) {
 		}
 		if elapsed := time.Since(started); elapsed != httpControlTimeout {
 			t.Fatalf("unresponsive preflight elapsed %s, want %s", elapsed, httpControlTimeout)
+		}
+	})
+}
+
+func TestRemoteChoicePreflightBoundsAllRetries(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		selection, err := httpEncode(remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+			Refresh: true, PreflightGeneration: 1}, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+			var pull httpPull
+			if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil {
+				return nil, err
+			}
+			select {
+			case <-time.After(20 * time.Second):
+			case <-request.Context().Done():
+				return nil, request.Context().Err()
+			}
+			if pull.PreflightResult != "" {
+				return nil, io.ErrUnexpectedEOF // The ACK did not reach the parent.
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(bytes.NewReader(selection)), Request: request}, nil
+		})}
+		finished := make(chan error, 1)
+		started := time.Now()
+		go func() {
+			finished <- preflightRemoteChoices(t.Context(), client, "https://example.test", "remote", false, remoteChoicePreflightTimeout)
+		}()
+		synctest.Wait()
+		if err := <-finished; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("retry budget error = %v, want deadline", err)
+		}
+		if elapsed := time.Since(started); elapsed != remoteChoicePreflightTimeout {
+			t.Fatalf("retry budget elapsed %s, want %s", elapsed, remoteChoicePreflightTimeout)
 		}
 	})
 }

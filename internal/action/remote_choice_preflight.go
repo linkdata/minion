@@ -96,27 +96,32 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 		return err
 	}
 	transport := httpExecutionClient{client: client, base: u}
+	preflightCtx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
+	// Reserve time to acknowledge a changed credential before the overall preflight expires.
+	probeCtx, stopProbe := context.WithTimeout(preflightCtx, timeout-min(httpControlTimeout, timeout/2))
+	defer stopProbe()
 	for attempt := 0; attempt < 3; attempt++ {
-		preflightCtx, stop := context.WithTimeout(ctx, timeout)
 		var selection remoteChoicePreflight
 		fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
 		err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
 		stopFetch()
 		if err != nil {
-			stop()
 			return err
 		}
 		if selection.Version != ProtocolVersion || selection.ExecutorID != executorID || selection.Refresh && selection.PreflightGeneration == 0 {
-			stop()
 			return errors.New("remote preflight version, executor or generation differs")
 		}
-		validationErr := validateRemoteSelection(preflightCtx, selection, allowAllUnixSockets)
-		stop()
+		validationCtx := preflightCtx
+		if selection.Refresh {
+			validationCtx = probeCtx
+		}
+		validationErr := validateRemoteSelection(validationCtx, selection, allowAllUnixSockets)
 		if !selection.Refresh {
 			return validationErr
 		}
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if preflightCtx.Err() != nil {
+			return preflightCtx.Err()
 		}
 		result := "ok"
 		if validationErr != nil {
@@ -129,15 +134,15 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 			return err
 		}
 		var ack httpAcknowledgement
-		ackCtx, stopACK := context.WithTimeout(ctx, httpControlTimeout)
+		ackCtx, stopACK := context.WithTimeout(preflightCtx, httpControlTimeout)
 		err = transport.post(ackCtx, "preflight", ackBody, httpControlBytes, &ack, httpBinding{}, 0)
 		stopACK()
 		if errors.Is(err, ErrRemotePreflightRequired) {
 			continue // A timed-out candidate was rolled back while this worker validated it.
 		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if preflightCtx.Err() != nil {
+				return preflightCtx.Err()
 			}
 			if attempt == 2 {
 				return err

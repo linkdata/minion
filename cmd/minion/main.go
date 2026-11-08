@@ -232,9 +232,24 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		client = candidate
 		return true
 	}
+	recoverySetup := func() int {
+		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil || store.Data.Accepted != nil {
+			return 1
+		}
+		for _, write := range store.Data.PublicationWrites {
+			if write.Status == state.PublicationWritePending {
+				return 1
+			}
+		}
+		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
 	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
+	aiPreflightFailed := false
 	preflight := func() bool {
+		aiPreflightFailed = false
 		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
+			aiPreflightFailed = true
 			logger.Printf("AI preflight: %v", err)
 			return false
 		}
@@ -259,6 +274,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			}
 		} else {
 			if err := checkModels(ctx, &cfg, logger); err != nil {
+				aiPreflightFailed = true
 				logger.Printf("AI preflight: %v", err)
 				return false
 			}
@@ -284,12 +300,15 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	if failedPreflight {
 		if *check || !terminalRecoveryPendingAt(store, now()) {
+			if aiPreflightFailed {
+				return recoverySetup()
+			}
 			return 1
 		}
 		terminalRecovery = true
 	}
 	if !authenticateGitHub() {
-		return 1
+		return recoverySetup()
 	}
 	if *check {
 		if err := checkRepositories(ctx, client, cfg, logger); err != nil {
@@ -315,6 +334,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		cfg = watcher.Config
 		if !preflight() {
+			if aiPreflightFailed {
+				return recoverySetup()
+			}
 			return 1
 		}
 	}
