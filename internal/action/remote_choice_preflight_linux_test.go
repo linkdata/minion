@@ -221,6 +221,59 @@ func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
 	}
 }
 
+func TestRemoteChoicePreflightChecksRestoredSelectionAfterThreeRejectedCredentials(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
+		t.Setenv(key, "")
+	}
+	script := strings.Replace(preflightCodexCLI,
+		"    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,",
+		"    IFS= read -r request || exit 1\n    case \"$request\" in\n      *bad-key*) printf '%s\\n' '{\"id\":0,\"error\":{\"message\":\"rejected\"}}'; exit 1 ;;\n      *) printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}' ;;\n    esac\n    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,", 1)
+	if script == preflightCodexCLI {
+		t.Fatal("Codex fixture did not install key check")
+	}
+	fakeOnPath(t, "codex", script)
+	fetches, rejected := 0, 0
+	client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+		var pull httpPull
+		if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil {
+			return nil, err
+		}
+		var value any
+		if pull.PreflightResult != "" {
+			rejected++
+			if pull.PreflightGeneration != uint64(rejected) || pull.PreflightResult != "failed" {
+				t.Fatalf("rejected generation %d: %+v", rejected, pull)
+			}
+			value = httpAcknowledgement{Kind: "preflight"}
+		} else {
+			fetches++
+			selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+				Main:        RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"},
+				Credentials: WorkerCredentials{CodexAPIKey: "old-key"}}
+			if fetches <= 3 {
+				selection.Refresh = true
+				selection.PreflightGeneration = uint64(fetches)
+				selection.Credentials.CodexAPIKey = fmt.Sprintf("bad-key-%d", fetches)
+			}
+			value = selection
+		}
+		body, err := httpEncode(value, httpControlBytes)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+	})}
+	if err := preflightRemoteChoices(t.Context(), client, "https://example.test", "remote", false, 10*time.Second); err != nil {
+		t.Fatalf("restored selection preflight: %v", err)
+	}
+	if fetches != 4 || rejected != 3 {
+		t.Fatalf("preflight requests: fetches=%d rejected=%d, want 4 and 3", fetches, rejected)
+	}
+}
+
 func TestRemoteChoicePreflightReturnsLostACKResponse(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())

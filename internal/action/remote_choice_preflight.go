@@ -101,7 +101,7 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	// Reserve time to acknowledge a changed credential before the overall preflight expires.
 	probeCtx, stopProbe := context.WithTimeout(preflightCtx, timeout-min(httpControlTimeout, timeout/2))
 	defer stopProbe()
-	for range 3 {
+	for {
 		var selection remoteChoicePreflight
 		fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
 		err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
@@ -151,7 +151,6 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 		}
 		// The parent restored old credentials after rejecting this candidate.
 	}
-	return errors.New("remote preflight changed too often")
 }
 
 func validateRemoteSelection(ctx context.Context, selection remoteChoicePreflight, allowAllUnixSockets bool) error {
