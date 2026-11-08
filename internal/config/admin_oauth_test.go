@@ -57,6 +57,17 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if err := equivalentIPv6.Validate(t.TempDir()); err != nil {
 		t.Fatalf("equivalent IPv6 callback hosts: %v", err)
 	}
+	equivalentIPv6Origin := valid()
+	equivalentIPv6Origin.Admin.WebservListenURL = "https://[0:0::1]"
+	equivalentIPv6Origin.Admin.GitHubOAuth.RedirectURL = "https://[::1]/auth/github/callback"
+	equivalentIPv6Origin.Admin.GitLabOAuth.RedirectURL = "https://[::1]/auth/gitlab/callback"
+	if err := equivalentIPv6Origin.Validate(t.TempDir()); err != nil {
+		t.Fatalf("equivalent IPv6 entry and callback origins: %v", err)
+	}
+	equivalentIPv6Origin.Admin.WebservListenURL = "https://[::2]"
+	if err := equivalentIPv6Origin.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "origin must match") {
+		t.Fatalf("different IPv6 entry and callback origins: %v", err)
+	}
 	for _, tc := range []struct{ listen, host string }{
 		{"127.0.0.1:8377", "127.0.0.2"},
 		{"127.0.0.1:8377", "[::1]"},
@@ -78,6 +89,18 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	defaultHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
 	if err := defaultHTTPPort.Validate(t.TempDir()); err != nil {
 		t.Fatalf("implicit HTTP port 80: %v", err)
+	}
+	namedHTTPPort := valid()
+	namedHTTPPort.Admin.TLSCertFile, namedHTTPPort.Admin.TLSKeyFile = "", ""
+	namedHTTPPort.Admin.WebservAddress = "127.0.0.1:http"
+	namedHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
+	namedHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
+	if err := namedHTTPPort.Validate(t.TempDir()); err != nil {
+		t.Fatalf("named Webserv port with matching callback: %v", err)
+	}
+	namedHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:81/auth/github/callback"
+	if err := namedHTTPPort.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP port must match") {
+		t.Fatalf("named Webserv port with wrong callback: %v", err)
 	}
 	webservPort := 8080
 	if os.Geteuid() == 0 {

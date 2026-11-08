@@ -50,10 +50,11 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 			if a.WebservAddress != "" {
 				if host, port, splitErr := net.SplitHostPort(a.WebservAddress); splitErr == nil {
 					listenHost = host
-					listenPort, err = strconv.ParseUint(port, 10, 16)
+					number, err := net.LookupPort("tcp", port)
 					if err != nil {
-						return fmt.Errorf("admin.%s HTTP redirect_url requires a numeric -address port", entry.name)
+						return fmt.Errorf("admin.%s HTTP redirect_url requires a valid -address port", entry.name)
 					}
+					listenPort = uint64(number)
 				} else {
 					listenPort = 8080
 					if os.Geteuid() == 0 {
@@ -138,6 +139,12 @@ func (a *AdminConfig) ValidateWebservOptions() error {
 }
 
 func sameOrigin(a, b *url.URL) bool {
+	hostA, errA := netip.ParseAddr(a.Hostname())
+	hostB, errB := netip.ParseAddr(b.Hostname())
+	sameHost := strings.EqualFold(a.Hostname(), b.Hostname())
+	if errA == nil && errB == nil {
+		sameHost = hostA == hostB
+	}
 	port := func(u *url.URL) int {
 		if u.Port() != "" {
 			number, _ := strconv.Atoi(u.Port()) // Both URLs were validated.
@@ -148,7 +155,7 @@ func sameOrigin(a, b *url.URL) bool {
 		}
 		return 80
 	}
-	return a.Scheme == b.Scheme && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
+	return a.Scheme == b.Scheme && sameHost && port(a) == port(b)
 }
 
 func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
