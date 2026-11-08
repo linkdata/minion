@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -39,20 +40,28 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 	selected := map[string]bool{"comment": true, "review": true}
 	reenabled := current
 	reenabled.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "review"}}}
-	if !sameSkillConfig(current, reenabled) || hasUnselectedCommand(selected, reenabled) {
+	if !sameSkillConfig(current, reenabled) || hasUnselectedCommand(selected, reenabled, true) {
 		t.Fatal("re-enabling a frozen command incorrectly requires remote restart")
 	}
 	newCommand := current
 	newCommand.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "fix"}}}
-	if !sameSkillConfig(current, newCommand) || !hasUnselectedCommand(selected, newCommand) {
+	if !sameSkillConfig(current, newCommand) || !hasUnselectedCommand(selected, newCommand, true) {
 		t.Fatal("unselected command bypassed remote restart")
 	}
 	unsupported := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
 		"comment":        {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
 		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
-	if hasUnselectedCommand(map[string]bool{"comment": true}, unsupported) {
+	if hasUnselectedCommand(map[string]bool{"comment": true}, unsupported, true) {
 		t.Fatal("unchanged provider-unsupported command incorrectly requires remote restart")
+	}
+	workerUnsupported := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"comment":        {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
+	if hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, false) ||
+		!hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) {
+		t.Fatal("remote audit capability did not distinguish unsupported from unselected")
 	}
 }
 
@@ -67,10 +76,13 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		t.Fatal(err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	commands := map[string]config.CommandMapping{
+		"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"audit":   {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+	}
 	cfg := config.Config{BotLogin: "bot", Main: "codex", Commands: commands, AlwaysOnSkills: []string{},
 		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
-		Repositories:   []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}},
+		Repositories:   []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment", "audit"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: listen, TLSCertFile: certFile, TLSKeyFile: keyFile, Token: token}}
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data, err := json.Marshal(cfg)
@@ -97,6 +109,9 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	t.Cleanup(func() { _ = endpoint.Close() })
 	if watcher.Handler != owner || watcher.SelectedExecutorID != "remote" || !watcher.SelectedCommands["comment"] {
 		t.Fatalf("remote service selection missing: executor=%q commands=%v", watcher.SelectedExecutorID, watcher.SelectedCommands)
+	}
+	if runtime.GOOS != "windows" && !watcher.SelectedCommands["audit"] {
+		t.Fatal("orchestrator did not initially offer audit for the simulated Windows worker")
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
@@ -152,6 +167,9 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	var logs bytes.Buffer
 	if code := runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second, live); code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
+	}
+	if watcher.SelectedCommands["audit"] || live.snapshot().RemoteCommands["audit"] || !watcher.SelectedCommands["comment"] {
+		t.Fatalf("unsupported worker audit remained discoverable: monitor=%v admin=%v", watcher.SelectedCommands, live.snapshot().RemoteCommands)
 	}
 	if live.snapshot().Pending || live.current().AIInstructions != "Read the selected task carefully." ||
 		owner.AIInstructions != "Read the selected task carefully." || len(watcher.Config.Repositories[0].AllowedActors) != 1 ||

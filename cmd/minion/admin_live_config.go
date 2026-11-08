@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -19,17 +20,18 @@ var errAdminRestartRequired = errors.New("configuration changed outside the admi
 // adminLiveConfig keeps disk writes and the running worker's configuration distinct.
 // The monitor applies saved edits only between iterations, after an accepted action ends.
 type adminLiveConfig struct {
-	path            string
-	mu              sync.RWMutex
-	active          config.Config
-	desired         config.Config
-	disk            config.Config
-	remoteSelected  map[string]bool
-	generation      uint64
-	pending         bool
-	restartRequired bool
-	lastError       string
-	updates         chan struct{}
+	path                     string
+	mu                       sync.RWMutex
+	active                   config.Config
+	desired                  config.Config
+	disk                     config.Config
+	remoteSelected           map[string]bool
+	remoteAuditHostSupported bool
+	generation               uint64
+	pending                  bool
+	restartRequired          bool
+	lastError                string
+	updates                  chan struct{}
 }
 
 func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error) {
@@ -57,7 +59,8 @@ func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error
 			}
 		}
 	}
-	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, remoteSelected: selected, updates: make(chan struct{}, 1)}, nil
+	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, remoteSelected: selected,
+		remoteAuditHostSupported: true, updates: make(chan struct{}, 1)}, nil
 }
 
 func (a *adminLiveConfig) current() config.Config {
@@ -80,6 +83,13 @@ func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
+}
+
+func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostSupported bool) {
+	a.mu.Lock()
+	a.remoteSelected = maps.Clone(selected)
+	a.remoteAuditHostSupported = auditHostSupported
+	a.mu.Unlock()
 }
 
 func sameFixedConfig(a, b config.Config) bool {
@@ -209,7 +219,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 			return errAdminRestartRequired
 		}
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
-		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate)) {
+		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
 			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}
 		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {

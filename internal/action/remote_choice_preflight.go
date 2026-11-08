@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/claudecli"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -65,6 +66,10 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 // Leave time for the worker to open its first pull before the orchestrator's two-minute wait expires.
 const remoteChoicePreflightTimeout = 90 * time.Second
 
+func auditSupportedOnHost() bool {
+	return (config.CommandMapping{Action: string(command.SecurityAudit)}).SupportedOnHost()
+}
+
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
 func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool) error {
 	err := preflightRemoteChoices(ctx, client, origin, executorID, allowAllUnixSockets, remoteChoicePreflightTimeout)
@@ -87,7 +92,8 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" || !workspace.ValidIdentitySegment(executorID) || client == nil {
 		return errors.New("invalid remote preflight endpoint")
 	}
-	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID}, httpControlBytes)
+	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
+		AuditHostSupported: auditSupportedOnHost()}, httpControlBytes)
 	if err != nil {
 		return err
 	}

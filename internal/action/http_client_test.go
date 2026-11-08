@@ -92,7 +92,7 @@ func TestRunHTTPReportsActualOutcomeAndRawPaidReceipts(t *testing.T) {
 				switch kind {
 				case "next":
 					var pull httpPull
-					if err := httpDecode(r.Body, httpControlBytes, &pull); err != nil || pull.Version != ProtocolVersion || pull.ExecutorID != job.Identity.ExecutorID || next.Add(1) != 1 {
+					if err := httpDecode(r.Body, httpControlBytes, &pull); err != nil || pull.Version != ProtocolVersion || pull.ExecutorID != job.Identity.ExecutorID || pull.AuditHostSupported != auditSupportedOnHost() || next.Add(1) != 1 {
 						t.Errorf("invalid or repeated pull: %+v error=%v", pull, err)
 					}
 					events <- "next"

@@ -189,6 +189,31 @@ func TestAdminLiveConfigAllowsRemotePolicySaveWithUnsupportedAction(t *testing.T
 	}
 }
 
+func TestAdminLiveConfigAllowsPolicySaveWithUnsupportedRemoteAudit(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Repositories[0].Actions = []string{"review", "security-audit"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.setRemoteSelected(map[string]bool{"review": true}, false)
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Use the configured review style."
+		return nil
+	}); err != nil {
+		t.Fatalf("unrelated policy save was blocked by the worker host: %v", err)
+	}
+	if !live.snapshot().Pending || live.snapshot().RemoteCommands["security-audit"] {
+		t.Fatal("unsupported audit appeared in selected commands")
+	}
+}
+
 func TestAdminLiveConfigAllowsRemoteSelectedCommandReenable(t *testing.T) {
 	_, path := liveConfigFixture(t, true)
 	cfg, err := config.Load(path)

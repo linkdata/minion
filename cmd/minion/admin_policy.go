@@ -20,20 +20,20 @@ type adminRoundOverride struct {
 type adminProviderAuth struct {
 	Name, Provider string
 	Configured     bool
+	MaxBytes       int
 }
 
 type adminPolicyView struct {
-	Global         int
-	Max            int
-	MaxAPIKeyBytes int
-	Critic         bool
-	Requesters     []adminRoundOverride
-	Repositories   []adminRoundOverride
-	Providers      []adminProviderAuth
-	Instructions   string
-	Custom         bool
-	Pending        bool
-	Error          string
+	Global       int
+	Max          int
+	Critic       bool
+	Requesters   []adminRoundOverride
+	Repositories []adminRoundOverride
+	Providers    []adminProviderAuth
+	Instructions string
+	Custom       bool
+	Pending      bool
+	Error        string
 }
 
 func policyView(snapshot adminConfigSnapshot) adminPolicyView {
@@ -42,12 +42,12 @@ func policyView(snapshot adminConfigSnapshot) adminPolicyView {
 	if cfg.CriticStopping.RequiredCleanRounds != nil {
 		global = *cfg.CriticStopping.RequiredCleanRounds
 	}
-	view := adminPolicyView{Global: global, Max: config.MaxCriticMaxRounds, MaxAPIKeyBytes: config.MaxProviderAPIKeyBytes,
+	view := adminPolicyView{Global: global, Max: config.MaxCriticMaxRounds,
 		Critic: cfg.Adversarial != "", Pending: snapshot.Pending, Error: snapshot.Error,
 		Instructions: cfg.AIInstructions, Custom: cfg.AIInstructions != ""}
 	view.Providers = []adminProviderAuth{
-		{Name: "Codex", Provider: "codex", Configured: cfg.Codex.APIKey != ""},
-		{Name: "Claude", Provider: "claude", Configured: cfg.Claude.APIKey != ""},
+		{Name: "Codex", Provider: "codex", Configured: cfg.Codex.APIKey != "", MaxBytes: config.MaxProviderAPIKeyBytes - len(cfg.Claude.APIKey)},
+		{Name: "Claude", Provider: "claude", Configured: cfg.Claude.APIKey != "", MaxBytes: config.MaxProviderAPIKeyBytes - len(cfg.Codex.APIKey)},
 	}
 	if !view.Custom {
 		view.Instructions = action.DefaultAIInstructions
@@ -79,7 +79,7 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
   <section class="border rounded p-3 mb-3"><h2 class="h5">AI authentication</h2><p class="small text-body-secondary">Set a provider API key for new actions. An empty key uses the executor host's saved CLI login or API-key environment variable. Existing keys are never shown here.</p>
     {{range .Providers}}<div class="border-top py-3"><h3 class="h6">{{.Name}}</h3><p>{{if .Configured}}Minion API key configured.{{else}}Using saved CLI login or host API-key environment.{{end}}</p>
       <form method="post" action="/admin/policy/{{.Provider}}/key" class="d-flex flex-wrap align-items-end gap-2">
-        <label class="d-grid gap-1">{{.Name}} API key<input class="form-control" type="password" name="api_key" autocomplete="new-password" maxlength="{{$.Dot.MaxAPIKeyBytes}}" required></label>
+        <label class="d-grid gap-1">{{.Name}} API key<input class="form-control" type="password" name="api_key" autocomplete="new-password" maxlength="{{.MaxBytes}}" required><small>Up to {{.MaxBytes}} bytes available; keys share 8,192 bytes.</small></label>
         <button class="btn btn-primary" type="submit">Set {{.Name}} API key</button>
       </form>
       {{if .Configured}}<form method="post" action="/admin/policy/{{.Provider}}/key/clear" class="mt-2"><button class="btn btn-outline-light" type="submit">Use saved CLI login or host API-key environment</button></form>{{end}}

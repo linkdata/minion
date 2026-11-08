@@ -79,7 +79,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			t.Cleanup(client.CloseIdleConnections)
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			pullBody := fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, ProtocolVersion)
+			pullBody := fmt.Sprintf(`{"version":%d,"executor_id":"remote","audit_host_supported":true}`, ProtocolVersion)
 			post := func(path string, tokenClient *http.Client) *http.Response {
 				t.Helper()
 				request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+path, strings.NewReader(pullBody))
@@ -179,6 +179,10 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 	client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/preflight" {
 			t.Fatalf("remote worker pulled before CLI preflight: %s", request.URL.Path)
+		}
+		var pull httpPull
+		if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil || !pull.AuditHostSupported {
+			t.Fatalf("Linux worker omitted audit capability: pull=%+v error=%v", pull, err)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
 			Body: io.NopCloser(bytes.NewReader(data)), Request: request}, nil

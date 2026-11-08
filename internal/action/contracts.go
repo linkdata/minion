@@ -18,8 +18,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 22
+// ProtocolVersion identifies the action and executor wire contracts.
+const ProtocolVersion = 23
 
 const (
 	maxDiagnostics            = 100

@@ -25,27 +25,28 @@ type pullGenerationContextKey struct{}
 
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
-	mu              sync.Mutex
-	lateOutcomeRead sync.Mutex
-	outcomeReads    chan struct{}
-	executorID      string
-	workRoot        string
-	credentials     WorkerCredentials
-	credentialsSet  bool
-	remoteChoices   *remoteChoicePreflight
-	choicesFetched  bool
-	active          *httpTransaction
-	pull            bool
-	pullDone        <-chan struct{}
-	pullStale       bool
-	pullGeneration  uint64
-	closed          bool
-	unavailable     bool
-	changed         chan struct{}
-	outcomeGrace    time.Duration
-	status          Status
-	statusAt        time.Time
-	lateOutcome     func(httpOutcome) error
+	mu                 sync.Mutex
+	lateOutcomeRead    sync.Mutex
+	outcomeReads       chan struct{}
+	executorID         string
+	workRoot           string
+	credentials        WorkerCredentials
+	credentialsSet     bool
+	remoteChoices      *remoteChoicePreflight
+	choicesFetched     bool
+	auditHostSupported bool
+	active             *httpTransaction
+	pull               bool
+	pullDone           <-chan struct{}
+	pullStale          bool
+	pullGeneration     uint64
+	closed             bool
+	unavailable        bool
+	changed            chan struct{}
+	outcomeGrace       time.Duration
+	status             Status
+	statusAt           time.Time
+	lateOutcome        func(httpOutcome) error
 }
 
 type httpTransaction struct {
@@ -438,21 +439,26 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is closed or unavailable"))
 		return
 	}
+	if e.choicesFetched && e.auditHostSupported != request.AuditHostSupported {
+		e.mu.Unlock()
+		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("remote audit host capability changed"))
+		return
+	}
 	response := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: e.executorID}
 	if e.remoteChoices != nil {
 		response = *e.remoteChoices
 		response.Credentials = e.credentials
 	}
-	e.mu.Unlock()
 	body, err := httpEncode(response, httpControlBytes)
 	if err != nil {
+		e.mu.Unlock()
 		return
 	}
 	if response.Main.Provider != "" {
-		e.mu.Lock()
+		e.auditHostSupported = request.AuditHostSupported
 		e.choicesFetched = true
-		e.mu.Unlock()
 	}
+	e.mu.Unlock()
 	_ = httpServerWriteBytes(w, http.StatusOK, body)
 }
 
@@ -481,6 +487,11 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 	if e.remoteChoices != nil && !e.choicesFetched {
 		e.mu.Unlock()
 		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("remote choices were not preflighted"))
+		return
+	}
+	if e.remoteChoices != nil && pull.AuditHostSupported != e.auditHostSupported {
+		e.mu.Unlock()
+		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("remote audit host capability differs from preflight"))
 		return
 	}
 	// Keep a new pull pending while the pre-cleanup handler still owns its slot.

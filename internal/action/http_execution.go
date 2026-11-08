@@ -34,8 +34,9 @@ func httpBindingDigest(binding httpBinding) string {
 }
 
 type httpPull struct {
-	Version    int    `json:"version"`
-	ExecutorID string `json:"executor_id"`
+	Version            int    `json:"version"`
+	ExecutorID         string `json:"executor_id"`
+	AuditHostSupported bool   `json:"audit_host_supported"`
 }
 
 type remoteChoicePreflight struct {

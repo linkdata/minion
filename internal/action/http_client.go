@@ -124,7 +124,8 @@ func runHTTP(ctx context.Context, client *http.Client, baseURL, executorID strin
 			*status = httpRunAcknowledged
 		}
 	}()
-	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID}, httpControlBytes)
+	pull, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
+		AuditHostSupported: auditSupportedOnHost()}, httpControlBytes)
 	if err != nil {
 		return err
 	}

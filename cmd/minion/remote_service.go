@@ -9,16 +9,18 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
 
-func hasUnselectedCommand(selected map[string]bool, cfg config.Config) bool {
+func hasUnselectedCommand(selected map[string]bool, cfg config.Config, auditHostSupported bool) bool {
 	for _, repo := range cfg.Repositories {
 		for _, name := range repo.Actions {
 			mapping := cfg.Commands[name]
-			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() && !selected[name] {
+			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() &&
+				(mapping.Action != string(command.SecurityAudit) || auditHostSupported) && !selected[name] {
 				return true
 			}
 		}
@@ -89,6 +91,21 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 		logger.Printf("wait for selected remote worker: %s", monitor.InertLogText(err.Error()))
 		return 1
 	}
+	auditHostSupported := endpoint.AuditHostSupported()
+	if !auditHostSupported {
+		for name := range watcher.SelectedCommands {
+			if watcher.Config.Commands[name].Action == string(command.SecurityAudit) {
+				delete(watcher.SelectedCommands, name)
+			}
+		}
+	}
+	if live != nil {
+		live.setRemoteSelected(watcher.SelectedCommands, auditHostSupported)
+	}
+	if len(watcher.SelectedCommands) == 0 {
+		logger.Print("selected remote worker has no supported commands")
+		return 1
+	}
 	retryConfig := false // A retry wake goes straight to activation, before another poll.
 	for {
 		if !retryConfig {
@@ -103,7 +120,7 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 		}
 		retryConfig = false
 		cfg, generation := live.next()
-		if !sameSkillConfig(watcher.Config, cfg) || hasUnselectedCommand(watcher.SelectedCommands, cfg) {
+		if !sameSkillConfig(watcher.Config, cfg) || hasUnselectedCommand(watcher.SelectedCommands, cfg, auditHostSupported) {
 			err := errors.New("remote worker selection cannot change while connected")
 			live.applied(watcher.Config, generation, err)
 			logger.Printf("activate admin config: %s", monitor.InertLogText(err.Error()))
