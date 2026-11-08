@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -183,6 +184,21 @@ func adminWebservConfig(cfg config.AdminConfig) *webserv.Config {
 	address := cfg.Listen
 	if cfg.WebservAddress != "" {
 		address = cfg.WebservAddress
+	}
+	if cfg.TLSCertFile != "" && cfg.WebservCertDir == "" {
+		if _, _, err := net.SplitHostPort(address); err != nil {
+			host := address
+			if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+				if ip, err := netip.ParseAddr(host[1 : len(host)-1]); err == nil {
+					host = ip.String()
+				}
+			}
+			port := "8443"
+			if os.Geteuid() == 0 {
+				port = "443"
+			}
+			address = net.JoinHostPort(host, port)
+		}
 	}
 	return &webserv.Config{Address: address, CertDir: cfg.WebservCertDir,
 		DataDir: cfg.WebservDataDir, ListenURL: cfg.WebservListenURL}

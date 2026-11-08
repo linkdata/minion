@@ -27,6 +27,20 @@ func TestAdminWebservConfigUsesCLIOverrides(t *testing.T) {
 	if service := adminWebservConfig(cfg); service.Address != cfg.Listen || service.CertDir != "" || service.User != "" || service.DataDir != "" || service.ListenURL != "" {
 		t.Fatalf("webserv defaults changed: %+v", service)
 	}
+	port := "8443"
+	if os.Geteuid() == 0 {
+		port = "443"
+	}
+	for _, test := range []struct{ address, want string }{
+		{"127.0.0.1", "127.0.0.1:" + port},
+		{"[::1]", "[::1]:" + port},
+		{"127.0.0.1:0", "127.0.0.1:0"},
+	} {
+		cfg = config.AdminConfig{WebservAddress: test.address, TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"}
+		if got := adminWebservConfig(cfg).Address; got != test.want {
+			t.Errorf("legacy TLS address %q = %q, want %q", test.address, got, test.want)
+		}
+	}
 }
 
 func TestWebservOverrideRequiresTLSOutsideLoopback(t *testing.T) {
