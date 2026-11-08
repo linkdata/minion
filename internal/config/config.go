@@ -613,15 +613,15 @@ func (c *Config) Validate(configDir string) error {
 			}
 			host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 		}
+		if err := admin.ValidateWebservOptions(); err != nil {
+			return err
+		}
 		addr, err := netip.ParseAddr(host)
 		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" && admin.WebservCertDir == "" {
 			if admin.WebservAddress == "" {
 				return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
 			}
 			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files")
-		}
-		if err := admin.ValidateWebservOptions(); err != nil {
-			return err
 		}
 		if err := admin.validateOAuth(host, number); err != nil {
 			return err

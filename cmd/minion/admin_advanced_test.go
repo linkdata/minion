@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -175,6 +176,13 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	}
 	if err := live.save(func(cfg *config.Config) error { cfg.AIInstructions = "updated"; return nil }); err != nil {
 		t.Fatalf("later live edit was blocked after key-only save: %v", err)
+	}
+	_, generation := live.next()
+	live.applied(loaded, generation, errors.New("key preflight failed"))
+	restored, err := config.Load(path)
+	if err != nil || restored.Codex.APIKey != loaded.Codex.APIKey || restored.AIInstructions != "updated" ||
+		live.desired.Codex.APIKey != loaded.Codex.APIKey {
+		t.Fatalf("rejected Advanced key survived or lost another edit: saved=%+v error=%v", restored, err)
 	}
 }
 

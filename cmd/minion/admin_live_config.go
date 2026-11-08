@@ -285,6 +285,38 @@ func (a *adminLiveConfig) applied(cfg config.Config, generation uint64, err erro
 	a.pending = false
 	if err != nil {
 		a.lastError = fmt.Sprintf("Saved configuration could not be activated: %v", err)
+		attempted := a.desired
+		if attempted.Codex.APIKey != cfg.Codex.APIKey || attempted.Claude.APIKey != cfg.Claude.APIKey {
+			var runtime config.AdminConfig
+			if cfg.Admin != nil {
+				runtime = *cfg.Admin
+			}
+			var restoredCodex, restoredClaude bool
+			_, restoreErr := config.UpdateWithAdminRuntime(a.path, runtime, func(saved *config.Config) error {
+				if attempted.Codex.APIKey != cfg.Codex.APIKey && saved.Codex.APIKey == attempted.Codex.APIKey {
+					saved.Codex.APIKey = cfg.Codex.APIKey
+					restoredCodex = true
+				}
+				if attempted.Claude.APIKey != cfg.Claude.APIKey && saved.Claude.APIKey == attempted.Claude.APIKey {
+					saved.Claude.APIKey = cfg.Claude.APIKey
+					restoredClaude = true
+				}
+				return nil
+			})
+			if restoreErr != nil {
+				a.lastError += fmt.Sprintf("; restore previous AI keys: %v", restoreErr)
+			} else {
+				if restoredCodex {
+					a.disk.Codex.APIKey, a.desired.Codex.APIKey = cfg.Codex.APIKey, cfg.Codex.APIKey
+				}
+				if restoredClaude {
+					a.disk.Claude.APIKey, a.desired.Claude.APIKey = cfg.Claude.APIKey, cfg.Claude.APIKey
+				}
+				if restoredCodex || restoredClaude {
+					a.lastError += "; previous AI credentials restored"
+				}
+			}
+		}
 	} else {
 		a.lastError = ""
 	}

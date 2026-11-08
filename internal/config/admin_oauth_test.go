@@ -34,6 +34,10 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 			}
 		})
 	}
+	malformed := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: "[]:9000"}}
+	if err := malformed.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "-address empty bracketed host") {
+		t.Fatalf("malformed -address without TLS: %v", err)
+	}
 }
 
 func TestOAuthClientConfigValidation(t *testing.T) {

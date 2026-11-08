@@ -263,6 +263,9 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if live.snapshot().Pending || watcher.Config.Codex.APIKey != "" || owner.Runner.Codex.APIKey != "" {
 		t.Fatal("rejected credential changed active policy or key")
 	}
+	if saved, err := config.Load(live.path); err != nil || saved.Codex.APIKey != "" {
+		t.Fatalf("rejected remote key survived restart: saved=%+v error=%v", saved, err)
+	}
 	if restored := fetchRefresh(); restored.Refresh || restored.Credentials.CodexAPIKey != "" {
 		t.Fatalf("old worker credential was not restored: %+v", restored)
 	}

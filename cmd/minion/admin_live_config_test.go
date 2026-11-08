@@ -302,6 +302,47 @@ func TestAdminLiveConfigRetriesFailedActivation(t *testing.T) {
 	}
 }
 
+func TestAdminLiveConfigRestoresRejectedAIKey(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	active := live.current()
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.Codex.APIKey = "rejected-key"
+		cfg.AIInstructions = "Keep this edit."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, generation := live.next()
+	live.applied(active, generation, errors.New("key preflight failed"))
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Codex.APIKey != active.Codex.APIKey || saved.AIInstructions != "Keep this edit." ||
+		live.desired.Codex.APIKey != active.Codex.APIKey || live.snapshot().Error == "" {
+		t.Fatal("failed activation left the rejected key on disk or lost another edit")
+	}
+	if restarted, err := newAdminLiveConfig(path, saved); err != nil || restarted.current().Codex.APIKey != active.Codex.APIKey {
+		t.Fatalf("rejected key survived restart: live=%+v error=%v", restarted, err)
+	}
+}
+
+func TestAdminLiveConfigDoesNotOverwriteNewerAIKey(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if err := live.save(func(cfg *config.Config) error { cfg.Codex.APIKey = "rejected-key"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	_, generation := live.next()
+	if _, err := config.Update(path, func(cfg *config.Config) error { cfg.Codex.APIKey = "newer-key"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	live.applied(live.current(), generation, errors.New("key preflight failed"))
+	saved, err := config.Load(path)
+	if err != nil || saved.Codex.APIKey != "newer-key" {
+		t.Fatalf("failed activation overwrote a later key: saved=%+v error=%v", saved, err)
+	}
+}
+
 func TestAdminLiveConfigKeepsResolvedModels(t *testing.T) {
 	_, path := liveConfigFixture(t, false)
 	runtime, err := config.Load(path)
