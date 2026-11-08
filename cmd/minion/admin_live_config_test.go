@@ -269,6 +269,10 @@ func TestAdminLiveConfigRetriesFailedActivation(t *testing.T) {
 	if live.snapshot().Pending || live.snapshot().Error == "" {
 		t.Fatal("failed activation was not reported")
 	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); !errors.Is(err, monitor.ErrConfigUpdatePending) || called {
+		t.Fatalf("failed activation admitted old policy: called=%t error=%v", called, err)
+	}
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -287,6 +291,10 @@ func TestAdminLiveConfigRetriesFailedActivation(t *testing.T) {
 	current, retryGeneration := live.next()
 	if retryGeneration <= generation || current.AIInstructions != selected.AIInstructions {
 		t.Fatal("retry did not retain the saved configuration")
+	}
+	live.applied(current, retryGeneration, nil)
+	if err := live.admit(func() error { called = true; return nil }); err != nil || !called {
+		t.Fatalf("successful retry did not resume admission: called=%t error=%v", called, err)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil || string(after) != string(before) {

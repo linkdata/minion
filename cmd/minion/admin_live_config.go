@@ -73,7 +73,7 @@ func (a *adminLiveConfig) admit(accept func() error) error {
 	// A completed save must not be followed by a durable decision under the old policy.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.pending {
+	if a.pending || a.lastError != "" {
 		return monitor.ErrConfigUpdatePending
 	}
 	return accept()

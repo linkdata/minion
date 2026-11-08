@@ -39,7 +39,7 @@ func TestAdminConflictReasonIsBoundedAndPrivate(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{account})
 	admin := dashboardTestCookie(t, handler)
 	guest := adminGuestCookie(t, handler)
-	failure := (&adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account}}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	failure := (&adminAccess{jaws: jw, account: account, passwordSet: true}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, strings.Repeat("x", 1024), http.StatusConflict)
 	}))
 	for _, test := range []struct {
@@ -249,7 +249,7 @@ func TestConcurrentAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	ready.Add(concurrent)
 	done.Add(concurrent)
 	release := make(chan struct{})
-	failure := (&adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account}}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	failure := (&adminAccess{jaws: jw, account: account, passwordSet: true}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		ready.Done()
 		<-release
 		w.WriteHeader(http.StatusForbidden)

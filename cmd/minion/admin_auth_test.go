@@ -1176,7 +1176,7 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 
 func TestAdminAttemptReservationIsConcurrentAndExpires(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		access := &adminAccess{accounts: map[string]config.AdminAccount{"admin": {}}, attempts: make(map[string]loginWindow)}
+		access := &adminAccess{passwordSet: true, attempts: make(map[string]loginWindow)}
 		var allowed atomic.Int32
 		var group sync.WaitGroup
 		for range 20 {
@@ -1209,6 +1209,10 @@ func TestAdminUnknownNamesShareAttemptLimit(t *testing.T) {
 		if response.Code != want {
 			t.Fatalf("unknown name %d: status=%d, want %d", i, response.Code, want)
 		}
+	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"username": {"admin"}, "password": {"correct-password"}}, adminGuestCookie(t, handler), ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("unknown names locked admin sign-in: status=%d, want 303", response.Code)
 	}
 }
 

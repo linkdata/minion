@@ -200,47 +200,89 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusPreconditionRequired {
 		t.Fatalf("unvalidated key did not gate the next pull: status=%d error=%v", response.StatusCode, err)
 	}
-	request, err = http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
-		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	response, err = client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var refresh struct {
+	type credentialRefresh struct {
 		PreflightGeneration uint64                   `json:"preflight_generation"`
 		Refresh             bool                     `json:"refresh"`
 		Credentials         action.WorkerCredentials `json:"credentials"`
 	}
-	err = json.NewDecoder(response.Body).Decode(&refresh)
-	closeErr := response.Body.Close()
-	if err != nil || closeErr != nil || response.StatusCode != http.StatusOK || !refresh.Refresh || refresh.PreflightGeneration == 0 || refresh.Credentials.CodexAPIKey != "remote-next-job-key" {
-		t.Fatalf("changed key was not offered for preflight: status=%d refresh=%+v error=%v close=%v", response.StatusCode, refresh, err, closeErr)
+	fetchRefresh := func() credentialRefresh {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
+			strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var refresh credentialRefresh
+		decodeErr := json.NewDecoder(response.Body).Decode(&refresh)
+		closeErr := response.Body.Close()
+		if decodeErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("remote credential preflight: status=%d refresh=%+v error=%v close=%v", response.StatusCode, refresh, decodeErr, closeErr)
+		}
+		return refresh
+	}
+	ackRefresh := func(generation uint64, result string) {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
+			strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote","preflight_generation":%d,"preflight_result":%q}`, action.ProtocolVersion, generation, result)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, readErr := io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("remote preflight acknowledgement: status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
+		}
+	}
+	refresh := fetchRefresh()
+	if !refresh.Refresh || refresh.PreflightGeneration == 0 || refresh.Credentials.CodexAPIKey != "remote-next-job-key" {
+		t.Fatalf("changed key was not offered for preflight: %+v", refresh)
 	}
 	if !live.snapshot().Pending || owner.Runner.Codex.APIKey != "remote-next-job-key" || watcher.Config.Codex.APIKey == "remote-next-job-key" {
 		t.Fatal("changed key became active before the worker confirmed preflight")
 	}
-	request, err = http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
-		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote","preflight_generation":%d,"preflight_result":"ok"}`, action.ProtocolVersion, refresh.PreflightGeneration)))
-	if err != nil {
+	ackRefresh(refresh.PreflightGeneration, "failed")
+	for live.snapshot().Error == "" {
+		select {
+		case <-ctx.Done():
+			t.Fatal("failed credential activation was not reported")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if live.snapshot().Pending || watcher.Config.Codex.APIKey != "" || owner.Runner.Codex.APIKey != "" {
+		t.Fatal("rejected credential changed active policy or key")
+	}
+	if restored := fetchRefresh(); restored.Refresh || restored.Credentials.CodexAPIKey != "" {
+		t.Fatalf("old worker credential was not restored: %+v", restored)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = "remote-corrected-job-key"
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
-	response, err = client.Do(request)
-	if err != nil {
-		t.Fatal(err)
+	for refresh = fetchRefresh(); !refresh.Refresh; refresh = fetchRefresh() {
+		select {
+		case <-ctx.Done():
+			t.Fatal("corrected credential was not offered for preflight")
+		case <-time.After(time.Millisecond):
+		}
 	}
-	if _, err := io.Copy(io.Discard, response.Body); err != nil {
-		t.Fatal(err)
+	if refresh.Credentials.CodexAPIKey != "remote-corrected-job-key" {
+		t.Fatalf("corrected credential was not offered for preflight: %+v", refresh)
 	}
-	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("remote preflight acknowledgement failed: status=%d error=%v", response.StatusCode, err)
-	}
+	ackRefresh(refresh.PreflightGeneration, "ok")
 	pullDone = pullNext()
 	if code := <-serviceDone; code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
@@ -253,7 +295,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		watcher.Config.Repositories[0].AllowedActors[0] != "writer" || owner.CleanCriticRounds == nil || owner.CleanCriticRounds(1, 7) != 2 {
 		t.Fatalf("remote policy was not activated: current=%+v worker=%+v owner=%+v", live.current(), watcher.Config, owner)
 	}
-	if owner.Runner.Codex.APIKey != "remote-next-job-key" {
+	if owner.Runner.Codex.APIKey != "remote-corrected-job-key" {
 		t.Fatal("remote worker key was not activated")
 	}
 	<-endpoint.Done()

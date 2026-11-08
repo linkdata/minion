@@ -109,8 +109,8 @@ type adminAccess struct {
 	setup        bool
 	setupPath    string
 	setupAdmin   config.AdminConfig
-	accounts     map[string]config.AdminAccount
-	dummy        config.AdminAccount
+	account      config.AdminAccount
+	passwordSet  bool
 	mu           sync.Mutex
 	noticeMu     sync.Mutex
 	attempts     map[string]loginWindow
@@ -153,20 +153,17 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	if err := jw.AddTemplateLookuper(adminAdvancedHTML); err != nil {
 		return nil, err
 	}
-	access := &adminAccess{jaws: jw, oauth: oauth, setup: setup, setupPath: setupPath, setupAdmin: cfg, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
-	for _, account := range cfg.Administrators {
-		if account.PasswordHash == "" || account.PasswordHash == config.AdminPasswordHashPlaceholder {
-			continue
-		}
-		access.accounts[account.Username] = account
-		if access.dummy.Username == "" {
-			access.dummy = account
+	access := &adminAccess{jaws: jw, oauth: oauth, setup: setup, setupPath: setupPath, setupAdmin: cfg, attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
+	if len(cfg.Administrators) == 1 {
+		account := cfg.Administrators[0]
+		if account.Username == "admin" && account.PasswordHash != "" && account.PasswordHash != config.AdminPasswordHashPlaceholder {
+			access.account, access.passwordSet = account, true
 		}
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	guestMu := new(sync.Mutex)
 	guestLoginLimit := maxGuestPageSessions
-	if len(access.accounts) != 0 {
+	if access.passwordSet {
 		guestLoginLimit = maxAdminSessions
 	}
 	if oauth != nil {
@@ -222,7 +219,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
-			if len(access.accounts) != 0 {
+			if access.passwordSet {
 				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 				return
 			}
@@ -332,7 +329,7 @@ func crossSchemeAdminOrigin(r *http.Request) bool {
 
 func (a *adminAccess) sessionUsername(sess *jaws.Session) string {
 	username, _ := sess.Get(adminSessionKey).(string)
-	if _, ok := a.accounts[username]; ok {
+	if username == "admin" && a.passwordSet {
 		return username
 	}
 	return ""
@@ -343,10 +340,10 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		return true
 	}
 	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodHead ||
-		len(a.accounts) != 0 && r.Method == http.MethodPost) {
+		a.passwordSet && r.Method == http.MethodPost) {
 		return true
 	}
-	if len(a.accounts) != 0 && r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
+	if a.passwordSet && r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
 		return true
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
@@ -400,12 +397,12 @@ func (a *adminAccess) ownsJaWSRequest(r *http.Request) bool {
 func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	sess := a.jaws.GetSession(r)
 	signedIn := a.sessionUsername(sess) != ""
-	a.publicPage(w, r, "admin login", adminLoginView{SignedIn: signedIn, PasswordSet: len(a.accounts) != 0})
+	a.publicPage(w, r, "admin login", adminLoginView{SignedIn: signedIn, PasswordSet: a.passwordSet})
 }
 
 func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 	account, _ := a.oauth.currentUser(a.jaws.GetSession(r))
-	view := adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(a.jaws.GetSession(r)) != "", Setup: a.setup}
+	view := adminHomeView{Admin: a.passwordSet, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(a.jaws.GetSession(r)) != "", Setup: a.setup}
 	if a.setup && a.setupPath != "" {
 		if cfg, err := config.LoadWithAdminRuntime(a.setupPath, a.setupAdmin); err == nil {
 			view.BotLogin = cfg.BotLogin
@@ -429,7 +426,7 @@ func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name st
 }
 
 func (a *adminAccess) reserveAttempt(username string) bool {
-	if _, ok := a.accounts[username]; !ok {
+	if username != "admin" || !a.passwordSet {
 		username = ""
 	}
 	a.mu.Lock()
@@ -474,12 +471,8 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
 		return
 	}
-	account, exists := a.accounts[username]
-	if !exists {
-		account = a.dummy
-	}
-	valid := account.VerifyPassword(password)
-	if !exists || !valid {
+	valid := a.account.VerifyPassword(password)
+	if username != "admin" || !valid {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
