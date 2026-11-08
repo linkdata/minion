@@ -124,6 +124,28 @@ func TestRemoteWorkerRejectsAssignmentAfterPullDisconnect(t *testing.T) {
 	}
 }
 
+func TestRemoteWorkerDefersUnsupportedAuditWithoutAssignment(t *testing.T) {
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pullDone := make(chan struct{})
+	executor.mu.Lock()
+	executor.pull, executor.pullDone = true, pullDone
+	executor.mu.Unlock()
+	worker := &remoteWorker{executor: executor, endpoint: &RemoteEndpoint{executor: executor, serveDone: make(chan struct{})}}
+	probe := &remoteAssignmentProbe{before: func(Job) error { t.Fatal("unsupported audit reached assignment"); return nil }}
+	result, err := worker.Execute(t.Context(), testJob(command.SecurityAudit), probe)
+	executor.mu.Lock()
+	active := executor.active
+	executor.mu.Unlock()
+	if !errors.Is(err, ErrRemoteWorkerUnavailable) || !errors.Is(err, monitor.ErrRequestTransport) ||
+		probe.undelivered != 1 || active != nil || result.Version != ProtocolVersion {
+		t.Fatalf("unsupported audit was not deferred before assignment: result=%+v error=%v undelivered=%d active=%v", result, err, probe.undelivered, active)
+	}
+	close(pullDone)
+}
+
 func TestRemoteWorkerLostPullStopsBeforeAssignmentClaim(t *testing.T) {
 	executor, err := NewHTTPExecutor("remote")
 	if err != nil {

@@ -14,10 +14,12 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 		valid   bool
 	}{
 		{"[::1", false, false},
+		{"127.0.0.1:bad:port", true, false},
 		{"[]", true, false},
 		{"[]:9000", true, false},
 		{"[localhost]", true, false},
 		{"[::1]", false, true},
+		{"::1", false, true},
 		{"[::1]:9000", false, true},
 		{"[localhost]:9000", true, true},
 	} {

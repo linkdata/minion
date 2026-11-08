@@ -165,10 +165,12 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	guestMu := new(sync.Mutex)
-	guestLoginLimit := maxGuestAdmissionSessions
+	guestLoginLimit := maxGuestPageSessions
+	if len(access.accounts) != 0 {
+		guestLoginLimit = maxAdminSessions
+	}
 	if oauth != nil {
 		guestMu = &oauth.admissionMu
-		guestLoginLimit = maxGuestPageSessions
 	}
 	mux := http.NewServeMux()
 	if err := jw.Setup(func(pattern string, handler http.Handler) {
@@ -220,6 +222,10 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
+			if len(access.accounts) != 0 {
+				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+				return
+			}
 			guestAdmissionUnavailable(w)
 			return
 		}

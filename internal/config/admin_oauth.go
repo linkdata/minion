@@ -125,6 +125,10 @@ func (a *AdminConfig) ValidateWebservOptions() error {
 		if !closed || err != nil {
 			return errors.New("-address requires a valid bracketed IP literal")
 		}
+	} else if strings.Contains(a.WebservAddress, ":") {
+		if _, err := netip.ParseAddr(a.WebservAddress); err != nil {
+			return errors.New("-address requires a valid bare IPv6 literal")
+		}
 	}
 	if a.WebservListenURL == "" {
 		return nil

@@ -601,10 +601,11 @@ func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
 	}
-	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" ||
-		len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
-		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
+	redirect := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" ||
+		len(redirect.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("home at admin sign-in reserve: status=%d location=%q sessions=%d cookies=%v", redirect.Code,
+			redirect.Header().Get("Location"), jw.SessionCount(), redirect.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
 	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {

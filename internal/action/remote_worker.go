@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync/atomic"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
@@ -157,6 +158,13 @@ func (w *remoteWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	pullDone := w.heldPull()
 	if pullDone == nil {
 		err := fmt.Errorf("%w: remote worker has no live pull", monitor.ErrRequestTransport)
+		if hasCheckpoint {
+			err = errors.Join(err, checkpoint.AssignmentNotDelivered())
+		}
+		return result, err
+	}
+	if job.Action == command.SecurityAudit && !w.endpoint.AuditHostSupported() {
+		err := errors.Join(ErrRemoteWorkerUnavailable, fmt.Errorf("%w: audit unsupported on remote host", monitor.ErrRequestTransport))
 		if hasCheckpoint {
 			err = errors.Join(err, checkpoint.AssignmentNotDelivered())
 		}
