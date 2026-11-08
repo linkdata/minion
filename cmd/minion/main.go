@@ -716,6 +716,10 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 			problems = append(problems, fmt.Errorf("%s is archived", repo.Name))
 			continue
 		}
+		if details.DefaultBranch == "" {
+			problems = append(problems, fmt.Errorf("%s has no default branch", repo.Name))
+			continue
+		}
 		logger.Printf("repository %s: default branch %s", repo.Name, details.DefaultBranch)
 		permission, err := client.Permission(ctx, repo.Name, cfg.BotLogin)
 		if err != nil {

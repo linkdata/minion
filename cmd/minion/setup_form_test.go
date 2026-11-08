@@ -29,7 +29,8 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer secret-token" {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer secret-token" && auth != "Bearer empty-branch-token" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -38,7 +39,11 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		case "/user":
 			_, _ = w.Write([]byte(`{"id":8,"login":"example-bot"}`))
 		case "/repos/example/repo":
-			_, _ = w.Write([]byte(`{"id":42,"full_name":"example/repo","owner":{"id":7}}`))
+			if auth == "Bearer empty-branch-token" {
+				_, _ = w.Write([]byte(`{"id":42,"full_name":"example/repo","owner":{"id":7}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"id":42,"full_name":"example/repo","owner":{"id":7},"default_branch":"main"}`))
+			}
 		case "/repos/example/repo/notifications":
 			_, _ = w.Write([]byte(`[]`))
 		case "/repos/example/repo/collaborators/example-bot/permission":
@@ -114,6 +119,12 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		"repository": {"Example/Missing"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/setup", missingRepo, cookie, ""); response.Code == http.StatusSeeOther {
 		t.Fatalf("missing repository was saved: status=%d", response.Code)
+	}
+	emptyBranch := url.Values{"bot_login": {"example-bot"}, "github_token": {"empty-branch-token"},
+		"repository": {"Example/Repo"}}
+	if response := adminResponse(handler, http.MethodPost, "/admin/setup", emptyBranch, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "default branches") {
+		t.Fatalf("repository without default branch setup status=%d body=%q", response.Code, response.Body.String())
 	}
 	unchanged, err := config.Load(path)
 	if err != nil || unchanged.BotLogin != "" || unchanged.GitHub.Token != "" || len(unchanged.Repositories) != 0 {

@@ -46,7 +46,7 @@ func (a *adminAccess) setupPost() http.Handler {
 			}
 			cfg.BotLogin, cfg.GitHub.Token = bot, token
 			if err := checkRepositories(ctx, client, *cfg, log.New(io.Discard, "", 0)); err != nil {
-				return errors.New("GitHub bot needs notification access and write permission to all configured repositories")
+				return errors.New("Check bot access, permissions, archived status, and default branches for all configured repositories")
 			}
 			return nil
 		})
