@@ -38,7 +38,7 @@ import (
 //
 // APIKey overrides the standard API-key environment and stored CLI login
 // through a temporary, tool-inaccessible key helper. OAuth environment tokens
-// and authenticated proxies are rejected.
+// are ignored with an API key and rejected without one. Authenticated proxies are rejected.
 func (s *Session) Run(ctx context.Context, dir, prompt string, writable bool, outputDir string, settings config.ClaudeConfig) (result aicli.Result, runError error) {
 	settings = ambientAPIKey(settings)
 	result.UsageComplete = true

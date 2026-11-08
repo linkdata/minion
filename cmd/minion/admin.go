@@ -83,7 +83,7 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			service.PrivkeyPem = relKey
 		}
 	}
-	if err := checkAdminCertificateURL(certificate, cfg.WebservListenURL); err != nil {
+	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
 		return nil, err
 	}
 	listener, err := service.Listen()
@@ -222,19 +222,19 @@ func checkAdminServerConfig(cfg config.AdminConfig) error {
 		if certificate == nil {
 			return errors.New("admin certificate directory expanded to an empty path")
 		}
-		return checkAdminCertificateURL(certificate, cfg.WebservListenURL)
+		return checkAdminCertificateURL(certificate, cfg)
 	}
 	if cfg.TLSCertFile != "" {
 		certificate, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
 			return err
 		}
-		return checkAdminCertificateURL(&certificate, cfg.WebservListenURL)
+		return checkAdminCertificateURL(&certificate, cfg)
 	}
 	return nil
 }
 
-func checkAdminCertificateURL(certificate *tls.Certificate, entryURL string) error {
+func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConfig) error {
 	if certificate == nil {
 		return nil
 	}
@@ -245,10 +245,20 @@ func checkAdminCertificateURL(certificate *tls.Certificate, entryURL string) err
 		}
 		certificate.Leaf = leaf
 	}
-	if entryURL != "" {
-		entry, _ := url.Parse(entryURL) // validateWebservAdminAddress checked the URL.
+	if cfg.WebservListenURL != "" {
+		entry, _ := url.Parse(cfg.WebservListenURL) // validateWebservAdminAddress checked the URL.
 		if err := certificate.Leaf.VerifyHostname(entry.Hostname()); err != nil {
 			return fmt.Errorf("admin certificate does not cover -listenurl host %q: %w", entry.Hostname(), err)
+		}
+		return nil
+	}
+	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
+		if client == nil {
+			continue
+		}
+		callback, _ := url.Parse(client.RedirectURL) // Validated before preflight and service startup.
+		if err := certificate.Leaf.VerifyHostname(callback.Hostname()); err != nil {
+			return fmt.Errorf("admin certificate does not cover OAuth callback host %q: %w", callback.Hostname(), err)
 		}
 	}
 	return nil

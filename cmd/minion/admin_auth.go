@@ -37,7 +37,7 @@ var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + 
 <button class="btn btn-primary">Sign in</button></form><script defer src="/admin/login.js"></script>
 {{else}}
 <h1 class="h3 mb-3">Minion admin</h1>
-<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>password_hash</code> for the <code>admin</code> account in your config file, then restart Minion.</p>
+<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, add the <code>admin</code> account under <code>admin.administrators</code> if absent, set its <code>password_hash</code> to the generated hash, then restart Minion.</p>
 {{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
@@ -49,7 +49,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{if .Dot.SignedAdmin}}<div class="d-flex gap-2 mb-3"><a class="btn btn-outline-light" href="/admin/config">Advanced config</a><form method="post" action="/admin/logout"><button class="btn btn-outline-light">Admin sign out</button></form></div>
 {{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
-{{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>password_hash</code> for the <code>admin</code> account in your config file, then restart Minion.</p>{{end}}
+{{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, add the <code>admin</code> account under <code>admin.administrators</code> if absent, set its <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
 {{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. Create the <code>work_root</code> directory (default <code>var/work</code>), install skills with <code>minion -install-skills</code>, then restart Minion. No jobs run during setup.</p>
 {{else}}<p role="status">Setup is incomplete. Sign in as admin to save the bot account and first repository. No jobs run during setup.</p>
 {{if .Dot.SignedAdmin}}

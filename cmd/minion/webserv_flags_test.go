@@ -113,12 +113,17 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 	if err := checkAdminServerConfig(cfg); err == nil {
 		t.Fatal("certificate without -listenurl hostname passed preflight")
 	}
-	if _, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+	if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+		_ = server.Close()
 		t.Fatal("certificate without -listenurl hostname reached the listener")
 	}
 	cfg.WebservListenURL = ""
 	cfg.GitHubOAuth.RedirectURL = "https://other.example/auth/github/callback"
-	if _, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+	if err := checkAdminServerConfig(cfg); err == nil || !strings.Contains(err.Error(), "OAuth callback host") {
+		t.Fatalf("certificate without callback hostname passed preflight: %v", err)
+	}
+	if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+		_ = server.Close()
 		t.Fatal("certificate without callback hostname was accepted")
 	}
 }
@@ -138,5 +143,22 @@ func TestWebservTLSOverrideValidatesWithoutListener(t *testing.T) {
 	code, output = runStartupFixture(t, cfg, "-install-skills", "-certdir", certDir)
 	if code != 0 || strings.Contains(output, "config:") {
 		t.Fatalf("install-skills runtime TLS validation: exit=%d log=%q", code, output)
+	}
+}
+
+func TestCheckRejectsUncoveredOAuthCallbackHost(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{
+		TLSCertFile: certFile, TLSKeyFile: keyFile, GitHubOAuth: &config.OAuthClient{
+			ClientID: "id", ClientSecret: "secret", RedirectURL: "https://other.example/auth/github/callback"}},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "admin TLS preflight:") || !strings.Contains(output, "OAuth callback host") {
+		t.Fatalf("-check accepted uncovered callback: code=%d output=%q", code, output)
 	}
 }

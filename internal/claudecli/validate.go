@@ -29,7 +29,8 @@ const initializeRequest = "{\"type\":\"control_request\",\"request_id\":\"minion
 // Claude owns sandbox enforcement.
 //
 // APIKey overrides the standard API-key environment and stored login.
-// OAuth environment tokens and authenticated proxies are rejected.
+// OAuth environment tokens are ignored with an API key and rejected without one.
+// Authenticated proxies are rejected.
 func Validate(ctx context.Context, settings config.ClaudeConfig) (validated config.ClaudeConfig, resultErr error) {
 	settings = ambientAPIKey(settings)
 	defer func() { resultErr = aicli.RedactError(resultErr, settings.APIKey) }()
