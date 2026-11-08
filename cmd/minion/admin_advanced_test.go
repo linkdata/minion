@@ -248,7 +248,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
 		t.Fatal(err)
 	}
-	edited.Codex.APIKey = "new-key"
+	edited.Codex.APIKey = "new-key1"
 	data, err = json.Marshal(edited)
 	if err != nil {
 		t.Fatal(err)
@@ -256,8 +256,8 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
 		t.Fatal(err)
 	}
-	if live.restartRequired || !live.pending || live.desired.Codex.APIKey != "new-key" {
-		t.Fatalf("key-only edit: restart=%t pending=%t key_staged=%t", live.restartRequired, live.pending, live.desired.Codex.APIKey == "new-key")
+	if live.restartRequired || !live.pending || live.desired.Codex.APIKey != "new-key1" {
+		t.Fatalf("key-only edit: restart=%t pending=%t key_staged=%t", live.restartRequired, live.pending, live.desired.Codex.APIKey == "new-key1")
 	}
 	if err := live.save(func(cfg *config.Config) error { cfg.AIInstructions = "updated"; return nil }); err != nil {
 		t.Fatalf("later live edit was blocked after key-only save: %v", err)

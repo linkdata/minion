@@ -81,7 +81,7 @@ func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
 		t.Fatalf("effective webserv TLS settings rejected: admin=%+v error=%v", loaded.Admin, err)
 	}
 	if _, err := UpdateWithAdminRuntime(path, runtime, func(cfg *Config) error {
-		cfg.Codex.APIKey = "new-key"
+		cfg.Codex.APIKey = "new-key1"
 		return nil
 	}); err != nil {
 		t.Fatalf("save with effective webserv TLS settings: %v", err)

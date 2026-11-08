@@ -270,6 +270,7 @@ func TestRunnerCredentialRotationConcurrentWithTrustedSecrets(t *testing.T) {
 			owner.SetRunnerCredentials(old, config.ClaudeConfig{})
 		}
 	}()
+	defer func() { <-done }()
 	for range 100 {
 		secrets := owner.trustedSecrets()
 		for _, key := range []string{old.APIKey, current.APIKey} {
