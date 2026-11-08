@@ -86,8 +86,6 @@ func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 }
 
 func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool, timeout time.Duration) error {
-	preflightCtx, stop := context.WithTimeout(ctx, timeout)
-	defer stop()
 	u, err := url.Parse(origin)
 	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" || !workspace.ValidIdentitySegment(executorID) || client == nil {
 		return errors.New("invalid remote preflight endpoint")
@@ -98,16 +96,60 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 		return err
 	}
 	transport := httpExecutionClient{client: client, base: u}
-	var selection remoteChoicePreflight
-	fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
-	err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
-	stopFetch()
-	if err != nil {
-		return err
+	for attempt := 0; attempt < 3; attempt++ {
+		preflightCtx, stop := context.WithTimeout(ctx, timeout)
+		var selection remoteChoicePreflight
+		fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
+		err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)
+		stopFetch()
+		if err != nil {
+			stop()
+			return err
+		}
+		if selection.Version != ProtocolVersion || selection.ExecutorID != executorID || selection.Refresh && selection.PreflightGeneration == 0 {
+			stop()
+			return errors.New("remote preflight version, executor or generation differs")
+		}
+		validationErr := validateRemoteSelection(preflightCtx, selection, allowAllUnixSockets)
+		stop()
+		if !selection.Refresh {
+			return validationErr
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		result := "ok"
+		if validationErr != nil {
+			result = "failed"
+		}
+		ackBody, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
+			AuditHostSupported: auditSupportedOnHost(), PreflightGeneration: selection.PreflightGeneration,
+			PreflightResult: result}, httpControlBytes)
+		if err != nil {
+			return err
+		}
+		var ack httpAcknowledgement
+		ackCtx, stopACK := context.WithTimeout(ctx, httpControlTimeout)
+		err = transport.post(ackCtx, "preflight", ackBody, httpControlBytes, &ack, httpBinding{}, 0)
+		stopACK()
+		if errors.Is(err, ErrRemotePreflightRequired) {
+			continue // A timed-out candidate was rolled back while this worker validated it.
+		}
+		if err != nil {
+			return err
+		}
+		if ack.Kind != "preflight" || ack.Failure != nil {
+			return errors.New("remote preflight acknowledgement differs")
+		}
+		if validationErr == nil {
+			return ctx.Err()
+		}
+		// The parent restored old credentials after rejecting this candidate.
 	}
-	if selection.Version != ProtocolVersion || selection.ExecutorID != executorID {
-		return errors.New("remote preflight version or executor differs")
-	}
+	return errors.New("remote preflight changed too often")
+}
+
+func validateRemoteSelection(ctx context.Context, selection remoteChoicePreflight, allowAllUnixSockets bool) error {
 	if err := validateRemoteChoices(selection); err != nil {
 		return err
 	}
@@ -119,9 +161,9 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	roles := offeredPreflightRoles(selection.Main, selection.MainChoices, selection.Critic, selection.CriticChoices)
 	for _, role := range roles {
 		if role.Provider == "claude" {
-			if _, err := claudecli.CheckHost(preflightCtx, allowAllUnixSockets); err != nil {
-				if preflightCtx.Err() != nil {
-					return preflightCtx.Err()
+			if _, err := claudecli.CheckHost(ctx, allowAllUnixSockets); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
 				// The short host probe deadline must not look like the whole preflight deadline.
 				return preflightError{message: "remote Claude host check failed: " + redactActionText(err.Error(), runner.secretValues()...)}
@@ -129,8 +171,8 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 			break
 		}
 	}
-	if message, err := checkOfferedRolesCLI(preflightCtx, &runner, roles); err != nil {
+	if message, err := checkOfferedRolesCLI(ctx, &runner, roles); err != nil {
 		return preflightError{message: message, cause: redactActionError(err, runner.secretValues()...)}
 	}
-	return preflightCtx.Err()
+	return ctx.Err()
 }

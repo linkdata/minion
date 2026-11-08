@@ -19,7 +19,7 @@ import (
 )
 
 // ProtocolVersion identifies the action and executor wire contracts.
-const ProtocolVersion = 23
+const ProtocolVersion = 24
 
 const (
 	maxDiagnostics            = 100

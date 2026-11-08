@@ -51,14 +51,16 @@ func modelKeysChanged(before, after config.Config) bool {
 }
 
 func applyModelKeys(owner *action.Orchestrator, cfg config.Config) {
-	owner.Runner.Codex.APIKey = cfg.Codex.APIKey
+	codex, claude := owner.Runner.Codex, owner.Runner.Claude
+	codex.APIKey = cfg.Codex.APIKey
 	if cfg.Codex.APIKey == "" && cfg.RemoteExecutor == nil {
-		owner.Runner.Codex = codexcli.CaptureAmbientNativeCredentials(owner.Runner.Codex)
+		codex = codexcli.CaptureAmbientNativeCredentials(codex)
 	}
-	owner.Runner.Claude.APIKey = cfg.Claude.APIKey
+	claude.APIKey = cfg.Claude.APIKey
 	if cfg.RemoteExecutor == nil {
-		owner.Runner.Claude.APIKey = claudeRunnerKey(cfg.Claude.APIKey)
+		claude.APIKey = claudeRunnerKey(cfg.Claude.APIKey)
 	}
+	owner.SetRunnerCredentials(codex, claude)
 }
 
 // attachSelectedLocalWorker prepares one selected child before the monitor can
@@ -183,7 +185,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 		}
 		logger.Printf("activate admin worker change: %s", monitor.InertLogText(err.Error()))
 		owner.Commands, owner.AlwaysOnSkills = oldCommands, oldSkills
-		owner.Runner.Codex, owner.Runner.Claude = oldCodex, oldClaude
+		owner.SetRunnerCredentials(oldCodex, oldClaude)
 		watcher.Config = oldCfg
 		watcher.SelectedCommands = nil
 		var rollbackErr error

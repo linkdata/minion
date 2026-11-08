@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -29,6 +30,18 @@ func (w *preflightGateWriter) Write(body []byte) (int, error) {
 	return w.ResponseRecorder.Write(body)
 }
 
+type preflightBlockedWriter struct {
+	*preflightGateWriter
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (w *preflightBlockedWriter) Write(body []byte) (int, error) {
+	close(w.entered)
+	<-w.release
+	return w.preflightGateWriter.Write(body)
+}
+
 func TestRemoteChoicePreflightOpensGateBeforeResponse(t *testing.T) {
 	executor, err := NewHTTPExecutor("remote")
 	if err != nil {
@@ -47,6 +60,112 @@ func TestRemoteChoicePreflightOpensGateBeforeResponse(t *testing.T) {
 	if writer.Code != http.StatusOK || !writer.gateOpenOnWrite || writer.Body.Len() == 0 {
 		t.Fatalf("preflight response exposed before pull gate: status=%d gate=%t body=%q",
 			writer.Code, writer.gateOpenOnWrite, writer.Body.String())
+	}
+}
+
+func TestRemotePreflightACKHoldsFetchAndPullUntilReported(t *testing.T) {
+	for _, result := range []string{"ok", "failed"} {
+		for _, path := range []string{"/preflight", "/next"} {
+			t.Run(result+path, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					executor, err := NewHTTPExecutor("remote")
+					if err != nil {
+						t.Fatal(err)
+					}
+					old := WorkerCredentials{CodexAPIKey: "old-key"}
+					candidate := WorkerCredentials{CodexAPIKey: "new-key"}
+					if err := executor.SetWorkerCredentials(old); err != nil {
+						t.Fatal(err)
+					}
+					executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+						Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+					executor.preflightGeneration = 1
+					executor.preflightCandidate = candidate
+					executor.preflightPending = true
+					executor.preflightFetched = true
+					executor.preflightWait = make(chan error, 1)
+					pull := httpPull{Version: ProtocolVersion, ExecutorID: "remote"}
+					request := func(path string, value httpPull, ctx context.Context) *http.Request {
+						t.Helper()
+						body, err := httpEncode(value, httpControlBytes)
+						if err != nil {
+							t.Fatal(err)
+						}
+						r := httptest.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
+						r.Header.Set("Content-Type", "application/json")
+						return r
+					}
+					ack := pull
+					ack.PreflightGeneration, ack.PreflightResult = 1, result
+					blocked := &preflightBlockedWriter{
+						preflightGateWriter: &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor},
+						entered:             make(chan struct{}), release: make(chan struct{}),
+					}
+					releaseACK := sync.OnceFunc(func() { close(blocked.release) })
+					defer releaseACK()
+					ackRequest := request("/preflight", ack, context.Background())
+					ackDone := make(chan struct{})
+					go func() {
+						executor.ServeHTTP(blocked, ackRequest)
+						close(ackDone)
+					}()
+					<-blocked.entered
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					observerRequest := request(path, pull, ctx)
+					response := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+					observerDone := make(chan struct{})
+					go func() {
+						executor.ServeHTTP(response, observerRequest)
+						close(observerDone)
+					}()
+					synctest.Wait()
+					select {
+					case <-observerDone:
+						t.Fatalf("%s returned while %s ACK write was blocked: status=%d", path, result, response.Code)
+					default:
+					}
+					executor.mu.Lock()
+					fetched, pulling := executor.choicesFetched, executor.pull
+					executor.mu.Unlock()
+					if fetched || pulling {
+						t.Fatalf("%s changed gate during blocked %s ACK: fetched=%t pulling=%t", path, result, fetched, pulling)
+					}
+					releaseACK()
+					<-ackDone
+					synctest.Wait()
+					if path == "/next" && result == "ok" {
+						executor.mu.Lock()
+						pulling = executor.pull
+						executor.mu.Unlock()
+						if !pulling {
+							t.Fatal("pull did not enter after successful ACK")
+						}
+						cancel()
+						<-observerDone
+						return
+					}
+					<-observerDone
+					if path == "/next" {
+						if response.Code != http.StatusPreconditionRequired {
+							t.Fatalf("pull after failed ACK status=%d, want %d", response.Code, http.StatusPreconditionRequired)
+						}
+						return
+					}
+					var selection remoteChoicePreflight
+					if err := httpDecode(response.Body, httpControlBytes, &selection); err != nil {
+						t.Fatal(err)
+					}
+					want := candidate
+					if result == "failed" {
+						want = old
+					}
+					if response.Code != http.StatusOK || selection.Refresh || selection.Credentials != want {
+						t.Fatalf("fetch after %s ACK: status=%d selection=%+v", result, response.Code, selection)
+					}
+				})
+			})
+		}
 	}
 }
 
@@ -80,6 +199,79 @@ func TestRemoteAuditCapabilityIsFrozenAcrossPreflightAndPull(t *testing.T) {
 		if got := post("/next", !supported); got != http.StatusConflict || executor.pull {
 			t.Fatalf("changed capability %t pull: status=%d pull=%t", !supported, got, executor.pull)
 		}
+	}
+}
+
+func TestRemoteRejectedCredentialKeepsGateClosedUntilRollbackPreflight(t *testing.T) {
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := WorkerCredentials{CodexAPIKey: "old-key"}
+	if err := executor.SetWorkerCredentials(old); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+	executor.choicesFetched = true
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	updated := make(chan error, 1)
+	go func() {
+		updated <- executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{CodexAPIKey: "bad-key"})
+	}()
+	for {
+		executor.mu.Lock()
+		pending, changed := executor.preflightPending, executor.changed
+		executor.mu.Unlock()
+		if pending {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("credential candidate was not staged")
+		}
+	}
+	post := func(path string, pull httpPull, value any) int {
+		t.Helper()
+		body, err := httpEncode(pull, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+		executor.ServeHTTP(response, request)
+		if err := httpDecode(response.Body, httpControlBytes, value); err != nil {
+			t.Fatal(err)
+		}
+		return response.Code
+	}
+	pull := httpPull{Version: ProtocolVersion, ExecutorID: "remote"}
+	var candidate remoteChoicePreflight
+	if status := post("/preflight", pull, &candidate); status != http.StatusOK || !candidate.Refresh || candidate.Credentials.CodexAPIKey != "bad-key" {
+		t.Fatalf("candidate fetch: status=%d selection=%+v", status, candidate)
+	}
+	failed := pull
+	failed.PreflightGeneration, failed.PreflightResult = candidate.PreflightGeneration, "failed"
+	var ack httpAcknowledgement
+	if status := post("/preflight", failed, &ack); status != http.StatusOK {
+		t.Fatalf("failed validation ACK status=%d", status)
+	}
+	if err := <-updated; err == nil {
+		t.Fatal("rejected credential became active")
+	}
+	if status := post("/next", pull, &ack); status != http.StatusPreconditionRequired {
+		t.Fatalf("pull before rollback preflight status=%d", status)
+	}
+	failed.PreflightResult = "ok" // The successful ACK for the discarded generation must be stale.
+	if status := post("/preflight", failed, &ack); status != http.StatusPreconditionRequired {
+		t.Fatalf("stale candidate ACK status=%d", status)
+	}
+	var restored remoteChoicePreflight
+	if status := post("/preflight", pull, &restored); status != http.StatusOK || restored.Refresh || restored.Credentials != old || !executor.choicesFetched {
+		t.Fatalf("rollback preflight: status=%d selection=%+v gate=%t", status, restored, executor.choicesFetched)
 	}
 }
 

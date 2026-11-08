@@ -229,6 +229,57 @@ func waitLateError(t *testing.T, done <-chan error) error {
 	}
 }
 
+func TestLateRemoteOutcomeRejectsRotatedProviderKeys(t *testing.T) {
+	const oldCodex, currentCodex, candidateCodex = "fixture-old-codex-key", "fixture-current-codex-key", "fixture-candidate-codex-key"
+	const oldClaude, currentClaude, candidateClaude = "fixture-old-claude-key", "fixture-current-claude-key", "fixture-candidate-claude-key"
+	for _, key := range []string{oldCodex, currentCodex, candidateCodex, oldClaude, currentClaude, candidateClaude} {
+		t.Run(key, func(t *testing.T) {
+			f := newLateOutcomeFixture(t, false)
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: oldCodex}, config.ClaudeConfig{APIKey: oldClaude})
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: currentCodex}, config.ClaudeConfig{APIKey: currentClaude})
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: candidateCodex}, config.ClaudeConfig{APIKey: candidateClaude})
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: currentCodex}, config.ClaudeConfig{APIKey: currentClaude}) // Failed preflight rolls back.
+			if got := redactActionText("late "+key, f.owner.trustedSecrets()...); got != "late [redacted]" {
+				t.Fatalf("rotated credential was not trusted: %q", got)
+			}
+			f.outcome.Result.Diagnostics[0].Message = "late " + key
+			if err := f.owner.receiveLateOutcome("remote", f.outcome); !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), key) {
+				t.Fatalf("late diagnostic with a provider credential was accepted: %v", err)
+			}
+			path := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("late diagnostic with a provider credential was retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunnerCredentialRotationConcurrentWithTrustedSecrets(t *testing.T) {
+	owner := &Orchestrator{}
+	old := config.CodexConfig{APIKey: "fixture-old-provider-key"}
+	current := config.CodexConfig{APIKey: "fixture-current-provider-key"}
+	owner.SetRunnerCredentials(old, config.ClaudeConfig{})
+	owner.SetRunnerCredentials(current, config.ClaudeConfig{})
+	owner.SetRunnerCredentials(old, config.ClaudeConfig{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			owner.SetRunnerCredentials(current, config.ClaudeConfig{})
+			owner.SetRunnerCredentials(old, config.ClaudeConfig{})
+		}
+	}()
+	for range 100 {
+		secrets := owner.trustedSecrets()
+		for _, key := range []string{old.APIKey, current.APIKey} {
+			if got := redactActionText(key, secrets...); got != "[redacted]" {
+				t.Fatalf("concurrent rotation lost provider credential: %q", got)
+			}
+		}
+	}
+	<-done
+}
+
 func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) {
 	job := testJob(command.Comment)
 	job.Main.Provider = "claude"

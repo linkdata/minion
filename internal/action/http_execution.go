@@ -34,19 +34,23 @@ func httpBindingDigest(binding httpBinding) string {
 }
 
 type httpPull struct {
-	Version            int    `json:"version"`
-	ExecutorID         string `json:"executor_id"`
-	AuditHostSupported bool   `json:"audit_host_supported"`
+	Version             int    `json:"version"`
+	ExecutorID          string `json:"executor_id"`
+	AuditHostSupported  bool   `json:"audit_host_supported"`
+	PreflightGeneration uint64 `json:"preflight_generation,omitempty"`
+	PreflightResult     string `json:"preflight_result,omitempty"`
 }
 
 type remoteChoicePreflight struct {
-	Version       int                      `json:"version"`
-	ExecutorID    string                   `json:"executor_id"`
-	Main          RoleSettings             `json:"main"`
-	Critic        *RoleSettings            `json:"critic,omitempty"`
-	MainChoices   []config.RoleModelConfig `json:"main_choices,omitempty"`
-	CriticChoices []config.RoleModelConfig `json:"critic_choices,omitempty"`
-	Credentials   WorkerCredentials        `json:"credentials"`
+	Version             int                      `json:"version"`
+	ExecutorID          string                   `json:"executor_id"`
+	Main                RoleSettings             `json:"main"`
+	Critic              *RoleSettings            `json:"critic,omitempty"`
+	MainChoices         []config.RoleModelConfig `json:"main_choices,omitempty"`
+	CriticChoices       []config.RoleModelConfig `json:"critic_choices,omitempty"`
+	Credentials         WorkerCredentials        `json:"credentials"`
+	PreflightGeneration uint64                   `json:"preflight_generation,omitempty"`
+	Refresh             bool                     `json:"refresh,omitempty"`
 }
 
 // WorkerCredentials are trusted parent input for one assignment, outside Job.

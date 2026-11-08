@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -154,6 +155,69 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			stopPull()
 			<-pullDone
 		})
+	}
+}
+
+func TestRemoteRejectedCredentialPreflightsRollback(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	for _, key := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_API_KEY"} {
+		t.Setenv(key, "")
+	}
+	script := strings.Replace(preflightCodexCLI,
+		"    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,",
+		"    IFS= read -r request || exit 1\n    case \"$request\" in\n      *bad-key*) printf '%s\\n' '{\"id\":0,\"error\":{\"message\":\"rejected\"}}'; exit 1 ;;\n      *) printf '%s\\n' '{\"id\":0,\"result\":{\"type\":\"apiKey\"}}' ;;\n    esac\n    IFS= read -r request || exit 1\n    printf '%s\\n' '{\"id\":2,", 1)
+	if script == preflightCodexCLI {
+		t.Fatal("Codex fixture did not install key check")
+	}
+	fakeOnPath(t, "codex", script)
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := WorkerCredentials{CodexAPIKey: "old-key"}
+	if err := executor.SetWorkerCredentials(old); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+	executor.choicesFetched = true
+	executor.auditHostSupported = auditSupportedOnHost()
+	server := httptest.NewTLSServer(executor)
+	t.Cleanup(func() {
+		_ = executor.Close()
+		server.Close()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	updated := make(chan error, 1)
+	go func() {
+		updated <- executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{CodexAPIKey: "bad-key"})
+	}()
+	for {
+		executor.mu.Lock()
+		pending, changed := executor.preflightPending, executor.changed
+		executor.mu.Unlock()
+		if pending {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("candidate was not staged")
+		}
+	}
+	if err := PreflightRemoteChoices(ctx, server.Client(), server.URL, "remote", false); err != nil {
+		t.Fatalf("rollback was not preflighted: %v (%v)", err, errors.Unwrap(err))
+	}
+	if err := <-updated; err == nil || !strings.Contains(err.Error(), "rejected changed provider credentials") {
+		t.Fatalf("rejected candidate was accepted: %v", err)
+	}
+	executor.mu.Lock()
+	got, pending, gate := executor.credentials, executor.preflightPending, executor.choicesFetched
+	executor.mu.Unlock()
+	if got != old || pending || !gate {
+		t.Fatalf("rollback state: credentials=%+v pending=%t gate=%t", got, pending, gate)
 	}
 }
 

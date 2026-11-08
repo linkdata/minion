@@ -120,32 +120,37 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	fetchRemotePreflight(t, ctx, client, endpoint, token)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
-		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Content-Type", "application/json")
 	type pullResult struct {
 		status int
 		body   []byte
 		err    error
 	}
-	pullDone := make(chan pullResult, 1)
-	go func() {
-		response, err := client.Do(request)
+	pullNext := func() <-chan pullResult {
+		t.Helper()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
+			strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
 		if err != nil {
-			pullDone <- pullResult{err: err}
-			return
+			t.Fatal(err)
 		}
-		body, readErr := io.ReadAll(response.Body)
-		closeErr := response.Body.Close()
-		if readErr == nil {
-			readErr = closeErr
-		}
-		pullDone <- pullResult{status: response.StatusCode, body: body, err: readErr}
-	}()
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		done := make(chan pullResult, 1)
+		go func() {
+			response, err := client.Do(request)
+			if err != nil {
+				done <- pullResult{err: err}
+				return
+			}
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if readErr == nil {
+				readErr = closeErr
+			}
+			done <- pullResult{status: response.StatusCode, body: body, err: readErr}
+		}()
+		return done
+	}
+	pullDone := pullNext()
 	if err := owner.WaitCapacity(ctx); err != nil {
 		t.Fatalf("authenticated pull did not provide capacity: %v", err)
 	}
@@ -165,7 +170,79 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	now := time.Now().UTC()
 	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
 	var logs bytes.Buffer
-	if code := runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second, live); code != 0 {
+	serviceDone := make(chan int, 1)
+	go func() {
+		defer close(serviceDone)
+		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second, live)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-serviceDone
+	})
+	got := <-pullDone
+	if got.status != http.StatusTooEarly || got.err != nil {
+		t.Fatalf("held pull was not retired for key preflight: status=%d body=%q error=%v", got.status, got.body, got.err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusPreconditionRequired {
+		t.Fatalf("unvalidated key did not gate the next pull: status=%d error=%v", response.StatusCode, err)
+	}
+	request, err = http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refresh struct {
+		PreflightGeneration uint64                   `json:"preflight_generation"`
+		Refresh             bool                     `json:"refresh"`
+		Credentials         action.WorkerCredentials `json:"credentials"`
+	}
+	err = json.NewDecoder(response.Body).Decode(&refresh)
+	closeErr := response.Body.Close()
+	if err != nil || closeErr != nil || response.StatusCode != http.StatusOK || !refresh.Refresh || refresh.PreflightGeneration == 0 || refresh.Credentials.CodexAPIKey != "remote-next-job-key" {
+		t.Fatalf("changed key was not offered for preflight: status=%d refresh=%+v error=%v close=%v", response.StatusCode, refresh, err, closeErr)
+	}
+	if !live.snapshot().Pending || owner.Runner.Codex.APIKey != "remote-next-job-key" || watcher.Config.Codex.APIKey == "remote-next-job-key" {
+		t.Fatal("changed key became active before the worker confirmed preflight")
+	}
+	request, err = http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote","preflight_generation":%d,"preflight_result":"ok"}`, action.ProtocolVersion, refresh.PreflightGeneration)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+		t.Fatal(err)
+	}
+	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("remote preflight acknowledgement failed: status=%d error=%v", response.StatusCode, err)
+	}
+	pullDone = pullNext()
+	if code := <-serviceDone; code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
 	}
 	if watcher.SelectedCommands["audit"] || live.snapshot().RemoteCommands["audit"] || !watcher.SelectedCommands["comment"] {
@@ -180,9 +257,9 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		t.Fatal("remote worker key was not activated")
 	}
 	<-endpoint.Done()
-	got := <-pullDone
+	got = <-pullDone
 	if got.status != http.StatusConflict || got.err != nil || !bytes.Contains(got.body, []byte(`"kind":"next"`)) || !bytes.Contains(got.body, []byte(`"failure"`)) {
-		t.Fatalf("held pull did not receive idle shutdown: status=%d body=%q error=%v", got.status, got.body, got.err)
+		t.Fatalf("fresh pull did not receive idle shutdown: status=%d body=%q error=%v", got.status, got.body, got.err)
 	}
 }
 

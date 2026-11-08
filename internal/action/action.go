@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -33,6 +34,9 @@ var ErrLocalWorkerUnavailable = errors.New("selected local worker unavailable")
 // ErrRemoteWorkerUnavailable means the selected remote endpoint cannot accept another Job.
 var ErrRemoteWorkerUnavailable = errors.New("selected remote worker unavailable")
 
+// ErrRemotePreflightRequired asks a remote worker to validate refreshed credentials before its next pull.
+var ErrRemotePreflightRequired = errors.New("remote worker preflight required")
+
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
 	"\x1c", "\n", "\x1d", "\n", "\x1e", "\n",
@@ -41,16 +45,17 @@ var modelLineBreaks = strings.NewReplacer(
 
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
-	attemptID          string
-	usageCheckpoint    *usageCheckpoint
-	lateUsageSave      func(usage.Record) error              // Test seam for an ambiguous late receipt save.
-	lateDiagnosticSave func(string, []byte, ...string) error // Test seam for an ambiguous late diagnostic upgrade.
-	finalUsageWaiting  func()                                // Test seam before final usage takes the private-record lock.
-	finalUsageEntered  func()                                // Test seam after final usage takes the private-record lock.
-	finalUsageSave     func(usage.Record) error              // Test seam for a failed terminal usage save.
-	pruneSelected      func()                                // Test seam after private retention eligibility is selected.
-	assignmentRequired bool
-	remoteSelected     bool
+	retiredProviderKeys []retiredProviderKey
+	attemptID           string
+	usageCheckpoint     *usageCheckpoint
+	lateUsageSave       func(usage.Record) error              // Test seam for an ambiguous late receipt save.
+	lateDiagnosticSave  func(string, []byte, ...string) error // Test seam for an ambiguous late diagnostic upgrade.
+	finalUsageWaiting   func()                                // Test seam before final usage takes the private-record lock.
+	finalUsageEntered   func()                                // Test seam after final usage takes the private-record lock.
+	finalUsageSave      func(usage.Record) error              // Test seam for a failed terminal usage save.
+	pruneSelected       func()                                // Test seam after private retention eligibility is selected.
+	assignmentRequired  bool
+	remoteSelected      bool
 
 	Executor                  Executor
 	ExecutorID                string
@@ -96,9 +101,53 @@ type Orchestrator struct {
 
 var _ monitor.StoredResultPublisher = (*Orchestrator)(nil)
 
+// Orchestrators are copied for action attempts, so this lock lives outside the struct.
+var providerKeysMu sync.RWMutex
+
+type retiredProviderKey struct {
+	value string
+	until time.Time
+}
+
+// SetRunnerCredentials keeps rotated keys available for late private-record redaction.
+func (e *Orchestrator) SetRunnerCredentials(codex config.CodexConfig, claude config.ClaudeConfig) {
+	providerKeysMu.Lock()
+	defer providerKeysMu.Unlock()
+	now := time.Now()
+	retired := make([]retiredProviderKey, 0, len(e.retiredProviderKeys)+4)
+	for _, key := range e.retiredProviderKeys {
+		if now.Before(key.until) {
+			retired = append(retired, key)
+		}
+	}
+	for _, pair := range [][2]string{
+		{e.Runner.Codex.APIKey, codex.APIKey},
+		{e.Runner.Codex.NativeAPIKey, codex.NativeAPIKey},
+		{e.Runner.Codex.NativeAccessToken, codex.NativeAccessToken},
+		{e.Runner.Claude.APIKey, claude.APIKey},
+	} {
+		if pair[0] != "" && pair[0] != pair[1] {
+			retired = append(retired, retiredProviderKey{value: pair[0], until: now.Add(privateRecordRetention)})
+		}
+	}
+	e.retiredProviderKeys = retired
+	e.Runner.Codex, e.Runner.Claude = codex, claude
+}
+
 // trustedSecrets includes the bot credential only in parent-side checks.
 func (e *Orchestrator) trustedSecrets() []string {
-	secrets := append(e.Runner.secretValues(), e.GitHub.Token())
+	providerKeysMu.RLock()
+	runner := Runner{Codex: e.Runner.Codex, Claude: e.Runner.Claude}
+	retired := slices.Clone(e.retiredProviderKeys)
+	providerKeysMu.RUnlock()
+	secrets := runner.secretValues()
+	now := time.Now()
+	for _, key := range retired {
+		if now.Before(key.until) {
+			secrets = append(secrets, key.value)
+		}
+	}
+	secrets = append(secrets, e.GitHub.Token())
 	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
 	return secrets
 }

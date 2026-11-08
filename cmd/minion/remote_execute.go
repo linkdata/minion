@@ -101,10 +101,26 @@ func runRemoteWorkerPreflightAndLoop(ctx context.Context, cfg remoteWorkerConfig
 func runRemoteWorkerLoop(ctx context.Context, cfg remoteWorkerConfig, client *http.Client, logger *log.Logger) int {
 	runner := action.NewRemoteRunner(cfg.WorkRoot)
 	runner.Claude.AllowAllUnixSockets = cfg.Claude.AllowAllUnixSockets
-	if err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner); err != nil {
-		// Returned errors can contain private model text.
-		logger.Print("remote worker: execution or protocol failure")
-		return 1
+	for {
+		err := action.RunHTTPLoop(ctx, client, cfg.BaseURL, cfg.ExecutorID, runner)
+		if errors.Is(err, action.ErrRemotePreflightRequired) {
+			if ctx.Err() != nil {
+				return 0
+			}
+			if err := action.PreflightRemoteChoices(ctx, client, cfg.BaseURL, cfg.ExecutorID, cfg.Claude.AllowAllUnixSockets); err != nil {
+				if ctx.Err() != nil {
+					return 0
+				}
+				logger.Printf("remote worker: selection preflight failed: %s", monitor.InertLogText(err.Error()))
+				return 1
+			}
+			continue
+		}
+		if err != nil {
+			// Returned errors can contain private model text.
+			logger.Print("remote worker: execution or protocol failure")
+			return 1
+		}
+		return 0
 	}
-	return 0
 }
