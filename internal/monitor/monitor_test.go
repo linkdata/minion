@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -390,6 +391,24 @@ func TestRemoteCommandsUseWorkerSkills(t *testing.T) {
 	m := &Monitor{Config: cfg, SelectedCommands: map[string]bool{"fix": true}}
 	if got := m.availableCommands(cfg.Repositories[0]); len(got) != 1 || got["fix"] != "fix" {
 		t.Fatalf("remote worker command depends on orchestrator-local skill: %v", got)
+	}
+}
+
+func TestAvailableCommandsRequireHostSupport(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repositories[0].Actions = append(cfg.Repositories[0].Actions, "security-audit")
+	for _, remote := range []bool{false, true} {
+		if remote {
+			cfg.RemoteExecutor = &config.RemoteExecutorConfig{}
+		}
+		m := &Monitor{Config: cfg}
+		got := m.availableCommands(cfg.Repositories[0])
+		if _, offered := got["security-audit"]; offered != (runtime.GOOS != "windows") || got["review"] != command.Review {
+			t.Errorf("remote=%t host=%s available commands = %v", remote, runtime.GOOS, got)
+		}
+		if m.controlCommands(cfg.Repositories[0])["security-audit"] != command.SecurityAudit {
+			t.Fatal("saved audit command disappeared from recovery parser")
+		}
 	}
 }
 

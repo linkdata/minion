@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -369,10 +370,13 @@ func TestAttachRemoteWorkerSelectsConfiguredIdentityWithoutHostSkills(t *testing
 	certificate, _ := testRemoteCertificate(t)
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	const missingSkill = "https://github.com/example/skills/tree/main/skills/not-installed"
-	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{missingSkill}}}
+	commands := map[string]config.CommandMapping{
+		"inspect": {Action: "comment", Skills: []string{missingSkill}},
+		"audit":   {Action: "security-audit", Skills: []string{missingSkill}},
+	}
 	cfg := config.Config{Main: "codex", Commands: commands,
 		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
-		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect"}}},
+		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect", "audit"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", Token: token}}
 	orchestrator := &Orchestrator{Main: "codex", Commands: commands, CodexModel: "main-1", CodexEffort: "high"}
 	selected, endpoint, err := orchestrator.AttachRemoteWorker(cfg, certificate)
@@ -384,7 +388,11 @@ func TestAttachRemoteWorkerSelectsConfiguredIdentityWithoutHostSkills(t *testing
 			t.Error(err)
 		}
 	})
-	if !selected["inspect"] || len(selected) != 1 || orchestrator.ExecutorID != "remote" || !orchestrator.assignmentRequired || !orchestrator.remoteSelected {
+	wantCount := 2
+	if runtime.GOOS == "windows" {
+		wantCount = 1
+	}
+	if !selected["inspect"] || selected["audit"] != (runtime.GOOS != "windows") || len(selected) != wantCount || orchestrator.ExecutorID != "remote" || !orchestrator.assignmentRequired || !orchestrator.remoteSelected {
 		t.Fatalf("wrong remote selection: commands=%v executor=%q", selected, orchestrator.ExecutorID)
 	}
 	job := monitor.Job{Repository: cfg.Repositories[0], Command: command.Command{Name: "inspect", Action: command.Comment}}

@@ -68,7 +68,8 @@ Consolidate the same root cause, but establish each variant's conditions and imp
 independently. Do not investigate peer-owned units. Return a variant with no current
 coverage unit as `uncovered`.
 
-USE THE NARROWEST LOCAL CHECK THAT SETTLES THE CLAIM. Target-controlled builds,
+USE THE NARROWEST ALLOWED CHECK THAT SETTLES THE CLAIM. When the runner forbids
+target execution, use only a deterministic source trace. Target-controlled builds,
 tests, processes, browsers, emulators, fuzzers, and fixture processing may run only
 inside the parent-approved OS-enforced sandbox. It must disable external networking,
 start from an empty allowlisted environment, expose target and tools read-only, permit
@@ -143,8 +144,10 @@ file separately:
 
 1. A candidate needs a complete repository-relative source trace and evidence for the
    claimed root cause, including the strongest source-visible control.
-2. A proposed confirmed record needs a bounded local observed result, meaningful impact
-   across a stated boundary, complete conditions, and no visible preventing layer.
+2. A proposed confirmed record needs a bounded local observed result or, when target
+   execution is forbidden, a deterministic source-derived result. It also needs
+   meaningful impact across a stated boundary, complete conditions, and no visible
+   preventing layer.
 3. Do not strengthen a crash into code execution, ordinary work into shared availability,
    or a same-principal action into privilege gain.
 4. If a required fact is not source-visible or locally observable, use

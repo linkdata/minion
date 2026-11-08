@@ -80,13 +80,15 @@ type CommandMapping struct {
 
 // SupportsProvider reports whether a CLI can execute the action's workflow.
 //
-// An empty provider selects Codex. Security audits need independent subagents
-// and validator file flags that Node does not expose on native Windows.
+// An empty provider selects Codex. Security audits need independent subagents.
 func (m CommandMapping) SupportsProvider(provider string) bool {
-	if m.Action == "security-audit" && runtime.GOOS == "windows" {
-		return false
-	}
 	return provider == "" || provider == "codex" || provider == "claude" && m.Action != "security-audit"
+}
+
+// SupportedOnHost reports whether the action's native tools can run here.
+// Native Windows Node cannot enforce the audit validators' POSIX file-open flags.
+func (m CommandMapping) SupportedOnHost() bool {
+	return m.Action != "security-audit" || runtime.GOOS != "windows"
 }
 
 func defaultCommands() map[string]CommandMapping {
@@ -924,10 +926,10 @@ func (c Config) CommandNames() []string {
 
 // CommandInstalled reports whether a command is available.
 //
-// The main provider must support its action and have all required skills installed.
+// The main provider and host must support its action, and required skills must be installed.
 func (c Config) CommandInstalled(name string) (bool, error) {
 	mapping, ok := c.Commands[name]
-	if !ok || len(mapping.Skills) == 0 || !mapping.SupportsProvider(c.Main) {
+	if !ok || len(mapping.Skills) == 0 || !mapping.SupportsProvider(c.Main) || !mapping.SupportedOnHost() {
 		return false, nil
 	}
 	provider := c.Main

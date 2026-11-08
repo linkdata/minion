@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,5 +120,23 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 	cfg.GitHubOAuth.RedirectURL = "https://other.example/auth/github/callback"
 	if _, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
 		t.Fatal("certificate without callback hostname was accepted")
+	}
+}
+
+func TestWebservTLSOverrideValidatesWithoutListener(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{Listen: "0.0.0.0:8443"},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
+	certDir := t.TempDir() // No certificate is needed without a listener.
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return errors.New("stop after config") })
+	}, "-oneshot", "-certdir", certDir)
+	if code != 1 || !strings.Contains(output, "Git preflight: stop after config") || strings.Contains(output, "config:") {
+		t.Fatalf("oneshot runtime TLS validation: exit=%d log=%q", code, output)
+	}
+	code, output = runStartupFixture(t, cfg, "-install-skills", "-certdir", certDir)
+	if code != 0 || strings.Contains(output, "config:") {
+		t.Fatalf("install-skills runtime TLS validation: exit=%d log=%q", code, output)
 	}
 }

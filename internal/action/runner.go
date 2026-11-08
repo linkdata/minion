@@ -249,6 +249,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
 	}
+	if (r.remote || r.selection != nil) && !(config.CommandMapping{Action: string(job.Action)}).SupportedOnHost() {
+		return result, fmt.Errorf("%w: action is unsupported on this host", monitor.ErrTerminalJob)
+	}
 	if r.runModel == nil && job.Critic != nil {
 		if err := CheckNativeRolePair(job.Main.Provider, job.Critic.Provider); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)

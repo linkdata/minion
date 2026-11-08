@@ -15,7 +15,11 @@ func runSetupMode(ctx context.Context, adminConfig config.AdminConfig, configPat
 		logger.Printf("setup UI: %v", err)
 		return 1
 	}
-	logger.Printf("setup UI: %s (config %s)", server.entryURL, configPath)
+	entry := server.entryURL
+	if entry == "" {
+		entry = server.listener.Addr().String() + " (no certificate-valid URL could be inferred)"
+	}
+	logger.Printf("setup UI: %s (config %s)", entry, configPath)
 	<-setupCtx.Done()
 	if err := server.Close(); err != nil {
 		logger.Printf("close setup UI: %v", err)

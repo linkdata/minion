@@ -64,7 +64,7 @@ func configurationView(snapshot adminConfigSnapshot) adminConfigurationView {
 	view := adminConfigurationView{Pending: snapshot.Pending, Error: snapshot.Error, Remote: snapshot.Remote}
 	view.AllCommands = cfg.CommandNames()
 	for _, name := range view.AllCommands {
-		if cfg.Commands[name].SupportsProvider(cfg.Main) && (!snapshot.Remote || snapshot.RemoteCommands[name]) {
+		if cfg.Commands[name].SupportsProvider(cfg.Main) && cfg.Commands[name].SupportedOnHost() && (!snapshot.Remote || snapshot.RemoteCommands[name]) {
 			view.Commands = append(view.Commands, name)
 		}
 	}
@@ -145,7 +145,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
     {{if .CanRemove}}<form method="post" action="/admin/repositories/remove"><input type="hidden" name="name" value="{{.Name}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove repository {{.Name}}">Remove repository</button></form>{{end}}</div>
     <p>Commands: {{range $i, $name := .Actions}}{{if $i}}, {{end}}<code>{{$name}}</code>{{else}}None{{end}}</p>
     <details><summary aria-label="Edit commands for {{.Name}}">Edit commands</summary><form method="post" action="/admin/repositories/actions" class="mt-3">
-      <input type="hidden" name="name" value="{{.Name}}"><fieldset><legend class="fs-6">Allowed commands</legend>{{$selected := .Actions}}{{range $.Dot.AllCommands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}" {{if hasAction $selected .}}checked{{else if not (hasAction $.Dot.Commands .)}}disabled{{end}}><span class="form-check-label">{{.}}{{if not (hasAction $.Dot.Commands .)}} {{if $.Dot.Remote}}(not selected by the remote worker){{else}}(unavailable with the current main AI){{end}}{{end}}</span></label>{{end}}</fieldset>
+      <input type="hidden" name="name" value="{{.Name}}"><fieldset><legend class="fs-6">Allowed commands</legend>{{$selected := .Actions}}{{range $.Dot.AllCommands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}" {{if hasAction $selected .}}checked{{else if not (hasAction $.Dot.Commands .)}}disabled{{end}}><span class="form-check-label">{{.}}{{if not (hasAction $.Dot.Commands .)}} {{if $.Dot.Remote}}(unavailable on this host or not selected by the remote worker){{else}}(unavailable with the current main AI or on this host){{end}}{{end}}</span></label>{{end}}</fieldset>
       <button class="btn btn-outline-light mt-2" type="submit" aria-label="Save commands for {{.Name}}">Save commands</button>
     </form></details>
     {{if not .CanRemove}}<small class="text-body-secondary">At least one repository is required.</small>{{end}}

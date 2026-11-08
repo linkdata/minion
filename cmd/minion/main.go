@@ -58,8 +58,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
 	webservFlagsUsed := *address != "" || *certDir != "" || *webUser != "" || *dataDir != "" || *listenURL != ""
-	if webservFlagsUsed && (*mode != "orchestrate" || *oneshot || *installSkills) {
-		logger.Print("webserv flags require orchestrate mode with the admin UI running")
+	if webservFlagsUsed && *mode != "orchestrate" {
+		logger.Print("webserv flags require orchestrate mode")
 		return 2
 	}
 	if flag.NArg() != 0 {
@@ -548,8 +548,8 @@ func checkWorkRootPath(path string) (resultErr error) {
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
 	for _, command := range cfg.CommandNames() {
-		if !cfg.Commands[command].SupportsProvider(cfg.Main) {
-			logger.Printf("command %s disabled: action %s is unsupported with %s as main", command, cfg.Commands[command].Action, cfg.Main)
+		if !cfg.Commands[command].SupportsProvider(cfg.Main) || !cfg.Commands[command].SupportedOnHost() {
+			logger.Printf("command %s disabled: action %s is unsupported with %s as main or on this host", command, cfg.Commands[command].Action, cfg.Main)
 			continue
 		}
 		if cfg.RemoteExecutor != nil {

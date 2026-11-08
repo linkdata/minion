@@ -16,10 +16,22 @@ import (
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/testsupport"
 	"github.com/linkdata/minion/internal/wintest"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestNativeWindowsRemoteAuditStopsBeforeModel(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	runner := NewRemoteRunner(t.TempDir())
+	runner.runModel = forbidModel(t)
+	result, err := runner.Run(t.Context(), job)
+	if !errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "unsupported on this host") || len(result.Calls) != 0 {
+		t.Fatalf("native audit reached model: result=%+v error=%v", result, err)
+	}
+	assertEmptyDir(t, runner.WorkRoot)
+}
 
 func TestNativeWindowsActionMaterializesGitAndRunsCommand(t *testing.T) {
 	if helper := os.Getenv("MINION_WINDOWS_MODEL_HELPER"); helper != "" {

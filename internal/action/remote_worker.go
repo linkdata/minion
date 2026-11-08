@@ -43,7 +43,7 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 			if !ok || !present || configured.Action != used.Action || !slices.Equal(configured.Skills, used.Skills) {
 				return nil, nil, fmt.Errorf("remote command %q differs from orchestrator mapping", name)
 			}
-			if len(configured.Skills) != 0 && configured.SupportsProvider(e.mainProvider()) {
+			if len(configured.Skills) != 0 && configured.SupportsProvider(e.mainProvider()) && configured.SupportedOnHost() {
 				commands[name] = true
 			}
 		}

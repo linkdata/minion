@@ -18,7 +18,7 @@ func hasUnselectedCommand(selected map[string]bool, cfg config.Config) bool {
 	for _, repo := range cfg.Repositories {
 		for _, name := range repo.Actions {
 			mapping := cfg.Commands[name]
-			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && !selected[name] {
+			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() && !selected[name] {
 				return true
 			}
 		}

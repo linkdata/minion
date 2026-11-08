@@ -27,6 +27,8 @@ func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
 		valid        bool
 	}{
 		{name: "assigned", ledger: auditCoveredLedgerFixture, valid: true},
+		{name: "companion", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1), valid: true},
+		{name: "noncompanion skill page", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["SKILL.md#Core principles"]`, 1)},
 		{name: "wrong block", ledger: strings.Replace(auditCoveredLedgerFixture, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Injection"`, 1)},
 		{name: "no block", ledger: strings.Replace(auditCoveredLedgerFixture, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":null`, 1)},
 		{name: "absent block", ledger: missing},

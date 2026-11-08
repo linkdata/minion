@@ -489,6 +489,10 @@ function validateExcludedBlocks(value, location, errors) {
 }
 
 const classBlocksByFile = new Map();
+const companionFiles = new Set(
+  [...fs.readFileSync(path.join(__dirname, "ATTACK-CLASSES.md"), "utf8").matchAll(/\]\(([A-Z][A-Z0-9-]*\.md)\)/g)]
+    .map((match) => match[1]),
+);
 
 function hasClassBlock(ref, ordinary) {
   if (typeof ref !== "string") return false;
@@ -496,7 +500,7 @@ function hasClassBlock(ref, ordinary) {
   if (separator < 0) return false;
   const file = ref.slice(0, separator);
   const name = ref.slice(separator + 1);
-  if (!/^[A-Z][A-Z0-9-]*\.md$/.test(file) || !name || (file === "ATTACK-CLASSES.md") !== ordinary) return false;
+  if (!name || (ordinary ? file !== "ATTACK-CLASSES.md" : !companionFiles.has(file))) return false;
   if (!classBlocksByFile.has(file)) {
     const blocks = new Set();
     try {

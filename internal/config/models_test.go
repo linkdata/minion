@@ -206,11 +206,15 @@ func TestCommandProviderCapabilities(t *testing.T) {
 	for _, provider := range []string{"", "codex", "claude", "unknown"} {
 		for _, action := range []string{"review", "fix", "comment", "security-audit"} {
 			mapping := CommandMapping{Action: action, Skills: []string{defaultAntiInjectionSkill}}
-			want := provider != "unknown" && (provider != "claude" || action != "security-audit") &&
-				(runtime.GOOS != "windows" || action != "security-audit")
-			if got := mapping.SupportsProvider(provider); got != want {
-				t.Errorf("%s/%s supported = %t; want %t", provider, action, got, want)
+			providerSupported := provider != "unknown" && (provider != "claude" || action != "security-audit")
+			if got := mapping.SupportsProvider(provider); got != providerSupported {
+				t.Errorf("%s/%s provider supported = %t; want %t", provider, action, got, providerSupported)
 			}
+			hostSupported := runtime.GOOS != "windows" || action != "security-audit"
+			if got := mapping.SupportedOnHost(); got != hostSupported {
+				t.Errorf("%s host supported = %t; want %t", action, got, hostSupported)
+			}
+			want := providerSupported && hostSupported
 			cfg := Config{Main: provider, Commands: map[string]CommandMapping{"test": mapping}}
 			if installed, err := cfg.CommandInstalled("test"); err != nil || installed != want {
 				t.Errorf("%s/%s installed = %t, %v; want %t", provider, action, installed, err, want)
