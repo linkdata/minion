@@ -14,7 +14,7 @@ import (
 func TestAdminWebservConfigUsesCLIOverrides(t *testing.T) {
 	cfg := config.AdminConfig{
 		Listen: "127.0.0.1:8377", WebservAddress: "127.0.0.1:9000",
-		WebservCertDir: "/certs", WebservUser: "minion", WebservDataDir: "/data",
+		WebservCertDir: "/certs", WebservDataDir: "/data",
 		WebservListenURL: "https://minion.example",
 	}
 	service := adminWebservConfig(cfg)

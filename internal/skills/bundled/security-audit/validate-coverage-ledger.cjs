@@ -727,11 +727,22 @@ function collectUnitErrors(unit, index) {
   }
   validateStringArray(unit.selected_companion_blocks, `${base}.selected_companion_blocks`, errors);
   if (Array.isArray(unit.selected_companion_blocks)) {
+    const selected = new Set(unit.selected_companion_blocks);
+    const classFiles = new Set();
     unit.selected_companion_blocks.forEach((block, blockIndex) => {
       if (!hasClassBlock(block, false)) {
         errors.push(`${base}.selected_companion_blocks[${blockIndex}]: block is absent from its companion file`);
+      } else if (hasClassBlock(block, false, true)) {
+        classFiles.add(block.slice(0, block.indexOf("#")));
       }
     });
+    for (const file of classFiles) {
+      for (const section of ["Core discipline", "Universal moves", "Validation rules"]) {
+        if (!selected.has(`${file}#${section}`)) {
+          errors.push(`${base}.selected_companion_blocks: ${file} class requires ${section}`);
+        }
+      }
+    }
   }
   if (isObject(unit.canonical_refs) &&
       unit.ordinary_attack_class_block !== unit.canonical_refs.attack_class &&

@@ -48,9 +48,9 @@ func TestSetupAdminCannotOpenOperationalPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := newAdminHandlerWithSetup(jw, config.AdminConfig{
+	handler, err := newAdminHandlerWithSetupPath(jw, config.AdminConfig{
 		Administrators: []config.AdminAccount{testAdminAccount()},
-	}, nil, nil, true)
+	}, nil, nil, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -118,11 +118,7 @@ type adminAccess struct {
 }
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
-	return newAdminHandlerWithSetup(jw, cfg, owner, oauth, false, liveConfigs...)
-}
-
-func newAdminHandlerWithSetup(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, setup bool, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
-	return newAdminHandlerWithSetupPath(jw, cfg, owner, oauth, setup, "", liveConfigs...)
+	return newAdminHandlerWithSetupPath(jw, cfg, owner, oauth, false, "", liveConfigs...)
 }
 
 func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, setup bool, setupPath string, liveConfigs ...*adminLiveConfig) (http.Handler, error) {

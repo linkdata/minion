@@ -26,15 +26,24 @@ func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
 	companionClass = strings.Replace(companionClass, "ATTACK-CLASSES.md%23Access%20control", "WEB-PROTOCOL-AND-AUTH.md%23Ordinary%20CSRF", 1)
 	companionClass = strings.Replace(companionClass, `"ordinary_attack_class_block":"WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"`, `"ordinary_attack_class_block":null`, 1)
 	companionClass = strings.Replace(companionClass, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1)
+	const companionBlocks = `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline","WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF","WEB-PROTOCOL-AND-AUTH.md#Universal moves","WEB-PROTOCOL-AND-AUTH.md#Validation rules"]`
+	companionWithContext := strings.Replace(companionClass, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, companionBlocks, 1)
+	ordinaryWithContext := strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, companionBlocks, 1)
 	companionContext := strings.ReplaceAll(companionClass, "Ordinary CSRF", "Core discipline")
 	companionContext = strings.ReplaceAll(companionContext, "Ordinary%20CSRF", "Core%20discipline")
 	for _, test := range []struct {
-		name, ledger string
-		valid        bool
+		name, ledger, wantError string
+		valid                   bool
 	}{
 		{name: "assigned", ledger: auditCoveredLedgerFixture, valid: true},
-		{name: "companion", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1), valid: true},
-		{name: "companion-only class", ledger: companionClass, valid: true},
+		{name: "ordinary with companion", ledger: ordinaryWithContext, valid: true},
+		{name: "companion-only class", ledger: companionWithContext, valid: true},
+		{name: "ordinary with companion without context", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1), wantError: "class requires Core discipline"},
+		{name: "companion without context", ledger: companionClass, wantError: "class requires Core discipline"},
+		{name: "missing core discipline", ledger: strings.Replace(companionWithContext, `"WEB-PROTOCOL-AND-AUTH.md#Core discipline",`, "", 1), wantError: "class requires Core discipline"},
+		{name: "missing universal moves", ledger: strings.Replace(companionWithContext, `,"WEB-PROTOCOL-AND-AUTH.md#Universal moves"`, "", 1), wantError: "class requires Universal moves"},
+		{name: "missing validation rules", ledger: strings.Replace(companionWithContext, `,"WEB-PROTOCOL-AND-AUTH.md#Validation rules"`, "", 1), wantError: "class requires Validation rules"},
+		{name: "wrong companion context", ledger: strings.Replace(companionWithContext, "WEB-PROTOCOL-AND-AUTH.md#Core discipline", "CLIENT-SIDE.md#Core discipline", 1), wantError: "class requires Core discipline"},
 		{name: "companion context selection", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline"]`, 1), valid: true},
 		{name: "companion context as class", ledger: companionContext},
 		{name: "noncompanion skill page", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["SKILL.md#Core principles"]`, 1)},
@@ -50,6 +59,9 @@ func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
 			output, err := exec.CommandContext(t.Context(), node, script, ledger).CombinedOutput()
 			if (err == nil) != test.valid {
 				t.Fatalf("validator error = %v; output = %s", err, output)
+			}
+			if test.wantError != "" && !strings.Contains(string(output), test.wantError) {
+				t.Fatalf("validator output = %s; want %q", output, test.wantError)
 			}
 		})
 	}
@@ -120,7 +132,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 			}
 		})
 	}
-	withContext := strings.Replace(validLedger, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1)
+	withContext := strings.Replace(validLedger, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline","WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF","WEB-PROTOCOL-AND-AUTH.md#Universal moves","WEB-PROTOCOL-AND-AUTH.md#Validation rules"]`, 1)
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
 		name, ledger, findings, report, want string

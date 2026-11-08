@@ -107,7 +107,6 @@ func cloneConfig(cfg config.Config) (config.Config, error) {
 	if cfg.Admin != nil && cloned.Admin != nil {
 		cloned.Admin.WebservAddress = cfg.Admin.WebservAddress
 		cloned.Admin.WebservCertDir = cfg.Admin.WebservCertDir
-		cloned.Admin.WebservUser = cfg.Admin.WebservUser
 		cloned.Admin.WebservDataDir = cfg.Admin.WebservDataDir
 		cloned.Admin.WebservListenURL = cfg.Admin.WebservListenURL
 	}

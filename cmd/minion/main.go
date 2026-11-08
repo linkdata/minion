@@ -137,7 +137,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 2
 	}
 	cfg, err := config.LoadWithAdminRuntime(loadedPath, config.AdminConfig{
-		WebservAddress: *address, WebservCertDir: *certDir, WebservUser: *webUser,
+		WebservAddress: *address, WebservCertDir: *certDir,
 		WebservDataDir: *dataDir, WebservListenURL: *listenURL,
 	})
 	if err != nil {
