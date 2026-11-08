@@ -620,7 +620,7 @@ func (c *Config) Validate(configDir string) error {
 			}
 			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files")
 		}
-		if err := admin.ValidateEntryURL(); err != nil {
+		if err := admin.ValidateWebservOptions(); err != nil {
 			return err
 		}
 		if err := admin.validateOAuth(host, number); err != nil {

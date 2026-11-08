@@ -60,7 +60,7 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
 	if hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, false) ||
-		!hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) {
+		hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) != (runtime.GOOS != "windows") {
 		t.Fatal("remote audit capability did not distinguish unsupported from unselected")
 	}
 }

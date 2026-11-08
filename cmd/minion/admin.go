@@ -189,7 +189,7 @@ func adminWebservConfig(cfg config.AdminConfig) *webserv.Config {
 }
 
 func validateWebservAdminAddress(cfg config.AdminConfig) error {
-	if err := cfg.ValidateEntryURL(); err != nil {
+	if err := cfg.ValidateWebservOptions(); err != nil {
 		return err
 	}
 	if cfg.WebservCertDir != "" || cfg.TLSCertFile != "" {

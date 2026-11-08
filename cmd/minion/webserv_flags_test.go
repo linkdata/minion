@@ -41,6 +41,11 @@ func TestWebservOverrideRequiresTLSOutsideLoopback(t *testing.T) {
 			t.Fatalf("loopback address %q rejected: %v", address, err)
 		}
 	}
+	for _, address := range []string{"127.0.0.1:99999", "127.0.0.1:-1"} {
+		if err := validateWebservAdminAddress(config.AdminConfig{WebservAddress: address}); err == nil || !strings.Contains(err.Error(), "-address port") {
+			t.Fatalf("invalid port in %q accepted: %v", address, err)
+		}
+	}
 	if err := validateWebservAdminAddress(config.AdminConfig{WebservAddress: ":9000", WebservCertDir: "/certs"}); err != nil {
 		t.Fatalf("TLS address rejected: %v", err)
 	}
@@ -143,6 +148,10 @@ func TestWebservTLSOverrideValidatesWithoutListener(t *testing.T) {
 	code, output = runStartupFixture(t, cfg, "-install-skills", "-certdir", certDir)
 	if code != 0 || strings.Contains(output, "config:") {
 		t.Fatalf("install-skills runtime TLS validation: exit=%d log=%q", code, output)
+	}
+	code, output = runStartupFixture(t, cfg, "-check", "-address", "127.0.0.1:99999")
+	if code != 2 || !strings.Contains(output, "-address port") {
+		t.Fatalf("-check accepted invalid webserv port: exit=%d log=%q", code, output)
 	}
 }
 

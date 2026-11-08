@@ -13,7 +13,7 @@ import (
 func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error {
 	var entryURL *url.URL
 	if a.WebservListenURL != "" {
-		entryURL, _ = url.Parse(a.WebservListenURL) // validateEntryURL has checked it.
+		entryURL, _ = url.Parse(a.WebservListenURL) // ValidateWebservOptions checked it.
 	}
 	var cookieHost string
 	for _, entry := range []struct {
@@ -105,8 +105,13 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 	return nil
 }
 
-// ValidateEntryURL checks the runtime URL against the listener's TLS mode.
-func (a *AdminConfig) ValidateEntryURL() error {
+// ValidateWebservOptions checks the runtime address and URL against the listener.
+func (a *AdminConfig) ValidateWebservOptions() error {
+	if _, port, err := net.SplitHostPort(a.WebservAddress); err == nil {
+		if _, err := net.LookupPort("tcp", port); err != nil {
+			return fmt.Errorf("-address port: %w", err)
+		}
+	}
 	if a.WebservListenURL == "" {
 		return nil
 	}
