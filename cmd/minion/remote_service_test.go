@@ -135,7 +135,12 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		request.Header.Set("Authorization", "Bearer "+token)
 		request.Header.Set("Content-Type", "application/json")
 		done := make(chan pullResult, 1)
+		t.Cleanup(func() {
+			for range done {
+			}
+		})
 		go func() {
+			defer close(done)
 			response, err := client.Do(request)
 			if err != nil {
 				done <- pullResult{err: err}
@@ -194,11 +199,10 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.Copy(io.Discard, response.Body); err != nil {
-		t.Fatal(err)
-	}
-	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusPreconditionRequired {
-		t.Fatalf("unvalidated key did not gate the next pull: status=%d error=%v", response.StatusCode, err)
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusPreconditionRequired {
+		t.Fatalf("unvalidated key did not gate the next pull: status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 	}
 	type credentialRefresh struct {
 		PreflightGeneration uint64                   `json:"preflight_generation"`
@@ -321,11 +325,10 @@ func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.Copy(io.Discard, response.Body); err != nil {
-		t.Fatal(err)
-	}
-	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("remote preflight fixture status=%d error=%v", response.StatusCode, err)
+	_, readErr := io.Copy(io.Discard, response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("remote preflight fixture status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 	}
 }
 

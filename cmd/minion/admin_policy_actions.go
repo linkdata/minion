@@ -40,8 +40,8 @@ func registerAdminPolicyActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		}
 		mux.Handle("POST /admin/policy/"+provider+"/key", adminConfigPost("/admin/policy", []string{"api_key"}, "", func(_ context.Context, values url.Values) error {
 			key := values.Get("api_key")
-			if key == "" || len(key) > config.MaxProviderAPIKeyBytes {
-				return fmt.Errorf("API key must contain 1 to %d bytes; clear it to use a saved CLI login or host API-key environment", config.MaxProviderAPIKeyBytes)
+			if len(key) < config.MinProviderAPIKeyBytes || len(key) > config.MaxProviderAPIKeyBytes {
+				return fmt.Errorf("API key must contain %d to %d bytes; clear it to use a saved CLI login or host API-key environment", config.MinProviderAPIKeyBytes, config.MaxProviderAPIKeyBytes)
 			}
 			return saveKey(key)
 		}))

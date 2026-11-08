@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +18,12 @@ import (
 
 func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 	master, terminal, _ := newHashPTY(t)
+	var workers sync.WaitGroup
+	defer func() {
+		_ = master.Close()
+		_ = terminal.Close()
+		workers.Wait()
+	}()
 	oldInput, oldError := os.Stdin, os.Stderr
 	os.Stdin, os.Stderr = terminal, terminal
 	t.Cleanup(func() { os.Stdin, os.Stderr = oldInput, oldError })
@@ -27,20 +34,22 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 		err     error
 	}
 	done := make(chan result, 1)
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		created, err := createInitialConfig(path, log.New(&output, "", 0))
 		done <- result{created, err}
 	}()
 	prompt := make([]byte, len("Set admin password: "))
 	promptRead := make(chan error, 1)
-	go func() { _, err := io.ReadFull(master, prompt); promptRead <- err }()
+	workers.Add(1)
+	go func() { defer workers.Done(); _, err := io.ReadFull(master, prompt); promptRead <- err }()
 	select {
 	case err := <-promptRead:
 		if err != nil || string(prompt) != "Set admin password: " {
 			t.Fatalf("initial password prompt=%q error=%v", prompt, err)
 		}
 	case <-time.After(5 * time.Second):
-		_ = master.Close()
 		t.Fatal("initial password prompt timed out")
 	}
 	if _, err := master.Write([]byte("\rnew-admin-password\r")); err != nil {
@@ -51,7 +60,9 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 		err    error
 	}
 	retryRead := make(chan retryResult, 1)
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		var output strings.Builder
 		for output.Len() < 256 && !strings.HasSuffix(output.String(), "Set admin password: ") {
 			var next [1]byte
@@ -71,7 +82,6 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 	case got := <-done:
 		t.Fatalf("blank password ended setup: %+v", got)
 	case <-time.After(5 * time.Second):
-		_ = master.Close()
 		t.Fatal("blank password retry timed out")
 	}
 	select {

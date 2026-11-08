@@ -135,13 +135,23 @@ func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pullRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/next", bytes.NewReader(pullBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pullRequest.Header.Set("Content-Type", "application/json")
 	type pullResult struct {
 		status int
 		err    error
 	}
 	pulled := make(chan pullResult, 1)
+	t.Cleanup(func() {
+		for range pulled {
+		}
+	})
 	go func() {
-		response, err := client.Post(server.URL+"/next", "application/json", bytes.NewReader(pullBody))
+		defer close(pulled)
+		response, err := client.Do(pullRequest)
 		if err != nil {
 			pulled <- pullResult{err: err}
 			return
@@ -165,7 +175,14 @@ func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
 	}
 	newCredentials := WorkerCredentials{CodexAPIKey: "new-key"}
 	updated := make(chan error, 1)
-	go func() { updated <- executor.updateIdleWorkerCredentials(ctx, newCredentials) }()
+	t.Cleanup(func() {
+		for range updated {
+		}
+	})
+	go func() {
+		defer close(updated)
+		updated <- executor.updateIdleWorkerCredentials(ctx, newCredentials)
+	}()
 	select {
 	case got := <-pulled:
 		if got.status != http.StatusTooEarly || got.err != nil {

@@ -101,15 +101,15 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			}
 			t.Cleanup(unauthorized.CloseIdleConnections)
 			response := post("/preflight", unauthorized)
-			if response.StatusCode != http.StatusUnauthorized {
-				t.Fatalf("unauthorized preflight status=%d", response.StatusCode)
+			status, closeErr := response.StatusCode, response.Body.Close()
+			if status != http.StatusUnauthorized || closeErr != nil {
+				t.Fatalf("unauthorized preflight status=%d close=%v", status, closeErr)
 			}
-			_ = response.Body.Close()
 			response = post("/next", client)
-			if response.StatusCode != http.StatusConflict {
-				t.Fatalf("pull skipped required preflight: status=%d", response.StatusCode)
+			status, closeErr = response.StatusCode, response.Body.Close()
+			if status != http.StatusConflict || closeErr != nil {
+				t.Fatalf("pull skipped required preflight: status=%d close=%v", status, closeErr)
 			}
-			_ = response.Body.Close()
 			if !tc.wantError {
 				// A Codex-only offer does not need Claude's host prerequisites.
 				root := filepath.Join(t.TempDir(), strings.Repeat("x", 60))
@@ -136,7 +136,12 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			pullCtx, stopPull := context.WithCancel(ctx)
 			defer stopPull()
 			pullDone := make(chan error, 1)
+			t.Cleanup(func() {
+				for range pullDone {
+				}
+			})
 			go func() {
+				defer close(pullDone)
 				request, err := http.NewRequestWithContext(pullCtx, http.MethodPost, origin+"/next", strings.NewReader(pullBody))
 				if err == nil {
 					request.Header.Set("Content-Type", "application/json")
@@ -192,7 +197,12 @@ func TestRemoteRejectedCredentialKeepsWorkerReadyForCorrection(t *testing.T) {
 	defer cancel()
 	stage := func(key string) <-chan error {
 		updated := make(chan error, 1)
+		t.Cleanup(func() {
+			for range updated {
+			}
+		})
 		go func() {
+			defer close(updated)
 			updated <- executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{CodexAPIKey: key})
 		}()
 		for {
@@ -224,7 +234,14 @@ func TestRemoteRejectedCredentialKeepsWorkerReadyForCorrection(t *testing.T) {
 	}
 	worker := NewRemoteRunner(t.TempDir())
 	next := make(chan error, 1)
-	go func() { next <- RunHTTPLoop(ctx, server.Client(), server.URL, "remote", worker) }()
+	t.Cleanup(func() {
+		for range next {
+		}
+	})
+	go func() {
+		defer close(next)
+		next <- RunHTTPLoop(ctx, server.Client(), server.URL, "remote", worker)
+	}()
 	for {
 		executor.mu.Lock()
 		pull, changed := executor.pull, executor.changed
@@ -287,7 +304,14 @@ func TestRemoteChoicePreflightReturnsLostACKResponse(t *testing.T) {
 	defer cancel()
 	candidate := WorkerCredentials{CodexAPIKey: "new-key"}
 	updated := make(chan error, 1)
-	go func() { updated <- executor.updateIdleWorkerCredentials(ctx, candidate) }()
+	t.Cleanup(func() {
+		for range updated {
+		}
+	})
+	go func() {
+		defer close(updated)
+		updated <- executor.updateIdleWorkerCredentials(ctx, candidate)
+	}()
 	for {
 		executor.mu.Lock()
 		pending, changed := executor.preflightPending, executor.changed

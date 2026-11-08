@@ -40,6 +40,7 @@ func TestSetupWaitsForPendingDurableWork(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() { _ = store.Close() })
 				switch kind {
 				case "accepted":
 					accepted := dashboardTestAccepted(at)
@@ -149,6 +150,7 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() { _ = store.Close() })
 				at := time.Now().UTC()
 				store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{AttemptID: "attempt-1", Kind: "comment",
 					BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,

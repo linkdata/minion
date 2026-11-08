@@ -332,7 +332,7 @@ func TestAdminPolicyAPIKeysAreEditableWithoutRenderingSecrets(t *testing.T) {
 	page := adminResponse(handler, http.MethodGet, "/admin/policy", nil, cookie, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `type="password" name="api_key"`) ||
 		strings.Count(page.Body.String(), `maxlength="`+strconv.Itoa(config.MaxProviderAPIKeyBytes)+`"`) != 2 ||
-		!strings.Contains(page.Body.String(), "256 bytes per key") ||
+		!strings.Contains(page.Body.String(), "8–256 UTF-8 bytes per key") ||
 		!strings.Contains(page.Body.String(), "/admin/policy/codex/key/clear") || !strings.Contains(page.Body.String(), "/admin/policy/claude/key/clear") {
 		t.Fatalf("API key controls missing: status=%d body=%q", page.Code, page.Body.String())
 	}
@@ -341,9 +341,9 @@ func TestAdminPolicyAPIKeysAreEditableWithoutRenderingSecrets(t *testing.T) {
 			t.Fatalf("policy page exposed API key %q", secret)
 		}
 	}
-	for _, invalid := range []string{"", "rejected-key with-space", strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)} {
+	for _, invalid := range []string{"", "x", "rejected-key with-space", strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)} {
 		response := post("/admin/policy/codex/key", url.Values{"api_key": {invalid}})
-		if response.Code != http.StatusConflict || invalid != "" && strings.Contains(response.Body.String(), invalid) {
+		if response.Code != http.StatusConflict || len(invalid) > 1 && strings.Contains(response.Body.String(), invalid) {
 			t.Fatalf("invalid API key: status=%d body=%q", response.Code, response.Body.String())
 		}
 	}
