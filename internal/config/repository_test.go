@@ -105,3 +105,30 @@ func TestAddRepositoryPreservesCriticStoppingValues(t *testing.T) {
 		})
 	}
 }
+
+func TestAddRepositoryUsesActiveAdminRuntime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"bot_login":"bot","admin":{"listen":"0.0.0.0:8443"},"repositories":[{"name":"owner/first","id":1,"owner_id":2,"actions":["review"]}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := Repository{Name: "owner/second", ID: 3, OwnerID: 2, Actions: []string{"review"}}
+	if _, err := AddRepository(path, repo); err == nil {
+		t.Fatal("public listener passed validation without runtime TLS")
+	}
+	added, err := AddRepositoryWithAdminRuntime(path, repo, &AdminConfig{WebservCertDir: "/certs"})
+	if err != nil || added.Name != repo.Name {
+		t.Fatalf("invitation with runtime TLS: repo=%+v err=%v", added, err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw Config
+	if err := json.Unmarshal(updated, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Repositories) != 2 || raw.Admin.WebservCertDir != "" {
+		t.Fatalf("runtime settings persisted or repository missing: %+v", raw)
+	}
+}

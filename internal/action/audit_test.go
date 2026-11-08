@@ -132,7 +132,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) {
 							t.Fatalf("audit source writable or reports not separate: writable=%v output=%q source=%q", writable, outputDir, dir)
 						}
-						for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Check authorization."} {
+						for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Source-derived: ", "Check authorization."} {
 							if !strings.Contains(prompt, want) {
 								t.Fatalf("audit prompt missing %q", want)
 							}

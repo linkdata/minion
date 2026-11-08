@@ -32,6 +32,7 @@ const (
 	DefaultMaxGitHubContextBytes = 32 << 10
 	// DefaultAdminListen binds the optional admin server to IPv4 loopback.
 	DefaultAdminListen = "127.0.0.1:8377"
+	defaultStatePath   = "var/state.json"
 	// DefaultInactivityTimeout is the default gap allowed without executor progress.
 	DefaultInactivityTimeout = 10 * time.Minute
 	// MaxInactivityTimeout is the largest configurable inactivity timeout.
@@ -368,6 +369,31 @@ func LoadWithAdminRuntime(path string, runtime AdminConfig) (Config, error) {
 	return load(path, &runtime)
 }
 
+// LoadStatePath reads only the setting needed by the usage report.
+// Listener validation depends on runtime flags that are unavailable to `minion usage`.
+func LoadStatePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := decode(f)
+	err = errors.Join(err, f.Close())
+	if err != nil {
+		return "", err
+	}
+	if cfg.StatePath == "" {
+		cfg.StatePath = defaultStatePath
+	}
+	if !filepath.IsAbs(cfg.StatePath) {
+		cfg.StatePath = filepath.Join(filepath.Dir(abs), cfg.StatePath)
+	}
+	return cfg.StatePath, nil
+}
+
 func load(path string, runtime *AdminConfig) (Config, error) {
 	var cfg Config
 	var err error
@@ -590,6 +616,9 @@ func (c *Config) Validate(configDir string) error {
 			}
 			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files")
 		}
+		if err := admin.ValidateEntryURL(); err != nil {
+			return err
+		}
 		if err := admin.validateOAuth(host, number); err != nil {
 			return err
 		}
@@ -735,7 +764,7 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("max_github_context_bytes must be between 1 and %d", workspace.MaxBytes)
 	}
 	if c.StatePath == "" {
-		c.StatePath = "var/state.json"
+		c.StatePath = defaultStatePath
 	}
 	if c.WorkRoot == "" {
 		c.WorkRoot = "var/work"

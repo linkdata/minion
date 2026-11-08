@@ -1,19 +1,52 @@
 package action
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/command"
 )
 
+func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	script := filepath.Join("..", "skills", "bundled", "security-audit", "validate-coverage-ledger.cjs")
+	missing := strings.ReplaceAll(auditCoveredLedgerFixture, "ATTACK-CLASSES.md#Access control", "ATTACK-CLASSES.md#Imaginary")
+	missing = strings.Replace(missing, "ATTACK-CLASSES.md%23Access%20control", "ATTACK-CLASSES.md%23Imaginary", 1)
+	for _, test := range []struct {
+		name, ledger string
+		valid        bool
+	}{
+		{name: "assigned", ledger: auditCoveredLedgerFixture, valid: true},
+		{name: "wrong block", ledger: strings.Replace(auditCoveredLedgerFixture, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Injection"`, 1)},
+		{name: "no block", ledger: strings.Replace(auditCoveredLedgerFixture, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":null`, 1)},
+		{name: "absent block", ledger: missing},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ledger := filepath.Join(t.TempDir(), "coverage-ledger.json")
+			if err := os.WriteFile(ledger, []byte(test.ledger), 0600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.CommandContext(t.Context(), node, script, ledger).CombinedOutput()
+			if (err == nil) != test.valid {
+				t.Fatalf("validator error = %v; output = %s", err, output)
+			}
+		})
+	}
+}
+
 func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	validLedger := auditCoveredLedgerFixture
 	archived := `{"wave":1,"status":"covered","agent_id":"older","reviewed_paths":["source.txt"],"local_checks":[{"agent_id":"helper","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null},{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}],"result_fingerprints":[],"unresolved":[],"reassignment_reason":"Rechecked"}`
 	withAttempt := strings.Replace(validLedger, `"attempts":[]`, `"attempts":[`+archived+`]`, 1)
 	withAttempt = strings.Replace(withAttempt, `"wave":1,"status":"covered","agent_id":"hunter"`, `"wave":2,"status":"covered","agent_id":"hunter"`, 1)
-	withLifecycle := strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::attack"`, `"coverage_id":"source::boundary::subsystem::attack::lifecycle"`, 1)
-	withLifecycle = strings.Replace(withLifecycle, `"attack_class":"attack"}`, `"attack_class":"attack","lifecycle":"lifecycle"}`, 1)
+	withLifecycle := strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::ATTACK-CLASSES.md%23Access%20control"`, `"coverage_id":"source::boundary::subsystem::ATTACK-CLASSES.md%23Access%20control::lifecycle"`, 1)
+	withLifecycle = strings.Replace(withLifecycle, `"attack_class":"ATTACK-CLASSES.md#Access control"}`, `"attack_class":"ATTACK-CLASSES.md#Access control","lifecycle":"lifecycle"}`, 1)
 	withLifecycle = strings.Replace(withLifecycle, `"attack_class":"Attack","starting_paths"`, `"attack_class":"Attack","lifecycle":"Lifecycle","starting_paths"`, 1)
 	archivedCandidate := strings.Replace(archived, `"status":"covered"`, `"status":"candidate"`, 1)
 	archivedCandidate = strings.Replace(archivedCandidate, `"result_fingerprints":[]`, `"result_fingerprints":["F"]`, 1)
@@ -72,8 +105,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 			}
 		})
 	}
-	withContext := strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":"The ordinary attack path is covered."`, 1)
-	withContext = strings.Replace(withContext, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["Companion A"]`, 1)
+	withContext := strings.Replace(validLedger, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1)
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"Companion B","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
 		name, ledger, findings, report, want string
@@ -115,6 +147,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "fractional current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":1.5`, 1), want: "invalid current wave"},
 		{name: "zero current wave", ledger: strings.Replace(validLedger, `"wave":1`, `"wave":0`, 1), want: "invalid current wave"},
 		{name: "confirmed finding", ledger: confirmedLedger, findings: auditConfirmedFindingFixture},
+		{name: "confirmed claim without source-derived evidence", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"observed_result":"Source-derived: the branch writes the other user's object."`, `"observed_result":"The other user's object changes."`, 1), want: "incomplete confirmed finding"},
 		{name: "confirmed finding with second candidate", ledger: twoBoundaries, findings: auditConfirmedFindingFixture},
 		{name: "one candidate cannot borrow another candidate's verifier", ledger: oneUnverifiedBoundary, findings: auditConfirmedFindingFixture, want: "without separately attributed source check"},
 		{name: "needs_validation finding", ledger: confirmedLedger, findings: auditCandidateFindingFixture},
@@ -139,8 +172,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "confirmed unknown condition", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"conditions":[]`, `"conditions":[{"kind":"unknown","description":"The attacker has an ordinary account."}]`, 1), want: "incomplete confirmed finding"},
 		{name: "confirmed invisible condition", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"conditions":[]`, `"conditions":[{"kind":"authentication_level","description":"\u200b"}]`, 1), want: "incomplete confirmed finding"},
 		{name: "confirmed invisible root cause", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"root_cause":"The operation omits the guard before changing the object."`, `"root_cause":"\u200b"`, 1), want: "incomplete confirmed finding"},
-		{name: "confirmed control-only observed result", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"observed_result":"The other user's object changes."`, `"observed_result":"\u0001"`, 1), want: "incomplete confirmed finding"},
-		{name: "confirmed missing observed result", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"observed_result":"The other user's object changes."`, `"observed_result":""`, 1), want: "incomplete confirmed finding"},
+		{name: "confirmed control-only observed result", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"observed_result":"Source-derived: the branch writes the other user's object."`, `"observed_result":"\u0001"`, 1), want: "incomplete confirmed finding"},
+		{name: "confirmed missing observed result", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"observed_result":"Source-derived: the branch writes the other user's object."`, `"observed_result":""`, 1), want: "incomplete confirmed finding"},
 		{name: "confirmed missing remediation", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"remediation":{"strategy":"Check ownership before the state change."}`, `"remediation":{}`, 1), want: "incomplete confirmed finding"},
 		{name: "confirmed missing severity", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"severity":{"likelihood":{"score":"medium","reason":"The operation is directly reachable."},"impact":{"score":"medium","reason":"One protected object can change."},"overall_severity":"medium"},`, ``, 1), want: "incomplete confirmed finding"},
 		{name: "empty ledger", ledger: `[]`, want: "no coverage units"},
@@ -150,7 +183,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "sole uppercase verdict", ledger: confirmedLedger, findings: strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"VERDICT":"confirmed"`, 1), want: "noncanonical key"},
 		{name: "duplicate finding key", findings: `[{"fingerprint":"F","fingerprint":"F"}]`, want: "duplicate object keys"},
 		{name: "bare finding", findings: `[{"fingerprint":"F"}]`, want: "incomplete finding"},
-		{name: "noncanonical identity", ledger: strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::attack"`, `"coverage_id":"forged"`, 1), want: "noncanonical coverage identity"},
+		{name: "noncanonical identity", ledger: strings.Replace(validLedger, `"coverage_id":"source::boundary::subsystem::ATTACK-CLASSES.md%23Access%20control"`, `"coverage_id":"forged"`, 1), want: "noncanonical coverage identity"},
 		{name: "missing owner", ledger: strings.Replace(validLedger, `"agent_id":"hunter","reviewed_paths"`, `"agent_id":null,"reviewed_paths"`, 1), want: "assigned review evidence"},
 		{name: "unchecked path", ledger: strings.Replace(validLedger, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["source.txt"]`, `"local_checks":[{"agent_id":"verifier","reviewed_paths":["other.txt"]`, 1), want: "local check outside reviewed paths"},
 		{name: "check without result", ledger: strings.Replace(validLedger, `"result":"The guard is present"`, `"result":""`, 1), want: "incomplete local check"},
@@ -158,8 +191,10 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "invisible local check result", ledger: strings.Replace(validLedger, `"result":"The guard is present"`, `"result":"\u200b"`, 1), want: "incomplete local check"},
 		{name: "invisible unresolved reason", ledger: strings.Replace(blockedAndCovered, `"unresolved":["Investigate boundary"]`, `"unresolved":["\u200b"]`, 1), want: "empty unresolved reason"},
 		{name: "covered with unresolved", ledger: strings.Replace(validLedger, `"unresolved":[]}]`, `"unresolved":["ignored"]}]`, 1), want: "inconsistent status evidence"},
-		{name: "missing ordinary block", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":null,`, ``, 1), want: "required coverage context"},
-		{name: "invalid ordinary block type", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":null`, `"ordinary_attack_class_block":[]`, 1), want: "invalid ordinary attack class block"},
+		{name: "missing ordinary block", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control",`, ``, 1), want: "required coverage context"},
+		{name: "invalid ordinary block type", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":[]`, 1), want: "invalid ordinary attack class block"},
+		{name: "unassigned attack class", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Injection"`, 1), want: "attack class without an assigned block"},
+		{name: "attack class with no block", ledger: strings.Replace(validLedger, `"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control"`, `"ordinary_attack_class_block":null`, 1), want: "attack class without an assigned block"},
 		{name: "missing selected blocks", ledger: strings.Replace(validLedger, `"selected_companion_blocks":[],`, ``, 1), want: "required coverage context"},
 		{name: "null selected blocks", ledger: strings.Replace(validLedger, `"selected_companion_blocks":[]`, `"selected_companion_blocks":null`, 1), want: "required coverage context"},
 		{name: "missing excluded blocks", ledger: strings.Replace(validLedger, `"excluded_blocks":[],`, ``, 1), want: "required coverage context"},

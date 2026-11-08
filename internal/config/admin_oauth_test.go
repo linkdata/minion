@@ -65,7 +65,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		unbound.Admin.TLSCertFile, unbound.Admin.TLSKeyFile = "", ""
 		unbound.Admin.GitHubOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/github/callback"
 		unbound.Admin.GitLabOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/gitlab/callback"
-		if err := unbound.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP host must match admin.listen") {
+		if err := unbound.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP host must match the admin listener") {
 			t.Errorf("unbound HTTP callback %s for %s: %v", tc.host, tc.listen, err)
 		}
 	}
@@ -79,8 +79,8 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	}
 	proxiedHTTPS := valid()
 	proxiedHTTPS.Admin.TLSCertFile, proxiedHTTPS.Admin.TLSKeyFile = "", ""
-	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
-		t.Fatalf("HTTPS callback through a reverse proxy: %v", err)
+	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "requires TLS") {
+		t.Fatalf("HTTPS callback without listener TLS: %v", err)
 	}
 	defaultPort := valid()
 	defaultPort.Admin.GitLabOAuth.BaseURL = "https://GITLAB.example:443"
@@ -125,6 +125,15 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"mixed HTTPS callback hosts", func(c *Config) {
 			c.Admin.GitLabOAuth.RedirectURL = "https://other.example/auth/gitlab/callback"
 		}, "hosts must match"},
+		{"callback differs from entry URL", func(c *Config) {
+			c.Admin.WebservListenURL = "https://other.example"
+		}, "origin must match"},
+		{"HTTP callback differs from effective address", func(c *Config) {
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.WebservAddress = "127.0.0.1:9000"
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback"
+		}, "port must match"},
 		{"mixed HTTP callback hosts", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"

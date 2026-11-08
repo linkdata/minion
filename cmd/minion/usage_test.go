@@ -231,6 +231,13 @@ func TestUsageConfigAndEmptyDirectory(t *testing.T) {
 	if output := reportJSON(t, "-config", path); output.Totals.Attempts != 4 {
 		t.Fatalf("wrong directory derived from state_path: %+v", output)
 	}
+	// The running service may get TLS from -certdir; usage needs only state_path.
+	if err := os.WriteFile(path, []byte(`{"state_path":"custom/state.json","admin":{"listen":"0.0.0.0:8443"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if output := reportJSON(t, "-config", path); output.Totals.Attempts != 4 {
+		t.Fatalf("usage rejected runtime-TLS configuration: %+v", output)
+	}
 	if err := os.WriteFile(path, []byte("broken config"), 0600); err != nil {
 		t.Fatal(err)
 	}

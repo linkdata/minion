@@ -46,13 +46,25 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 	service := adminWebservConfig(cfg)
 	cfg.Listen = service.Address
 	var fallbackTLS *tls.Config
-	var certificate tls.Certificate
-	if cfg.WebservCertDir == "" && cfg.TLSCertFile != "" {
+	var certificate *tls.Certificate
+	if cfg.WebservCertDir != "" {
 		var err error
-		certificate, err = loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
+		certificate, _, err = webserv.LoadCert(cfg.WebservCertDir, "", "")
 		if err != nil {
 			return nil, err
 		}
+		if certificate == nil {
+			return nil, errors.New("admin certificate directory expanded to an empty path")
+		}
+	}
+	if cfg.WebservCertDir == "" && cfg.TLSCertFile != "" {
+		var err error
+		var loaded tls.Certificate
+		loaded, err = loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return nil, err
+		}
+		certificate = &loaded
 		certDir := filepath.Dir(cfg.TLSCertFile)
 		relKey, err := filepath.Rel(certDir, cfg.TLSKeyFile)
 		// webserv expands CertDir and cleans paths; Windows volumes may differ.
@@ -60,7 +72,7 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			filepath.Clean(cfg.TLSCertFile) != cfg.TLSCertFile || filepath.Clean(cfg.TLSKeyFile) != cfg.TLSKeyFile {
 			fallbackTLS = &tls.Config{
 				MinVersion:   tls.VersionTLS13,
-				Certificates: []tls.Certificate{certificate},
+				Certificates: []tls.Certificate{*certificate},
 				// A manually wrapped listener cannot follow net/http's HTTP/2 policy.
 				NextProtos: []string{"http/1.1"},
 			}
@@ -78,8 +90,18 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
 	entryURL := service.ListenURL
-	if fallbackTLS != nil && cfg.WebservListenURL == "" {
-		entryURL = certifiedListenURL(listener.Addr().String(), &certificate, cfg)
+	if cfg.WebservListenURL == "" {
+		if certificate != nil {
+			entryURL = certifiedListenURL(listener.Addr().String(), certificate, cfg)
+			if entryURL == "" && (cfg.GitHubOAuth != nil || cfg.GitLabOAuth != nil) {
+				_ = listener.Close()
+				return nil, errors.New("admin TLS certificate does not cover the OAuth callback host")
+			}
+		} else if host, port, err := net.SplitHostPort(listener.Addr().String()); err == nil {
+			if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+				entryURL = (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, port)}).String()
+			}
+		}
 	}
 	service.ListenURL = entryURL
 	jw, err := jaws.New()
@@ -158,15 +180,21 @@ func adminWebservConfig(cfg config.AdminConfig) *webserv.Config {
 	if cfg.WebservAddress != "" {
 		address = cfg.WebservAddress
 	}
-	return &webserv.Config{Address: address, CertDir: cfg.WebservCertDir, User: cfg.WebservUser,
+	return &webserv.Config{Address: address, CertDir: cfg.WebservCertDir,
 		DataDir: cfg.WebservDataDir, ListenURL: cfg.WebservListenURL}
 }
 
 func validateWebservAdminAddress(cfg config.AdminConfig) error {
-	if cfg.WebservAddress == "" || cfg.WebservCertDir != "" || cfg.TLSCertFile != "" {
+	if err := cfg.ValidateEntryURL(); err != nil {
+		return err
+	}
+	if cfg.WebservCertDir != "" || cfg.TLSCertFile != "" {
 		return nil
 	}
-	host := cfg.WebservAddress
+	host := cfg.Listen
+	if cfg.WebservAddress != "" {
+		host = cfg.WebservAddress
+	}
 	if value, _, err := net.SplitHostPort(host); err == nil {
 		host = value
 	}
@@ -183,8 +211,14 @@ func checkAdminServerConfig(cfg config.AdminConfig) error {
 		return err
 	}
 	if cfg.WebservCertDir != "" {
-		_, _, err := webserv.LoadCert(cfg.WebservCertDir, "", "")
-		return err
+		certificate, _, err := webserv.LoadCert(cfg.WebservCertDir, "", "")
+		if err != nil {
+			return err
+		}
+		if certificate == nil {
+			return errors.New("admin certificate directory expanded to an empty path")
+		}
+		return nil
 	}
 	if cfg.TLSCertFile != "" {
 		_, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)

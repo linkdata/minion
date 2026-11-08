@@ -63,7 +63,7 @@ func TestHostileHTTPAuditSchemaCannotPublish(t *testing.T) {
 			`"evidence":[{"file":"source.txt","line":1`, `"evidence":[{"file":"source.txt","line":999999`, 1), want: "evidence outside current source", candidate: true},
 		{name: "binary source citation", findings: auditCandidateFindingFixture, want: "trace outside current source", candidate: true, sourceData: []byte{'x', 0, '\n'}},
 		{name: "missing coverage context", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
-			`"ordinary_attack_class_block":null,`, ``, 1), want: "required coverage context"},
+			`"ordinary_attack_class_block":"ATTACK-CLASSES.md#Access control",`, ``, 1), want: "required coverage context"},
 		{name: "unverifiable local proof", artifact: "coverage-ledger.json", data: strings.Replace(auditCoveredLedgerFixture,
 			`"method":"source","result":"The guard is present","artifact":null`,
 			`"method":"local","result":"The guard is present","artifact":"agents/hunter/artifacts/proof.txt"`, 1), want: "unsupported local check method"},

@@ -496,7 +496,8 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		case "confirmed":
 			invalid := !auditVisibleText(finding.RootCause) || !auditVisibleText(finding.IntendedBehavior) ||
 				finding.Conditions == nil || !auditVisibleText(finding.Execution.AttackerPerspective) || len(finding.Execution.Payloads) == 0 ||
-				len(finding.Execution.Instructions) == 0 || !auditVisibleText(finding.Execution.ObservedResult) ||
+				len(finding.Execution.Instructions) == 0 || !strings.HasPrefix(finding.Execution.ObservedResult, "Source-derived: ") ||
+				!auditVisibleText(strings.TrimPrefix(finding.Execution.ObservedResult, "Source-derived: ")) ||
 				!auditVisibleText(finding.Remediation.Strategy) ||
 				!auditVisibleText(finding.Severity.Likelihood.Reason) || !auditVisibleText(finding.Severity.Impact.Reason) ||
 				!auditVisibleText(finding.Confidence.Reason) ||
@@ -686,16 +687,21 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		if unit.PriorStatus != "none" {
 			return errors.New("audit coverage-ledger.json claims a prior run absent from metadata")
 		}
+		var ordinaryBlock string
 		if !bytes.Equal(bytes.TrimSpace(unit.OrdinaryAttackClassBlock), []byte("null")) {
-			var block string
-			if json.Unmarshal(unit.OrdinaryAttackClassBlock, &block) != nil || !auditVisibleText(block) {
+			if json.Unmarshal(unit.OrdinaryAttackClassBlock, &ordinaryBlock) != nil || !auditVisibleText(ordinaryBlock) {
 				return errors.New("audit coverage-ledger.json has invalid ordinary attack class block")
 			}
 		}
+		assignedClass := ordinaryBlock == unit.CanonicalRefs["attack_class"]
 		for _, block := range unit.SelectedCompanionBlocks {
 			if !auditVisibleText(block) {
 				return errors.New("audit coverage-ledger.json has invalid selected companion block")
 			}
+			assignedClass = assignedClass || block == unit.CanonicalRefs["attack_class"]
+		}
+		if !assignedClass {
+			return errors.New("audit coverage-ledger.json has attack class without an assigned block")
 		}
 		for _, block := range unit.ExcludedBlocks {
 			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) {

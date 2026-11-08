@@ -48,7 +48,7 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		}
 	})
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://localhost:"+port {
+	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
 		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	if admin.signInEnabled {
@@ -437,11 +437,7 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "https://" + leaf.DNSNames[0] + ":" + port; admin.entryURL != want {
+	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
 		t.Fatalf("HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)

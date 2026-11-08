@@ -10,7 +10,8 @@ import (
 //go:embed bundled
 var bundledSkills embed.FS
 
-// These snapshots are reviewed and updated with Minion, not at install time.
+// Commits identify the upstream base; embedded copies include Minion-specific edits.
+// The copies are reviewed and updated with Minion, not at install time.
 var bundledCommits = map[string]string{
 	"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail":               "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
 	"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review":        "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",

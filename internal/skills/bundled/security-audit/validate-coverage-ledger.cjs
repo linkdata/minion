@@ -488,6 +488,34 @@ function validateExcludedBlocks(value, location, errors) {
   });
 }
 
+const classBlocksByFile = new Map();
+
+function hasClassBlock(ref, ordinary) {
+  if (typeof ref !== "string") return false;
+  const separator = ref.indexOf("#");
+  if (separator < 0) return false;
+  const file = ref.slice(0, separator);
+  const name = ref.slice(separator + 1);
+  if (!/^[A-Z][A-Z0-9-]*\.md$/.test(file) || !name || (file === "ATTACK-CLASSES.md") !== ordinary) return false;
+  if (!classBlocksByFile.has(file)) {
+    const blocks = new Set();
+    try {
+      for (const line of fs.readFileSync(path.join(__dirname, file), "utf8").split(/\r?\n/)) {
+        const bold = file === "ATTACK-CLASSES.md"
+          ? /^\*\*(.*?)\*\* \(subagent_type: /.exec(line)
+          : /^\*\*(.*?)\*\*(?:\s|$)/.exec(line);
+        const heading = /^#{1,6} (.*?)(?: \(|$)/.exec(line);
+        if (bold) blocks.add(bold[1]);
+        if (heading && file !== "ATTACK-CLASSES.md") blocks.add(heading[1]);
+      }
+    } catch {
+      // A missing companion has no blocks.
+    }
+    classBlocksByFile.set(file, blocks);
+  }
+  return classBlocksByFile.get(file).has(name);
+}
+
 function semanticKey(unit) {
   return JSON.stringify([
     unit.surface,
@@ -689,8 +717,22 @@ function collectUnitErrors(unit, index) {
   validateStringArray(unit.starting_paths, `${base}.starting_paths`, errors, { allowEmpty: false, pathValue: true });
   if (unit.ordinary_attack_class_block !== null && !isVisibleText(unit.ordinary_attack_class_block)) {
     errors.push(`${base}.ordinary_attack_class_block: expected null or non-empty text`);
+  } else if (unit.ordinary_attack_class_block !== null && !hasClassBlock(unit.ordinary_attack_class_block, true)) {
+    errors.push(`${base}.ordinary_attack_class_block: block is absent from ATTACK-CLASSES.md`);
   }
   validateStringArray(unit.selected_companion_blocks, `${base}.selected_companion_blocks`, errors);
+  if (Array.isArray(unit.selected_companion_blocks)) {
+    unit.selected_companion_blocks.forEach((block, blockIndex) => {
+      if (!hasClassBlock(block, false)) {
+        errors.push(`${base}.selected_companion_blocks[${blockIndex}]: block is absent from its companion file`);
+      }
+    });
+  }
+  if (isObject(unit.canonical_refs) &&
+      unit.ordinary_attack_class_block !== unit.canonical_refs.attack_class &&
+      (!Array.isArray(unit.selected_companion_blocks) || !unit.selected_companion_blocks.includes(unit.canonical_refs.attack_class))) {
+    errors.push(`${base}.canonical_refs.attack_class: class must be an assigned block`);
+  }
   validateExcludedBlocks(unit.excluded_blocks, `${base}.excluded_blocks`, errors);
   if (Array.isArray(unit.selected_companion_blocks) && Array.isArray(unit.excluded_blocks)) {
     const selected = new Set(unit.selected_companion_blocks);

@@ -37,9 +37,11 @@ These rules apply in both operating modes. Source inspection is read-only. Run t
 - a read-only target and toolchain, with the target-controlled process able to write only inside its assigned `scratch/` directory; and
 - explicit low CPU, memory, process, file-size, disk, and wall-clock limits.
 
-The agent, outside the target-controlled process, may make a disposable source copy in an assigned `scratch/` directory when a build must write beside source. In guidance mode, do not retain target-controlled files. In full audit mode, only trusted parent-side code may promote the minimum non-secret result to retained `artifacts/` using the procedure under Write isolation. Never expose a retained output directory (other than the agent's own assigned `scratch/`), another agent's directory, the host home directory, credentials, sockets, or shared services to target code. Do not install dependencies or let builds fetch them. Use only tools and dependencies already available locally. If every control cannot be enforced, do not execute target code: report the missing sandbox capability as a needs-validation blocker and give a safe validation plan.
+The agent, outside the target-controlled process, may make a disposable source copy in an assigned `scratch/` directory when a build must write beside source. In guidance mode, do not retain target-controlled files. In full audit mode, only trusted parent-side code may promote the minimum non-secret result to retained `artifacts/` using the procedure under Write isolation. Never expose a retained output directory (other than the agent's own assigned `scratch/`), another agent's directory, the host home directory, credentials, sockets, or shared services to target code. Do not install dependencies or let builds fetch them. Use only tools and dependencies already available locally. If every control cannot be enforced, do not execute target code. When execution is decisive, report the missing capability as a needs-validation blocker and give a safe validation plan.
 
 Use dummy principals, fixtures, and secrets. Do not probe deployed endpoints, external services, shared infrastructure, production identities, other users' data, or live control planes. Do not test availability against a live or shared process, publish artifacts, alter releases, spend paid API quota, or continue beyond the minimum local effect needed to establish a defect. If the decisive fact is outside source or the sandboxed fixture, report it as needing validation.
+
+If the runner forbids all target execution, that restriction also applies to delegated agents and supersedes this skill's local-check instructions. A deterministic source trace may confirm a boundary failure and its source-derived result without a local run. Prefix `observed_result` with `Source-derived: ` and do not claim a test ran. Use `needs_validation` whenever the result depends on runtime, deployment, or provider behavior that the source cannot settle.
 
 ## Full audit setup
 
@@ -141,7 +143,7 @@ For every candidate, name the lower-trust principal, accepted input or action, i
 
 ### Use bounded local evidence
 
-Static analysis establishes the source path. Sandboxed local tests resolve behavior when all execution controls are available: a minimal function harness, existing unit test, small parser fixture, dummy-tenant integration test, locally rendered configuration, or bounded isolated-loopback client. Stop at a wrong return value, unauthorized dummy record, sanitizer finding, policy difference, or other minimum effect. Do not extend the local check beyond the minimum boundary result or produce persistence, post-fault, or concealment material.
+Static analysis establishes the source path and sometimes a deterministic result. Sandboxed local tests resolve behavior when all execution controls are available: a minimal function harness, existing unit test, small parser fixture, dummy-tenant integration test, locally rendered configuration, or bounded isolated-loopback client. Stop at a wrong return value, unauthorized dummy record, sanitizer finding, policy difference, or other minimum effect. Do not extend the local check beyond the minimum boundary result or produce persistence, post-fault, or concealment material.
 
 ### Respect source visibility
 

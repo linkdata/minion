@@ -26,6 +26,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
+	"github.com/linkdata/webserv"
 )
 
 func main() {
@@ -125,6 +126,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	loadedPath, err := filepath.Abs(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
+		return 2
+	}
+	if err := webserv.BecomeUser(*webUser); err != nil {
+		logger.Printf("switch webserv user: %v", err)
 		return 2
 	}
 	if _, err := createInitialConfig(loadedPath, logger); err != nil {

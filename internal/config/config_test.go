@@ -48,7 +48,7 @@ func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("public listener without TLS was accepted without overrides")
 	}
-	runtime := AdminConfig{WebservCertDir: "/certs", WebservListenURL: "https://minion.example:8443"}
+	runtime := AdminConfig{WebservCertDir: "/certs", WebservListenURL: "https://minion.example"}
 	loaded, err := LoadWithAdminRuntime(path, runtime)
 	if err != nil || loaded.Admin == nil || loaded.Admin.WebservCertDir != "/certs" {
 		t.Fatalf("effective webserv TLS settings rejected: admin=%+v error=%v", loaded.Admin, err)
@@ -67,9 +67,8 @@ func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080", WebservListenURL: "https://minion.example"})
-	if err != nil {
-		t.Fatalf("HTTPS OAuth behind loopback reverse proxy rejected: %v", err)
+	if _, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080", WebservListenURL: "https://minion.example"}); err == nil {
+		t.Fatal("HTTPS OAuth through a plaintext listener was accepted")
 	}
 }
 

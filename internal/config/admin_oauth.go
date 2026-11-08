@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -10,6 +11,10 @@ import (
 )
 
 func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error {
+	var entryURL *url.URL
+	if a.WebservListenURL != "" {
+		entryURL, _ = url.Parse(a.WebservListenURL) // validateEntryURL has checked it.
+	}
 	var cookieHost string
 	for _, entry := range []struct {
 		name, callbackPath string
@@ -34,18 +39,35 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 		if redirect.Scheme == "http" && (a.TLSCertFile != "" || a.WebservCertDir != "") {
 			return fmt.Errorf("admin.%s redirect_url must use HTTPS when the admin listener uses TLS", entry.name)
 		}
-		if redirect.Scheme == "http" && a.WebservAddress == "" && a.WebservListenURL == "" {
+		if redirect.Scheme == "https" && a.TLSCertFile == "" && a.WebservCertDir == "" {
+			return fmt.Errorf("admin.%s redirect_url requires TLS on the admin listener", entry.name)
+		}
+		if entryURL != nil && !sameOrigin(redirect, entryURL) {
+			return fmt.Errorf("admin.%s redirect_url origin must match -listenurl", entry.name)
+		}
+		if redirect.Scheme == "http" && entryURL == nil {
+			if a.WebservAddress != "" {
+				var port string
+				listenHost, port, err = net.SplitHostPort(a.WebservAddress)
+				if err != nil {
+					return fmt.Errorf("admin.%s HTTP redirect_url requires -address with an explicit port", entry.name)
+				}
+				listenPort, err = strconv.ParseUint(port, 10, 16)
+				if err != nil {
+					return fmt.Errorf("admin.%s HTTP redirect_url requires a numeric -address port", entry.name)
+				}
+			}
 			redirectPort := uint64(80)
 			if redirect.Port() != "" {
 				redirectPort, _ = strconv.ParseUint(redirect.Port(), 10, 16) // validOAuthOrigin checked the port.
 			}
 			if listenPort != redirectPort {
-				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
+				return fmt.Errorf("admin.%s redirect_url HTTP port must match the admin listener", entry.name)
 			}
 			callbackIP, _ := netip.ParseAddr(redirect.Hostname())
 			listenIP, _ := netip.ParseAddr(listenHost)
 			if callbackIP.Unmap() != listenIP.Unmap() {
-				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
+				return fmt.Errorf("admin.%s redirect_url HTTP host must match the admin listener", entry.name)
 			}
 		}
 		redirectHost := redirect.Hostname()
@@ -81,6 +103,43 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 		client.BaseURL = "https://" + host
 	}
 	return nil
+}
+
+// ValidateEntryURL checks the runtime URL against the listener's TLS mode.
+func (a *AdminConfig) ValidateEntryURL() error {
+	if a.WebservListenURL == "" {
+		return nil
+	}
+	entry, err := url.Parse(a.WebservListenURL)
+	if err != nil || entry == nil || (entry.Path != "" && entry.Path != "/") || entry.RawPath != "" ||
+		strings.ContainsAny(a.WebservListenURL, "?#") || !validOAuthOrigin(&url.URL{Scheme: "https", Host: entry.Host, User: entry.User, Opaque: entry.Opaque}, false) {
+		return errors.New("-listenurl must be an HTTP or HTTPS origin without a path, query, or fragment")
+	}
+	listenerTLS := a.TLSCertFile != "" || a.WebservCertDir != ""
+	if listenerTLS && entry.Scheme != "https" || !listenerTLS && entry.Scheme != "http" {
+		return errors.New("-listenurl scheme must match the admin listener TLS")
+	}
+	if entry.Scheme == "http" {
+		addr, err := netip.ParseAddr(entry.Hostname())
+		if !strings.EqualFold(entry.Hostname(), "localhost") && (err != nil || !addr.Unmap().IsLoopback()) {
+			return errors.New("HTTP -listenurl requires localhost or a literal loopback IP")
+		}
+	}
+	return nil
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	port := func(u *url.URL) int {
+		if u.Port() != "" {
+			number, _ := strconv.Atoi(u.Port()) // Both URLs were validated.
+			return number
+		}
+		if u.Scheme == "https" {
+			return 443
+		}
+		return 80
+	}
+	return a.Scheme == b.Scheme && strings.EqualFold(a.Hostname(), b.Hostname()) && port(a) == port(b)
 }
 
 func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {

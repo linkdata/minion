@@ -118,7 +118,7 @@
           },
           "execution": {
             "type": "object",
-            "description": "Target-neutral reproduction in the target's native interface.",
+            "description": "Target-neutral input and demonstrated result in the target's native interface.",
             "properties": {
               "attacker_perspective": {
                 "type": "string",
@@ -145,7 +145,8 @@
               "observed_result": {
                 "type": "string",
                 "minLength": 1,
-                "visibleContent": true
+                "visibleContent": true,
+                "description": "Actual local result, or Source-derived: followed by the deterministic effect when target execution is forbidden."
               }
             },
             "required": ["attacker_perspective", "payloads", "instructions", "observed_result"],

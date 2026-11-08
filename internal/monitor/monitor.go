@@ -3552,7 +3552,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			deferred = append(deferred, strings.ToLower(fullName))
 			actions := m.Config.CommandNames()
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})
+			repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions}, m.Config.Admin)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
 				continue

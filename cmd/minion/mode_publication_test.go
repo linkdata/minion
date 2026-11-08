@@ -219,7 +219,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		}
 		homeURL, bound, _ := strings.Cut(addressLine, " (bound to ")
 		parsed, err := url.Parse(homeURL)
-		if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "localhost" || parsed.Path != "" || parsed.Port() == "" {
+		if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Path != "" || parsed.Port() == "" {
 			t.Fatalf("admin home URL is not clickable: %q: %v", homeURL, err)
 		}
 		address := net.JoinHostPort("127.0.0.1", parsed.Port())

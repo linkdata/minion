@@ -117,7 +117,16 @@ func update(path string, runtime *AdminConfig, mutate func(*Config) error) (cand
 // AddRepository preserves existing settings and atomically appends a repository.
 // Update serializes config writes; the monitor saves invitation cursors separately.
 func AddRepository(path string, repo Repository) (Repository, error) {
-	cfg, err := Update(path, func(cfg *Config) error {
+	return addRepository(path, repo, nil)
+}
+
+// AddRepositoryWithAdminRuntime validates an invitation with active listener settings.
+func AddRepositoryWithAdminRuntime(path string, repo Repository, runtime *AdminConfig) (Repository, error) {
+	return addRepository(path, repo, runtime)
+}
+
+func addRepository(path string, repo Repository, runtime *AdminConfig) (Repository, error) {
+	cfg, err := update(path, runtime, func(cfg *Config) error {
 		for _, existing := range cfg.Repositories {
 			if strings.EqualFold(existing.Name, repo.Name) {
 				return nil

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +17,7 @@ func TestAdminWebservConfigUsesCLIOverrides(t *testing.T) {
 	}
 	service := adminWebservConfig(cfg)
 	if service.Address != cfg.WebservAddress || service.CertDir != cfg.WebservCertDir ||
-		service.User != cfg.WebservUser || service.DataDir != cfg.WebservDataDir ||
+		service.User != "" || service.DataDir != cfg.WebservDataDir ||
 		service.ListenURL != cfg.WebservListenURL {
 		t.Fatalf("webserv options not passed through: %+v", service)
 	}
@@ -43,7 +45,7 @@ func TestWebservOverrideRequiresTLSOutsideLoopback(t *testing.T) {
 }
 
 func TestSetupServerUsesWebservListenURL(t *testing.T) {
-	const publicURL = "http://minion.example/setup"
+	const publicURL = "http://127.0.0.1:9000"
 	server, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.1:8377", WebservAddress: "127.0.0.1:0", WebservListenURL: publicURL,
 	}, nil, "", nil, true)
@@ -57,5 +59,52 @@ func TestSetupServerUsesWebservListenURL(t *testing.T) {
 	})
 	if server.entryURL != publicURL {
 		t.Fatalf("advertised URL = %q, want %q", server.entryURL, publicURL)
+	}
+}
+
+func TestAdminListenerRejectsUnsafeWebservOptions(t *testing.T) {
+	for _, cfg := range []config.AdminConfig{
+		{Listen: "127.0.0.1:8377", WebservListenURL: "http://public.example"},
+		{Listen: "127.0.0.1:8377", WebservListenURL: "https://public.example"},
+		{Listen: "127.0.0.1:8377", WebservListenURL: "http://localhost/setup"},
+		{Listen: "127.0.0.1:8377", TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", WebservListenURL: "http://localhost"},
+	} {
+		if err := validateWebservAdminAddress(cfg); err == nil {
+			t.Errorf("unsafe listener options accepted: %+v", cfg)
+		}
+	}
+	t.Setenv("MINION_TEST_EMPTY_CERTDIR", "")
+	cfg := config.AdminConfig{Listen: "127.0.0.1:8377", WebservAddress: ":9000", WebservCertDir: "$MINION_TEST_EMPTY_CERTDIR"}
+	if err := checkAdminServerConfig(cfg); err == nil {
+		t.Fatal("empty expanded certificate directory passed preflight")
+	}
+	if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+		_ = server.Close()
+		t.Fatal("empty expanded certificate directory reached the listener")
+	}
+}
+
+func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
+	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	dir := filepath.Dir(certFile)
+	if err := os.Rename(certFile, filepath.Join(dir, "fullchain.pem")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(keyFile, filepath.Join(dir, "privkey.pem")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir,
+		GitHubOAuth: &config.OAuthClient{RedirectURL: "https://" + leaf.DNSNames[0] + "/auth/github/callback"}}
+	server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if want := "https://" + leaf.DNSNames[0]; server.entryURL != want {
+		t.Fatalf("Webserv entry URL = %q, want callback origin %q", server.entryURL, want)
+	}
+	cfg.GitHubOAuth.RedirectURL = "https://other.example/auth/github/callback"
+	if _, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+		t.Fatal("certificate without callback hostname was accepted")
 	}
 }

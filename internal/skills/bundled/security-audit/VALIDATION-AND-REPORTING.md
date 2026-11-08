@@ -14,7 +14,7 @@ local evidence. Do not contact deployed endpoints or external/shared services. R
 target-controlled code only inside the approved OS-enforced sandbox: no external
 network, empty allowlisted environment, read-only target and tools, scratch-only
 writes, and explicit low resource and wall-clock limits. If any control is unavailable,
-do not execute; retain the exact missing capability as a needs_validation blocker.
+do not execute; retain the exact missing capability as a needs_validation blocker when execution is decisive.
 Treat every scratch entry as target-controlled after execution. After the sandbox and
 all its processes terminate, only trusted parent-side code may promote a predeclared
 scratch-relative file, following the promotion procedure block included verbatim in
@@ -96,13 +96,13 @@ If a strict total-agent budget cannot cover every candidate, set the run status 
 
 The parent writes all independently decided records to `<output-dir>/findings.json`, sorted by fingerprint. Include:
 
-- `confirmed`: source-grounded vulnerabilities with complete local execution evidence, conditions, specific remediation, likelihood/impact/overall severity, and confidence.
+- `confirmed`: source-grounded vulnerabilities with complete evidence of the boundary and result, conditions, specific remediation, likelihood/impact/overall severity, and confidence. When a runner forbids target execution, a deterministic source trace may establish the result; prefix `observed_result` with `Source-derived: ` and do not claim a test ran. If the result depends on runtime behavior, use `needs_validation`.
 - `needs_validation`: source-grounded candidates with an exact unresolved blocker and at least one applicable local or owner-observed deployment plan.
 - `rejected`: source-grounded candidates disproved during validation, retained so future runs do not repeat the unsupported claim without changed evidence.
 
 Read `report-schema.json` immediately before writing. It uses `additionalProperties: false`; do not carry hunter wrapper fields into a record. Keep these verdict contracts distinct:
 
-- A `confirmed` record uses `root_cause`, `intended_behavior`, `conditions`, `execution`, `remediation`, `severity`, and `confidence`. It must not use `claimed_root_cause`, `blockers`, `validation_plan`, or `reason`. `execution` is target-neutral and uses the target's native interface: API/HTTP input, CLI call, library call, message, file fixture, browser action, rendered policy, or local harness as applicable. `observed_result` is nonempty and factual.
+- A `confirmed` record uses `root_cause`, `intended_behavior`, `conditions`, `execution`, `remediation`, `severity`, and `confidence`. It must not use `claimed_root_cause`, `blockers`, `validation_plan`, or `reason`. `execution` is target-neutral and uses the target's native interface: API/HTTP input, CLI call, library call, message, file fixture, browser action, rendered policy, or local harness as applicable. `observed_result` is nonempty, factual, and labels a source-derived result when execution was forbidden.
 - A `needs_validation` record uses `claimed_root_cause`, `trace`, `evidence`, `blockers`, and at least one nonempty `validation_plan.local` or `validation_plan.deployment` field. Include both only when both contexts can resolve distinct facts. It must not use severity, execution, remediation, reason, or confirmed root cause.
 - A `rejected` record uses `claimed_root_cause`, `trace`, `evidence`, and `reason`. It must not use severity, execution, remediation, blockers, validation plan, or confirmed root cause.
 
@@ -119,7 +119,7 @@ Fix every structural and semantic error before continuing. The findings validato
 
 ### Phase 5: Verify the final records with fresh eyes
 
-Launch one fresh `research` verifier per final `confirmed` and `needs_validation` record, in parallel. This verifier checks the structured record, not the hunter write-up, and remains inside source/local boundaries.
+Launch one fresh `research` verifier per final `confirmed` and `needs_validation` record, in parallel. Phase 3 completes validation for a `rejected` record, which does not need another verifier. This verifier checks the structured record, not the hunter write-up, and remains inside source/local boundaries.
 
 In a `quick` run, Phase 3 and Phase 5 merge: the Phase 3 verifier also performs these record checks and returns the final schema-shaped record, so each candidate gets one fresh independent reviewer instead of two. Every other profile keeps the two passes separate. Never skip independent review of a `confirmed` record in any profile.
 
@@ -127,7 +127,7 @@ For `confirmed`, require it to check:
 
 1. Every repository-relative trace/evidence path, line, scope, and described operation.
 2. Real entry interface and exact local input shape.
-3. Every condition, parser/policy step, source-visible preventing layer, and observed local result.
+3. Every condition, parser/policy step, source-visible preventing layer, and local or source-derived result.
 4. Affected principal/resource and demonstrated impact.
 5. Severity separation: realistic likelihood, demonstrated impact, overall no greater than impact.
 6. Remediation strategy and any `code_changes`, including whether the fix enforces the invariant without merely moving trust.
@@ -144,13 +144,13 @@ Each verifier returns exactly one JSON object: `{"decision":"verified","fingerpr
 
 Do not apply a Phase 5 replacement as final when it promotes a record to a stronger verdict, including any promotion to `confirmed`, or materially changes the root cause, trace, execution input or observed result, demonstrated impact, or severity. Give that complete replacement to a new independent verifier that did not hunt, perform Phase 3 validation, or propose the Phase 5 replacement. The new verifier rechecks the current source and independently reproduces any decisive local result under the execution boundary, then returns `verified` or another replacement. Apply a material replacement only after this fresh verification. If another material replacement results, repeat with a fresh verifier. If budget or independence is unavailable, remove the disputed record from `findings.json`, keep its ledger unit as an unresolved candidate, and set `run_status: "incomplete"` with an exact `incomplete_reason`. Non-material wording or repository-line corrections may be applied directly when they do not change meaning or evidence.
 
-After every applied replacement, rerun both validators and update linked ledger decisions. If a final verifier identifies a separate root cause, assign a new fingerprint and send it through independent candidate validation before inclusion. Set `run_status: "complete"` only when every ledger candidate has an independent final disposition and every retained record passes Phase 5.
+After every applied replacement, rerun both validators and update linked ledger decisions. If a final verifier identifies a separate root cause, assign a new fingerprint and send it through independent candidate validation before inclusion. Set `run_status: "complete"` only when every ledger candidate has an independent final disposition and every retained `confirmed` or `needs_validation` record passes Phase 5; `rejected` records finish in Phase 3.
 
 Do not verify only `confirmed` records. A misleading `needs_validation` handoff wastes owner time and can preserve a false premise.
 
 ### Phase 6: Produce target-neutral reports from final records
 
-Only after Phase 5 passes for every record retained in `findings.json`, derive prose from the final records, the ledger, and the hunter `hardening` notes retained in ledger bookkeeping. An incomplete run may report independently verified records, but it must identify each unresolved ledger candidate and must not present it as a finding. The prose files never change a verdict, severity, blocker, or demonstrated impact.
+Only after Phase 5 passes for every `confirmed` and `needs_validation` record retained in `findings.json`, derive prose from the final records, the ledger, and the hunter `hardening` notes retained in ledger bookkeeping. `rejected` records finish in Phase 3. An incomplete run may report independently verified records, but it must identify each unresolved ledger candidate and must not present it as a finding. The prose files never change a verdict, severity, blocker, or demonstrated impact.
 
 #### `REPORT.md`
 
@@ -159,7 +159,7 @@ Write:
 1. Run profile, scope, budget (if set) with agents spent versus planned, source ref, sandboxed source-and-local-only execution statement, prior-run use, and explicit deferred and out-of-scope coverage. Name carried same-source confirmations and changed-source revalidations. A `quick`, scoped, budget-limited, or incomplete run states plainly that it is a partial pass. If candidate validation exhausted a strict budget, state that the run is incomplete and list every unvalidated fingerprint and linked unit; do not describe those candidates as findings. If the budget prevented a mandatory critic, state which critic did not run and make no clean-coverage claim.
 2. One short security posture summary.
 3. A confirmed-findings table: severity, title, affected boundary, and one-line observed result.
-4. Each confirmed finding: repository source location, lower-trust principal, target-native bounded reproduction, conditions, actual result, impact, priority rationale, and smallest source fix.
+4. Each confirmed finding: repository source location, lower-trust principal, target-native input or source trace, conditions, demonstrated result, impact, priority rationale, and smallest source fix.
 5. A separate `NEEDS VALIDATION` table. Give each lead's title, repository trace, exact blocker, bounded local next step, and safe owner-observed deployment check. Do not assign severity or call it a confirmed vulnerability.
 6. Separate hardening notes and positive source patterns.
 7. Coverage summary from the ledger: covered, candidate, blocked, and deferred counts, plus important exclusions and the final critic result.
@@ -168,12 +168,12 @@ Do not describe rejected records as findings. Mention their fingerprints only wh
 
 #### `FINDINGS-DETAIL.md`
 
-For each confirmed `medium`, `high`, or `critical` record, copy the complete source path and target-neutral local reproduction:
+For each confirmed `medium`, `high`, or `critical` record, copy the complete source path and target-neutral evidence:
 
 - ordered repository-relative trace and evidence;
 - dummy attacker/principal and affected dummy resource;
-- native input, invocation, or fixture and exact bounded instructions;
-- observed output and the security invariant it proves;
+- native input, invocation, or fixture and exact bounded instructions or deterministic source path;
+- local output or labeled source-derived result and the security invariant it proves;
 - conditions and containment;
 - source-level remediation and regression case.
 

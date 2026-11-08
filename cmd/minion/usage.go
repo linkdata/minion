@@ -112,11 +112,11 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 		return fail(2, err)
 	}
 	if !dirSet {
-		cfg, err := config.Load(*configPath)
+		statePath, err := config.LoadStatePath(*configPath)
 		if err != nil {
 			return fail(2, fmt.Errorf("config: %w", err))
 		}
-		*dir = filepath.Join(filepath.Dir(cfg.StatePath), "usage")
+		*dir = filepath.Join(filepath.Dir(statePath), "usage")
 	}
 	query, err := (usage.Store{Dir: *dir}).Query(filter, groups, details)
 	if err != nil {

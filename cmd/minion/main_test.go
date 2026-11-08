@@ -89,6 +89,23 @@ func runStartupFixtureWithRun(t *testing.T, cfg config.Config, start func() int,
 	return code, string(data)
 }
 
+func TestWebservUserSwitchPrecedesInitialConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	oldFlags, oldArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() { flag.CommandLine, os.Args = oldFlags, oldArgs })
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", path, "-user", "minion-no-such-user-!"}
+	if code := runWithGitCheck(func(context.Context, string) error {
+		t.Fatal("checked Git before switching user")
+		return nil
+	}); code != 2 {
+		t.Fatalf("user switch exit = %d, want 2", code)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created config before switching user: %v", err)
+	}
+}
+
 func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	t.Setenv("GH_TOKEN", "wrong-ambient-token")
