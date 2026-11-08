@@ -237,6 +237,9 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/invited", ID: 12, OwnerID: 22}); err != nil {
+		t.Fatal(err)
+	}
 	view, err := advancedConfigView(path, live, *loaded.Admin)
 	if err != nil {
 		t.Fatal(err)
@@ -259,10 +262,14 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	if err := live.save(func(cfg *config.Config) error { cfg.AIInstructions = "updated"; return nil }); err != nil {
 		t.Fatalf("later live edit was blocked after key-only save: %v", err)
 	}
+	if len(live.snapshot().Config.Repositories) != 1 {
+		t.Fatal("invited repository became active before restart")
+	}
 	_, generation := live.next()
 	live.applied(loaded, generation, errors.New("key preflight failed"))
 	restored, err := config.Load(path)
 	if err != nil || restored.Codex.APIKey != loaded.Codex.APIKey || restored.AIInstructions != "updated" ||
+		len(restored.Repositories) != 2 ||
 		live.desired.Codex.APIKey != loaded.Codex.APIKey {
 		t.Fatalf("rejected Advanced key survived or lost another edit: saved=%+v error=%v", restored, err)
 	}

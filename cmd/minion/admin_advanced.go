@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/jaws/lib/ui"
@@ -217,6 +218,7 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		live.mu.Lock()
 		defer live.mu.Unlock()
 	}
+	var preEdit config.Config
 	updated, err := config.UpdateWithAdminRuntime(path, runtime, func(raw *config.Config) error {
 		before, err := cloneConfig(*raw)
 		if err != nil {
@@ -232,6 +234,7 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		if currentVersion != version {
 			return errors.New("configuration changed; reload before saving")
 		}
+		preEdit = before
 		if err := restoreAdvancedSecrets(&edited, raw); err != nil {
 			return err
 		}
@@ -244,6 +247,11 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 	}
 	if live != nil {
 		baseline := live.disk
+		// Invitations append to disk without joining the running config.
+		if !live.restartRequired && len(preEdit.Repositories) >= len(baseline.Repositories) &&
+			reflect.DeepEqual(preEdit.Repositories[:len(baseline.Repositories)], baseline.Repositories) {
+			baseline.Repositories = preEdit.Repositories
+		}
 		baseline.Codex.APIKey, baseline.Claude.APIKey = updated.Codex.APIKey, updated.Claude.APIKey
 		beforeJSON, _ := json.Marshal(baseline)
 		updatedJSON, _ := json.Marshal(updated)
