@@ -36,7 +36,7 @@ func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
 }
 
-func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
+func TestAdminServerWithoutSignInServesHomeAndSetupPage(t *testing.T) {
 	t.Parallel()
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin"}}}, nil, "", nil)
 	if err != nil {
@@ -71,6 +71,18 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		!strings.Contains(string(homeBody), "The admin password is not set") ||
 		strings.Contains(string(homeBody), `href="/admin/login"`) || strings.Contains(string(homeBody), `href="/auth/login"`) {
 		t.Fatalf("unconfigured home: status=%d cookies=%v body=%q", home.StatusCode, home.Cookies(), homeBody)
+	}
+	setup, err := client.Get("http://" + admin.listener.Addr().String() + "/admin/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = setup.Body.Close() })
+	setupBody, err := io.ReadAll(setup.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.StatusCode != http.StatusOK || !strings.Contains(string(setupBody), "The admin password is not set") {
+		t.Fatalf("unconfigured setup page: status=%d body=%q", setup.StatusCode, setupBody)
 	}
 	for _, path := range []string{"/jaws/.ping", bootstrapAssetPath(t, string(homeBody), ".css")} {
 		response, err := client.Get("http://" + admin.listener.Addr().String() + path)

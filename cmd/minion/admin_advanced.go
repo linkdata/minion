@@ -35,7 +35,7 @@ var adminAdvancedHTML = template.Must(template.New("admin advanced").Parse(headH
 <body>{{if .Dot.Setup}}<header class="d-flex align-items-center gap-3 px-4 py-3 border-bottom"><strong>MINION / setup</strong><a href="/">Home</a><form class="ms-auto" method="post" action="/admin/logout"><button class="btn btn-outline-light" type="submit">Sign out</button></form></header>{{else}}{{template "admin-nav" $}}{{end}}<main class="container py-4">
 <h1>Configuration</h1><p>Use this editor for settings without a dedicated control. Changes to service settings need a restart; AI API key changes apply to new jobs after any active action ends.</p>
 {{if .Dot.RestartRequired}}<p role="status" class="alert alert-info">Saved configuration requires a Minion restart.</p>{{end}}
-{{if .Dot.PendingActivation}}<p role="status" class="alert alert-info">AI key change is pending activation.</p>{{end}}
+{{if .Dot.PendingActivation}}<p role="status" class="alert alert-info">A configuration change is pending activation.</p>{{end}}
 <p>Existing secrets appear as <code>PASTE_NEW_SECRET_OR_KEEP_THIS_VALUE</code>. Leave that value to keep a secret, replace it to set a new one, or use an empty string to clear it. The admin password hash cannot be changed here.</p>
 <form method="post" action="/admin/config">
 <input type="hidden" name="version" value="{{.Dot.Version}}">

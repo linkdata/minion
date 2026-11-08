@@ -494,7 +494,7 @@ const companionFiles = new Set(
     .map((match) => match[1]),
 );
 
-function hasClassBlock(ref, ordinary) {
+function hasClassBlock(ref, ordinary, classOnly = false) {
   if (typeof ref !== "string") return false;
   const separator = ref.indexOf("#");
   if (separator < 0) return false;
@@ -502,22 +502,23 @@ function hasClassBlock(ref, ordinary) {
   const name = ref.slice(separator + 1);
   if (!name || (ordinary ? file !== "ATTACK-CLASSES.md" : !companionFiles.has(file))) return false;
   if (!classBlocksByFile.has(file)) {
-    const blocks = new Set();
+    const blocks = new Map();
     try {
       for (const line of fs.readFileSync(path.join(__dirname, file), "utf8").split(/\r?\n/)) {
         const bold = file === "ATTACK-CLASSES.md"
           ? /^\*\*(.*?)\*\* \(subagent_type: /.exec(line)
           : /^\*\*(.*?)\*\*(?:\s|$)/.exec(line);
         const heading = /^#{1,6} (.*?)(?: \(|$)/.exec(line);
-        if (bold) blocks.add(bold[1]);
-        if (heading && file !== "ATTACK-CLASSES.md") blocks.add(heading[1]);
+        if (bold) blocks.set(bold[1], true);
+        if (heading && file !== "ATTACK-CLASSES.md" && !blocks.has(heading[1])) blocks.set(heading[1], false);
       }
     } catch {
       // A missing companion has no blocks.
     }
     classBlocksByFile.set(file, blocks);
   }
-  return classBlocksByFile.get(file).has(name);
+  const blocks = classBlocksByFile.get(file);
+  return classOnly ? blocks.get(name) === true : blocks.has(name);
 }
 
 function semanticKey(unit) {
@@ -734,7 +735,8 @@ function collectUnitErrors(unit, index) {
   }
   if (isObject(unit.canonical_refs) &&
       unit.ordinary_attack_class_block !== unit.canonical_refs.attack_class &&
-      (!Array.isArray(unit.selected_companion_blocks) || !unit.selected_companion_blocks.includes(unit.canonical_refs.attack_class))) {
+      (!Array.isArray(unit.selected_companion_blocks) || !unit.selected_companion_blocks.includes(unit.canonical_refs.attack_class) ||
+        !hasClassBlock(unit.canonical_refs.attack_class, false, true))) {
     errors.push(`${base}.canonical_refs.attack_class: class must be an assigned block`);
   }
   validateExcludedBlocks(unit.excluded_blocks, `${base}.excluded_blocks`, errors);
