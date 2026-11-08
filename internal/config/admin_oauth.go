@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -47,14 +48,17 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 		}
 		if redirect.Scheme == "http" && entryURL == nil {
 			if a.WebservAddress != "" {
-				var port string
-				listenHost, port, err = net.SplitHostPort(a.WebservAddress)
-				if err != nil {
-					return fmt.Errorf("admin.%s HTTP redirect_url requires -address with an explicit port", entry.name)
-				}
-				listenPort, err = strconv.ParseUint(port, 10, 16)
-				if err != nil {
-					return fmt.Errorf("admin.%s HTTP redirect_url requires a numeric -address port", entry.name)
+				if host, port, splitErr := net.SplitHostPort(a.WebservAddress); splitErr == nil {
+					listenHost = host
+					listenPort, err = strconv.ParseUint(port, 10, 16)
+					if err != nil {
+						return fmt.Errorf("admin.%s HTTP redirect_url requires a numeric -address port", entry.name)
+					}
+				} else {
+					listenPort = 8080
+					if os.Geteuid() == 0 {
+						listenPort = 80
+					}
 				}
 			}
 			redirectPort := uint64(80)

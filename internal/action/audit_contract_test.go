@@ -11,7 +11,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 )
 
-func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
+func TestBundledAuditValidatorCoverageRules(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
 	}
@@ -31,11 +31,19 @@ func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
 	ordinaryWithContext := strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, companionBlocks, 1)
 	companionContext := strings.ReplaceAll(companionClass, "Ordinary CSRF", "Core discipline")
 	companionContext = strings.ReplaceAll(companionContext, "Ordinary%20CSRF", "Core%20discipline")
+	archived := auditArchivedCoveredBlockedLedgerFixture()
+	missingCurrentOwner := strings.Replace(auditCoveredLedgerFixture, `,{"agent_id":"hunter","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}`, "", 1)
+	missingArchivedOwner := strings.Replace(archived, `,{"agent_id":"older","reviewed_paths":["source.txt"],"invariant":"Access is checked","method":"source","result":"The guard is present","artifact":null}`, "", 1)
+	reusedArchivedCheck := strings.Replace(archived, `"agent_id":"verifier"`, `"agent_id":"helper"`, 1)
 	for _, test := range []struct {
 		name, ledger, wantError string
 		valid                   bool
 	}{
 		{name: "assigned", ledger: auditCoveredLedgerFixture, valid: true},
+		{name: "archived assignment", ledger: archived, valid: true},
+		{name: "current owner has no check", ledger: missingCurrentOwner, wantError: "assigned agent must own a local check"},
+		{name: "archived owner has no check", ledger: missingArchivedOwner, wantError: "assigned agent must own a local check"},
+		{name: "archived check owner reused", ledger: reusedArchivedCheck, wantError: "prior assignment owner evidence"},
 		{name: "ordinary with companion", ledger: ordinaryWithContext, valid: true},
 		{name: "companion-only class", ledger: companionWithContext, valid: true},
 		{name: "ordinary with companion without context", ledger: strings.Replace(auditCoveredLedgerFixture, `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF"]`, 1), wantError: "class requires Core discipline"},

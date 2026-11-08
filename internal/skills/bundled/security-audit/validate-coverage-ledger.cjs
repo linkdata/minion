@@ -452,6 +452,11 @@ function validateChecks(value, location, errors) {
 
 function validateReviewedPathOwnership(unit, base, errors) {
   if (!Array.isArray(unit.reviewed_paths) || !Array.isArray(unit.local_checks)) return;
+  if (ATTEMPT_STATUSES.has(unit.status) &&
+      isSafeAgentId(unit.agent_id) &&
+      !unit.local_checks.some((check) => isObject(check) && check.agent_id === unit.agent_id)) {
+    errors.push(`${base}.local_checks: assigned agent must own a local check`);
+  }
   const aggregatePaths = new Set(unit.reviewed_paths.filter((value) => typeof value === "string"));
   const ownedPaths = new Set();
   for (const check of unit.local_checks) {
@@ -658,6 +663,11 @@ function validateAttempts(value, unit, base, errors) {
       });
     }
     if (hasFreshOwner) priorOwners.add(attempt.agent_id);
+    if (Array.isArray(attempt.local_checks)) {
+      for (const check of attempt.local_checks) {
+        if (isObject(check) && isSafeAgentId(check.agent_id)) priorOwners.add(check.agent_id);
+      }
+    }
   });
 
   if (isSafeAgentId(unit.agent_id) && priorOwners.has(unit.agent_id)) {

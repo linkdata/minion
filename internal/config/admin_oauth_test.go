@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -76,6 +78,28 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	defaultHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
 	if err := defaultHTTPPort.Validate(t.TempDir()); err != nil {
 		t.Fatalf("implicit HTTP port 80: %v", err)
+	}
+	webservPort := 8080
+	if os.Geteuid() == 0 {
+		webservPort = 80
+	}
+	for _, test := range []struct{ address, host string }{
+		{"127.0.0.1", "127.0.0.1"},
+		{"[::1]", "[::1]"},
+		{"::1", "[::1]"},
+	} {
+		bareHost := valid()
+		bareHost.Admin.TLSCertFile, bareHost.Admin.TLSKeyFile = "", ""
+		bareHost.Admin.WebservAddress = test.address
+		bareHost.Admin.GitHubOAuth.RedirectURL = "http://" + test.host + ":" + strconv.Itoa(webservPort) + "/auth/github/callback"
+		bareHost.Admin.GitLabOAuth.RedirectURL = "http://" + test.host + ":" + strconv.Itoa(webservPort) + "/auth/gitlab/callback"
+		if err := bareHost.Validate(t.TempDir()); err != nil {
+			t.Errorf("bare Webserv address %q with matching callback: %v", test.address, err)
+		}
+		bareHost.Admin.GitHubOAuth.RedirectURL = "http://" + test.host + ":" + strconv.Itoa(webservPort+1) + "/auth/github/callback"
+		if err := bareHost.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP port must match") {
+			t.Errorf("bare Webserv address %q with wrong callback port: %v", test.address, err)
+		}
 	}
 	proxiedHTTPS := valid()
 	proxiedHTTPS.Admin.TLSCertFile, proxiedHTTPS.Admin.TLSKeyFile = "", ""
