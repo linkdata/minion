@@ -35,10 +35,6 @@ func (a *adminAccess) setupPost() http.Handler {
 		}
 		first := config.Repository{Name: name, ID: details.ID, OwnerID: details.Owner.ID,
 			Actions: []string{"review"}, DenyAllActors: true}
-		probe := config.Config{BotLogin: bot, Repositories: []config.Repository{first}}
-		if err := checkRepositories(ctx, client, probe, log.New(io.Discard, "", 0)); err != nil {
-			return errors.New("GitHub bot needs notification access and write permission to the repository")
-		}
 		_, err = config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(cfg *config.Config) error {
 			if cfg.Admin == nil {
 				return errors.New("admin setup is no longer configured; restart Minion")
@@ -49,6 +45,9 @@ func (a *adminAccess) setupPost() http.Handler {
 				return errors.New("the configured first repository differs; reload setup or use Advanced config")
 			}
 			cfg.BotLogin, cfg.GitHub.Token = bot, token
+			if err := checkRepositories(ctx, client, *cfg, log.New(io.Discard, "", 0)); err != nil {
+				return errors.New("GitHub bot needs notification access and write permission to all configured repositories")
+			}
 			return nil
 		})
 		return err

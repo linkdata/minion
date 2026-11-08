@@ -145,4 +145,23 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		strings.Contains(home.Body.String(), "secret-token") || strings.Contains(home.Body.String(), "Save setup") {
 		t.Fatalf("saved setup home status=%d body=%q", home.Code, home.Body.String())
 	}
+	_, err = config.Update(path, func(cfg *config.Config) error {
+		cfg.GitHub.Token = ""
+		cfg.Repositories = append(cfg.Repositories, config.Repository{
+			Name: "example/second", ID: 43, OwnerID: 7, Actions: []string{"review"}, DenyAllActors: true,
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
+	if denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), "all configured repositories") {
+		t.Fatalf("inaccessible second repository setup status=%d body=%q", denied.Code, denied.Body.String())
+	}
+	unchanged, err = config.Load(path)
+	if err != nil || unchanged.GitHub.Token != "" || len(unchanged.Repositories) != 2 {
+		t.Fatalf("inaccessible second repository changed setup config: tokenSet=%t repositories=%d error=%v",
+			unchanged.GitHub.Token != "", len(unchanged.Repositories), err)
+	}
 }
