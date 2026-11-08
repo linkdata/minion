@@ -337,3 +337,32 @@ func TestCompleteAuditRequiresArchitectureText(t *testing.T) {
 		t.Fatalf("partial architecture evidence rejected: %v", err)
 	}
 }
+
+func TestBundledAuditValidatorsRejectDuplicateObjectKeys(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	for _, test := range []struct{ name, script, content string }{
+		{"ledger", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","status":"covered"`, 1)},
+		{"ledger escaped key", "validate-coverage-ledger.cjs", strings.Replace(auditCoveredLedgerFixture, `"status":"covered"`, `"status":"planned","\u0073tatus":"covered"`, 1)},
+		{"finding", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"verdict":"rejected","verdict":"confirmed"`, 1)},
+		{"finding escaped key", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"verdict":"confirmed"`, `"verdict":"rejected","\u0076erdict":"confirmed"`, 1)},
+		{"nested finding", "validate-findings.cjs", strings.Replace(auditConfirmedFindingFixture, `"overall_severity":"medium"`, `"overall_severity":"low","overall_severity":"medium"`, 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "audit.json")
+			if err := os.WriteFile(file, []byte(test.content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join("..", "skills", "bundled", "security-audit", test.script)
+			output, err := exec.CommandContext(t.Context(), node, script, file).CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "duplicate object keys") {
+				t.Fatalf("validator accepted duplicate key: output=%q error=%v", output, err)
+			}
+		})
+	}
+}

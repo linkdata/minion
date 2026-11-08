@@ -164,6 +164,12 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		}
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
+	guestMu := new(sync.Mutex)
+	guestLoginLimit := maxGuestAdmissionSessions
+	if oauth != nil {
+		guestMu = &oauth.admissionMu
+		guestLoginLimit = maxGuestPageSessions
+	}
 	mux := http.NewServeMux()
 	if err := jw.Setup(func(pattern string, handler http.Handler) {
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +182,12 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
+		guestMu.Lock()
+		defer guestMu.Unlock()
+		if jw.GetSession(r) == nil && jw.SessionCount() >= guestLoginLimit {
+			guestAdmissionUnavailable(w)
+			return
+		}
 		loginPage.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("HEAD /admin/login", headPublicPage)
@@ -198,10 +210,6 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	})
 	dashboard := adminDashboardHandler(jw, owner)
 	home := jw.SessionMiddleware(http.HandlerFunc(access.homePage))
-	guestMu := new(sync.Mutex)
-	if oauth != nil {
-		guestMu = &oauth.admissionMu
-	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		sess := jw.GetSession(r)
 		if !setup && access.sessionUsername(sess) != "" {

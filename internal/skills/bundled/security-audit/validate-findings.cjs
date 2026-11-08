@@ -11,6 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const { TextDecoder } = require("util");
+const { hasDuplicateObjectKeys } = require("./strict-json-keys.cjs");
 
 const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const SUPPORTED_TYPES = new Set(["object", "array", "string", "integer", "number", "boolean", "null"]);
@@ -733,6 +734,10 @@ function run(file) {
 
   let findings;
   try {
+    if (hasDuplicateObjectKeys(contents)) {
+      console.error("Failed to parse findings JSON: duplicate object keys");
+      return 1;
+    }
     findings = JSON.parse(contents);
   } catch {
     console.error("Failed to parse findings JSON: invalid JSON syntax");

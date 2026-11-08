@@ -38,6 +38,10 @@ func createInitialConfig(path string, logger *log.Logger) (bool, error) {
 				break
 			}
 			hash, err := hashAdminPassword(password)
+			if errors.Is(err, errInvalidAdminPassword) {
+				fmt.Fprintln(os.Stderr, err)
+				continue
+			}
 			if err != nil {
 				logger.Printf("admin password setup skipped: %v", err)
 				break

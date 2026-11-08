@@ -43,6 +43,37 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 		_ = master.Close()
 		t.Fatal("initial password prompt timed out")
 	}
+	if _, err := master.Write([]byte("\r")); err != nil {
+		t.Fatal(err)
+	}
+	type retryResult struct {
+		output string
+		err    error
+	}
+	retryRead := make(chan retryResult, 1)
+	go func() {
+		var output strings.Builder
+		for output.Len() < 256 && !strings.HasSuffix(output.String(), "Set admin password: ") {
+			var next [1]byte
+			if _, err := master.Read(next[:]); err != nil {
+				retryRead <- retryResult{output.String(), err}
+				return
+			}
+			output.WriteByte(next[0])
+		}
+		retryRead <- retryResult{output: output.String()}
+	}()
+	select {
+	case got := <-retryRead:
+		if got.err != nil || !strings.Contains(got.output, errInvalidAdminPassword.Error()) || !strings.HasSuffix(got.output, "Set admin password: ") {
+			t.Fatalf("blank password retry = %q, %v", got.output, got.err)
+		}
+	case got := <-done:
+		t.Fatalf("blank password ended setup: %+v", got)
+	case <-time.After(5 * time.Second):
+		_ = master.Close()
+		t.Fatal("blank password retry timed out")
+	}
 	if _, err := master.Write([]byte("new-admin-password\r")); err != nil {
 		t.Fatal(err)
 	}
