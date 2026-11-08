@@ -159,6 +159,22 @@ func selectedServiceTestConfig(t *testing.T) config.Config {
 	}
 }
 
+func TestModelKeysChangedIncludesCriticProvider(t *testing.T) {
+	before := selectedServiceTestConfig(t)
+	before.Adversarial = "claude"
+	after := before
+	after.Claude.APIKey = "next-critic-key"
+	if !modelKeysChanged(before, after) {
+		t.Fatal("critic key change did not refresh worker credentials")
+	}
+	before.Main, before.Adversarial = "claude", "codex"
+	after = before
+	after.Codex.APIKey = "next-critic-key"
+	if !modelKeysChanged(before, after) {
+		t.Fatal("Codex critic key change did not refresh worker credentials")
+	}
+}
+
 func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	cfg := selectedServiceTestConfig(t)
 	repo := &cfg.Repositories[0]
@@ -451,6 +467,17 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 	if len(startup.Selection.Commands) != 3 || len(startup.Selection.Commands["available"].Skills) != 1 ||
 		startup.Selection.Commands["available"].Skills[0] != availableSkill {
 		t.Fatalf("new child did not receive installed skill: commands=%v", startup.Selection.Commands)
+	}
+	beforeUnusedKeyChange := owner.Executor
+	if err := live.save(func(next *config.Config) error {
+		next.Claude.APIKey = "updated-unused-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != beforeUnusedKeyChange || watcher.Config.Claude.APIKey != "updated-unused-key" {
+		t.Fatal("unused provider key restarted the worker or did not apply")
 	}
 	beforeKeyChange := owner.Executor
 	if err := live.save(func(next *config.Config) error {

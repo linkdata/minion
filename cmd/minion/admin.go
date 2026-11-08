@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -81,6 +82,9 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			service.FullchainPem = filepath.Base(cfg.TLSCertFile)
 			service.PrivkeyPem = relKey
 		}
+	}
+	if err := checkAdminCertificateURL(certificate, cfg.WebservListenURL); err != nil {
+		return nil, err
 	}
 	listener, err := service.Listen()
 	if err != nil {
@@ -218,11 +222,34 @@ func checkAdminServerConfig(cfg config.AdminConfig) error {
 		if certificate == nil {
 			return errors.New("admin certificate directory expanded to an empty path")
 		}
-		return nil
+		return checkAdminCertificateURL(certificate, cfg.WebservListenURL)
 	}
 	if cfg.TLSCertFile != "" {
-		_, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
-		return err
+		certificate, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
+		if err != nil {
+			return err
+		}
+		return checkAdminCertificateURL(&certificate, cfg.WebservListenURL)
+	}
+	return nil
+}
+
+func checkAdminCertificateURL(certificate *tls.Certificate, entryURL string) error {
+	if certificate == nil {
+		return nil
+	}
+	if certificate.Leaf == nil {
+		leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+		if err != nil {
+			return fmt.Errorf("parse admin TLS certificate: %w", err)
+		}
+		certificate.Leaf = leaf
+	}
+	if entryURL != "" {
+		entry, _ := url.Parse(entryURL) // validateWebservAdminAddress checked the URL.
+		if err := certificate.Leaf.VerifyHostname(entry.Hostname()); err != nil {
+			return fmt.Errorf("admin certificate does not cover -listenurl host %q: %w", entry.Hostname(), err)
+		}
 	}
 	return nil
 }

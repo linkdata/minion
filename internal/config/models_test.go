@@ -206,7 +206,8 @@ func TestCommandProviderCapabilities(t *testing.T) {
 	for _, provider := range []string{"", "codex", "claude", "unknown"} {
 		for _, action := range []string{"review", "fix", "comment", "security-audit"} {
 			mapping := CommandMapping{Action: action, Skills: []string{defaultAntiInjectionSkill}}
-			want := provider != "unknown" && (provider != "claude" || action != "security-audit")
+			want := provider != "unknown" && (provider != "claude" || action != "security-audit") &&
+				(runtime.GOOS != "windows" || action != "security-audit")
 			if got := mapping.SupportsProvider(provider); got != want {
 				t.Errorf("%s/%s supported = %t; want %t", provider, action, got, want)
 			}

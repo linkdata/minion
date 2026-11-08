@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -79,9 +80,12 @@ type CommandMapping struct {
 
 // SupportsProvider reports whether a CLI can execute the action's workflow.
 //
-// An empty provider selects Codex. Claude's Bash-only tool set cannot run the
-// independent subagents required by the security-audit action.
+// An empty provider selects Codex. Security audits need independent subagents
+// and validator file flags that Node does not expose on native Windows.
 func (m CommandMapping) SupportsProvider(provider string) bool {
+	if m.Action == "security-audit" && runtime.GOOS == "windows" {
+		return false
+	}
 	return provider == "" || provider == "codex" || provider == "claude" && m.Action != "security-audit"
 }
 

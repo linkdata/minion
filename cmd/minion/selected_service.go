@@ -46,7 +46,8 @@ func hasNewInstalledCommand(cfg config.Config, selected map[string]bool) bool {
 }
 
 func modelKeysChanged(before, after config.Config) bool {
-	return before.Codex.APIKey != after.Codex.APIKey || before.Claude.APIKey != after.Claude.APIKey
+	return (before.Main == "codex" || before.Adversarial == "codex") && before.Codex.APIKey != after.Codex.APIKey ||
+		(before.Main == "claude" || before.Adversarial == "claude") && before.Claude.APIKey != after.Claude.APIKey
 }
 
 func applyModelKeys(owner *action.Orchestrator, cfg config.Config) {

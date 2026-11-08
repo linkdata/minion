@@ -170,12 +170,14 @@ func applyAdvancedRuntime(cfg *config.Config, runtime config.AdminConfig) {
 }
 
 func restoreAdvancedSecrets(after, before *config.Config) error {
-	if before.Admin == nil || after.Admin == nil || len(before.Admin.Administrators) != 1 || len(after.Admin.Administrators) != 1 ||
-		after.Admin.Administrators[0].Username != before.Admin.Administrators[0].Username ||
-		after.Admin.Administrators[0].PasswordHash != advancedPasswordMarker {
-		return errors.New("admin password and account cannot be changed here")
+	if after.Admin != nil {
+		if before.Admin == nil || len(before.Admin.Administrators) != 1 || len(after.Admin.Administrators) != 1 ||
+			after.Admin.Administrators[0].Username != before.Admin.Administrators[0].Username ||
+			after.Admin.Administrators[0].PasswordHash != advancedPasswordMarker {
+			return errors.New("admin password and account cannot be changed here")
+		}
+		after.Admin.Administrators[0].PasswordHash = before.Admin.Administrators[0].PasswordHash
 	}
-	after.Admin.Administrators[0].PasswordHash = before.Admin.Administrators[0].PasswordHash
 	keep := func(value *string, original string) {
 		if *value == advancedSecretMarker {
 			*value = original
@@ -189,15 +191,17 @@ func restoreAdvancedSecrets(after, before *config.Config) error {
 	} else if after.RemoteExecutor != nil && after.RemoteExecutor.Token == advancedSecretMarker {
 		return errors.New("a new remote worker token is required")
 	}
-	if after.Admin.GitHubOAuth != nil && before.Admin.GitHubOAuth != nil {
-		keep(&after.Admin.GitHubOAuth.ClientSecret, before.Admin.GitHubOAuth.ClientSecret)
-	} else if after.Admin.GitHubOAuth != nil && after.Admin.GitHubOAuth.ClientSecret == advancedSecretMarker {
-		return errors.New("a new GitHub OAuth secret is required")
-	}
-	if after.Admin.GitLabOAuth != nil && before.Admin.GitLabOAuth != nil {
-		keep(&after.Admin.GitLabOAuth.ClientSecret, before.Admin.GitLabOAuth.ClientSecret)
-	} else if after.Admin.GitLabOAuth != nil && after.Admin.GitLabOAuth.ClientSecret == advancedSecretMarker {
-		return errors.New("a new GitLab OAuth secret is required")
+	if after.Admin != nil {
+		if after.Admin.GitHubOAuth != nil && before.Admin.GitHubOAuth != nil {
+			keep(&after.Admin.GitHubOAuth.ClientSecret, before.Admin.GitHubOAuth.ClientSecret)
+		} else if after.Admin.GitHubOAuth != nil && after.Admin.GitHubOAuth.ClientSecret == advancedSecretMarker {
+			return errors.New("a new GitHub OAuth secret is required")
+		}
+		if after.Admin.GitLabOAuth != nil && before.Admin.GitLabOAuth != nil {
+			keep(&after.Admin.GitLabOAuth.ClientSecret, before.Admin.GitLabOAuth.ClientSecret)
+		} else if after.Admin.GitLabOAuth != nil && after.Admin.GitLabOAuth.ClientSecret == advancedSecretMarker {
+			return errors.New("a new GitLab OAuth secret is required")
+		}
 	}
 	return nil
 }

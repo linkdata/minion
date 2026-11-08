@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -11,6 +12,9 @@ import (
 )
 
 func TestBundledAuditValidatorRequiresAssignedClass(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
+	}
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("audit validator requires node")

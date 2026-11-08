@@ -103,6 +103,18 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 	if want := "https://" + leaf.DNSNames[0]; server.entryURL != want {
 		t.Fatalf("Webserv entry URL = %q, want callback origin %q", server.entryURL, want)
 	}
+	cfg.WebservListenURL = "https://" + leaf.DNSNames[0]
+	if err := checkAdminServerConfig(cfg); err != nil {
+		t.Fatalf("certificate rejected matching -listenurl: %v", err)
+	}
+	cfg.WebservListenURL = "https://other.example"
+	if err := checkAdminServerConfig(cfg); err == nil {
+		t.Fatal("certificate without -listenurl hostname passed preflight")
+	}
+	if _, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+		t.Fatal("certificate without -listenurl hostname reached the listener")
+	}
+	cfg.WebservListenURL = ""
 	cfg.GitHubOAuth.RedirectURL = "https://other.example/auth/github/callback"
 	if _, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
 		t.Fatal("certificate without callback hostname was accepted")
