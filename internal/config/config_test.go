@@ -61,7 +61,7 @@ func TestDefaultSkillsInstallOffline(t *testing.T) {
 
 func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
 	cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
-		Listen:      "0.0.0.0:8443",
+		Listen: "0.0.0.0:8443", Administrators: []AdminAccount{{Username: "admin"}},
 		GitHubOAuth: &OAuthClient{ClientID: "client", ClientSecret: "secret", RedirectURL: "https://minion.example/auth/github/callback"},
 	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	data, err := json.Marshal(cfg)
@@ -130,7 +130,7 @@ func TestUserModelChoicesBoundPreferencesAndTrustedDefaults(t *testing.T) {
 		Codex:        CodexConfig{Model: "default-main", ReasoningEffort: "medium"},
 		Claude:       ClaudeConfig{Model: "default-critic", Effort: "low"},
 		MainSettings: RoleModelConfig{Model: "operator-main"},
-		Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+		Admin: &AdminConfig{Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
 			UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{low}, Critic: []RoleModelConfig{medium}}},
 		Commands: map[string]CommandMapping{}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
 	if err := cfg.Validate(t.TempDir()); err != nil {
@@ -166,7 +166,7 @@ func TestUserModelChoicesValidateExactPairs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{},
 				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
-				Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+				Admin: &AdminConfig{Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
 					UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{valid}}}}
 			tc.edit(&cfg)
 			if err := cfg.Validate(t.TempDir()); err == nil {

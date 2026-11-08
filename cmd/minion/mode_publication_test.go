@@ -191,7 +191,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = listener.Close() })
-		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
+		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String(), Administrators: []config.AdminAccount{{Username: "admin"}}}
 	} else if adminSetup == "active" {
 		watcher.Config.Admin = &config.AdminConfig{Listen: freeAdminListen(t), Administrators: []config.AdminAccount{testAdminAccount()}}
 	} else if adminSetup == "placeholder" {

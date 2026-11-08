@@ -1054,8 +1054,8 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	}
 }
 
-func TestAdminWithoutConfiguredAccountsServesPublicHome(t *testing.T) {
-	handler, jw, _ := testAdminHandler(t, nil)
+func TestAdminWithoutConfiguredPasswordServesPublicHome(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{{Username: "admin"}})
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, "/admin/login"},
 		{http.MethodPost, "/admin/logout"},

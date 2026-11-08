@@ -108,7 +108,7 @@ func TestAddRepositoryPreservesCriticStoppingValues(t *testing.T) {
 
 func TestAddRepositoryUsesActiveAdminRuntime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	data := []byte(`{"bot_login":"bot","admin":{"listen":"0.0.0.0:8443"},"repositories":[{"name":"owner/first","id":1,"owner_id":2,"actions":["review"]}]}`)
+	data := []byte(`{"bot_login":"bot","admin":{"listen":"0.0.0.0:8443","administrators":[{"username":"admin"}]},"repositories":[{"name":"owner/first","id":1,"owner_id":2,"actions":["review"]}]}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}

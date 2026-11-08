@@ -279,6 +279,9 @@ func TestRunnerCredentialRotationConcurrentWithTrustedSecrets(t *testing.T) {
 		}
 	}
 	<-done
+	if got := len(owner.retiredProviderKeys); got != 2 {
+		t.Fatalf("repeated key rotation retained %d duplicate redaction entries", got)
+	}
 }
 
 func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) {

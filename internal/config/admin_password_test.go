@@ -65,7 +65,7 @@ func TestAdminAccountsValidation(t *testing.T) {
 		accounts []AdminAccount
 		invalid  bool
 	}{
-		{name: "no default account"},
+		{name: "no default account", invalid: true},
 		{name: "unset password", accounts: []AdminAccount{{Username: "admin"}}},
 		{name: "valid", accounts: []AdminAccount{{Username: "admin", PasswordHash: hash}}},
 		{name: "sample placeholder", accounts: []AdminAccount{{Username: "admin", PasswordHash: AdminPasswordHashPlaceholder}}},

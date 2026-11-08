@@ -577,14 +577,13 @@ func (c *Config) Validate(configDir string) error {
 				}
 			}
 		}
-		if len(admin.Administrators) > 1 || len(admin.Administrators) == 1 && admin.Administrators[0].Username != "admin" {
-			return errors.New("admin.administrators must contain only the admin account")
+		if len(admin.Administrators) != 1 || admin.Administrators[0].Username != "admin" {
+			return errors.New("admin.administrators must contain exactly one admin account")
 		}
-		for _, account := range admin.Administrators {
-			if account.PasswordHash != "" && account.PasswordHash != AdminPasswordHashPlaceholder {
-				if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
-					return errors.New("admin.administrators password_hash is invalid")
-				}
+		account := admin.Administrators[0]
+		if account.PasswordHash != "" && account.PasswordHash != AdminPasswordHashPlaceholder {
+			if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
+				return errors.New("admin.administrators password_hash is invalid")
 			}
 		}
 		if admin.Listen == "" {
@@ -594,19 +593,17 @@ func (c *Config) Validate(configDir string) error {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
 		host, port, err := net.SplitHostPort(admin.Listen)
-		if err != nil && admin.WebservAddress == "" {
+		if err != nil {
 			return fmt.Errorf("admin.listen: %w", err)
 		}
-		if strings.HasPrefix(admin.Listen, "[]") && admin.WebservAddress == "" {
+		if strings.HasPrefix(admin.Listen, "[]") {
 			return errors.New("admin.listen empty bracketed host is invalid; use :port")
 		}
-		var number uint64
-		if admin.WebservAddress == "" {
-			number, err = strconv.ParseUint(port, 10, 16)
-			if err != nil || number == 0 {
-				return errors.New("admin.listen requires a numeric port from 1 to 65535")
-			}
-		} else {
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || number == 0 {
+			return errors.New("admin.listen requires a numeric port from 1 to 65535")
+		}
+		if admin.WebservAddress != "" {
 			host = admin.WebservAddress
 			if overrideHost, _, err := net.SplitHostPort(host); err == nil {
 				host = overrideHost

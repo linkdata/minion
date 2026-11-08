@@ -129,7 +129,14 @@ func (e *Orchestrator) SetRunnerCredentials(codex config.CodexConfig, claude con
 		{e.Runner.Claude.APIKey, claude.APIKey},
 	} {
 		if pair[0] != "" && pair[0] != pair[1] {
-			retired = append(retired, retiredProviderKey{value: pair[0], until: now.Add(privateRecordRetention)})
+			until := now.Add(privateRecordRetention)
+			if i := slices.IndexFunc(retired, func(key retiredProviderKey) bool { return key.value == pair[0] }); i >= 0 {
+				if retired[i].until.Before(until) {
+					retired[i].until = until
+				}
+			} else {
+				retired = append(retired, retiredProviderKey{value: pair[0], until: until})
+			}
 		}
 	}
 	e.retiredProviderKeys = retired

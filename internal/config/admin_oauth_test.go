@@ -24,7 +24,7 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 		{"[localhost]:9000", true, true},
 	} {
 		t.Run(test.address, func(t *testing.T) {
-			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: test.address}}
+			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: test.address, Administrators: []AdminAccount{{Username: "admin"}}}}
 			if test.tls {
 				cfg.Admin.WebservCertDir = "/certs"
 			}
@@ -34,7 +34,7 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 			}
 		})
 	}
-	malformed := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: "[]:9000"}}
+	malformed := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: "[]:9000", Administrators: []AdminAccount{{Username: "admin"}}}}
 	if err := malformed.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "-address empty bracketed host") {
 		t.Fatalf("malformed -address without TLS: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 
 func TestOAuthClientConfigValidation(t *testing.T) {
 	valid := func() Config {
-		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", GitHubOAuth: &OAuthClient{
+		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{
 			ClientID: "github-client", ClientSecret: "github-secret", RedirectURL: "https://minion.example/auth/github/callback"},
 			GitLabOAuth: &OAuthClient{ClientID: "gitlab-client", ClientSecret: "gitlab-secret",
 				RedirectURL: "https://minion.example/auth/gitlab/callback"}},

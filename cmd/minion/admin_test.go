@@ -351,7 +351,7 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = store.Close() })
-				admin := &config.AdminConfig{Listen: freeAdminListen(t),
+				admin := &config.AdminConfig{Listen: freeAdminListen(t), Administrators: []config.AdminAccount{{Username: "admin"}},
 					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"}}
 				admin.GitHubOAuth.RedirectURL = "http://" + admin.Listen + "/auth/github/callback"
 				choice := config.RoleModelConfig{Model: "approved", Effort: "low"}
@@ -712,7 +712,7 @@ func TestCheckRejectsInvalidAdminTLS(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{
 				BotLogin: "bot", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
-				Admin:    &config.AdminConfig{TLSCertFile: tc.cert, TLSKeyFile: tc.key},
+				Admin:    &config.AdminConfig{TLSCertFile: tc.cert, TLSKeyFile: tc.key, Administrators: []config.AdminAccount{{Username: "admin"}}},
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
 			}
@@ -734,7 +734,7 @@ func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {
 	cfg := config.Config{
 		Main: "codex", BotLogin: "bot", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 		Codex: config.CodexConfig{Model: "test-model", ReasoningEffort: "medium"},
-		Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem"},
+		Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem", Administrators: []config.AdminAccount{{Username: "admin"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{
 			ExecutorID: "remote", Listen: "127.0.0.1:8443",
 			TLSCertFile: certFile, TLSKeyFile: keyFile,

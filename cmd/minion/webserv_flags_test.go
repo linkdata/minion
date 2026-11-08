@@ -148,7 +148,7 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 }
 
 func TestWebservTLSOverrideValidatesWithoutListener(t *testing.T) {
-	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{Listen: "0.0.0.0:8443"},
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{Listen: "0.0.0.0:8443", Administrators: []config.AdminAccount{{Username: "admin"}}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
 		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
@@ -173,7 +173,7 @@ func TestCheckRejectsUncoveredOAuthCallbackHost(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	certFile, keyFile, _ := remoteTestTLSFiles(t)
 	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{
-		TLSCertFile: certFile, TLSKeyFile: keyFile, GitHubOAuth: &config.OAuthClient{
+		TLSCertFile: certFile, TLSKeyFile: keyFile, Administrators: []config.AdminAccount{{Username: "admin"}}, GitHubOAuth: &config.OAuthClient{
 			ClientID: "id", ClientSecret: "secret", RedirectURL: "https://other.example/auth/github/callback"}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},

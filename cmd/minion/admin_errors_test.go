@@ -149,7 +149,7 @@ func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
 }
 
 func TestOAuthOnlyAdminLoginShowsPasswordSetup(t *testing.T) {
-	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+	cfg := config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin"}}, GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}
 	handler, _, _ := testOAuthAdminHandler(t, cfg, nil)
 	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
