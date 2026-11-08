@@ -1,13 +1,16 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -29,6 +32,30 @@ func TestCheckedInConfigIsMinimalDefault(t *testing.T) {
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
 		t.Fatal("checked-in configuration differs from expected default")
+	}
+}
+
+func TestDefaultSkillsInstallOffline(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+	}
+	var urls []string
+	for _, command := range cfg.Commands {
+		urls = append(urls, command.Skills...)
+	}
+	urls = append(urls, cfg.AlwaysOnSkills...)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // Any default that needs a download must fail without network access.
+	if err := skills.Install(ctx, urls); err != nil {
+		t.Fatal(err)
 	}
 }
 
