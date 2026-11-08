@@ -36,7 +36,7 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 		{"invalid UTF-8", WorkerCredentials{CodexAPIKey: string([]byte{0xff})}, false},
 		{"newline", WorkerCredentials{CodexAPIKey: secret + "\n"}, false},
 		{"oversized", WorkerCredentials{CodexAPIKey: strings.Repeat("x", maxWorkerCredentialBytes+1)}, false},
-		{"aggregate oversized", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", 4096), CodexAccessToken: strings.Repeat("y", 4097)}, false},
+		{"native key and token above old aggregate limit", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", 4096), CodexAccessToken: strings.Repeat("y", 4097)}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.credentials.validateJob(job)
@@ -49,6 +49,9 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 				t.Fatalf("credential validity=%t got_error=%t", test.valid, err != nil)
 			}
 		})
+	}
+	if err := (WorkerCredentials{CodexNativeAPIKey: "x", ClaudeAPIKey: strings.Repeat("y", maxWorkerCredentialBytes)}).validate(); err != nil {
+		t.Fatalf("ambient Codex key with maximum saved Claude key: %v", err)
 	}
 	credentials := WorkerCredentials{CodexAPIKey: secret}
 	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil, credentials)

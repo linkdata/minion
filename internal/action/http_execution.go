@@ -75,11 +75,9 @@ func (e *Orchestrator) workerCredentials(main, critic string) WorkerCredentials 
 const maxWorkerCredentialBytes = 8 << 10
 
 func (credentials WorkerCredentials) validate() error {
-	// Bound each field before summing so the aggregate cannot overflow int.
 	if len(credentials.CodexAPIKey) > maxWorkerCredentialBytes || len(credentials.CodexNativeAPIKey) > maxWorkerCredentialBytes ||
 		len(credentials.CodexAccessToken) > maxWorkerCredentialBytes ||
-		len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes ||
-		len(credentials.CodexAPIKey)+len(credentials.CodexNativeAPIKey)+len(credentials.CodexAccessToken)+len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes {
+		len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes {
 		return errors.New("worker credentials exceed limit")
 	}
 	for _, value := range []string{credentials.CodexAPIKey, credentials.CodexNativeAPIKey, credentials.CodexAccessToken, credentials.ClaudeAPIKey} {
