@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -26,8 +27,9 @@ func createInitialConfig(path string, logger *log.Logger) (bool, error) {
 	}
 	passwordSet := false
 	if fd, ok := adminPasswordTerminal(); ok {
+		reader := bufio.NewReader(os.Stdin)
 		for {
-			password, err := readAdminPasswordWithPrompt(fd, "Set admin password: ")
+			password, err := readAdminPasswordWithPrompt(fd, "Set admin password: ", reader)
 			fmt.Fprintln(os.Stderr)
 			if errors.Is(err, errInvalidAdminPassword) {
 				fmt.Fprintln(os.Stderr, err)

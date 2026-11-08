@@ -144,6 +144,7 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 				continue
 			}
 		}
+		syncUnselectedModelKeys(owner, cfg)
 		watcher.Config = cfg
 		owner.AIInstructions = cfg.AIInstructions
 		owner.CleanCriticRounds = cfg.RequiredCleanRounds

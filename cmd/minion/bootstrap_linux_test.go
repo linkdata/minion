@@ -43,7 +43,7 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 		_ = master.Close()
 		t.Fatal("initial password prompt timed out")
 	}
-	if _, err := master.Write([]byte("\r")); err != nil {
+	if _, err := master.Write([]byte("\rnew-admin-password\r")); err != nil {
 		t.Fatal(err)
 	}
 	type retryResult struct {
@@ -73,9 +73,6 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		_ = master.Close()
 		t.Fatal("blank password retry timed out")
-	}
-	if _, err := master.Write([]byte("new-admin-password\r")); err != nil {
-		t.Fatal(err)
 	}
 	select {
 	case got := <-done:

@@ -58,10 +58,10 @@ func runHashMode() int {
 }
 
 func readAdminPassword(fd int) (password string, err error) {
-	return readAdminPasswordWithPrompt(fd, "Password to hash: ")
+	return readAdminPasswordWithPrompt(fd, "Password to hash: ", bufio.NewReader(os.Stdin))
 }
 
-func readAdminPasswordWithPrompt(fd int, prompt string) (password string, err error) {
+func readAdminPasswordWithPrompt(fd int, prompt string, reader *bufio.Reader) (password string, err error) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -93,7 +93,6 @@ func readAdminPasswordWithPrompt(fd int, prompt string) (password string, err er
 		return "", err
 	}
 	// x/term.NewTerminal.ReadPassword stalls on a valid U+FFFD rune.
-	reader := bufio.NewReader(os.Stdin)
 	runes := make([]rune, 0, 64)
 	count := 0
 	cancelled := false

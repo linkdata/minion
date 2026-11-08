@@ -63,6 +63,19 @@ func applyModelKeys(owner *action.Orchestrator, cfg config.Config) {
 	owner.SetRunnerCredentials(codex, claude)
 }
 
+func syncUnselectedModelKeys(owner *action.Orchestrator, cfg config.Config) {
+	codex, claude := owner.Runner.Codex, owner.Runner.Claude
+	if cfg.Main != "codex" && cfg.Adversarial != "codex" {
+		codex.APIKey = cfg.Codex.APIKey
+	}
+	if cfg.Main != "claude" && cfg.Adversarial != "claude" {
+		claude.APIKey = cfg.Claude.APIKey
+	}
+	if codex.APIKey != owner.Runner.Codex.APIKey || claude.APIKey != owner.Runner.Claude.APIKey {
+		owner.SetRunnerCredentials(codex, claude)
+	}
+}
+
 // attachSelectedLocalWorker prepares one selected child before the monitor can
 // discover work. Public service mode selection remains with the CLI switch.
 func attachSelectedLocalWorker(ctx context.Context, owner *action.Orchestrator, watcher *monitor.Monitor, path string, args []string, readyTimeout time.Duration) (<-chan struct{}, func() error, error) {
@@ -145,6 +158,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 		cfg, generation := live.next()
 		refresh := modelKeysChanged(watcher.Config, cfg) || selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || hasNewInstalledCommand(cfg, watcher.SelectedCommands)
 		if !refresh {
+			syncUnselectedModelKeys(owner, cfg)
 			owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 			owner.AIInstructions = cfg.AIInstructions
 			owner.CleanCriticRounds = cfg.RequiredCleanRounds

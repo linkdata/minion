@@ -175,6 +175,29 @@ func TestModelKeysChangedIncludesCriticProvider(t *testing.T) {
 	}
 }
 
+type keyRedactionCapacityExecutor struct{ err error }
+
+func (e keyRedactionCapacityExecutor) Execute(context.Context, action.Job, action.Checkpoints) (action.Result, error) {
+	return action.Result{}, e.err
+}
+
+func (e keyRedactionCapacityExecutor) WaitCapacity(context.Context) error { return e.err }
+
+func TestUnselectedModelKeyEditUpdatesParentRedaction(t *testing.T) {
+	cfg := selectedServiceTestConfig(t)
+	owner := newOrchestrator(cfg, github.New("bot-token"), nil, nil, nil)
+	const key = "updated-unused-key"
+	cfg.Claude.APIKey = key
+	owner.Executor = keyRedactionCapacityExecutor{err: errors.New("unavailable: " + key)}
+	syncUnselectedModelKeys(owner, cfg)
+	if owner.Runner.Codex.APIKey != "selected-config-key" || owner.Runner.Claude.APIKey != key {
+		t.Fatal("unselected key update changed selected credentials or left parent redaction stale")
+	}
+	if err := owner.WaitCapacity(t.Context()); err == nil || strings.Contains(err.Error(), key) {
+		t.Fatalf("unselected key escaped readiness redaction: %v", err)
+	}
+}
+
 func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	cfg := selectedServiceTestConfig(t)
 	repo := &cfg.Repositories[0]
@@ -476,8 +499,8 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitApplied()
-	if owner.Executor != beforeUnusedKeyChange || watcher.Config.Claude.APIKey != "updated-unused-key" {
-		t.Fatal("unused provider key restarted the worker or did not apply")
+	if owner.Executor != beforeUnusedKeyChange || watcher.Config.Claude.APIKey != "updated-unused-key" || owner.Runner.Claude.APIKey != "updated-unused-key" {
+		t.Fatal("unused provider key restarted the worker or did not update parent redaction")
 	}
 	beforeKeyChange := owner.Executor
 	if err := live.save(func(next *config.Config) error {
