@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -48,5 +49,42 @@ func TestCreateInitialConfigWithoutTerminal(t *testing.T) {
 	}
 	if data, err := os.ReadFile(path); err != nil || string(data) != minion.DefaultConfig() {
 		t.Fatalf("existing config changed: error=%v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	type result struct {
+		created bool
+		err     error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			created, err := createInitialConfig(path, logger)
+			results <- result{created, err}
+		}()
+	}
+	close(start)
+	createdCount := 0
+	var createErr error
+	for range 2 {
+		got := <-results
+		createErr = errors.Join(createErr, got.err)
+		if got.created {
+			createdCount++
+		}
+	}
+	if createErr != nil || createdCount != 1 {
+		t.Fatalf("concurrent create: count=%d error=%v", createdCount, createErr)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil || string(data) != minion.DefaultConfig() {
+		t.Fatalf("published config is incomplete: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("temporary config remains: entries=%v error=%v", entries, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/linkdata/minion"
@@ -15,7 +16,7 @@ import (
 )
 
 // createInitialConfig writes the embedded template only when no config exists.
-func createInitialConfig(path string, logger *log.Logger) (bool, error) {
+func createInitialConfig(path string, logger *log.Logger) (created bool, resultErr error) {
 	if _, err := os.Lstat(path); err == nil {
 		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -53,20 +54,25 @@ func createInitialConfig(path string, logger *log.Logger) (bool, error) {
 			break
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return false, nil
-	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".minion-config-*")
 	if err != nil {
 		return false, err
 	}
+	defer func() { resultErr = errors.Join(resultErr, os.Remove(f.Name())) }()
 	_, err = io.WriteString(f, content)
 	if err == nil {
 		err = f.Sync()
 	}
 	err = errors.Join(err, f.Close())
 	if err != nil {
-		return false, errors.Join(err, os.Remove(path))
+		return false, err
+	}
+	// Link publishes complete content without replacing a config created meanwhile.
+	if err = os.Link(f.Name(), path); errors.Is(err, os.ErrExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	logger.Printf("created config %s", path)
 	if !passwordSet {

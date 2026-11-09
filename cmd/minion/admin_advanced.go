@@ -27,6 +27,7 @@ const (
 
 type adminAdvancedView struct {
 	JSON, Version     string
+	Error             string
 	Setup             bool
 	RestartRequired   bool
 	PendingActivation bool
@@ -37,6 +38,7 @@ var adminAdvancedHTML = template.Must(template.New("admin advanced").Parse(headH
 <h1>Configuration</h1><p>Use this editor for settings without a dedicated control. {{if .Dot.Setup}}Restart Minion after setup to use the saved settings.{{else}}All edits here except AI API keys require a Minion restart. AI API key changes apply to new jobs after any active action ends. If remote startup preflight fails, restart Minion and the worker after correcting the key.{{end}}</p>
 {{if .Dot.RestartRequired}}<p role="status" class="alert alert-info">Saved configuration requires a Minion restart.</p>{{end}}
 {{if .Dot.PendingActivation}}<p role="status" class="alert alert-info">A configuration change is pending activation.</p>{{end}}
+{{if .Dot.Error}}<p role="alert" class="alert alert-danger">Latest change failed: {{.Dot.Error}}</p>{{end}}
 <p>Existing secrets appear as <code>PASTE_NEW_SECRET_OR_KEEP_THIS_VALUE</code>. Leave that value to keep a secret, replace it to set a new one, or use an empty string to clear an optional secret. The admin password hash cannot be changed here.</p>
 <form method="post" action="/admin/config">
 <input type="hidden" name="version" value="{{.Dot.Version}}">
@@ -75,7 +77,12 @@ func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string,
 
 func advancedConfigView(path string, live *adminLiveConfig, runtime config.AdminConfig) (adminAdvancedView, error) {
 	var view adminAdvancedView
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return view, errors.New("configuration is unavailable or exceeds the editor limit")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxAdvancedConfig+1))
 	if err != nil || len(data) > maxAdvancedConfig {
 		return view, errors.New("configuration is unavailable or exceeds the editor limit")
 	}
@@ -104,7 +111,7 @@ func advancedConfigView(path string, live *adminLiveConfig, runtime config.Admin
 	view.Setup = live == nil
 	if live != nil {
 		live.mu.RLock()
-		view.RestartRequired, view.PendingActivation = live.restartRequired, live.pending
+		view.RestartRequired, view.PendingActivation, view.Error = live.restartRequired, live.pending, live.lastError
 		live.mu.RUnlock()
 	}
 	return view, nil

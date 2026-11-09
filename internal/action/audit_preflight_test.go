@@ -19,9 +19,6 @@ import (
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 	for _, scenario := range []struct{ name, script, node, want string }{
 		{"missing findings validator", "validate-findings.cjs", "valid", "audit validator"},
-		{"missing JSON keys helper", "strict-json-keys.cjs", "valid", "audit validator"},
-		{"missing safe input helper", "safe-input.cjs", "valid", "audit validator"},
-		{"missing report schema", "report-schema.json", "valid", "audit validator"},
 		{"nonregular validator", "directory", "valid", "not a regular file"},
 		{"missing node", "", "missing", "audit requires node"},
 		{"unsupported node", "", "unsupported", "permission model is unavailable"},

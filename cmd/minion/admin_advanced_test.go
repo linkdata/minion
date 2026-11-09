@@ -219,6 +219,27 @@ func TestAdvancedConfigRoutesRequireAdminAndSaveMaskedForm(t *testing.T) {
 		saved.Codex.APIKey != cfg.Codex.APIKey || saved.Admin.Administrators[0].PasswordHash != account.PasswordHash {
 		t.Fatal("config route changed the wrong fields or lost masked secrets")
 	}
+	live.mu.Lock()
+	live.lastError = "key activation <failed>"
+	live.mu.Unlock()
+	failed := adminResponse(handler, http.MethodGet, "/admin/config", nil, cookie, "")
+	if failed.Code != http.StatusOK || !strings.Contains(failed.Body.String(), `role="alert"`) ||
+		!strings.Contains(failed.Body.String(), "key activation &lt;failed&gt;") {
+		t.Fatalf("configuration page hid activation failure: status=%d body=%q", failed.Code, failed.Body.String())
+	}
+}
+
+func TestAdvancedConfigViewRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxAdvancedConfig+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := advancedConfigView(path, nil, config.AdminConfig{}); err == nil || !strings.Contains(err.Error(), "editor limit") {
+		t.Fatalf("oversized config file was accepted: %v", err)
+	}
 }
 
 func TestAdvancedConfigHandlesAllCredentialFields(t *testing.T) {
