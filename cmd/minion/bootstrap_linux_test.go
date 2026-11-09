@@ -197,7 +197,7 @@ func TestCreateInitialConfigUsesPreopenedTerminal(t *testing.T) {
 	os.Stdin = input
 	defer func() { os.Stdin = oldInput }()
 	if os.Geteuid() != 0 {
-		if _, opened, err := adminPasswordTerminal(true); err == nil {
+		if opened, err := adminPasswordTerminal(); err == nil {
 			if opened != nil {
 				_ = opened.Close()
 			}

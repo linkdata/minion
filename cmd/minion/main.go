@@ -155,7 +155,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	var passwordOutput *os.File
 	if *webUser != "" && !*installSkills {
-		_, passwordOutput, _ = adminPasswordTerminal(true)
+		passwordOutput, _ = adminPasswordTerminal()
 	}
 	if err := webserv.BecomeUser(*webUser); err != nil {
 		if passwordOutput != nil {

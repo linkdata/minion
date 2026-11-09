@@ -33,7 +33,7 @@ func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool,
 	}
 	passwordSet := false
 	if prompt && output == nil {
-		_, opened, err := adminPasswordTerminal(true)
+		opened, err := adminPasswordTerminal()
 		if err != nil {
 			logger.Printf("admin password setup skipped: %v", err)
 		} else if opened != nil {
@@ -102,18 +102,15 @@ func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool,
 	return true, nil
 }
 
-func adminPasswordTerminal(prompt bool) (int, *os.File, error) {
-	if !prompt {
-		return 0, nil, nil
-	}
+func adminPasswordTerminal() (*os.File, error) {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
-		return 0, nil, nil
+		return nil, nil
 	}
 	path := os.Stdin.Name()
 	if runtime.GOOS == "windows" {
 		path = "CONOUT$"
 	}
 	output, err := os.OpenFile(path, os.O_WRONLY, 0)
-	return fd, output, err
+	return output, err
 }

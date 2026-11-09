@@ -200,9 +200,6 @@ func applyAdvancedRuntime(cfg *config.Config, runtime config.AdminConfig) {
 }
 
 func restoreAdvancedSecrets(after, before *config.Config) error {
-	if before.Admin != nil && after.Admin == nil {
-		return errors.New("admin password and account cannot be changed here")
-	}
 	if after.Admin != nil {
 		if before.Admin == nil || len(before.Admin.Administrators) != 1 || len(after.Admin.Administrators) != 1 ||
 			after.Admin.Administrators[0].Username != before.Admin.Administrators[0].Username ||
