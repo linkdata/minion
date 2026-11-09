@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -227,6 +228,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	var client *github.Client
 	var user github.User
+	githubCredentialsNeedSetup := true
 	authenticateGitHub := func() bool {
 		if client != nil {
 			return true
@@ -238,6 +240,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		candidate := github.New(cfg.GitHub.Token)
 		user, err = candidate.AuthenticatedUser(ctx)
 		if err != nil {
+			var status *github.StatusError
+			githubCredentialsNeedSetup = errors.As(err, &status) && status.StatusCode == http.StatusUnauthorized
 			logger.Printf("GitHub identity check: %v", err)
 			return false
 		}
@@ -323,7 +327,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		terminalRecovery = true
 	}
 	if !authenticateGitHub() {
-		return recoverySetup()
+		if githubCredentialsNeedSetup {
+			return recoverySetup()
+		}
+		return 1
 	}
 	if *check {
 		if err := checkRepositories(ctx, client, cfg, logger); err != nil {

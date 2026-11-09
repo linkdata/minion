@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -119,24 +120,35 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	address := occupiedAdminAddress(t)
 	certFile, keyFile, _ := remoteTestTLSFiles(t)
-	previousTransport := http.DefaultTransport
-	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Path != "/user" {
-			t.Errorf("unexpected GitHub request: %s", request.URL)
-		}
-		recorder := httptest.NewRecorder()
-		recorder.WriteHeader(http.StatusUnauthorized)
-		return recorder.Result(), nil
-	})
-	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 	for _, tc := range []struct {
-		name         string
-		args         []string
-		pendingWrite bool
-		wantRecovery bool
-	}{{"service", nil, false, true}, {"check", []string{"-check"}, false, false},
-		{"oneshot", []string{"-oneshot"}, false, false}, {"pending publication", nil, true, false}} {
+		name           string
+		args           []string
+		pendingWrite   bool
+		wantRecovery   bool
+		status         int
+		transportError bool
+	}{
+		{name: "service", wantRecovery: true, status: http.StatusUnauthorized},
+		{name: "check", args: []string{"-check"}, status: http.StatusUnauthorized},
+		{name: "oneshot", args: []string{"-oneshot"}, status: http.StatusUnauthorized},
+		{name: "pending publication", pendingWrite: true, status: http.StatusUnauthorized},
+		{name: "GitHub unavailable", status: http.StatusServiceUnavailable},
+		{name: "transport error", transportError: true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
+			previousTransport := http.DefaultTransport
+			http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+				if request.URL.Path != "/user" {
+					t.Errorf("unexpected GitHub request: %s", request.URL)
+				}
+				if tc.transportError {
+					return nil, errors.New("fixture connection failure")
+				}
+				recorder := httptest.NewRecorder()
+				recorder.WriteHeader(tc.status)
+				return recorder.Result(), nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = previousTransport })
 			cfg := config.Config{Main: "codex", BotLogin: "bot", GitHub: config.GitHubConfig{Token: "bad-token"},
 				Codex:     config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
 				StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
