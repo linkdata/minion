@@ -34,6 +34,13 @@ type remoteStartupGitHub struct {
 	invitationChecked chan struct{}
 }
 
+type unsupportedAuditRecoveryHandler struct{}
+
+func (unsupportedAuditRecoveryHandler) WaitCapacity(context.Context) error { return nil }
+func (unsupportedAuditRecoveryHandler) Execute(context.Context, monitor.Job) error {
+	return fmt.Errorf("%w: audit unsupported on remote host", monitor.ErrTerminalJob)
+}
+
 func (g *remoteStartupGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
 	g.invitationChecks++
 	if g.invitationChecked != nil {
@@ -43,6 +50,68 @@ func (g *remoteStartupGitHub) ListRepositoryInvitations(context.Context) ([]gith
 		}
 	}
 	return nil, nil
+}
+
+func (*remoteStartupGitHub) ReactEyes(context.Context, string) error { return nil }
+
+func TestRemoteStartupCompletesUnsupportedAuditRecovery(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the orchestrator does not select security audits on Windows")
+	}
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	cfg := selectedServiceTestConfig(t)
+	cfg.Commands["audit"] = config.CommandMapping{Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}}
+	cfg.Repositories[0].ID, cfg.Repositories[0].OwnerID = 1, 2
+	cfg.Repositories[0].Actions = []string{"comment", "audit"}
+	cfg.Repositories[0].AllowedActors = []string{"writer"}
+	cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+	cfg.RemoteExecutor = &config.RemoteExecutorConfig{
+		ExecutorID: "remote", Listen: "127.0.0.1:0", TLSCertFile: certFile, TLSKeyFile: keyFile,
+		Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32)),
+	}
+	now := time.Now().UTC()
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "remote",
+		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+		SubjectType: "Issue", SubjectNumber: 7,
+		SourceKey: "comment:1", SourceNodeID: "source-node",
+		SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-1", SourceUpdatedAt: now,
+		Requester: "writer", RequesterID: 7, CommandName: "audit", Action: "security-audit",
+		AcceptedAt: now.Add(-time.Minute), Deadline: now.Add(time.Hour),
+	}
+	store := serviceStore(t, state.Data{
+		Cursor:      now.Add(-2 * time.Minute),
+		Accepted:    &accepted,
+		JobFailures: map[string]state.JobFailure{accepted.JobID: frozenFailureForTest(accepted)},
+		Processed:   map[string]time.Time{}, TerminalDecisions: map[string]state.TerminalDecision{},
+		PublicationWrites: map[string]state.PublicationWrite{},
+		NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour),
+	})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &remoteStartupGitHub{terminalRecoveryGitHub: &terminalRecoveryGitHub{item: github.Item{
+		Key: accepted.SourceKey, NodeID: accepted.SourceNodeID, HTMLURL: accepted.SourceURL,
+		UpdatedAt: now, Body: "@bot audit", Author: github.User{Login: "writer", ID: 7},
+	}}}
+	var logs bytes.Buffer
+	logger := log.New(&logs, "", 0)
+	owner := newOrchestrator(cfg, nil, store, logger, nil)
+	watcher := &monitor.Monitor{Config: cfg, GitHub: gh, BotID: 8, Logger: logger}
+	endpoint, err := attachSelectedRemoteWorker(owner, watcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	if !watcher.SelectedCommands["audit"] {
+		t.Fatal("audit was not initially selected")
+	}
+	watcher.Handler = unsupportedAuditRecoveryHandler{}
+	if code := runSelectedRemoteService(t.Context(), owner, watcher, store, false, logger, endpoint, time.Second, nil); code != 0 ||
+		store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" || gh.terminalRecoveryGitHub.reply == "" {
+		t.Fatalf("terminal audit recovery stopped startup: code=%d state=%+v reply=%q logs=%q", code, store.Data, gh.terminalRecoveryGitHub.reply, logs.String())
+	}
 }
 
 func TestRemoteStartupRecoversWithoutWorkerPull(t *testing.T) {

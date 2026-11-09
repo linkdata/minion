@@ -42,7 +42,7 @@ func validPreflightMessage(message string) bool {
 		preflightCommandSkillUnavailable, preflightAuditSkillUnavailable,
 		preflightAuditToolchainUnavailable, preflightGitReadinessUnavailable,
 		preflightCodexLoginUnavailable, preflightCodexBoundaryUnavailable,
-		preflightCodexInvocationUnsupported, preflightClaudeSettingsUnavailable, preflightRemoteClaudeHostCheckFailed:
+		preflightCodexInvocationUnsupported, preflightClaudeSettingsUnavailable:
 		return true
 	}
 	return false

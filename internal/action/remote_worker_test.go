@@ -124,7 +124,7 @@ func TestRemoteWorkerRejectsAssignmentAfterPullDisconnect(t *testing.T) {
 	}
 }
 
-func TestRemoteWorkerDefersUnsupportedAuditWithoutAssignment(t *testing.T) {
+func TestRemoteWorkerFailsUnsupportedAuditWithoutAssignment(t *testing.T) {
 	executor, err := NewHTTPExecutor("remote")
 	if err != nil {
 		t.Fatal(err)
@@ -139,9 +139,9 @@ func TestRemoteWorkerDefersUnsupportedAuditWithoutAssignment(t *testing.T) {
 	executor.mu.Lock()
 	active := executor.active
 	executor.mu.Unlock()
-	if !errors.Is(err, ErrRemoteWorkerUnavailable) || !errors.Is(err, monitor.ErrRequestTransport) ||
+	if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, ErrRemoteWorkerUnavailable) || errors.Is(err, monitor.ErrRequestTransport) ||
 		probe.undelivered != 1 || active != nil || result.Version != ProtocolVersion {
-		t.Fatalf("unsupported audit was not deferred before assignment: result=%+v error=%v undelivered=%d active=%v", result, err, probe.undelivered, active)
+		t.Fatalf("unsupported audit was not failed before assignment: result=%+v error=%v undelivered=%d active=%v", result, err, probe.undelivered, active)
 	}
 	close(pullDone)
 }

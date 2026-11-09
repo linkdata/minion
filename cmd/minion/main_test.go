@@ -161,6 +161,52 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	}
 }
 
+func TestCheckValidAdminTLSWithoutBinding(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	address := occupiedAdminAddress(t)
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/user":
+			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		case "/repos/owner/repo/notifications":
+			_, _ = recorder.WriteString(`[]`)
+		case "/repos/owner/repo":
+			_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","default_branch":"main","owner":{"id":2}}`)
+		case "/repos/owner/repo/collaborators/bot/permission":
+			_, _ = recorder.WriteString(`{"permission":"write","user":{"id":8,"login":"bot"}}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", request.Method, request.URL)
+			recorder.WriteHeader(http.StatusNotFound)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	cfg := config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"}, Main: "codex",
+		Codex: config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		Admin: &config.AdminConfig{Listen: address, TLSCertFile: certFile, TLSKeyFile: keyFile,
+			Administrators: []config.AdminAccount{testAdminAccount()}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
+			TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+	}
+	start := func() int { return runWithGitCheck(func(context.Context, string) error { return nil }) }
+	code, output := runStartupFixtureWithRun(t, cfg, start, "-check")
+	if code != 0 || !strings.Contains(output, "preflight passed as @bot") {
+		t.Fatalf("-check rejected valid TLS on occupied port: code=%d output=%q", code, output)
+	}
+	code, output = runStartupFixtureWithRun(t, cfg, start)
+	if code != 1 || !strings.Contains(output, "admin dashboard: prepare listener:") || !strings.Contains(output, address) {
+		t.Fatalf("service did not report occupied admin port: code=%d output=%q", code, output)
+	}
+}
+
 func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
 	for _, tc := range []struct {
 		name, main, adversarial string

@@ -182,7 +182,7 @@ func (w *remoteWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (
 		return result, err
 	}
 	if job.Action == command.SecurityAudit && !w.endpoint.AuditHostSupported() {
-		err := errors.Join(ErrRemoteWorkerUnavailable, fmt.Errorf("%w: audit unsupported on remote host", monitor.ErrRequestTransport))
+		err := fmt.Errorf("%w: audit unsupported on remote host", monitor.ErrTerminalJob)
 		if hasCheckpoint {
 			err = errors.Join(err, checkpoint.AssignmentNotDelivered())
 		}
