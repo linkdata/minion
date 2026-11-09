@@ -152,3 +152,45 @@ func TestUpdatePreservesWindowsConfigSecurity(t *testing.T) {
 		t.Fatal("config DACL changed after save")
 	}
 }
+
+func TestUpdatePreservesInheritedWindowsConfigACL(t *testing.T) {
+	dir := t.TempDir()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentSD, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentDACL, _, err := parentSD.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, parentDACL, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, _, err := before.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED != 0 || !strings.Contains(before.String(), "ID;") {
+		t.Fatalf("config did not inherit parent ACL: control=%#x descriptor=%q error=%v", control, before.String(), err)
+	}
+	if _, err := Update(path, func(cfg *Config) error { cfg.BotLogin = "changed"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	after, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.String() != after.String() {
+		t.Fatalf("saved config changed inherited ACL: before=%q after=%q", before.String(), after.String())
+	}
+}
