@@ -57,7 +57,13 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
-	webservFlagsUsed := *address != "" || *certDir != "" || *webUser != "" || *dataDir != "" || *listenURL != ""
+	webservFlagsUsed := false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "address", "certdir", "user", "datadir", "listenurl":
+			webservFlagsUsed = true
+		}
+	})
 	if webservFlagsUsed && *mode != "orchestrate" {
 		logger.Print("webserv flags require orchestrate mode")
 		return 2

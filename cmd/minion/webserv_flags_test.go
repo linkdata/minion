@@ -43,6 +43,29 @@ func TestAdminWebservConfigUsesCLIOverrides(t *testing.T) {
 	}
 }
 
+func TestWebservFlagsRejectExplicitEmptyOutsideAdminService(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-mode=execute", "-address="}, "webserv flags require orchestrate mode"},
+		{[]string{"-certdir="}, "webserv flags require an admin block"},
+	} {
+		code, output := runStartupFixtureWithRun(t, cfg, func() int {
+			return runWithGitCheck(func(context.Context, string) error {
+				t.Fatal("webserv flag reached Git preflight")
+				return nil
+			})
+		}, test.args...)
+		if code != 2 || !strings.Contains(output, test.want) {
+			t.Fatalf("explicit empty webserv flag %v: exit=%d log=%q", test.args, code, output)
+		}
+	}
+}
+
 func TestWebservOverrideRequiresTLSOutsideLoopback(t *testing.T) {
 	for _, address := range []string{":9000", "0.0.0.0:9000", "example.test:9000", "localhost:9000"} {
 		cfg := config.AdminConfig{WebservAddress: address}
