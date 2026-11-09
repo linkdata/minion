@@ -32,7 +32,6 @@ var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + 
 {{else if .Dot.PasswordSet}}
 <h1 class="h3 mb-3">Minion admin</h1>
 <form method="post" action="/admin/login" class="vstack gap-3 col-md-6 col-lg-4">
-<input type="hidden" name="username" value="admin">
 <label class="form-label">Password <input class="form-control" name="password" type="password" autocomplete="current-password" required></label>
 <button class="btn btn-primary">Sign in</button></form><script defer src="/admin/login.js"></script>
 {{else}}
@@ -112,7 +111,7 @@ type adminAccess struct {
 	passwordSet  bool
 	mu           sync.Mutex
 	noticeMu     sync.Mutex
-	attempts     map[string]loginWindow
+	attempts     loginWindow
 	hashSlots    chan struct{}
 }
 
@@ -152,7 +151,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	if err := jw.AddTemplateLookuper(adminAdvancedHTML); err != nil {
 		return nil, err
 	}
-	access := &adminAccess{jaws: jw, oauth: oauth, setup: setup, setupPath: setupPath, setupAdmin: cfg, attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
+	access := &adminAccess{jaws: jw, oauth: oauth, setup: setup, setupPath: setupPath, setupAdmin: cfg, hashSlots: make(chan struct{}, 2)}
 	if len(cfg.Administrators) == 1 {
 		account := cfg.Administrators[0]
 		if account.Username == "admin" && account.PasswordHash != "" && account.PasswordHash != config.AdminPasswordHashPlaceholder {
@@ -424,13 +423,10 @@ func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name st
 	ui.Handler(a.jaws, name, view).ServeHTTP(w, r)
 }
 
-func (a *adminAccess) reserveAttempt(username string) bool {
-	if username != "admin" || !a.passwordSet {
-		username = ""
-	}
+func (a *adminAccess) reserveAttempt() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	window := a.attempts[username]
+	window := a.attempts
 	now := time.Now()
 	if window.start.IsZero() || now.Sub(window.start) >= time.Minute {
 		window = loginWindow{start: now}
@@ -439,7 +435,7 @@ func (a *adminAccess) reserveAttempt(username string) bool {
 		return false
 	}
 	window.count++
-	a.attempts[username] = window
+	a.attempts = window
 	return true
 }
 
@@ -452,9 +448,8 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
-	username, password := r.PostForm.Get("username"), r.PostForm.Get("password")
-	if username == "" || !config.ValidAdminPassword(password) || len(username) > 100 ||
-		len(r.PostForm["username"]) != 1 || len(r.PostForm["password"]) != 1 {
+	password := r.PostForm.Get("password")
+	if len(r.PostForm) != 1 || len(r.PostForm["password"]) != 1 || !config.ValidAdminPassword(password) {
 		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
@@ -466,12 +461,11 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Login busy", http.StatusServiceUnavailable)
 		return
 	}
-	if !a.reserveAttempt(username) {
+	if !a.reserveAttempt() {
 		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
 		return
 	}
-	valid := a.account.VerifyPassword(password)
-	if username != "admin" || !valid {
+	if !a.account.VerifyPassword(password) {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -491,9 +485,9 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Session unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	sess.Set(adminSessionKey, username)
+	sess.Set(adminSessionKey, "admin")
 	a.mu.Lock()
-	delete(a.attempts, username)
+	a.attempts = loginWindow{}
 	a.mu.Unlock()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

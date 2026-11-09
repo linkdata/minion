@@ -261,7 +261,7 @@ func TestAdminActionDetailConnectedPageRevoked(t *testing.T) {
 			if status != http.StatusOK || len(cookies) != 1 {
 				t.Fatalf("guest login: status=%d cookies=%d", status, len(cookies))
 			}
-			form := url.Values{"username": {"admin"}, "password": {"correct-password"}}
+			form := url.Values{"password": {"correct-password"}}
 			status, _, cookies = send(http.MethodPost, "/admin/login", form, cookies[0])
 			if status != http.StatusSeeOther || len(cookies) != 1 {
 				t.Fatalf("admin login: status=%d cookies=%d", status, len(cookies))

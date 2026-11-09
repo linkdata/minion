@@ -33,7 +33,7 @@ func TestAddRepositoryThroughJunctionWindows(t *testing.T) {
 
 func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2}]}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)

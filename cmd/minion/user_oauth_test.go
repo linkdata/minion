@@ -464,7 +464,7 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 		}
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"username": {"admin"}, "password": {"correct-password"},
+		"password": {"correct-password"},
 	}, admin, "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("admin login after OAuth saturation: status=%d cookies=%v", login.Code, login.Result().Cookies())
@@ -534,7 +534,7 @@ func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
 		t.Fatalf("fresh admin page after guest burst: status=%d sessions=%d cookies=%v", page.Code, jw.SessionCount(), page.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"username": {"admin"}, "password": {"correct-password"},
+		"password": {"correct-password"},
 	}, page.Result().Cookies()[0], "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("fresh admin cannot sign in after guest burst: status=%d sessions=%d", login.Code, jw.SessionCount())
@@ -543,7 +543,7 @@ func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
 		t.Fatalf("fresh admin dashboard after guest burst: status=%d", dashboard.Code)
 	}
 	if login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"username": {"admin"}, "password": {"correct-password"},
+		"password": {"correct-password"},
 	}, admin, ""); login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("existing admin guest cannot sign in after burst: status=%d sessions=%d", login.Code, jw.SessionCount())
 	}
@@ -723,7 +723,7 @@ func TestOAuthLinkAndLogoutSerializePersistence(t *testing.T) {
 	go func() {
 		close(rotationStarted)
 		rotatedResult <- adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-			"username": {"admin"}, "password": {"correct-password"},
+			"password": {"correct-password"},
 		}, cookie, "")
 	}()
 	<-rotationStarted

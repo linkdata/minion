@@ -63,7 +63,7 @@ func TestSetupAdminCannotOpenOperationalPages(t *testing.T) {
 		t.Fatalf("setup login page: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"username": {"admin"}, "password": {"correct-password"},
+		"password": {"correct-password"},
 	}, page.Result().Cookies()[0], "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("setup login: status=%d cookies=%v", login.Code, login.Result().Cookies())

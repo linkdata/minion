@@ -59,7 +59,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("signed-out setup home status=%d body=%q", home.Code, home.Body.String())
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"username": {"admin"}, "password": {"correct-password"},
+		"password": {"correct-password"},
 	}, loginPage.Result().Cookies()[0], "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("setup login status=%d cookies=%v", login.Code, login.Result().Cookies())

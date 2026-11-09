@@ -128,7 +128,7 @@ func validateRemoteSelection(ctx context.Context, selection remoteChoicePrefligh
 					return ctx.Err()
 				}
 				// The short host probe deadline must not look like the whole preflight deadline.
-				return preflightError{message: preflightRemoteClaudeHostCheckFailed + ": " + redactActionText(err.Error(), runner.secretValues()...)}
+				return preflightError{message: "remote Claude host check failed: " + redactActionText(err.Error(), runner.secretValues()...)}
 			}
 			break
 		}
