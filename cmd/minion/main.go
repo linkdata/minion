@@ -150,15 +150,20 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("config: %v", err)
 		return 2
 	}
+	var passwordOutput *os.File
+	if *webUser != "" && !*installSkills {
+		_, passwordOutput, _ = adminPasswordTerminal(true)
+	}
 	if err := webserv.BecomeUser(*webUser); err != nil {
+		if passwordOutput != nil {
+			_ = passwordOutput.Close()
+		}
 		logger.Printf("switch webserv user: %v", err)
 		return 2
 	}
-	var createErr error
-	if *installSkills {
-		_, createErr = createInitialConfigWithoutPrompt(loadedPath, logger)
-	} else {
-		_, createErr = createInitialConfig(loadedPath, logger)
+	_, createErr := createInitialConfigWithPrompt(loadedPath, logger, !*installSkills, passwordOutput)
+	if passwordOutput != nil {
+		_ = passwordOutput.Close()
 	}
 	if createErr != nil {
 		logger.Printf("create config: %v", createErr)

@@ -27,7 +27,6 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
-var auditBlockFile = regexp.MustCompile(`^[A-Z][A-Z0-9-]*\.md$`)
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -717,7 +716,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		for _, block := range unit.ExcludedBlocks {
 			file, section, hasSection := strings.Cut(block.Block, "#")
 			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) ||
-				!hasSection || !auditBlockFile.MatchString(file) || !auditVisibleText(section) || strings.TrimSpace(section) != section ||
+				!hasSection || !workspace.ValidPath(file) || !auditVisibleText(section) || strings.TrimSpace(section) != section ||
 				block.Block == ordinaryBlock || slices.Contains(unit.SelectedCompanionBlocks, block.Block) {
 				return errors.New("audit coverage-ledger.json has invalid excluded block")
 			}

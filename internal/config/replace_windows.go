@@ -2,6 +2,8 @@ package config
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -10,6 +12,21 @@ import (
 )
 
 var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
+
+func newConfigTemp(target string) (*os.File, error) {
+	return os.CreateTemp(filepath.Dir(target), ".config-*")
+}
+
+func cleanupConfigTemp(name string) error {
+	if err := os.Remove(name); !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func preserveConfigMetadata(_ string, replacement *os.File, info os.FileInfo) error {
+	return replacement.Chmod(info.Mode().Perm())
+}
 
 func replaceConfigFile(source, target string) error {
 	toWindowsPath := func(path string) string {

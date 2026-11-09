@@ -18,14 +18,10 @@ import (
 
 // createInitialConfig writes the embedded template only when no config exists.
 func createInitialConfig(path string, logger *log.Logger) (created bool, resultErr error) {
-	return createInitialConfigWithPrompt(path, logger, true)
+	return createInitialConfigWithPrompt(path, logger, true, nil)
 }
 
-func createInitialConfigWithoutPrompt(path string, logger *log.Logger) (bool, error) {
-	return createInitialConfigWithPrompt(path, logger, false)
-}
-
-func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool) (created bool, resultErr error) {
+func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool, output *os.File) (created bool, resultErr error) {
 	if _, err := os.Lstat(path); err == nil {
 		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -36,13 +32,19 @@ func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool)
 		return false, errors.New("embedded config has no unique admin password placeholder")
 	}
 	passwordSet := false
-	if fd, output, err := adminPasswordTerminal(prompt); err != nil {
-		logger.Printf("admin password setup skipped: %v", err)
-	} else if output != nil {
-		defer output.Close()
+	if prompt && output == nil {
+		_, opened, err := adminPasswordTerminal(true)
+		if err != nil {
+			logger.Printf("admin password setup skipped: %v", err)
+		} else if opened != nil {
+			output = opened
+			defer output.Close()
+		}
+	}
+	if prompt && output != nil {
 		reader := bufio.NewReader(os.Stdin)
 		for {
-			password, err := readAdminPasswordWithPrompt(fd, "Set admin password: ", reader, output)
+			password, err := readAdminPasswordWithPrompt(int(os.Stdin.Fd()), "Set admin password: ", reader, output)
 			fmt.Fprintln(output)
 			if errors.Is(err, errInvalidAdminPassword) {
 				fmt.Fprintln(output, err)

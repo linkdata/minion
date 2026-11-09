@@ -138,7 +138,7 @@ func TestCreateInitialConfigWithoutPromptFromTerminal(t *testing.T) {
 	worker.Add(1)
 	go func() {
 		defer worker.Done()
-		_, err := createInitialConfigWithoutPrompt(path, log.New(io.Discard, "", 0))
+		_, err := createInitialConfigWithPrompt(path, log.New(io.Discard, "", 0), false, nil)
 		done <- err
 	}()
 	select {
@@ -160,5 +160,84 @@ func TestCreateInitialConfigWithoutPromptFromTerminal(t *testing.T) {
 	if err != nil || cfg.Admin == nil || len(cfg.Admin.Administrators) != 1 ||
 		cfg.Admin.Administrators[0].PasswordHash != config.AdminPasswordHashPlaceholder {
 		t.Fatalf("install-only config did not retain inert password placeholder: error=%v", err)
+	}
+}
+
+func TestCreateInitialConfigUsesPreopenedTerminal(t *testing.T) {
+	master, terminal, _ := newHashPTY(t)
+	var workers sync.WaitGroup
+	defer func() {
+		_ = master.Close()
+		_ = terminal.Close()
+		workers.Wait()
+	}()
+	input, err := os.Open(terminal.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	output, err := os.OpenFile(terminal.Name(), os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer output.Close()
+	info, err := terminal.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(terminal.Name(), 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chmod(terminal.Name(), info.Mode()); err != nil {
+			t.Errorf("restore terminal mode: %v", err)
+		}
+	}()
+	oldInput := os.Stdin
+	os.Stdin = input
+	defer func() { os.Stdin = oldInput }()
+	if os.Geteuid() != 0 {
+		if _, opened, err := adminPasswordTerminal(true); err == nil {
+			if opened != nil {
+				_ = opened.Close()
+			}
+			t.Fatal("terminal unexpectedly reopened after permission change")
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.local.json")
+	done := make(chan error, 1)
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		_, err := createInitialConfigWithPrompt(path, log.New(io.Discard, "", 0), true, output)
+		done <- err
+	}()
+	prompt := make([]byte, len("Set admin password: "))
+	read := make(chan error, 1)
+	workers.Add(1)
+	go func() { defer workers.Done(); _, err := io.ReadFull(master, prompt); read <- err }()
+	select {
+	case err := <-read:
+		if err != nil || string(prompt) != "Set admin password: " {
+			t.Fatalf("preopened terminal prompt=%q error=%v", prompt, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("preopened terminal prompt timed out")
+	}
+	if _, err := master.Write([]byte("preopened-password\r")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("preopened terminal setup timed out")
+	}
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Admin == nil || len(cfg.Admin.Administrators) != 1 ||
+		!cfg.Admin.Administrators[0].VerifyPassword("preopened-password") {
+		t.Fatalf("preopened terminal password was not saved: %v", err)
 	}
 }

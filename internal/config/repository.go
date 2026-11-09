@@ -15,6 +15,8 @@ import (
 
 var updateMu sync.Mutex
 
+const configPermissionBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+
 // Update validates and atomically saves a change to the JSON configuration.
 // It serializes Minion's config writers; callers still need the state lock when
 // coordinating a write with monitor state.
@@ -77,18 +79,16 @@ func update(path string, runtime *AdminConfig, mutate func(*Config) error) (cand
 	if err != nil {
 		return Config{}, err
 	}
-	f, err := os.CreateTemp(filepath.Dir(target), ".config-*")
+	f, err := newConfigTemp(target)
 	if err != nil {
 		return Config{}, err
 	}
 	defer func() {
-		if removeErr := os.Remove(f.Name()); !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, removeErr)
-		}
+		err = errors.Join(err, cleanupConfigTemp(f.Name()))
 	}()
-	err = f.Chmod(info.Mode().Perm())
+	_, err = f.Write(append(updated, '\n'))
 	if err == nil {
-		_, err = f.Write(append(updated, '\n'))
+		err = preserveConfigMetadata(target, f, info)
 	}
 	if err == nil {
 		err = f.Sync()

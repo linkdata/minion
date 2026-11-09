@@ -230,6 +230,8 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "covered with populated context", ledger: withContext, companion: true},
 		{name: "malformed excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "Companion B", 1), want: "invalid excluded block", companion: true},
 		{name: "custom excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "CUSTOM-AUDIT.md#New class", 1), companion: true},
+		{name: "nested custom excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "notes/threats.md#Injection", 1), companion: true},
+		{name: "unsafe custom excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "../threats.md#Injection", 1), want: "invalid excluded block", companion: true},
 		{name: "assigned ordinary excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "ATTACK-CLASSES.md#Access control", 1), want: "invalid excluded block", companion: true},
 		{name: "selected companion excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF", 1), want: "invalid excluded block", companion: true},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
