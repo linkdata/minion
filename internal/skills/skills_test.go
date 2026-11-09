@@ -427,8 +427,15 @@ func TestInstallBundledDefaultsWithoutNetwork(t *testing.T) {
 				t.Fatalf("%s %s metadata = %q, %v", provider, name, metadata, err)
 			}
 			for _, file := range append([]string{"SKILL.md", "LICENSE"}, map[string][]string{
-				"caveman":        {"LICENSE-MIT", "LICENSING.md", "NOTICE"},
-				"security-audit": {"HUNTING.md", "report-schema.json", "validate-findings.cjs", "validate-coverage-ledger.cjs", "strict-json-keys.cjs", "safe-input.cjs"},
+				"caveman": {"LICENSE-MIT", "LICENSING.md", "NOTICE"},
+				"security-audit": {
+					"AI-AND-LLM.md", "ATTACK-CLASSES.md", "CLIENT-SIDE.md", "CLOUD-AND-DEPLOYMENT.md",
+					"DATA-ISOLATION-AND-LIFECYCLE.md", "DESKTOP-MOBILE-AND-LOCAL-IPC.md", "HUNTING.md",
+					"MEMORY-SAFETY-AND-BINARY.md", "PROTOCOLS-RPC-AND-MESSAGING.md", "RECONNAISSANCE.md",
+					"RESOURCE-EXHAUSTION-AND-AVAILABILITY.md", "SUPPLY-CHAIN-AND-RELEASE.md",
+					"VALIDATION-AND-REPORTING.md", "WEB-PROTOCOL-AND-AUTH.md", "report-schema.json",
+					"safe-input.cjs", "strict-json-keys.cjs", "validate-coverage-ledger.cjs", "validate-findings.cjs",
+				},
 			}[name]...) {
 				if data, err := os.ReadFile(filepath.Join(dir, file)); err != nil || len(data) == 0 {
 					t.Fatalf("%s %s %s = %d bytes, %v", provider, name, file, len(data), err)

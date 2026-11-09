@@ -103,8 +103,11 @@ func TestRemoteStartupCompletesUnsupportedAuditRecovery(t *testing.T) {
 	if watcher.SelectedCommands["audit"] != (runtime.GOOS != "windows") {
 		t.Fatalf("audit initial selection on %s: %v", runtime.GOOS, watcher.SelectedCommands)
 	}
+	delete(watcher.SelectedCommands, "audit") // Also exercise lost worker capability on POSIX.
 	watcher.Handler = unsupportedAuditRecoveryHandler{}
-	if code := runSelectedRemoteService(t.Context(), owner, watcher, store, false, logger, endpoint, time.Second, nil); code != 0 ||
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if code := runSelectedRemoteService(ctx, owner, watcher, store, false, logger, endpoint, time.Second, nil); code != 0 ||
 		store.Data.Accepted != nil || store.Data.Processed[accepted.JobID].IsZero() ||
 		store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" || gh.terminalRecoveryGitHub.reply == "" {
 		t.Fatalf("terminal audit recovery stopped startup: code=%d state=%+v reply=%q logs=%q", code, store.Data, gh.terminalRecoveryGitHub.reply, logs.String())

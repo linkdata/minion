@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"syscall"
@@ -25,19 +26,20 @@ func newConfigTemp(target string) (*os.File, error) {
 	if err != nil {
 		return nil, errors.Join(err, os.Remove(dir))
 	}
+	if err := RemoveInheritedConfigACL(directory); err != nil {
+		return nil, errors.Join(err, directory.Close(), os.Remove(dir))
+	}
 	info, statErr := directory.Stat()
-	_, inheritedACL, aclErr := macOSACLBytes(directory)
 	closeErr := directory.Close()
-	if err := errors.Join(statErr, aclErr, closeErr); err != nil {
+	if err := errors.Join(statErr, closeErr); err != nil {
 		return nil, errors.Join(err, os.Remove(dir))
 	}
-	if info.Mode().Perm() != 0o700 || inheritedACL {
+	if info.Mode().Perm() != 0o700 {
 		return nil, errors.Join(errors.New("config temporary directory grants other users access"), os.Remove(dir))
 	}
 	name := filepath.Join(dir, "config.json")
-	// CLONE_ACL copies the source ACL as well as ordinary file metadata.
-	if err := unix.Clonefile(target, name, 0x0004); err != nil {
-		return nil, errors.Join(fmt.Errorf("clone config metadata: %w", err), cleanupConfigTemp(name))
+	if output, err := exec.Command("/bin/cp", "-p", target, name).CombinedOutput(); err != nil {
+		return nil, errors.Join(fmt.Errorf("copy config metadata: %w: %s", err, bytes.TrimSpace(output)), cleanupConfigTemp(name))
 	}
 	if err := os.Chmod(name, 0o600); err != nil {
 		return nil, errors.Join(err, cleanupConfigTemp(name))
@@ -61,6 +63,25 @@ func cleanupConfigTemp(name string) error {
 		fileErr = nil
 	}
 	return errors.Join(fileErr, os.Remove(filepath.Dir(name)))
+}
+
+// RemoveInheritedConfigACL removes a parent ACL before a temporary config can contain secrets.
+func RemoveInheritedConfigACL(file *os.File) error {
+	_, hasACL, err := macOSACLBytes(file)
+	if err != nil || !hasACL {
+		return err
+	}
+	if output, err := exec.Command("/bin/chmod", "-N", file.Name()).CombinedOutput(); err != nil {
+		return fmt.Errorf("remove inherited config ACL: %w: %s", err, bytes.TrimSpace(output))
+	}
+	_, hasACL, err = macOSACLBytes(file)
+	if err != nil {
+		return err
+	}
+	if hasACL {
+		return errors.New("temporary config still has an inherited ACL")
+	}
+	return nil
 }
 
 func macOSACLBytes(file *os.File) ([]byte, bool, error) {

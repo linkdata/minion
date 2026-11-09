@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -77,7 +78,7 @@ func TestWebservFlagsRejectExplicitEmptyOutsideAdminService(t *testing.T) {
 
 func TestWebservFlagsRejectUnusedWithoutListener(t *testing.T) {
 	for _, shortcut := range []string{"-oneshot", "-install-skills"} {
-		for _, option := range []string{"-address=", "-certdir=", "-datadir=", "-listenurl="} {
+		for _, option := range []string{"-address=", "-datadir=", "-listenurl="} {
 			code, output := runStartupFixture(t, config.Config{}, shortcut, option)
 			if code != 2 || !strings.Contains(output, "cannot be combined with -oneshot or -install-skills") {
 				t.Fatalf("%s accepted %s: exit=%d log=%q", shortcut, option, code, output)
@@ -103,7 +104,7 @@ func TestWebservUserSwitchWithoutAdminListener(t *testing.T) {
 		}
 	}
 	code, output := runStartupFixture(t, cfg, "-install-skills", "-user=minion-no-such-user-!")
-	if code != 2 || !strings.Contains(output, "switch webserv user:") {
+	if code != 2 || !strings.Contains(output, "switch user:") {
 		t.Fatalf("-install-skills rejected -user before switching: exit=%d log=%q", code, output)
 	}
 }
@@ -277,11 +278,52 @@ func TestWebservCertificateSkipsMalformedDNSName(t *testing.T) {
 			}
 			cfg.WebservListenURL = ""
 			cfg.WebservCertDir = testAdminDNSCertificate(t, badName)
+			if err := checkAdminServerConfig(cfg); err == nil || !strings.Contains(err.Error(), "no valid startup URL") {
+				t.Fatalf("malformed only certificate name passed preflight: %v", err)
+			}
 			if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
 				_ = server.Close()
 				t.Fatal("malformed only certificate name was advertised")
 			}
 		})
+	}
+}
+
+func TestAdminTLSPreflightRequiresUsableURL(t *testing.T) {
+	for _, test := range []struct {
+		listen, name string
+		wantError    bool
+	}{
+		{"127.0.0.1:0", "*.example", true},
+		{"127.0.0.2:0", "localhost", true},
+		{"minion.example:8443", "*.example", false},
+	} {
+		cfg := config.AdminConfig{Listen: test.listen, WebservCertDir: testAdminDNSCertificate(t, test.name)}
+		if err := checkAdminServerConfig(cfg); (err != nil) != test.wantError {
+			t.Errorf("listen %q, certificate %q: preflight error = %v", test.listen, test.name, err)
+		}
+	}
+	for _, test := range []struct {
+		listen, name string
+		ip           net.IP
+		wantError    bool
+	}{
+		{listen: "minion.example:8443", ip: net.ParseIP("192.0.2.8")},
+		{listen: "localhost:8443", ip: net.ParseIP("::1")},
+		{listen: "minion.example:8443", name: "localhost"},
+		{listen: "minion.example:8443", ip: net.ParseIP("0.0.0.0"), wantError: true},
+	} {
+		leaf := &x509.Certificate{NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour)}
+		if test.name != "" {
+			leaf.DNSNames = []string{test.name}
+		}
+		if test.ip != nil {
+			leaf.IPAddresses = []net.IP{test.ip}
+		}
+		certificate := &tls.Certificate{Leaf: leaf}
+		if err := checkAdminCertificateURL(certificate, config.AdminConfig{Listen: test.listen}); (err != nil) != test.wantError {
+			t.Errorf("listen %q, name %q, IP %v: preflight error = %v", test.listen, test.name, test.ip, err)
+		}
 	}
 }
 

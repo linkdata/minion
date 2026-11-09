@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestUpdatePreservesMacOSACLOrOriginalFile(t *testing.T) {
+func TestUpdatePreservesMacOSACL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	data := []byte(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -28,7 +28,9 @@ func TestUpdatePreservesMacOSACLOrOriginalFile(t *testing.T) {
 	if err != nil || !hasACL {
 		t.Fatalf("fixture ACL unavailable: %v, %t", err, hasACL)
 	}
-	_, updateErr := AddRepository(path, Repository{Name: "owner/second", ID: 3, OwnerID: 2, Actions: []string{"review"}})
+	if _, err := AddRepository(path, Repository{Name: "owner/second", ID: 3, OwnerID: 2, Actions: []string{"review"}}); err != nil {
+		t.Fatalf("save config with ACL: %v", err)
+	}
 	updated, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -38,23 +40,16 @@ func TestUpdatePreservesMacOSACLOrOriginalFile(t *testing.T) {
 	if err != nil || !stillHasACL || !bytes.Equal(after, before) {
 		t.Fatalf("config ACL changed: before=%v after=%v present=%t error=%v", before, after, stillHasACL, err)
 	}
-	if updateErr != nil {
-		contents, err := os.ReadFile(path)
-		if err != nil || !bytes.Equal(contents, data) {
-			t.Fatalf("failed ACL save replaced original: %v, %v", contents, err)
-		}
-	} else {
-		cfg, err := Load(path)
-		if err != nil || len(cfg.Repositories) != 2 || cfg.Repositories[1].Name != "owner/second" {
-			t.Fatalf("repository change was not saved: %+v, %v", cfg, err)
-		}
+	cfg, err := Load(path)
+	if err != nil || len(cfg.Repositories) != 2 || cfg.Repositories[1].Name != "owner/second" {
+		t.Fatalf("repository change was not saved: %+v, %v", cfg, err)
 	}
 }
 
-func TestNewConfigTempRejectsInheritedACLBeforeClone(t *testing.T) {
+func TestUpdateClearsInheritedStagingDirectoryACL(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	data := []byte(`{"admin":{"password_hash":"secret"}}`)
+	data := []byte(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -75,16 +70,24 @@ func TestNewConfigTempRejectsInheritedACLBeforeClone(t *testing.T) {
 	if aclErr != nil || closeErr != nil || removeErr != nil || !inherited {
 		t.Fatalf("fixture did not inherit ACL: inherited=%t, acl=%v, close=%v, remove=%v", inherited, aclErr, closeErr, removeErr)
 	}
-	if f, err := newConfigTemp(path); err == nil {
-		_ = f.Close()
-		t.Fatal("created temporary config with inherited ACL")
+	if _, err := AddRepository(path, Repository{Name: "owner/second", ID: 3, OwnerID: 2, Actions: []string{"review"}}); err != nil {
+		t.Fatalf("save config under inheritable ACL: %v", err)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil || len(entries) != 1 || entries[0].Name() != "config.json" {
 		t.Fatalf("temporary config remained: %v, %v", entries, err)
 	}
-	contents, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(contents, data) {
-		t.Fatalf("original config changed: %v, %v", contents, err)
+	cfg, err := Load(path)
+	if err != nil || len(cfg.Repositories) != 2 || cfg.Repositories[1].Name != "owner/second" {
+		t.Fatalf("repository change was not saved: %+v, %v", cfg, err)
+	}
+	updated, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer updated.Close()
+	_, hasACL, err := macOSACLBytes(updated)
+	if err != nil || hasACL {
+		t.Fatalf("saved config inherited staging ACL: present=%t error=%v", hasACL, err)
 	}
 }

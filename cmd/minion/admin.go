@@ -296,7 +296,39 @@ func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConf
 			return fmt.Errorf("admin certificate does not cover OAuth callback host %q: %w", callback.Hostname(), err)
 		}
 	}
-	return nil
+	if cfg.GitHubOAuth != nil || cfg.GitLabOAuth != nil {
+		return nil
+	}
+	cfg.Listen = adminWebservConfig(cfg).Address
+	host, port, err := net.SplitHostPort(cfg.Listen)
+	if err != nil {
+		host = strings.TrimSuffix(strings.TrimPrefix(cfg.Listen, "["), "]")
+		port = "0" // Only hostname viability matters before the listener chooses its port.
+	}
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	if net.ParseIP(host) != nil {
+		if certifiedListenURL(net.JoinHostPort(host, port), certificate, cfg) != "" {
+			return nil
+		}
+	} else if !strings.Contains(host, "%") {
+		if config.ValidURLHost(host) && certificate.Leaf.VerifyHostname(host) == nil {
+			return nil
+		}
+		for _, name := range certificate.Leaf.DNSNames {
+			if config.ValidURLHost(name) && certificate.Leaf.VerifyHostname(name) == nil {
+				return nil
+			}
+		}
+		// A DNS listen address may resolve to an IP covered only by an IP SAN.
+		for _, address := range certificate.Leaf.IPAddresses {
+			if config.ValidURLHost(address.String()) {
+				return nil
+			}
+		}
+	}
+	return errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
 }
 
 func certifiedListenURL(address string, certificate *tls.Certificate, cfg config.AdminConfig) string {

@@ -2141,6 +2141,10 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
 		return fmt.Errorf("%w: selected executor changed before recovery", ErrAcceptanceState)
 	}
+	if m.SelectedCommands != nil && !m.SelectedCommands[accepted.CommandName] {
+		m.logf("finish %s: selected worker no longer offers %s", job.ID, accepted.CommandName)
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
 	acceptedForPreparation := *accepted
 	resumeCtx, cancel := context.WithDeadline(ctx, job.Deadline)
 	defer cancel()

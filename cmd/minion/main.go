@@ -52,20 +52,24 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	installSkills := flag.Bool("install-skills", false, "install configured skills for Codex and Claude, then exit")
 	address := flag.String("address", "", "webserv listen address for the admin UI")
 	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
-	webUser := flag.String("user", "", "webserv user to switch to before setup and listener binding")
+	webUser := flag.String("user", "", "switch the whole Minion process to this user before config creation")
 	dataDir := flag.String("datadir", "", "webserv data directory")
 	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
-	webservFlagsUsed, listenerFlagsUsed, dataDirUsed := false, false, false
+	webservFlagsUsed, listenerFlagsUsed, nonCertListenerFlagsUsed, dataDirUsed := false, false, false, false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "address", "certdir", "listenurl":
 			webservFlagsUsed = true
 			listenerFlagsUsed = true
+			if f.Name != "certdir" {
+				nonCertListenerFlagsUsed = true
+			}
 		case "datadir":
 			webservFlagsUsed = true
 			listenerFlagsUsed = true
+			nonCertListenerFlagsUsed = true
 			dataDirUsed = true
 		case "user":
 			webservFlagsUsed = true
@@ -136,8 +140,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("-install-skills cannot be combined with -oneshot or -check")
 		return 2
 	}
-	if (*oneshot || *installSkills) && listenerFlagsUsed {
-		logger.Print("-address, -certdir, -datadir, and -listenurl cannot be combined with -oneshot or -install-skills")
+	if (*oneshot || *installSkills) && nonCertListenerFlagsUsed {
+		logger.Print("-address, -datadir, and -listenurl cannot be combined with -oneshot or -install-skills")
 		return 2
 	}
 	if *check && dataDirUsed {
@@ -157,7 +161,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if passwordOutput != nil {
 			_ = passwordOutput.Close()
 		}
-		logger.Printf("switch webserv user: %v", err)
+		logger.Printf("switch user: %v", err)
 		return 2
 	}
 	_, createErr := createInitialConfigWithPrompt(loadedPath, logger, !*installSkills, passwordOutput)

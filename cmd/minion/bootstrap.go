@@ -73,6 +73,9 @@ func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool,
 		return false, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.Remove(f.Name())) }()
+	if err := config.RemoveInheritedConfigACL(f); err != nil {
+		return false, errors.Join(err, f.Close())
+	}
 	_, err = io.WriteString(f, content)
 	if err == nil {
 		err = f.Sync()
