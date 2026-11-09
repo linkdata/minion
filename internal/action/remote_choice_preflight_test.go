@@ -83,7 +83,6 @@ func TestRemotePreflightACKHoldsFetchAndPullUntilReported(t *testing.T) {
 					executor.preflightGeneration = 1
 					executor.preflightCandidate = candidate
 					executor.preflightPending = true
-					executor.preflightFetched = true
 					executor.preflightWait = make(chan error, 1)
 					pull := httpPull{Version: ProtocolVersion, ExecutorID: "remote"}
 					request := func(path string, value httpPull, ctx context.Context) *http.Request {

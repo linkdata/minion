@@ -190,6 +190,10 @@ func TestWebservTLSOverrideValidatesWithoutListener(t *testing.T) {
 	if code != 2 || !strings.Contains(output, "-address port") {
 		t.Fatalf("-check accepted invalid webserv port: exit=%d log=%q", code, output)
 	}
+	code, output = runStartupFixture(t, cfg, "-check", "-address", "bad/address", "-certdir", certDir)
+	if code != 2 || !strings.Contains(output, "-address contains invalid host characters") {
+		t.Fatalf("-check accepted invalid webserv host: exit=%d log=%q", code, output)
+	}
 }
 
 func TestCheckRejectsUncoveredOAuthCallbackHost(t *testing.T) {

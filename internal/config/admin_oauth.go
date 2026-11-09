@@ -112,6 +112,9 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 
 // ValidateWebservOptions checks the runtime address and URL against the listener.
 func (a *AdminConfig) ValidateWebservOptions() error {
+	if strings.ContainsAny(a.WebservAddress, "/\\?# \t\r\n") {
+		return errors.New("-address contains invalid host characters")
+	}
 	if _, port, err := net.SplitHostPort(a.WebservAddress); err == nil {
 		if strings.HasPrefix(a.WebservAddress, "[]") {
 			return errors.New("-address empty bracketed host is invalid; use :port")

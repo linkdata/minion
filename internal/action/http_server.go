@@ -37,7 +37,6 @@ type HTTPExecutor struct {
 	preflightGeneration uint64
 	preflightCandidate  WorkerCredentials
 	preflightPending    bool
-	preflightFetched    bool
 	preflightReporting  bool
 	preflightWait       chan error
 	auditHostSupported  bool
@@ -172,7 +171,6 @@ func (e *HTTPExecutor) updateIdleWorkerCredentials(ctx context.Context, credenti
 	e.preflightGeneration++
 	e.preflightCandidate = credentials
 	e.preflightPending = true
-	e.preflightFetched = false
 	e.preflightWait = make(chan error, 1)
 	wait := e.preflightWait
 	e.pullGeneration++
@@ -203,7 +201,6 @@ func (e *HTTPExecutor) updateIdleWorkerCredentials(ctx context.Context, credenti
 
 func (e *HTTPExecutor) rejectRemotePreflightLocked(err error) {
 	e.preflightPending = false
-	e.preflightFetched = false
 	e.preflightReporting = false
 	e.preflightCandidate = WorkerCredentials{}
 	e.preflightGeneration++
@@ -517,7 +514,7 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 			httpServerReject(w, "preflight", http.StatusBadRequest, httpBinding{}, 0, errors.New("invalid remote preflight result"))
 			return
 		}
-		if !e.preflightPending || !e.preflightFetched || request.PreflightGeneration != e.preflightGeneration {
+		if !e.preflightPending || request.PreflightGeneration != e.preflightGeneration {
 			e.mu.Unlock()
 			httpServerReject(w, "preflight", http.StatusPreconditionRequired, httpBinding{}, 0, ErrRemotePreflightRequired)
 			return
@@ -544,7 +541,6 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 			e.credentials = e.preflightCandidate
 			e.preflightCandidate = WorkerCredentials{}
 			e.preflightPending = false
-			e.preflightFetched = false
 			e.choicesFetched = true
 			e.preflightWait <- nil
 			e.preflightWait = nil
@@ -571,8 +567,6 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 	if response.Main.Provider != "" && !e.preflightPending {
 		e.auditHostSupported = request.AuditHostSupported
 		e.choicesFetched = true
-	} else if e.preflightPending {
-		e.preflightFetched = true
 	}
 	e.mu.Unlock()
 	_ = httpServerWriteBytes(w, http.StatusOK, body)

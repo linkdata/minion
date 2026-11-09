@@ -160,7 +160,7 @@ Write:
 2. One short security posture summary.
 3. A confirmed-findings table: severity, title, affected boundary, and one-line observed result.
 4. Each confirmed finding: repository source location, lower-trust principal, target-native input or source trace, conditions, demonstrated result, impact, priority rationale, and smallest source fix.
-5. A separate `NEEDS VALIDATION` table. Give each lead's title, repository trace, exact blocker, bounded local next step, and safe owner-observed deployment check. Do not assign severity or call it a confirmed vulnerability.
+5. A separate `NEEDS VALIDATION` table. Give each lead's title, repository trace, exact blocker, and bounded local next step or safe owner-observed deployment check, as applicable. Do not assign severity or call it a confirmed vulnerability.
 6. Separate hardening notes and positive source patterns.
 7. Coverage summary from the ledger: covered, candidate, blocked, and deferred counts, plus important exclusions and the final critic result.
 

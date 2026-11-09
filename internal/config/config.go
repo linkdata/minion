@@ -595,23 +595,28 @@ func (c *Config) Validate(configDir string) error {
 		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
-		host, port, err := net.SplitHostPort(admin.Listen)
-		if err != nil {
-			return fmt.Errorf("admin.listen: %w", err)
-		}
-		if strings.HasPrefix(admin.Listen, "[]") {
-			return errors.New("admin.listen empty bracketed host is invalid; use :port")
-		}
-		number, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || number == 0 {
-			return errors.New("admin.listen requires a numeric port from 1 to 65535")
-		}
+		var host string
+		var number uint64
 		if admin.WebservAddress != "" {
 			host = admin.WebservAddress
 			if overrideHost, _, err := net.SplitHostPort(host); err == nil {
 				host = overrideHost
 			}
 			host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		} else {
+			var port string
+			var err error
+			host, port, err = net.SplitHostPort(admin.Listen)
+			if err != nil {
+				return fmt.Errorf("admin.listen: %w", err)
+			}
+			if strings.HasPrefix(admin.Listen, "[]") {
+				return errors.New("admin.listen empty bracketed host is invalid; use :port")
+			}
+			number, err = strconv.ParseUint(port, 10, 16)
+			if err != nil || number == 0 {
+				return errors.New("admin.listen requires a numeric port from 1 to 65535")
+			}
 		}
 		if err := admin.ValidateWebservOptions(); err != nil {
 			return err

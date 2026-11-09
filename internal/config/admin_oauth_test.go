@@ -18,6 +18,8 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 		{"[]", true, false},
 		{"[]:9000", true, false},
 		{"[localhost]", true, false},
+		{"bad/address", true, false},
+		{"bad/address:9000", true, false},
 		{"[::1]", false, true},
 		{"::1", false, true},
 		{"[::1]:9000", false, true},
@@ -124,6 +126,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		t.Fatalf("implicit HTTP port 80: %v", err)
 	}
 	namedHTTPPort := valid()
+	namedHTTPPort.Admin.Listen = "invalid saved listen"
 	namedHTTPPort.Admin.TLSCertFile, namedHTTPPort.Admin.TLSKeyFile = "", ""
 	namedHTTPPort.Admin.WebservAddress = "127.0.0.1:http"
 	namedHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
