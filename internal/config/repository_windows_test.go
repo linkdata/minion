@@ -31,7 +31,7 @@ func TestAddRepositoryThroughJunctionWindows(t *testing.T) {
 	}
 }
 
-func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
+func TestUpdatePreservesWindowsConfigSecurity(t *testing.T) {
 	dir := t.TempDir()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -66,9 +66,41 @@ func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
 	}
-	before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	original, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
+	}
+	originalOwner, _, err := original.Owner()
+	if err != nil || originalOwner == nil {
+		t.Fatalf("read original config owner: %v", err)
+	}
+	groups, err := windows.GetCurrentProcessToken().GetTokenGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternateOwner := false
+	for _, group := range groups.AllGroups() {
+		if group.Attributes&windows.SE_GROUP_OWNER == 0 || group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0 ||
+			group.Sid.Equals(originalOwner) {
+			continue
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, group.Sid, nil, nil, nil); err == nil {
+			alternateOwner = true
+			break
+		}
+	}
+	if !alternateOwner {
+		t.Log("no assignable alternate owner in token; checking current owner")
+	}
+	before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeOwner, _, err := before.Owner()
+	if err != nil || beforeOwner == nil {
+		t.Fatalf("read config owner: %v", err)
 	}
 	control, _, err := before.Control()
 	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
@@ -84,9 +116,14 @@ func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
 			t.Errorf("remove temporary config: %v", err)
 		}
 	})
-	tempACL, err := windows.GetNamedSecurityInfo(temporary.Name(), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	tempACL, err := windows.GetNamedSecurityInfo(temporary.Name(), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil || tempACL == nil {
 		t.Fatalf("read temporary config DACL: %v", err)
+	}
+	tempOwner, _, err := tempACL.Owner()
+	if err != nil || tempOwner == nil || !beforeOwner.Equals(tempOwner) {
+		t.Fatalf("temporary config owner differs: original=%s temporary=%v error=%v", beforeOwner, tempOwner, err)
 	}
 	tempControl, _, err := tempACL.Control()
 	beforeSDDL, tempSDDL := before.String(), tempACL.String()
@@ -102,9 +139,14 @@ func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
 	if err != nil || len(backups) != 0 {
 		t.Fatalf("successful config update left backup files: %v, %v", backups, err)
 	}
-	after, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	after, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
+	}
+	afterOwner, _, err := after.Owner()
+	if err != nil || afterOwner == nil || !beforeOwner.Equals(afterOwner) {
+		t.Fatalf("saved config owner differs: original=%s saved=%v error=%v", beforeOwner, afterOwner, err)
 	}
 	if before.String() == "" || before.String() != after.String() {
 		t.Fatal("config DACL changed after save")

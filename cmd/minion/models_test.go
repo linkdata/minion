@@ -90,6 +90,17 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 	}
 }
 
+func TestLogCommandSkillsUsesRemoteHost(t *testing.T) {
+	cfg := config.Config{Main: "codex", RemoteExecutor: &config.RemoteExecutorConfig{}, Commands: map[string]config.CommandMapping{
+		"security": {Action: "security-audit", Skills: []string{"unused"}},
+	}}
+	var output bytes.Buffer
+	logCommandSkills(cfg, log.New(&output, "", 0))
+	if strings.Contains(output.String(), "command security disabled") {
+		t.Fatalf("orchestrator host disabled remote audit: %s", output.String())
+	}
+}
+
 func TestCheckModelsBoundsResolvedCatalogueModel(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell provider fixture is unavailable on native Windows")

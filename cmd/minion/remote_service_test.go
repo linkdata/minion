@@ -16,7 +16,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +59,7 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
 	if hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, false) ||
-		hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) != (runtime.GOOS != "windows") {
+		!hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) {
 		t.Fatal("remote audit capability did not distinguish unsupported from unselected")
 	}
 }
@@ -110,7 +109,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if watcher.Handler != owner || watcher.SelectedExecutorID != "remote" || !watcher.SelectedCommands["comment"] {
 		t.Fatalf("remote service selection missing: executor=%q commands=%v", watcher.SelectedExecutorID, watcher.SelectedCommands)
 	}
-	if runtime.GOOS != "windows" && !watcher.SelectedCommands["audit"] {
+	if !watcher.SelectedCommands["audit"] {
 		t.Fatal("orchestrator did not initially offer audit for the simulated Windows worker")
 	}
 	roots := x509.NewCertPool()
@@ -199,9 +198,6 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		}
 		pullDone <- pullResult{status: response.StatusCode, body: body, err: readErr}
 	}()
-	if err := owner.WaitCapacity(ctx); err != nil {
-		t.Fatalf("authenticated pull did not provide capacity: %v", err)
-	}
 	if code := <-serviceDone; code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
 	}

@@ -398,13 +398,21 @@ func TestAvailableCommandsRequireHostSupport(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.Repositories[0].Actions = append(cfg.Repositories[0].Actions, "security-audit")
 	for _, remote := range []bool{false, true} {
+		selected := map[string]bool(nil)
 		if remote {
 			cfg.RemoteExecutor = &config.RemoteExecutorConfig{}
+			selected = map[string]bool{"review": true, "security-audit": true}
 		}
-		m := &Monitor{Config: cfg}
+		m := &Monitor{Config: cfg, SelectedCommands: selected}
 		got := m.availableCommands(cfg.Repositories[0])
-		if _, offered := got["security-audit"]; offered != (runtime.GOOS != "windows") || got["review"] != command.Review {
+		if _, offered := got["security-audit"]; offered != (remote || runtime.GOOS != "windows") || got["review"] != command.Review {
 			t.Errorf("remote=%t host=%s available commands = %v", remote, runtime.GOOS, got)
+		}
+		if remote {
+			delete(selected, "security-audit")
+			if _, offered := m.availableCommands(cfg.Repositories[0])["security-audit"]; offered {
+				t.Fatal("remote host without audit capability offered audit")
+			}
 		}
 		if m.controlCommands(cfg.Repositories[0])["security-audit"] != command.SecurityAudit {
 			t.Fatal("saved audit command disappeared from recovery parser")

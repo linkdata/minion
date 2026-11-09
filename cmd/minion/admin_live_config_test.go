@@ -225,9 +225,6 @@ func TestAdminLiveConfigHidesRemoteAuditUntilWorkerCapabilityKnown(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Commands["security-audit"].SupportedOnHost() {
-		t.Skip("security audit is unavailable on this host")
-	}
 	live, err := newAdminLiveConfig(path, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -248,6 +245,12 @@ func TestAdminLiveConfigHidesRemoteAuditUntilWorkerCapabilityKnown(t *testing.T)
 	live.setRemoteSelected(map[string]bool{"review": true, "security-audit": true}, true)
 	if !slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") {
 		t.Fatal("supported remote audit was not offered after worker connection")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[1].Actions = []string{"review", "security-audit"}
+		return nil
+	}); err != nil {
+		t.Fatalf("supported remote audit was rejected: %v", err)
 	}
 }
 

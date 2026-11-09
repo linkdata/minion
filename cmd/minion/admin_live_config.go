@@ -54,7 +54,7 @@ func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error
 		for _, repo := range cfg.Repositories {
 			for _, name := range repo.Actions {
 				mapping := cfg.Commands[name]
-				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() && mapping.Action != string(command.SecurityAudit) {
+				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.Action != string(command.SecurityAudit) {
 					selected[name] = true
 				}
 			}

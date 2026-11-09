@@ -643,7 +643,7 @@ func checkWorkRootPath(path string) (resultErr error) {
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
 	for _, command := range cfg.CommandNames() {
-		if !cfg.Commands[command].SupportsProvider(cfg.Main) || !cfg.Commands[command].SupportedOnHost() {
+		if !cfg.Commands[command].SupportsProvider(cfg.Main) || cfg.RemoteExecutor == nil && !cfg.Commands[command].SupportedOnHost() {
 			logger.Printf("command %s disabled: action %s is unsupported with %s as main or on this host", command, cfg.Commands[command].Action, cfg.Main)
 			continue
 		}

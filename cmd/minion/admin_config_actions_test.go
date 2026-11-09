@@ -256,6 +256,18 @@ func TestAdminRepositoryCommandsRejectUnsupportedMainAI(t *testing.T) {
 	post("owner/new", http.StatusConflict)
 }
 
+func TestAdminRepositoryCommandsUseRemoteWorkerCapability(t *testing.T) {
+	cfg := config.Config{Main: "codex", RemoteExecutor: &config.RemoteExecutorConfig{},
+		Commands: map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"builtin://anti-prompt-injection"}}}}
+	selected := map[string]bool{"audit": true}
+	if view := configurationView(adminConfigSnapshot{Config: cfg, Remote: true, RemoteCommands: selected}); len(view.Commands) != 1 || view.Commands[0] != "audit" {
+		t.Fatalf("supported remote audit not offered: %v", view.Commands)
+	}
+	if err := validateAdminActions(cfg, []string{"audit"}, nil); err != nil {
+		t.Fatalf("supported remote audit rejected: %v", err)
+	}
+}
+
 func TestAdminRemovesConfiguredLegacyRequester(t *testing.T) {
 	live, path := liveConfigFixture(t, false)
 	if err := live.save(func(cfg *config.Config) error {

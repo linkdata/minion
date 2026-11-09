@@ -402,8 +402,8 @@ func validateAdminActions(cfg config.Config, actions, existing []string) error {
 	selected := make(map[string]bool, len(actions))
 	for _, name := range actions {
 		mapping, exists := cfg.Commands[name]
-		if !exists || selected[name] || (!mapping.SupportsProvider(cfg.Main) || !mapping.SupportedOnHost()) && !slices.Contains(existing, name) {
-			return errors.New("Select distinct commands supported by the configured main AI and this host, or keep commands already enabled here")
+		if !exists || selected[name] || (!mapping.SupportsProvider(cfg.Main) || cfg.RemoteExecutor == nil && !mapping.SupportedOnHost()) && !slices.Contains(existing, name) {
+			return errors.New("Select distinct commands supported by the main AI and selected executor, or keep already enabled commands")
 		}
 		selected[name] = true
 	}

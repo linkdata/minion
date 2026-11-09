@@ -1162,7 +1162,7 @@ func (m *Monitor) availableCommands(repo config.Repository) map[string]command.A
 			continue
 		}
 		mapping, ok := m.Config.Commands[name]
-		if !ok || !mapping.SupportedOnHost() {
+		if !ok {
 			continue
 		}
 		if m.Config.RemoteExecutor != nil {

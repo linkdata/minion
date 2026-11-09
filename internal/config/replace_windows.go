@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,12 +18,20 @@ import (
 var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
 
 func newConfigTemp(target string) (*os.File, error) {
-	sd, err := windows.GetNamedSecurityInfo(extendedWindowsPath(target), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(extendedWindowsPath(target), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return nil, err
 	}
 	if sd == nil {
 		return nil, errors.New("config has no security descriptor")
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return nil, err
+	}
+	if owner == nil {
+		return nil, errors.New("config has no owner")
 	}
 	abs, err := sd.ToAbsolute()
 	if err != nil {
@@ -101,6 +110,8 @@ func replaceConfigFile(source, target string) error {
 		return errors.New("ReplaceFileW failed")
 	}
 	// The replacement has committed; backup removal cannot make the save fail.
-	_ = os.Remove(backupName)
+	if err := os.Remove(backupName); err != nil {
+		log.Printf("config saved but could not remove backup %q: %v", backupName, err)
+	}
 	return nil
 }

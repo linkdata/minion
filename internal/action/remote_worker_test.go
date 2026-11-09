@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -410,11 +409,7 @@ func TestAttachRemoteWorkerSelectsConfiguredIdentityWithoutHostSkills(t *testing
 			t.Error(err)
 		}
 	})
-	wantCount := 2
-	if runtime.GOOS == "windows" {
-		wantCount = 1
-	}
-	if !selected["inspect"] || selected["audit"] != (runtime.GOOS != "windows") || len(selected) != wantCount || orchestrator.ExecutorID != "remote" || !orchestrator.assignmentRequired || !orchestrator.remoteSelected {
+	if !selected["inspect"] || !selected["audit"] || len(selected) != 2 || orchestrator.ExecutorID != "remote" || !orchestrator.assignmentRequired || !orchestrator.remoteSelected {
 		t.Fatalf("wrong remote selection: commands=%v executor=%q", selected, orchestrator.ExecutorID)
 	}
 	job := monitor.Job{Repository: cfg.Repositories[0], Command: command.Command{Name: "inspect", Action: command.Comment}}

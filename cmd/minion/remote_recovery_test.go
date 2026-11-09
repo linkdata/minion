@@ -55,9 +55,6 @@ func (g *remoteStartupGitHub) ListRepositoryInvitations(context.Context) ([]gith
 func (*remoteStartupGitHub) ReactEyes(context.Context, string) error { return nil }
 
 func TestRemoteStartupCompletesUnsupportedAuditRecovery(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the orchestrator does not select security audits on Windows")
-	}
 	certFile, keyFile, _ := remoteTestTLSFiles(t)
 	cfg := selectedServiceTestConfig(t)
 	cfg.Commands["audit"] = config.CommandMapping{Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}}
