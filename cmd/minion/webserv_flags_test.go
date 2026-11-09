@@ -140,6 +140,21 @@ func TestSetupServerUsesWebservListenURL(t *testing.T) {
 	}
 }
 
+func TestAdminServerUsesHTTPOAuthCallbackOrigin(t *testing.T) {
+	address := freeAdminListen(t)
+	want := "http://" + address
+	server, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{
+		Listen: address, GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret", RedirectURL: want + "/auth/github/callback"},
+	}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if server.entryURL != want {
+		t.Fatalf("HTTP OAuth entry URL = %q, want %q", server.entryURL, want)
+	}
+}
+
 func TestAdminListenerRejectsUnsafeWebservOptions(t *testing.T) {
 	for _, cfg := range []config.AdminConfig{
 		{Listen: "127.0.0.1:8377", WebservListenURL: "http://public.example"},
@@ -171,17 +186,18 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 	if err := os.Rename(keyFile, filepath.Join(dir, "privkey.pem")); err != nil {
 		t.Fatal(err)
 	}
+	want := "https://" + leaf.IPAddresses[0].String()
 	cfg := config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir,
-		GitHubOAuth: &config.OAuthClient{RedirectURL: "https://" + leaf.DNSNames[0] + "/auth/github/callback"}}
+		GitHubOAuth: &config.OAuthClient{RedirectURL: want + "/auth/github/callback"}}
 	server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	if want := "https://" + leaf.DNSNames[0]; server.entryURL != want {
+	if server.entryURL != want {
 		t.Fatalf("Webserv entry URL = %q, want callback origin %q", server.entryURL, want)
 	}
-	cfg.WebservListenURL = "https://" + leaf.DNSNames[0]
+	cfg.WebservListenURL = want
 	if err := checkAdminServerConfig(cfg); err != nil {
 		t.Fatalf("certificate rejected matching -listenurl: %v", err)
 	}

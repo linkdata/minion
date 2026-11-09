@@ -87,6 +87,15 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
 		return nil, err
 	}
+	if service.ListenURL == "" {
+		for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
+			if client != nil {
+				callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
+				service.ListenURL = (&url.URL{Scheme: callback.Scheme, Host: callback.Host}).String()
+				break
+			}
+		}
+	}
 	listener, err := service.Listen()
 	if err != nil {
 		return nil, fmt.Errorf("prepare listener: %w", err)
@@ -95,16 +104,13 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
 	entryURL := service.ListenURL
-	if cfg.WebservListenURL == "" {
-		if certificate != nil {
+	if cfg.WebservListenURL == "" && certificate != nil {
+		entry, _ := url.Parse(entryURL)
+		if entry.Scheme != "https" || certificate.Leaf.VerifyHostname(entry.Hostname()) != nil {
 			entryURL = certifiedListenURL(listener.Addr().String(), certificate, cfg)
 			if entryURL == "" && (cfg.GitHubOAuth != nil || cfg.GitLabOAuth != nil) {
 				_ = listener.Close()
 				return nil, errors.New("admin TLS certificate does not cover the OAuth callback host")
-			}
-		} else if host, port, err := net.SplitHostPort(listener.Addr().String()); err == nil {
-			if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-				entryURL = (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, port)}).String()
 			}
 		}
 	}
