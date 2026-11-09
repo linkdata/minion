@@ -172,6 +172,9 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 		owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 		if _, err := owner.WorkerSelection(cfg); err != nil {
 			owner.Commands, owner.AlwaysOnSkills = oldCommands, oldSkills
+			if ctx.Err() != nil {
+				return 0
+			}
 			logger.Printf("activate admin skill change: %s", monitor.InertLogText(err.Error()))
 			live.applied(oldCfg, generation, err)
 			if code = waitForConfigRetry(ctx, live.updates, done); code != monitorConfigChanged {
@@ -181,6 +184,9 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			continue
 		}
 		if err := closeWorker(); err != nil {
+			if ctx.Err() != nil {
+				return 0
+			}
 			logger.Printf("close selected worker for config change: %s", monitor.InertLogText(err.Error()))
 			live.applied(oldCfg, generation, err)
 			return 1
@@ -196,6 +202,9 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			owner.CleanCriticRounds = cfg.RequiredCleanRounds
 			live.applied(cfg, generation, nil)
 			continue
+		}
+		if ctx.Err() != nil {
+			return 0
 		}
 		logger.Printf("activate admin worker change: %s", monitor.InertLogText(err.Error()))
 		owner.Commands, owner.AlwaysOnSkills = oldCommands, oldSkills

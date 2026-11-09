@@ -312,6 +312,123 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	}
 }
 
+func TestRemoteKeyActivationCancellationKeepsSavedKey(t *testing.T) {
+	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Codex: config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
+		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		Repositories:   []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: listen, TLSCertFile: certFile, TLSKeyFile: keyFile, Token: token}}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := &action.Orchestrator{Main: "codex", Commands: cfg.Commands, CodexModel: "main-1", CodexEffort: "high"}
+	watcher := &monitor.Monitor{Config: cfg}
+	endpoint, err := attachSelectedRemoteWorker(owner, watcher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.Close() })
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}}
+	t.Cleanup(client.CloseIdleConnections)
+	workerCtx, cancelWorker := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelWorker()
+	fetchRemotePreflight(t, workerCtx, client, endpoint, token)
+	pull, err := http.NewRequestWithContext(workerCtx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pull.Header.Set("Authorization", "Bearer "+token)
+	pull.Header.Set("Content-Type", "application/json")
+	pullDone := make(chan error, 1)
+	go func() {
+		response, err := client.Do(pull)
+		if err == nil {
+			_, err = io.Copy(io.Discard, response.Body)
+			if closeErr := response.Body.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		pullDone <- err
+		close(pullDone)
+	}()
+	t.Cleanup(func() { <-pullDone })
+	if err := owner.WaitCapacity(workerCtx); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error { next.Codex.APIKey = "saved-key"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	serviceCtx, cancelService := context.WithCancel(workerCtx)
+	serviceDone := make(chan int, 1)
+	go func() {
+		serviceDone <- runSelectedRemoteService(serviceCtx, owner, watcher, store, false, log.New(io.Discard, "", 0), endpoint, time.Second, live)
+		close(serviceDone)
+	}()
+	t.Cleanup(func() { cancelService(); <-serviceDone })
+	for {
+		request, err := http.NewRequestWithContext(workerCtx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
+			strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var refresh struct {
+			Refresh bool `json:"refresh"`
+		}
+		decodeErr := json.NewDecoder(response.Body).Decode(&refresh)
+		closeErr := response.Body.Close()
+		if decodeErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("remote preflight: status=%d decode=%v close=%v", response.StatusCode, decodeErr, closeErr)
+		}
+		if refresh.Refresh {
+			break
+		}
+		if err := workerCtx.Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cancelService()
+	if code := <-serviceDone; code != 0 {
+		t.Fatalf("canceling remote key activation returned %d", code)
+	}
+	saved, err := config.Load(path)
+	if err != nil || saved.Codex.APIKey != "saved-key" {
+		t.Fatalf("canceled activation lost saved key: key=%q error=%v", saved.Codex.APIKey, err)
+	}
+}
+
 func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string) {
 	t.Helper()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
