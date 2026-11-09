@@ -437,6 +437,30 @@ func TestCertifiedListenURL(t *testing.T) {
 	}
 }
 
+func TestAdminCertificateValidity(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name                string
+		notBefore, notAfter time.Time
+		wantError           bool
+	}{
+		{"current", now.Add(-time.Hour), now.Add(time.Hour), false},
+		{"expired", now.Add(-2 * time.Hour), now.Add(-time.Hour), true},
+		{"not yet valid", now.Add(time.Hour), now.Add(2 * time.Hour), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"admin.example"}, NotBefore: test.notBefore, NotAfter: test.notAfter}}
+			err := checkAdminCertificateURL(certificate, config.AdminConfig{WebservListenURL: "https://admin.example"})
+			if (err != nil) != test.wantError {
+				t.Fatalf("certificate validity error = %v, want error %t", err, test.wantError)
+			}
+			if err != nil && !strings.Contains(err.Error(), "not currently valid") {
+				t.Fatalf("unexpected certificate validity error: %v", err)
+			}
+		})
+	}
+}
+
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)

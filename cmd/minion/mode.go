@@ -67,19 +67,11 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		if admin.preferences != nil && watcher.Config.Admin.UserModelChoices != nil {
 			watcher.UserPreferences = admin.preferences.preferencesForGitHubID
 		}
-		entry := admin.entryURL
-		if entry == "" {
-			entry = admin.listener.Addr().String() + " (no certificate-valid URL could be inferred)"
-		}
 		suffix := ""
 		if !admin.signInEnabled {
 			suffix = " (sign-in disabled until password_hash or OAuth is configured)"
 		}
-		if admin.entryURL != "" {
-			logger.Printf("Minion UI listening on %s%s (bound to %s)", entry, suffix, admin.listener.Addr())
-		} else {
-			logger.Printf("Minion UI listening on %s%s", entry, suffix)
-		}
+		logger.Printf("Minion UI listening on %s%s (bound to %s)", admin.entryURL, suffix, admin.listener.Addr())
 	} else if watcher.Config.Admin != nil && watcher.Config.Admin.UserModelChoices != nil {
 		links, err := openUserLinks(watcher.Config.StatePath + ".link")
 		if err != nil {

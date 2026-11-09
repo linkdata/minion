@@ -267,6 +267,10 @@ func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConf
 		}
 		certificate.Leaf = leaf
 	}
+	now := time.Now()
+	if now.Before(certificate.Leaf.NotBefore) || now.After(certificate.Leaf.NotAfter) {
+		return errors.New("admin TLS certificate is not currently valid")
+	}
 	if cfg.WebservListenURL != "" {
 		entry, _ := url.Parse(cfg.WebservListenURL) // validateWebservAdminAddress checked the URL.
 		if err := certificate.Leaf.VerifyHostname(entry.Hostname()); err != nil {
