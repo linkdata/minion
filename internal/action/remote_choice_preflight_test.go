@@ -64,108 +64,82 @@ func TestRemoteChoicePreflightOpensGateBeforeResponse(t *testing.T) {
 	}
 }
 
-func TestRemotePreflightACKHoldsFetchAndPullUntilReported(t *testing.T) {
-	for _, result := range []string{"ok", "failed"} {
-		for _, path := range []string{"/preflight", "/next"} {
-			t.Run(result+path, func(t *testing.T) {
-				synctest.Test(t, func(t *testing.T) {
-					executor, err := NewHTTPExecutor("remote")
-					if err != nil {
-						t.Fatal(err)
-					}
-					old := WorkerCredentials{CodexAPIKey: "old-key"}
-					candidate := WorkerCredentials{CodexAPIKey: "new-key"}
-					if err := executor.SetWorkerCredentials(old); err != nil {
-						t.Fatal(err)
-					}
-					executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
-						Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
-					executor.preflightGeneration = 1
-					executor.preflightCandidate = candidate
-					executor.preflightPending = true
-					executor.preflightWait = make(chan error, 1)
-					pull := httpPull{Version: ProtocolVersion, ExecutorID: "remote"}
-					request := func(path string, value httpPull, ctx context.Context) *http.Request {
-						t.Helper()
-						body, err := httpEncode(value, httpControlBytes)
-						if err != nil {
-							t.Fatal(err)
-						}
-						r := httptest.NewRequestWithContext(ctx, http.MethodPost, path, bytes.NewReader(body))
-						r.Header.Set("Content-Type", "application/json")
-						return r
-					}
-					ack := pull
-					ack.PreflightGeneration, ack.PreflightResult = 1, result
-					blocked := &preflightBlockedWriter{
-						preflightGateWriter: &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor},
-						entered:             make(chan struct{}), release: make(chan struct{}),
-					}
-					releaseACK := sync.OnceFunc(func() { close(blocked.release) })
-					defer releaseACK()
-					ackRequest := request("/preflight", ack, context.Background())
-					ackDone := make(chan struct{})
-					go func() {
-						executor.ServeHTTP(blocked, ackRequest)
-						close(ackDone)
-					}()
-					<-blocked.entered
-					ctx, cancel := context.WithCancel(context.Background())
-					defer cancel()
-					observerRequest := request(path, pull, ctx)
-					response := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
-					observerDone := make(chan struct{})
-					go func() {
-						executor.ServeHTTP(response, observerRequest)
-						close(observerDone)
-					}()
-					synctest.Wait()
-					select {
-					case <-observerDone:
-						t.Fatalf("%s returned while %s ACK write was blocked: status=%d", path, result, response.Code)
-					default:
-					}
-					executor.mu.Lock()
-					fetched, pulling := executor.choicesFetched, executor.pull
-					executor.mu.Unlock()
-					if fetched || pulling {
-						t.Fatalf("%s changed gate during blocked %s ACK: fetched=%t pulling=%t", path, result, fetched, pulling)
-					}
-					releaseACK()
-					<-ackDone
-					synctest.Wait()
-					if path == "/next" && result == "ok" {
-						executor.mu.Lock()
-						pulling = executor.pull
-						executor.mu.Unlock()
-						if !pulling {
-							t.Fatal("pull did not enter after successful ACK")
-						}
-						cancel()
-						<-observerDone
-						return
-					}
-					<-observerDone
-					if path == "/next" {
-						if response.Code != http.StatusPreconditionRequired {
-							t.Fatalf("pull after failed ACK status=%d, want %d", response.Code, http.StatusPreconditionRequired)
-						}
-						return
-					}
-					var selection remoteChoicePreflight
-					if err := httpDecode(response.Body, httpControlBytes, &selection); err != nil {
-						t.Fatal(err)
-					}
-					want := candidate
-					if result == "failed" {
-						want = old
-					}
-					if response.Code != http.StatusOK || selection.Refresh || selection.Credentials != want {
-						t.Fatalf("fetch after %s ACK: status=%d selection=%+v", result, response.Code, selection)
-					}
-				})
-			})
+func TestRemotePreflightACKKeepsCandidatePendingUntilWrite(t *testing.T) {
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := WorkerCredentials{CodexAPIKey: "old-key"}
+	candidate := WorkerCredentials{CodexAPIKey: "new-key"}
+	if err := executor.SetWorkerCredentials(old); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+	executor.preflightGeneration = 1
+	executor.preflightCandidate = candidate
+	executor.preflightPending = true
+	executor.preflightWait = make(chan error, 1)
+	wait := executor.preflightWait
+	request := func(path string, pull httpPull) *http.Request {
+		t.Helper()
+		body, err := httpEncode(pull, httpControlBytes)
+		if err != nil {
+			t.Fatal(err)
 		}
+		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		return r
+	}
+	pull := httpPull{Version: ProtocolVersion, ExecutorID: "remote"}
+	ack := pull
+	ack.PreflightGeneration, ack.PreflightResult = 1, "ok"
+	ackRequest := request("/preflight", ack)
+	blocked := &preflightBlockedWriter{
+		preflightGateWriter: &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor},
+		entered:             make(chan struct{}), release: make(chan struct{}),
+	}
+	releaseACK := sync.OnceFunc(func() { close(blocked.release) })
+	ackDone := make(chan struct{})
+	t.Cleanup(func() { releaseACK(); <-ackDone })
+	go func() {
+		executor.ServeHTTP(blocked, ackRequest)
+		close(ackDone)
+	}()
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-blocked.entered:
+	case <-timer.C:
+		t.Fatal("ACK write did not start")
+	}
+	next := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+	executor.ServeHTTP(next, request("/next", pull))
+	if next.Code != http.StatusPreconditionRequired {
+		t.Fatalf("pending candidate admitted a pull: status=%d", next.Code)
+	}
+	fetch := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+	executor.ServeHTTP(fetch, request("/preflight", pull))
+	var selection remoteChoicePreflight
+	if err := httpDecode(fetch.Body, httpControlBytes, &selection); err != nil {
+		t.Fatal(err)
+	}
+	executor.mu.Lock()
+	current, pending := executor.credentials, executor.preflightPending
+	executor.mu.Unlock()
+	if fetch.Code != http.StatusOK || !selection.Refresh || selection.Credentials != candidate || current != old || !pending {
+		t.Fatalf("candidate changed before ACK write: status=%d selection=%+v current=%+v pending=%t", fetch.Code, selection, current, pending)
+	}
+	releaseACK()
+	<-ackDone
+	if err := <-wait; err != nil {
+		t.Fatalf("candidate ACK failed: %v", err)
+	}
+	executor.mu.Lock()
+	current, pending = executor.credentials, executor.preflightPending
+	executor.mu.Unlock()
+	if current != candidate || pending {
+		t.Fatalf("candidate was not committed after ACK write: current=%+v pending=%t", current, pending)
 	}
 }
 

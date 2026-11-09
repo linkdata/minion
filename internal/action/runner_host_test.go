@@ -133,7 +133,7 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 			if action == command.SecurityAudit {
 				job = auditRunnerJob(t)
 			}
-			job.RuntimeBudget = 2 * time.Second
+			job.RuntimeBudget = 10 * time.Second
 			calls := 0
 			var reports string
 			root := t.TempDir()

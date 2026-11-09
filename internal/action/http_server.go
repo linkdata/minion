@@ -37,7 +37,6 @@ type HTTPExecutor struct {
 	preflightGeneration uint64
 	preflightCandidate  WorkerCredentials
 	preflightPending    bool
-	preflightReporting  bool
 	preflightWait       chan error
 	auditHostSupported  bool
 	active              *httpTransaction
@@ -201,7 +200,6 @@ func (e *HTTPExecutor) updateIdleWorkerCredentials(ctx context.Context, credenti
 
 func (e *HTTPExecutor) rejectRemotePreflightLocked(err error) {
 	e.preflightPending = false
-	e.preflightReporting = false
 	e.preflightCandidate = WorkerCredentials{}
 	e.preflightGeneration++
 	if e.preflightWait != nil {
@@ -209,19 +207,6 @@ func (e *HTTPExecutor) rejectRemotePreflightLocked(err error) {
 		e.preflightWait = nil
 	}
 	e.notifyLocked()
-}
-
-func (e *HTTPExecutor) waitPreflightReportLocked(ctx context.Context) bool {
-	for e.preflightReporting && ctx.Err() == nil {
-		changed := e.changed
-		e.mu.Unlock()
-		select {
-		case <-changed:
-		case <-ctx.Done():
-		}
-		e.mu.Lock()
-	}
-	return ctx.Err() == nil
 }
 
 func (e *HTTPExecutor) notifyLocked() {
@@ -494,10 +479,6 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 		return
 	}
 	e.mu.Lock()
-	if !e.waitPreflightReportLocked(r.Context()) {
-		e.mu.Unlock()
-		return
-	}
 	if e.closed || e.unavailable {
 		e.mu.Unlock()
 		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is closed or unavailable"))
@@ -520,7 +501,6 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 			return
 		}
 		generation := e.preflightGeneration
-		e.preflightReporting = true
 		e.mu.Unlock()
 		writeErr := httpServerWrite(w, http.StatusOK, httpAcknowledgement{Kind: "preflight"})
 		e.mu.Lock()
@@ -528,7 +508,6 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 			e.mu.Unlock()
 			return
 		}
-		e.preflightReporting = false
 		if writeErr != nil {
 			e.rejectRemotePreflightLocked(writeErr)
 		} else if request.PreflightResult != "ok" {
@@ -594,10 +573,6 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	e.mu.Lock()
-	if !e.waitPreflightReportLocked(r.Context()) {
-		e.mu.Unlock()
-		return
-	}
 	if e.remoteChoices != nil && (!e.choicesFetched || e.preflightPending) {
 		status := http.StatusConflict
 		if e.preflightGeneration != 0 {
