@@ -8,7 +8,7 @@ description: >
 
 # caveman
 
-> Modified for Minion: aliases for unbundled skills were removed.
+> Modified for Minion.
 
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
 

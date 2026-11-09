@@ -136,7 +136,6 @@ type AdminConfig struct {
 	TLSKeyFile       string            `json:"tls_key_file,omitempty"`
 	WebservAddress   string            `json:"-"`
 	WebservCertDir   string            `json:"-"`
-	WebservDataDir   string            `json:"-"`
 	WebservListenURL string            `json:"-"`
 	Administrators   []AdminAccount    `json:"administrators,omitempty"`
 	GitHubOAuth      *OAuthClient      `json:"github_oauth,omitempty"`
@@ -429,7 +428,6 @@ func applyAdminRuntime(cfg *Config, runtime *AdminConfig) {
 	}
 	cfg.Admin.WebservAddress = runtime.WebservAddress
 	cfg.Admin.WebservCertDir = runtime.WebservCertDir
-	cfg.Admin.WebservDataDir = runtime.WebservDataDir
 	cfg.Admin.WebservListenURL = runtime.WebservListenURL
 }
 

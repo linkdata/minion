@@ -14,12 +14,11 @@ import (
 func TestAdminWebservConfigUsesCLIOverrides(t *testing.T) {
 	cfg := config.AdminConfig{
 		Listen: "127.0.0.1:8377", WebservAddress: "127.0.0.1:9000",
-		WebservCertDir: "/certs", WebservDataDir: "/data",
-		WebservListenURL: "https://minion.example",
+		WebservCertDir: "/certs", WebservListenURL: "https://minion.example",
 	}
 	service := adminWebservConfig(cfg)
 	if service.Address != cfg.WebservAddress || service.CertDir != cfg.WebservCertDir ||
-		service.User != "" || service.DataDir != cfg.WebservDataDir ||
+		service.User != "" ||
 		service.ListenURL != cfg.WebservListenURL {
 		t.Fatalf("webserv options not passed through: %+v", service)
 	}

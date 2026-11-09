@@ -165,7 +165,6 @@ func applyAdvancedRuntime(cfg *config.Config, runtime config.AdminConfig) {
 	}
 	cfg.Admin.WebservAddress = runtime.WebservAddress
 	cfg.Admin.WebservCertDir = runtime.WebservCertDir
-	cfg.Admin.WebservDataDir = runtime.WebservDataDir
 	cfg.Admin.WebservListenURL = runtime.WebservListenURL
 }
 

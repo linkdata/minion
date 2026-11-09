@@ -200,8 +200,7 @@ func adminWebservConfig(cfg config.AdminConfig) *webserv.Config {
 			address = net.JoinHostPort(host, port)
 		}
 	}
-	return &webserv.Config{Address: address, CertDir: cfg.WebservCertDir,
-		DataDir: cfg.WebservDataDir, ListenURL: cfg.WebservListenURL}
+	return &webserv.Config{Address: address, CertDir: cfg.WebservCertDir, ListenURL: cfg.WebservListenURL}
 }
 
 func validateWebservAdminAddress(cfg config.AdminConfig) error {

@@ -53,14 +53,13 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	address := flag.String("address", "", "webserv listen address for the admin UI")
 	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
 	webUser := flag.String("user", "", "webserv user to switch to before setup and listener binding")
-	dataDir := flag.String("datadir", "", "webserv data directory")
 	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
 	webservFlagsUsed := false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
-		case "address", "certdir", "user", "datadir", "listenurl":
+		case "address", "certdir", "user", "listenurl":
 			webservFlagsUsed = true
 		}
 	})
@@ -143,8 +142,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 2
 	}
 	cfg, err := config.LoadWithAdminRuntime(loadedPath, config.AdminConfig{
-		WebservAddress: *address, WebservCertDir: *certDir,
-		WebservDataDir: *dataDir, WebservListenURL: *listenURL,
+		WebservAddress: *address, WebservCertDir: *certDir, WebservListenURL: *listenURL,
 	})
 	if err != nil {
 		logger.Printf("config: %v", err)
