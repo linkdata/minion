@@ -96,6 +96,55 @@ func TestAdvancedConfigMasksSecretsAndStagesOnlyKeys(t *testing.T) {
 	}
 }
 
+func TestAdvancedConfigRejectsEquivalentExternalPathEdit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := config.Config{BotLogin: "bot", StatePath: "state.json", Admin: &config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
+	}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, nil, *cfg.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.BotLogin = "new-bot"
+	source, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.StatePath = filepath.Join(filepath.Dir(path), "state.json")
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, nil, *cfg.Admin, view.Version, string(source)); err == nil || !strings.Contains(err.Error(), "reload") {
+		t.Fatalf("stale editor overwrote equivalent external path edit: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved config.Config
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.BotLogin != "bot" || saved.StatePath != cfg.StatePath {
+		t.Fatalf("stale editor changed disk config: bot=%q state=%q", saved.BotLogin, saved.StatePath)
+	}
+}
+
 func TestAdvancedConfigUsesRuntimeCertDirWithPartialSavedTLS(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{
 		Listen: "0.0.0.0:8443", TLSKeyFile: "key.pem",

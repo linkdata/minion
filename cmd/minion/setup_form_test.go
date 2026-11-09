@@ -116,6 +116,21 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("invalid setup changed config: bot=%q tokenSet=%t repositories=%d error=%v",
 			unchanged.BotLogin, unchanged.GitHub.Token != "", len(unchanged.Repositories), err)
 	}
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.StatePath = "var/state.json" // Same validated path as the omitted default.
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if stale := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, ""); stale.Code != http.StatusConflict ||
+		!strings.Contains(stale.Body.String(), "configuration changed; reload") {
+		t.Fatalf("equivalent-path stale setup save status=%d body=%q", stale.Code, stale.Body.String())
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"state_path": "var/state.json"`) {
+		t.Fatalf("stale setup changed the operator's path: data=%s error=%v", data, err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	form.Set("version", setupFormVersion(t, home.Body.String()))
 	saved := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
 	if saved.Code != http.StatusSeeOther || saved.Header().Get("Location") != "/" {
 		t.Fatalf("setup save status=%d body=%q", saved.Code, saved.Body.String())

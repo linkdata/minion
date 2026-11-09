@@ -29,15 +29,15 @@ func (a *adminAccess) setupPost() http.Handler {
 			if cfg.Admin == nil {
 				return errors.New("admin setup is no longer configured; restart Minion")
 			}
+			version, err := advancedVersion(*cfg)
+			if err != nil {
+				return err
+			}
 			before, err := cloneConfig(*cfg)
 			if err != nil {
 				return err
 			}
 			if err := before.Validate(filepath.Dir(a.setupPath)); err != nil {
-				return err
-			}
-			version, err := advancedVersion(before)
-			if err != nil {
 				return err
 			}
 			if version != values.Get("version") {

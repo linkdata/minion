@@ -95,11 +95,11 @@ func advancedConfigView(path string, live *adminLiveConfig, runtime config.Admin
 		return view, err
 	}
 	applyAdvancedRuntime(&verified, runtime)
-	if err := verified.Validate(filepath.Dir(path)); err != nil {
-		return view, err
-	}
 	view.Version, err = advancedVersion(verified)
 	if err != nil {
+		return view, err
+	}
+	if err := verified.Validate(filepath.Dir(path)); err != nil {
 		return view, err
 	}
 	maskAdvancedSecrets(&raw)
@@ -230,15 +230,15 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 	}
 	var preEdit config.Config
 	updated, err := config.UpdateWithAdminRuntime(path, runtime, func(raw *config.Config) error {
+		currentVersion, err := advancedVersion(*raw)
+		if err != nil {
+			return err
+		}
 		before, err := cloneConfig(*raw)
 		if err != nil {
 			return err
 		}
 		if err := before.Validate(filepath.Dir(path)); err != nil {
-			return err
-		}
-		currentVersion, err := advancedVersion(before)
-		if err != nil {
 			return err
 		}
 		if currentVersion != version {

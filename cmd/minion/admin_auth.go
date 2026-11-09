@@ -6,6 +6,8 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -405,13 +407,11 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 	account, _ := a.oauth.currentUser(a.jaws.GetSession(r))
 	view := adminHomeView{Admin: a.passwordSet, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(a.jaws.GetSession(r)) != "", Setup: a.setup}
 	if a.setup && a.setupPath != "" {
-		if cfg, err := config.LoadWithAdminRuntime(a.setupPath, a.setupAdmin); err == nil {
+		if cfg, version, err := loadSetupConfig(a.setupPath, a.setupAdmin); err == nil {
 			view.BotLogin = cfg.BotLogin
 			view.TokenSet = cfg.GitHub.Token != ""
 			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && len(cfg.Repositories) != 0
-			if version, err := advancedVersion(cfg); err == nil {
-				view.Version = version
-			}
+			view.Version = version
 			if len(cfg.Repositories) != 0 {
 				view.Repository = cfg.Repositories[0].Name
 				view.RepositoryID = cfg.Repositories[0].ID
@@ -420,6 +420,30 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.publicPage(w, r, "home", view)
+}
+
+func loadSetupConfig(path string, runtime config.AdminConfig) (config.Config, string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	cfg, err := decodeAdvancedConfig(data)
+	if err != nil {
+		return cfg, "", err
+	}
+	applyAdvancedRuntime(&cfg, runtime)
+	version, err := advancedVersion(cfg)
+	if err != nil {
+		return cfg, "", err
+	}
+	if err := cfg.Validate(filepath.Dir(path)); err != nil {
+		return cfg, "", err
+	}
+	return cfg, version, nil
 }
 
 func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name string, view any) {
