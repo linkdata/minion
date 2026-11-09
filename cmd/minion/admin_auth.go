@@ -365,7 +365,8 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 			return false
 		}
 		return r.Method == http.MethodPost && r.URL.Path == "/admin/setup" ||
-			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost)
+			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost) ||
+			r.URL.Path == "/admin/config/check" && r.Method == http.MethodGet
 	}
 	return a.sessionUsername(a.jaws.GetSession(r)) != ""
 }

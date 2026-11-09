@@ -109,8 +109,8 @@ func checkGitHubAuth(ctx context.Context, owner *action.Orchestrator) adminGitHu
 		}
 		return result
 	}
-	if user.ID <= 0 || user.ID != owner.BotID || !strings.EqualFold(user.Login, owner.BotLogin) {
-		result.Message = "GitHub account does not match the active bot identity."
+	if user.ID <= 0 || owner.BotID != 0 && user.ID != owner.BotID || !strings.EqualFold(user.Login, owner.BotLogin) {
+		result.Message = "GitHub account does not match the configured bot identity."
 		return result
 	}
 	result.OK = true

@@ -185,6 +185,21 @@ func TestGitHubTokenValidation(t *testing.T) {
 	}
 }
 
+func TestBotLoginValidation(t *testing.T) {
+	for _, login := range []string{"Bot-1", strings.Repeat("a", 39)} {
+		cfg := Config{BotLogin: login, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+		if err := cfg.Validate(t.TempDir()); err != nil {
+			t.Fatalf("valid bot login %q: %v", login, err)
+		}
+	}
+	for _, login := range []string{"bad_user", "bad!", "-bad", "bad-", "bad--name", "bad\nname", strings.Repeat("a", 40)} {
+		cfg := Config{BotLogin: login, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+		if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "bot_login") {
+			t.Fatalf("invalid bot login %q accepted: %v", login, err)
+		}
+	}
+}
+
 func TestUserModelChoicesBoundPreferencesAndTrustedDefaults(t *testing.T) {
 	low := RoleModelConfig{Model: "approved-main", Effort: "low"}
 	medium := RoleModelConfig{Model: "approved-critic", Effort: "medium"}

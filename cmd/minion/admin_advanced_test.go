@@ -438,3 +438,48 @@ func TestAdvancedConfigCannotRemoveAdminBlock(t *testing.T) {
 		t.Fatal("rejected admin removal changed saved or running configuration")
 	}
 }
+
+func TestAdvancedConfigRejectsInvalidBotLogin(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	path := filepath.Join(t.TempDir(), "config.json")
+	original, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.BotLogin = "bad_user"
+	source, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(source)); err == nil || !strings.Contains(err.Error(), "bot_login") {
+		t.Fatalf("invalid bot login accepted: %v", err)
+	}
+	saved, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(saved) != string(original) || live.restartRequired || live.pending {
+		t.Fatal("rejected bot login changed saved or running configuration")
+	}
+}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,7 +17,9 @@ import (
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/jaws/lib/ui"
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/github"
 )
 
 const (
@@ -28,6 +31,7 @@ const (
 type adminAdvancedView struct {
 	JSON, Version     string
 	Error             string
+	GitHubCheck       adminGitHubCheck
 	Setup             bool
 	RestartRequired   bool
 	PendingActivation bool
@@ -45,10 +49,13 @@ var adminAdvancedHTML = template.Must(template.New("admin advanced").Parse(headH
 <label class="d-grid gap-1" for="config-json">Configuration JSON</label>
 <textarea class="form-control font-monospace" id="config-json" name="config" rows="30" spellcheck="false" required>{{.Dot.JSON}}</textarea>
 <button class="btn btn-primary mt-3" type="submit">Save configuration</button>
-</form></main>{{$.TailHTML}}</body></html>`))
+</form>
+<form method="get" action="/admin/config/check" class="mt-3"><button class="btn btn-outline-primary" type="submit">Test saved GitHub auth</button></form>
+{{if .Dot.GitHubCheck.Checked}}<p role="status" class="alert {{if .Dot.GitHubCheck.OK}}alert-success{{else}}alert-danger{{end}} mt-3">{{.Dot.GitHubCheck.Message}}</p>{{end}}
+</main>{{$.TailHTML}}</body></html>`))
 
 func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string, live *adminLiveConfig, runtime config.AdminConfig) {
-	mux.Handle("GET /admin/config", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	configPage := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		view, err := advancedConfigView(path, live, runtime)
@@ -56,8 +63,13 @@ func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string,
 			http.Error(w, "Configuration could not be loaded; check the file and reload", http.StatusConflict)
 			return
 		}
+		if r.URL.Path == "/admin/config/check" {
+			view.GitHubCheck = checkSavedGitHubAuth(r.Context(), path, runtime)
+		}
 		ui.Handler(jw, "admin advanced", view).ServeHTTP(w, r)
-	}))
+	})
+	mux.Handle("GET /admin/config", configPage)
+	mux.Handle("GET /admin/config/check", configPage)
 	mux.Handle("POST /admin/config", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		r.Body = http.MaxBytesReader(w, r.Body, 4*maxAdvancedConfig)
@@ -73,6 +85,17 @@ func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string,
 		}
 		http.Redirect(w, r, "/admin/config", http.StatusSeeOther)
 	}))
+}
+
+func checkSavedGitHubAuth(ctx context.Context, path string, runtime config.AdminConfig) adminGitHubCheck {
+	cfg, err := config.LoadWithAdminRuntime(path, runtime)
+	if err != nil {
+		return adminGitHubCheck{Checked: true, Message: "Saved configuration could not be loaded."}
+	}
+	if cfg.BotLogin == "" || cfg.GitHub.Token == "" {
+		return adminGitHubCheck{Checked: true, Message: "Save a GitHub bot login and token before testing."}
+	}
+	return checkGitHubAuth(ctx, &action.Orchestrator{GitHub: github.New(cfg.GitHub.Token), BotLogin: cfg.BotLogin})
 }
 
 func advancedConfigView(path string, live *adminLiveConfig, runtime config.AdminConfig) (adminAdvancedView, error) {

@@ -464,6 +464,11 @@ func validModelSetting(value string) bool {
 	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && strings.IndexFunc(value, unicode.IsSpace) < 0
 }
 
+// ValidGitHubLogin checks the GitHub account name syntax used in configuration.
+func ValidGitHubLogin(login string) bool {
+	return len(login) <= 39 && ownerNamePattern.MatchString(login) && !strings.Contains(login, "--")
+}
+
 // RequireGitHubToken checks the credential needed by the orchestrator.
 // Install-only and remote worker configurations do not need one.
 func (c Config) RequireGitHubToken() error {
@@ -480,7 +485,7 @@ func (c *Config) Validate(configDir string) error {
 	if c.BotLogin == "" && c.Admin == nil {
 		return fmt.Errorf("bot_login is required")
 	}
-	if strings.ContainsAny(c.BotLogin, " /\\@") {
+	if c.BotLogin != "" && !ValidGitHubLogin(c.BotLogin) {
 		return fmt.Errorf("invalid bot_login %q", c.BotLogin)
 	}
 	if strings.IndexFunc(c.GitHub.Token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
@@ -821,7 +826,7 @@ func (c *Config) Validate(configDir string) error {
 	seenRequesterIDs := map[int64]bool{}
 	for i := range c.RequesterPolicies {
 		requester := &c.RequesterPolicies[i]
-		if len(requester.Login) > 39 || !ownerNamePattern.MatchString(requester.Login) || requester.ID <= 0 {
+		if !ValidGitHubLogin(requester.Login) || requester.ID <= 0 {
 			return fmt.Errorf("requester_policies requires a valid GitHub login and positive ID")
 		}
 		requester.Login = strings.ToLower(requester.Login)

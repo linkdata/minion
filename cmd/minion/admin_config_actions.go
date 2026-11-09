@@ -327,7 +327,7 @@ func validateAdminRequester(ctx context.Context, live *adminLiveConfig, owner *a
 }
 
 func validateAdminRequesterInRepository(ctx context.Context, owner *action.Orchestrator, repo config.Repository, login string) (int64, error) {
-	if !validAdminGitHubLogin(login) {
+	if !config.ValidGitHubLogin(login) {
 		return 0, errors.New("Enter a configured repository and valid GitHub login")
 	}
 	if owner == nil || owner.GitHub == nil {
@@ -376,19 +376,6 @@ func adminConfigPost(back string, fields []string, repeated string, action func(
 		}
 		http.Redirect(w, r, back, http.StatusSeeOther)
 	})
-}
-
-func validAdminGitHubLogin(login string) bool {
-	if len(login) == 0 || len(login) > 39 || login[0] == '-' || login[len(login)-1] == '-' {
-		return false
-	}
-	for _, ch := range login {
-		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-' {
-			continue
-		}
-		return false
-	}
-	return true
 }
 
 func adminCanWrite(permission string) bool {

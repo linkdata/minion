@@ -20,7 +20,7 @@ func (a *adminAccess) setupPost() http.Handler {
 		name := strings.ToLower(strings.TrimSpace(values.Get("repository")))
 		repositoryID, repositoryErr := strconv.ParseInt(values.Get("repository_id"), 10, 64)
 		ownerID, ownerErr := strconv.ParseInt(values.Get("owner_id"), 10, 64)
-		if !validAdminGitHubLogin(bot) || len(token) > 4096 || !workspace.ValidRepository(name) ||
+		if !config.ValidGitHubLogin(bot) || len(token) > 4096 || !workspace.ValidRepository(name) ||
 			repositoryErr != nil || repositoryID <= 0 || ownerErr != nil || ownerID <= 0 {
 			return errors.New("Enter a bot login, token, repository name, repository ID, and owner ID")
 		}
