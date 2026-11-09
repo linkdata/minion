@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,7 +13,6 @@ import (
 
 	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/github"
 )
 
 func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
@@ -28,38 +27,12 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer secret-token" && auth != "Bearer empty-branch-token" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/user":
-			_, _ = w.Write([]byte(`{"id":8,"login":"example-bot"}`))
-		case "/repos/example/repo":
-			if auth == "Bearer empty-branch-token" {
-				_, _ = w.Write([]byte(`{"id":42,"full_name":"example/repo","owner":{"id":7}}`))
-			} else {
-				_, _ = w.Write([]byte(`{"id":42,"full_name":"example/repo","owner":{"id":7},"default_branch":"main"}`))
-			}
-		case "/repos/example/repo/notifications":
-			_, _ = w.Write([]byte(`[]`))
-		case "/repos/example/repo/collaborators/example-bot/permission":
-			_, _ = w.Write([]byte(`{"permission":"write"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(api.Close)
-	previousClient := newSetupGitHubClient
-	newSetupGitHubClient = func(token string) *github.Client {
-		client := github.New(token)
-		client.BaseURL = api.URL
-		return client
-	}
-	t.Cleanup(func() { newSetupGitHubClient = previousClient })
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		t.Errorf("setup made an external request: %s", request.URL)
+		return nil, errors.New("unexpected setup request")
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 	jw, err := jaws.New()
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +46,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	go func() { jw.Serve(); close(done) }()
 	t.Cleanup(func() { jw.Close(); <-done })
 	form := url.Values{"bot_login": {"example-bot"}, "github_token": {"secret-token"},
-		"repository": {"Example/Repo"}}
+		"repository": {"Example/Repo"}, "repository_id": {"42"}, "owner_id": {"7"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/setup", form, nil, ""); response.Code != http.StatusForbidden {
 		t.Fatalf("anonymous setup save status=%d, want 403", response.Code)
 	}
@@ -101,32 +74,23 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		!strings.Contains(home.Body.String(), "Save the bot account and first repository below") ||
 		!strings.Contains(home.Body.String(), "one configured command, if any") ||
 		!strings.Contains(home.Body.String(), `name="repository" value="" maxlength="201"`) ||
+		!strings.Contains(home.Body.String(), `name="repository_id"`) || !strings.Contains(home.Body.String(), `name="owner_id"`) ||
 		strings.Contains(home.Body.String(), "Sign in as admin to save") ||
-		strings.Contains(home.Body.String(), `name="repository_id"`) || strings.Contains(home.Body.String(), `name="owner_id"`) ||
 		strings.Contains(home.Body.String(), "secret-token") {
 		t.Fatalf("setup form status=%d body=%q", home.Code, home.Body.String())
 	}
 	invalid := url.Values{"bot_login": {"example-bot"}, "github_token": {"bad secret token"},
-		"repository": {"Example/Repo"}}
+		"repository": {"Example/Repo"}, "repository_id": {"42"}, "owner_id": {"7"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/setup", invalid, cookie, ""); response.Code == http.StatusSeeOther ||
 		strings.Contains(response.Body.String(), "bad secret token") {
 		t.Fatalf("invalid setup save status=%d echoed token=%t", response.Code, strings.Contains(response.Body.String(), "bad secret token"))
 	}
-	wrongLogin := url.Values{"bot_login": {"wrong-bot"}, "github_token": {"secret-token"},
-		"repository": {"Example/Repo"}}
-	if response := adminResponse(handler, http.MethodPost, "/admin/setup", wrongLogin, cookie, ""); response.Code == http.StatusSeeOther {
-		t.Fatalf("wrong bot login was saved: status=%d", response.Code)
-	}
-	missingRepo := url.Values{"bot_login": {"example-bot"}, "github_token": {"secret-token"},
-		"repository": {"Example/Missing"}}
-	if response := adminResponse(handler, http.MethodPost, "/admin/setup", missingRepo, cookie, ""); response.Code == http.StatusSeeOther {
-		t.Fatalf("missing repository was saved: status=%d", response.Code)
-	}
-	emptyBranch := url.Values{"bot_login": {"example-bot"}, "github_token": {"empty-branch-token"},
-		"repository": {"Example/Repo"}}
-	if response := adminResponse(handler, http.MethodPost, "/admin/setup", emptyBranch, cookie, ""); response.Code != http.StatusConflict ||
-		!strings.Contains(response.Body.String(), "default branches") {
-		t.Fatalf("repository without default branch setup status=%d body=%q", response.Code, response.Body.String())
+	for _, tc := range []struct{ field, value string }{{"repository_id", "0"}, {"owner_id", "-1"}, {"repository_id", "not-a-number"}, {"owner_id", "9223372036854775808"}} {
+		invalidID := form.Clone()
+		invalidID.Set(tc.field, tc.value)
+		if response := adminResponse(handler, http.MethodPost, "/admin/setup", invalidID, cookie, ""); response.Code != http.StatusConflict {
+			t.Fatalf("invalid %s=%q setup status=%d", tc.field, tc.value, response.Code)
+		}
 	}
 	unchanged, err := config.Load(path)
 	if err != nil || unchanged.BotLogin != "" || unchanged.GitHub.Token != "" || len(unchanged.Repositories) != 0 {
@@ -160,22 +124,20 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	}
 	_, err = config.Update(path, func(cfg *config.Config) error {
 		cfg.GitHub.Token = ""
-		cfg.Repositories = append(cfg.Repositories, config.Repository{
-			Name: "example/second", ID: 43, OwnerID: 7, Actions: []string{"review"}, DenyAllActors: true,
-		})
+		cfg.Repositories[0].ID = 43
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	denied := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
-	if denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), "all configured repositories") {
-		t.Fatalf("inaccessible second repository setup status=%d body=%q", denied.Code, denied.Body.String())
+	if denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), "first repository differs") {
+		t.Fatalf("changed first repository setup status=%d body=%q", denied.Code, denied.Body.String())
 	}
 	unchanged, err = config.Load(path)
-	if err != nil || unchanged.GitHub.Token != "" || len(unchanged.Repositories) != 2 {
-		t.Fatalf("inaccessible second repository changed setup config: tokenSet=%t repositories=%d error=%v",
-			unchanged.GitHub.Token != "", len(unchanged.Repositories), err)
+	if err != nil || unchanged.GitHub.Token != "" || len(unchanged.Repositories) != 1 || unchanged.Repositories[0].ID != 43 {
+		t.Fatalf("rejected setup changed config: tokenSet=%t repositories=%v error=%v",
+			unchanged.GitHub.Token != "", unchanged.Repositories, err)
 	}
 	for _, tc := range []struct {
 		name, main      string

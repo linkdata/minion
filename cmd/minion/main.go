@@ -189,13 +189,102 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	setupIncomplete := cfg.Admin != nil && !*check && !*oneshot &&
 		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0)
-	if setupIncomplete {
-		if _, err := os.Stat(cfg.StatePath); errors.Is(err, os.ErrNotExist) {
-			return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
-		}
+	freshState := false
+	if cfg.Admin != nil && !*check && !*oneshot {
+		_, err := os.Stat(cfg.StatePath)
+		freshState = errors.Is(err, os.ErrNotExist)
+	}
+	if setupIncomplete && freshState {
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 	}
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
+	}
+	var client *github.Client
+	var user github.User
+	githubCredentialsNeedSetup := true
+	authenticateGitHub := func() bool {
+		if client != nil {
+			return true
+		}
+		if err := cfg.RequireGitHubToken(); err != nil {
+			logger.Printf("GitHub authentication: %v", err)
+			return false
+		}
+		candidate := github.New(cfg.GitHub.Token)
+		user, err = candidate.AuthenticatedUser(ctx)
+		if err != nil {
+			var status *github.StatusError
+			githubCredentialsNeedSetup = errors.As(err, &status) && status.StatusCode == http.StatusUnauthorized
+			logger.Printf("GitHub identity check: %v", err)
+			return false
+		}
+		if user.ID <= 0 {
+			logger.Printf("GitHub identity check: authenticated account ID is missing")
+			return false
+		}
+		if !strings.EqualFold(user.Login, cfg.BotLogin) {
+			logger.Printf("GitHub identity is @%s; config requires @%s", user.Login, cfg.BotLogin)
+			return false
+		}
+		client = candidate
+		return true
+	}
+	aiPreflightFailed := false
+	preflight := func() bool {
+		aiPreflightFailed = false
+		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
+			aiPreflightFailed = true
+			logger.Printf("AI preflight: %v", err)
+			return false
+		}
+		if err := checkWorkRoot(); err != nil {
+			logger.Printf("work root: %v", err)
+			return false
+		}
+		if err := checkGit(ctx, cfg.WorkRoot); err != nil {
+			logger.Printf("Git preflight: %v", err)
+			return false
+		}
+		if cfg.Admin != nil && !*oneshot {
+			if err := checkAdminServerConfig(*cfg.Admin); err != nil {
+				logger.Printf("admin TLS preflight: %v", err)
+				return false
+			}
+		}
+		if remote := cfg.RemoteExecutor; remote != nil {
+			if _, err := loadTLSCertificate("remote", remote.TLSCertFile, remote.TLSKeyFile); err != nil {
+				logger.Printf("remote TLS preflight: %v", err)
+				return false
+			}
+		} else {
+			if err := checkModels(ctx, &cfg, logger); err != nil {
+				aiPreflightFailed = true
+				logger.Printf("AI preflight: %v", err)
+				return false
+			}
+		}
+		return true
+	}
+	startRecoverySetup := func() int {
+		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
+	freshPreflightPassed := false
+	if freshState {
+		if !preflight() {
+			if aiPreflightFailed {
+				return startRecoverySetup()
+			}
+			return 1
+		}
+		freshPreflightPassed = true
+		if !authenticateGitHub() {
+			if githubCredentialsNeedSetup {
+				return startRecoverySetup()
+			}
+			return 1
+		}
 	}
 	var store *state.Store
 	initial := time.Now().UTC()
@@ -249,81 +338,14 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			}
 		}()
 	}
-	var client *github.Client
-	var user github.User
-	githubCredentialsNeedSetup := true
-	authenticateGitHub := func() bool {
-		if client != nil {
-			return true
-		}
-		if err := cfg.RequireGitHubToken(); err != nil {
-			logger.Printf("GitHub authentication: %v", err)
-			return false
-		}
-		candidate := github.New(cfg.GitHub.Token)
-		user, err = candidate.AuthenticatedUser(ctx)
-		if err != nil {
-			var status *github.StatusError
-			githubCredentialsNeedSetup = errors.As(err, &status) && status.StatusCode == http.StatusUnauthorized
-			logger.Printf("GitHub identity check: %v", err)
-			return false
-		}
-		if user.ID <= 0 {
-			logger.Printf("GitHub identity check: authenticated account ID is missing")
-			return false
-		}
-		if !strings.EqualFold(user.Login, cfg.BotLogin) {
-			logger.Printf("GitHub identity is @%s; config requires @%s", user.Login, cfg.BotLogin)
-			return false
-		}
-		client = candidate
-		return true
-	}
 	recoverySetup := func() int {
 		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil || pendingDurableWork() {
 			return 1
 		}
-		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")
-		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+		return startRecoverySetup()
 	}
 	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
-	aiPreflightFailed := false
-	preflight := func() bool {
-		aiPreflightFailed = false
-		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
-			aiPreflightFailed = true
-			logger.Printf("AI preflight: %v", err)
-			return false
-		}
-		if err := checkWorkRoot(); err != nil {
-			logger.Printf("work root: %v", err)
-			return false
-		}
-		if err := checkGit(ctx, cfg.WorkRoot); err != nil {
-			logger.Printf("Git preflight: %v", err)
-			return false
-		}
-		if cfg.Admin != nil && !*oneshot {
-			if err := checkAdminServerConfig(*cfg.Admin); err != nil {
-				logger.Printf("admin TLS preflight: %v", err)
-				return false
-			}
-		}
-		if remote := cfg.RemoteExecutor; remote != nil {
-			if _, err := loadTLSCertificate("remote", remote.TLSCertFile, remote.TLSKeyFile); err != nil {
-				logger.Printf("remote TLS preflight: %v", err)
-				return false
-			}
-		} else {
-			if err := checkModels(ctx, &cfg, logger); err != nil {
-				aiPreflightFailed = true
-				logger.Printf("AI preflight: %v", err)
-				return false
-			}
-		}
-		return true
-	}
-	failedPreflight := !terminalRecovery && !preflight()
+	failedPreflight := !terminalRecovery && !freshPreflightPassed && !preflight()
 	if failedPreflight && !*check {
 		for _, write := range store.Data.PublicationWrites {
 			if write.Status != state.PublicationWritePending {

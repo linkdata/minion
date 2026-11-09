@@ -118,6 +118,11 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 				strings.Contains(output, "setup UI:") != tc.wantRecovery {
 				t.Fatalf("AI recovery mode: code=%d output=%q", code, output)
 			}
+			if tc.wantRecovery {
+				if _, err := os.Stat(cfg.StatePath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("AI recovery created state before preflight passed: %v", err)
+				}
+			}
 		})
 	}
 }
@@ -188,6 +193,11 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 				strings.Contains(output, "starting admin recovery UI") != tc.wantRecovery ||
 				strings.Contains(output, "setup UI:") != tc.wantRecovery {
 				t.Fatalf("GitHub recovery mode: code=%d output=%q", code, output)
+			}
+			if tc.wantRecovery {
+				if _, err := os.Stat(cfg.StatePath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("GitHub recovery created state before preflight passed: %v", err)
+				}
 			}
 		})
 	}

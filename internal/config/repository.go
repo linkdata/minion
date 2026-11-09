@@ -104,7 +104,7 @@ func update(path string, runtime *AdminConfig, mutate func(*Config) error) (cand
 	if !bytes.Equal(data, current) {
 		return Config{}, fmt.Errorf("config changed while updating; retry")
 	}
-	if err := os.Rename(f.Name(), target); err != nil {
+	if err := replaceConfigFile(f.Name(), target); err != nil {
 		return Config{}, err
 	}
 	if dir, openErr := os.Open(filepath.Dir(target)); openErr == nil {
