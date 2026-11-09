@@ -26,6 +26,7 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
+var auditValidatorHelpers = []string{"strict-json-keys.cjs", "safe-input.cjs"}
 
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
 var auditBlockFile = regexp.MustCompile(`^[A-Z][A-Z0-9-]*\.md$`)
@@ -47,8 +48,12 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 }
 
 func checkAuditValidatorScripts(skill string) error {
+	scripts := slices.Clone(auditValidatorHelpers)
 	for _, validator := range auditValidators {
-		script := filepath.Join(filepath.Dir(skill), validator.script)
+		scripts = append(scripts, validator.script)
+	}
+	for _, name := range scripts {
+		script := filepath.Join(filepath.Dir(skill), name)
 		info, err := os.Stat(script)
 		if err != nil {
 			return fmt.Errorf("audit validator %q: %w", script, err)
