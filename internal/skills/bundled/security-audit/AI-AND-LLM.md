@@ -14,7 +14,7 @@ Use this alongside `ATTACK-CLASSES.md`, not instead of it. Transport, access con
 - A guardrail prompt is not a security boundary. Count only deterministic checks, resource-scoped authorization, isolation, binding, and constrained credentials.
 - State the attacker, affected principal, effective execution identity, resource, exact action, authority used, and observable impact. An intentional direct request to use the requester's existing authority is not a delegation defect merely because a model executes it.
 - Authorization and action binding are separate controls. Attacker-controlled content that causes an action under an affected principal's valid authority is an action-binding failure when that principal did not intentionally request or approve the exact action.
-- Classify every candidate as `confirmed` only after source evidence and bounded local validation establish the boundary and result. Use `needs_validation` when a required provider, deployment, model, renderer, or identity behavior is not observable locally.
+- Classify `confirmed` only when source evidence establishes the boundary and result, with bounded local validation when execution is allowed or a deterministic source-derived result when forbidden. Use `needs_validation` when required provider, deployment, model, renderer, or identity behavior remains unverified.
 ```
 
 ## Context, retrieval, and memory attack classes (subagent_type: `general`)

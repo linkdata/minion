@@ -13,7 +13,7 @@ Split large systems by producer/consumer pair, external/internal peer role, sync
 - Schema validation proves message shape, not provenance, resource authority, ordering, or safe values. Follow decoded fields to policy and side effects.
 - Broker guarantees and application guarantees differ. Write down retry, ordering, acknowledgement, deduplication, and transaction behavior before evaluating state changes.
 - Parser disagreement requires two concrete consumers, schema versions, or wire representations and one security-relevant divergent value.
-- Use `confirmed` for source-complete paths plus bounded local producer/consumer tests. Use `needs_validation` for broker ACL, service-mesh identity, topic attachment, or compatibility behavior outside the repository.
+- Use `confirmed` for source-complete paths and a result established by bounded local producer/consumer tests when execution is allowed or deterministically from source when forbidden. Use `needs_validation` for broker ACL, service-mesh identity, topic attachment, or compatibility behavior outside the repository.
 ```
 
 ## Framing, schema, and interpretation attack classes (subagent_type: `general`)

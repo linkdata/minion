@@ -75,4 +75,4 @@ A restart, restore, fallback, or cleanup path rebuilds unbounded state, ignores 
 2. Confirm no source-visible upstream, parser, queue, tenant, or framework bound prevents the path. Unknown deployed controls require `needs_validation`.
 3. For superlinear behavior, establish the accepted complexity and bounded local growth. For leaks, show repeatable retention after cleanup should occur. For fatal paths, identify process/supervisor isolation.
 4. Prioritize by low requester work, unauthenticated reachability, cross-tenant scope, persistence, and poor recovery; do not validate with availability impact.
-5. Return `confirmed` only with safe local proof and meaningful shared effect. Return `needs_validation` with the exact upstream limit, topology, quota, or recovery observation an owner must check.
+5. Return `confirmed` only with a meaningful shared effect established by safe local proof, or deterministically from source when execution is forbidden. Return `needs_validation` with the exact upstream limit, topology, quota, or recovery observation an owner must check.

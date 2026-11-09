@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,6 +138,28 @@ func TestSetupServerUsesWebservListenURL(t *testing.T) {
 	})
 	if server.entryURL != publicURL {
 		t.Fatalf("advertised URL = %q, want %q", server.entryURL, publicURL)
+	}
+}
+
+func TestAdminServerUsesSpecificLoopbackURL(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{Listen: "127.0.0.2:0"}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := server.Close(); err != nil {
+			t.Errorf("close setup server: %v", err)
+		}
+	})
+	if want := "http://" + server.listener.Addr().String(); server.entryURL != want {
+		t.Fatalf("specific loopback URL = %q, want %q", server.entryURL, want)
 	}
 }
 

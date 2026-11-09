@@ -13,7 +13,7 @@ Pick relevant classes from Phase 1 and split large targets by parser, allocator/
 - A panic, sanitizer finding, or crash proves a defect only when a realistic untrusted input reaches it. Do not infer memory corruption, code execution, or shared availability impact from a label alone.
 - Validate in a local harness with sanitizers, deterministic concurrency tests, existing fuzz targets, and debugger-assisted fault classification. Stop after proving the violated invariant and observable impact; do not develop post-corruption techniques.
 - Assembly, JIT code, custom allocators, intra-object accesses, and foreign libraries can escape sanitizer coverage. Identify which relevant instructions are instrumented.
-- Classify as `confirmed` only after source evidence and bounded local validation establish the defect and effect. Use `needs_validation` when ABI, allocator, architecture, feature, deployment, or reachability facts remain unknown.
+- Classify `confirmed` only when source evidence establishes the defect and effect, with bounded local validation when execution is allowed or a deterministic source-derived result when forbidden. Use `needs_validation` when ABI, allocator, architecture, feature, deployment, or reachability facts remain unknown.
 ```
 
 ## Bounds, integer, and representation attack classes (subagent_type: `general`)

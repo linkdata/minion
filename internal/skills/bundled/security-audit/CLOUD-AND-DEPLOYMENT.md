@@ -13,7 +13,7 @@ Use `SUPPLY-CHAIN-AND-RELEASE.md` for build and promotion trust, `WEB-PROTOCOL-A
 - Map each workload's identity to specific operations and resources. Broad policy is a finding only when lower-trust input can reach an unauthorized action.
 - Ingress, proxies, service mesh, metadata services, and admission policy are real boundaries, but only count a control when its configuration and attachment are visible.
 - Secret references are not secret disclosure. Require a lower-trust reader, output, artifact, log path, or unsafe fallback.
-- Use `confirmed` for active in-repo configurations and local rendering/policy validation. Use `needs_validation` for account policy, network attachment, runtime admission, hosted metadata, or drift that needs owner observation.
+- Use `confirmed` for active in-repo configurations with a result established by bounded local rendering/policy checks when execution is allowed or deterministically from source when forbidden. Use `needs_validation` for account policy, network attachment, runtime admission, hosted metadata, or drift that needs owner observation.
 ```
 
 ## Workload identity and IAM attack classes (subagent_type: `general`)
