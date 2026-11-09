@@ -47,6 +47,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 					`"supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"medium"}]`, 1)
 			}
 			fakeOnPath(t, "codex", script)
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			certificate, leaf := testRemoteCertificate(t)
 			token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 			commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
@@ -162,6 +163,45 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 	}
 }
 
+func TestRemoteAuditCapabilityRequiresNodeToolchain(t *testing.T) {
+	for _, tc := range []struct {
+		name, nodeScript string
+		want             bool
+	}{
+		{name: "missing node"},
+		{name: "missing permission model", nodeScript: "#!/bin/sh\nexit 1\n"},
+		{name: "supported", nodeScript: "#!/bin/sh\nexit 0\n", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", t.TempDir())
+			scratch := t.TempDir()
+			t.Setenv("TMPDIR", scratch)
+			if tc.nodeScript != "" {
+				fakeOnPath(t, "node", tc.nodeScript)
+			}
+			seen := false
+			client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+				var pull httpPull
+				if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil {
+					t.Fatal(err)
+				}
+				seen = true
+				if pull.AuditHostSupported != tc.want {
+					t.Fatalf("advertised audit support = %t, want %t", pull.AuditHostSupported, tc.want)
+				}
+				return nil, errors.New("stop after capability check")
+			})}
+			_ = preflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", false, time.Second)
+			if !seen {
+				t.Fatal("remote preflight did not advertise capability")
+			}
+			if entries, err := os.ReadDir(scratch); err != nil || len(entries) != 0 {
+				t.Fatalf("audit capability probe left scratch files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
 func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
@@ -175,6 +215,7 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 		t.Fatal("Codex login probe fixture did not change")
 	}
 	fakeOnPath(t, "codex", script)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
 		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
 	data, err := httpEncode(selection, httpControlBytes)

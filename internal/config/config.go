@@ -63,7 +63,7 @@ const (
 	MaxUserModelChoicesPerRole = 16
 	MaxAIInstructionsBytes     = 16 << 10
 	MinProviderAPIKeyBytes     = 8
-	MaxProviderAPIKeyBytes     = 1 << 10
+	MaxProviderAPIKeyBytes     = 256
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"

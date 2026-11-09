@@ -53,19 +53,22 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the bot account and first repository below.{{else}}Sign in as admin to save the bot account and first repository.{{end}} No jobs run during setup.</p>
 {{if .Dot.SignedAdmin}}
 <form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
+<input type="hidden" name="version" value="{{.Dot.Version}}">
 <label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>
-<label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" required></label>
+<label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" {{if not .Dot.TokenSet}}required{{end}}></label>
+{{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
 <label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" maxlength="201" required></label>
-<label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" step="1" required></label>
-<label class="form-label">Owner ID<input class="form-control" name="owner_id" type="number" min="1" step="1" required></label>
+<label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" step="1" value="{{if .Dot.RepositoryID}}{{.Dot.RepositoryID}}{{end}}" required></label>
+<label class="form-label">Owner ID<input class="form-control" name="owner_id" type="number" min="1" step="1" value="{{if .Dot.OwnerID}}{{.Dot.OwnerID}}{{end}}" required></label>
 <p class="text-body-secondary">The first repository starts with one configured command, if any, and no allowed requesters. Add requesters in the admin UI after restarting.</p>
 <button class="btn btn-primary" type="submit">Save setup</button></form>
 {{end}}{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminHomeView struct {
-	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete bool
-	BotLogin, Repository                                       string
+	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete, TokenSet bool
+	BotLogin, Repository, Version                                        string
+	RepositoryID, OwnerID                                                int64
 }
 type adminLoginView struct{ SignedIn, PasswordSet bool }
 
@@ -161,7 +164,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	guestMu := new(sync.Mutex)
 	guestLoginLimit := maxGuestPageSessions
-	if access.passwordSet {
+	if access.passwordSet && oauth == nil {
 		guestLoginLimit = maxAdminSessions
 	}
 	if oauth != nil {
@@ -217,7 +220,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
-			if access.passwordSet {
+			if access.passwordSet && oauth == nil {
 				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 				return
 			}
@@ -404,9 +407,15 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 	if a.setup && a.setupPath != "" {
 		if cfg, err := config.LoadWithAdminRuntime(a.setupPath, a.setupAdmin); err == nil {
 			view.BotLogin = cfg.BotLogin
-			view.SetupComplete = cfg.BotLogin != "" && cfg.GitHub.Token != "" && len(cfg.Repositories) != 0
+			view.TokenSet = cfg.GitHub.Token != ""
+			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && len(cfg.Repositories) != 0
+			if version, err := advancedVersion(cfg); err == nil {
+				view.Version = version
+			}
 			if len(cfg.Repositories) != 0 {
 				view.Repository = cfg.Repositories[0].Name
+				view.RepositoryID = cfg.Repositories[0].ID
+				view.OwnerID = cfg.Repositories[0].OwnerID
 			}
 		}
 	}

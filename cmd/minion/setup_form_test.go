@@ -15,6 +15,19 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
+func setupFormVersion(t *testing.T, body string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(body, `name="version" value="`)
+	if !ok {
+		t.Fatal("setup form has no config version")
+	}
+	version, _, ok := strings.Cut(rest, `"`)
+	if !ok || len(version) != 64 {
+		t.Fatalf("invalid setup version %q", version)
+	}
+	return version
+}
+
 func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	initial := config.Config{Admin: &config.AdminConfig{
@@ -79,11 +92,17 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		strings.Contains(home.Body.String(), "secret-token") {
 		t.Fatalf("setup form status=%d body=%q", home.Code, home.Body.String())
 	}
-	invalid := url.Values{"bot_login": {"example-bot"}, "github_token": {"bad secret token"},
-		"repository": {"Example/Repo"}, "repository_id": {"42"}, "owner_id": {"7"}}
+	form.Set("version", setupFormVersion(t, home.Body.String()))
+	invalid := form.Clone()
+	invalid.Set("github_token", "bad secret token")
 	if response := adminResponse(handler, http.MethodPost, "/admin/setup", invalid, cookie, ""); response.Code == http.StatusSeeOther ||
 		strings.Contains(response.Body.String(), "bad secret token") {
 		t.Fatalf("invalid setup save status=%d echoed token=%t", response.Code, strings.Contains(response.Body.String(), "bad secret token"))
+	}
+	missingToken := form.Clone()
+	missingToken.Set("github_token", "")
+	if response := adminResponse(handler, http.MethodPost, "/admin/setup", missingToken, cookie, ""); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "Enter a GitHub bot token") {
+		t.Fatalf("missing setup token status=%d body=%q", response.Code, response.Body.String())
 	}
 	for _, tc := range []struct{ field, value string }{{"repository_id", "0"}, {"owner_id", "-1"}, {"repository_id", "not-a-number"}, {"owner_id", "9223372036854775808"}} {
 		invalidID := form.Clone()
@@ -125,6 +144,45 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("saved setup home status=%d body=%q", home.Code, home.Body.String())
 	}
 	_, err = config.Update(path, func(cfg *config.Config) error {
+		cfg.GitHub.Token = "new-token"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "configuration changed; reload") {
+		t.Fatalf("stale setup save status=%d body=%q", stale.Code, stale.Body.String())
+	}
+	cfg, err = config.Load(path)
+	if err != nil || cfg.GitHub.Token != "new-token" {
+		t.Fatalf("stale setup overwrote newer token: token=%q error=%v", cfg.GitHub.Token, err)
+	}
+	_, err = config.Update(path, func(cfg *config.Config) error {
+		cfg.BotLogin = ""
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Leave blank to keep the saved token") ||
+		!strings.Contains(home.Body.String(), `name="repository_id" type="number" min="1" step="1" value="42"`) ||
+		!strings.Contains(home.Body.String(), `name="owner_id" type="number" min="1" step="1" value="7"`) ||
+		strings.Contains(home.Body.String(), "new-token") {
+		t.Fatalf("partial setup form status=%d body=%q", home.Code, home.Body.String())
+	}
+	partial := form.Clone()
+	partial.Set("version", setupFormVersion(t, home.Body.String()))
+	partial.Set("github_token", "")
+	if saved := adminResponse(handler, http.MethodPost, "/admin/setup", partial, cookie, ""); saved.Code != http.StatusSeeOther {
+		t.Fatalf("partial setup save status=%d body=%q", saved.Code, saved.Body.String())
+	}
+	cfg, err = config.Load(path)
+	if err != nil || cfg.BotLogin != "example-bot" || cfg.GitHub.Token != "new-token" {
+		t.Fatalf("partial setup lost saved token: bot=%q token=%q error=%v", cfg.BotLogin, cfg.GitHub.Token, err)
+	}
+	_, err = config.Update(path, func(cfg *config.Config) error {
 		cfg.GitHub.Token = ""
 		cfg.Repositories[0].ID = 43
 		return nil
@@ -132,6 +190,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	form.Set("version", setupFormVersion(t, adminResponse(handler, http.MethodGet, "/", nil, cookie, "").Body.String()))
 	denied := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
 	if denied.Code != http.StatusConflict || !strings.Contains(denied.Body.String(), "first repository differs") {
 		t.Fatalf("changed first repository setup status=%d body=%q", denied.Code, denied.Body.String())
@@ -172,6 +231,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
+			form.Set("version", setupFormVersion(t, adminResponse(handler, http.MethodGet, "/", nil, cookie, "").Body.String()))
 			response := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
 			if tc.wantError != "" {
 				if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), tc.wantError) {

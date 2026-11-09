@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -66,8 +68,21 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 // Leave time for the worker to open its first pull before the orchestrator's two-minute wait expires.
 const remoteChoicePreflightTimeout = 90 * time.Second
 
-func auditSupportedOnHost() bool {
-	return (config.CommandMapping{Action: string(command.SecurityAudit)}).SupportedOnHost()
+func auditSupportedOnHost(ctx context.Context) bool {
+	if !(config.CommandMapping{Action: string(command.SecurityAudit)}).SupportedOnHost() {
+		return false
+	}
+	binary, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		return false
+	}
+	dir, err := os.MkdirTemp("", ".minion-audit-preflight-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	_, err = auditNodePermissionFlag(ctx, dir, binary)
+	return err == nil
 }
 
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
@@ -90,14 +105,14 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" || !workspace.ValidIdentitySegment(executorID) || client == nil {
 		return errors.New("invalid remote preflight endpoint")
 	}
+	preflightCtx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
 	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
-		AuditHostSupported: auditSupportedOnHost()}, httpControlBytes)
+		AuditHostSupported: auditSupportedOnHost(preflightCtx)}, httpControlBytes)
 	if err != nil {
 		return err
 	}
 	transport := httpExecutionClient{client: client, base: u}
-	preflightCtx, stop := context.WithTimeout(ctx, timeout)
-	defer stop()
 	var selection remoteChoicePreflight
 	fetchCtx, stopFetch := context.WithTimeout(preflightCtx, httpControlTimeout)
 	err = transport.post(fetchCtx, "preflight", request, httpControlBytes, &selection, httpBinding{}, 0)

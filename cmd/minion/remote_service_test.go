@@ -119,7 +119,55 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	defer client.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	fetchRemotePreflight(t, ctx, client, endpoint, token)
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	var logs bytes.Buffer
+	serviceDone := make(chan int, 1)
+	go func() {
+		defer close(serviceDone)
+		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, 5*time.Second, live)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-serviceDone
+	})
+	if credentials := fetchRemotePreflight(t, ctx, client, endpoint, token); credentials.CodexAPIKey != "" {
+		t.Fatal("remote preflight had an unexpected initial key")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].AllowedActors = []string{"writer"}
+		next.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+		next.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
+		next.AIInstructions = "Read the selected task carefully."
+		next.Codex.APIKey = "remote-next-job-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().Pending || len(watcher.Config.Repositories[0].AllowedActors) != 0 {
+		t.Fatal("saved remote policy was active before the service boundary")
+	}
+	for fetchRemotePreflight(t, ctx, client, endpoint, token).CodexAPIKey != "remote-next-job-key" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for fetchRemotePreflight(t, ctx, client, endpoint, token).CodexAPIKey != "" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = "remote-next-job-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for fetchRemotePreflight(t, ctx, client, endpoint, token).CodexAPIKey != "remote-next-job-key" {
+		time.Sleep(10 * time.Millisecond)
+	}
 	type pullResult struct {
 		status int
 		body   []byte
@@ -154,31 +202,6 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if err := owner.WaitCapacity(ctx); err != nil {
 		t.Fatalf("authenticated pull did not provide capacity: %v", err)
 	}
-	if err := live.save(func(next *config.Config) error {
-		next.Repositories[0].AllowedActors = []string{"writer"}
-		next.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
-		next.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
-		next.AIInstructions = "Read the selected task carefully."
-		next.Codex.APIKey = "remote-next-job-key"
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !live.snapshot().Pending || len(watcher.Config.Repositories[0].AllowedActors) != 0 {
-		t.Fatal("saved remote policy was active before the service boundary")
-	}
-	now := time.Now().UTC()
-	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
-	var logs bytes.Buffer
-	serviceDone := make(chan int, 1)
-	go func() {
-		defer close(serviceDone)
-		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second, live)
-	}()
-	t.Cleanup(func() {
-		cancel()
-		<-serviceDone
-	})
 	if code := <-serviceDone; code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
 	}
@@ -203,7 +226,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	}
 }
 
-func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string) {
+func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string) action.WorkerCredentials {
 	t.Helper()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
 		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
@@ -216,11 +239,18 @@ func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, readErr := io.Copy(io.Discard, response.Body)
+	data, readErr := io.ReadAll(response.Body)
 	closeErr := response.Body.Close()
 	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("remote preflight fixture status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
 	}
+	var selection struct {
+		Credentials action.WorkerCredentials `json:"credentials"`
+	}
+	if err := json.Unmarshal(data, &selection); err != nil {
+		t.Fatal(err)
+	}
+	return selection.Credentials
 }
 
 func remoteTestTLSFiles(t *testing.T) (certFile, keyFile string, leaf *x509.Certificate) {

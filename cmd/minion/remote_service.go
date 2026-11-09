@@ -85,7 +85,35 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 		}
 	}
 	capacityCtx, cancel := context.WithTimeout(ctx, readyTimeout)
-	err := owner.WaitCapacity(capacityCtx)
+	capacityDone := make(chan error, 1)
+	go func() { capacityDone <- owner.WaitCapacity(capacityCtx) }()
+	var updates <-chan struct{}
+	if live != nil {
+		updates = live.updates
+	}
+	retryConfig := false // An update consumed before capacity must activate before polling.
+	var err error
+capacity:
+	for {
+		select {
+		case err = <-capacityDone:
+			break capacity
+		case <-updates:
+			retryConfig = true
+			cfg, _ := live.next()
+			current := watcher.Config
+			current.Codex.APIKey = owner.Runner.Codex.APIKey
+			current.Claude.APIKey = owner.Runner.Claude.APIKey
+			if modelKeysChanged(current, cfg) {
+				oldCodex, oldClaude := owner.Runner.Codex, owner.Runner.Claude
+				applyModelKeys(owner, cfg)
+				if keyErr := owner.UpdateRemoteWorkerCredentials(); keyErr != nil {
+					owner.SetRunnerCredentials(oldCodex, oldClaude)
+					logger.Printf("activate admin model key before worker preflight: %s", monitor.InertLogText(keyErr.Error()))
+				}
+			}
+		}
+	}
 	cancel()
 	if err != nil {
 		logger.Printf("wait for selected remote worker: %s", monitor.InertLogText(err.Error()))
@@ -106,7 +134,6 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 		logger.Print("selected remote worker has no supported commands")
 		return 1
 	}
-	retryConfig := false // A retry wake goes straight to activation, before another poll.
 	for {
 		if !retryConfig {
 			var updates <-chan struct{}

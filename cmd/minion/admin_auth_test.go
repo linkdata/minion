@@ -507,6 +507,7 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 
 func TestHomeReservesSessionsForSignIn(t *testing.T) {
 	handler, jw, _ := testOAuthAdminHandler(t, config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}, nil)
