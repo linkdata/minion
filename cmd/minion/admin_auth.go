@@ -57,7 +57,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 <label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>
 <label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" required></label>
 <label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" maxlength="201" required></label>
-<p class="text-body-secondary">The first repository starts with the review command and no allowed requesters. Add requesters in the admin UI after restarting.</p>
+<p class="text-body-secondary">The first repository starts with one configured command, if any, and no allowed requesters. Add requesters in the admin UI after restarting.</p>
 <button class="btn btn-primary" type="submit">Save setup</button></form>
 {{end}}{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))

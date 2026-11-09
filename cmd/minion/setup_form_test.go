@@ -99,6 +99,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Save setup") ||
 		!strings.Contains(home.Body.String(), "Save the bot account and first repository below") ||
+		!strings.Contains(home.Body.String(), "one configured command, if any") ||
 		!strings.Contains(home.Body.String(), `name="repository" value="" maxlength="201"`) ||
 		strings.Contains(home.Body.String(), "Sign in as admin to save") ||
 		strings.Contains(home.Body.String(), `name="repository_id"`) || strings.Contains(home.Body.String(), `name="owner_id"`) ||
@@ -175,5 +176,38 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	if err != nil || unchanged.GitHub.Token != "" || len(unchanged.Repositories) != 2 {
 		t.Fatalf("inaccessible second repository changed setup config: tokenSet=%t repositories=%d error=%v",
 			unchanged.GitHub.Token != "", len(unchanged.Repositories), err)
+	}
+	for _, tc := range []struct {
+		name     string
+		commands map[string]config.CommandMapping
+		want     string
+	}{
+		{"custom commands", map[string]config.CommandMapping{
+			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
+			"alpha": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
+		}, "alpha"},
+		{"no commands", map[string]config.CommandMapping{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := config.Update(path, func(cfg *config.Config) error {
+				cfg.Repositories = nil
+				cfg.Commands = tc.commands
+				cfg.GitHub.Token = ""
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			response := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
+			if response.Code != http.StatusSeeOther {
+				t.Fatalf("custom setup save status=%d body=%q", response.Code, response.Body.String())
+			}
+			cfg, err := config.Load(path)
+			if err != nil || len(cfg.Repositories) != 1 {
+				t.Fatalf("saved setup config: repositories=%v error=%v", cfg.Repositories, err)
+			}
+			if got := strings.Join(cfg.Repositories[0].Actions, ","); got != tc.want {
+				t.Fatalf("saved commands=%q want=%q", got, tc.want)
+			}
+		})
 	}
 }

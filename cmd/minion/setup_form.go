@@ -33,13 +33,18 @@ func (a *adminAccess) setupPost() http.Handler {
 		if err != nil || details.ID <= 0 || details.Owner.ID <= 0 || !strings.EqualFold(details.FullName, name) {
 			return errors.New("GitHub repository could not be verified")
 		}
-		first := config.Repository{Name: name, ID: details.ID, OwnerID: details.Owner.ID,
-			Actions: []string{"review"}, DenyAllActors: true}
+		first := config.Repository{Name: name, ID: details.ID, OwnerID: details.Owner.ID, DenyAllActors: true}
 		_, err = config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(cfg *config.Config) error {
 			if cfg.Admin == nil {
 				return errors.New("admin setup is no longer configured; restart Minion")
 			}
 			if len(cfg.Repositories) == 0 {
+				_, review := cfg.Commands["review"]
+				if review || cfg.Commands == nil {
+					first.Actions = []string{"review"}
+				} else if names := cfg.CommandNames(); len(names) > 0 {
+					first.Actions = names[:1]
+				}
 				cfg.Repositories = []config.Repository{first}
 			} else if !strings.EqualFold(cfg.Repositories[0].Name, name) || !cfg.Repositories[0].MatchesIdentity(details.ID, details.Owner.ID) {
 				return errors.New("the configured first repository differs; reload setup or use Advanced config")
