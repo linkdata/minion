@@ -67,11 +67,14 @@ func TestSetupPreservesPendingDurableWork(t *testing.T) {
 				Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{}}
 			code, output := runStartupFixtureWithRun(t, cfg, func() int {
-				return runWithGitCheck(func(context.Context, string) error { return nil })
+				return runWithGitCheck(func(context.Context, string) error {
+					t.Fatal("setup reached Git preflight")
+					return nil
+				})
 			})
 			if code != 1 || !strings.Contains(output, "setup UI:") ||
-				kind != "empty" && (!strings.Contains(output, "GitHub authentication:") ||
-					!strings.Contains(output, "starting admin recovery UI")) {
+				strings.Contains(output, "AI preflight:") || strings.Contains(output, "GitHub authentication:") ||
+				strings.Contains(output, "GitHub identity check:") {
 				t.Fatalf("setup with %s state: code=%d log=%q", kind, code, output)
 			}
 			if kind == "empty" {
@@ -89,6 +92,28 @@ func TestSetupPreservesPendingDurableWork(t *testing.T) {
 				t.Fatalf("pending %s state was lost: %+v", kind, reopened.Data)
 			}
 		})
+	}
+}
+
+func TestOneShotRejectsEmptyRepositoriesBeforePreflight(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+		StatePath: statePath, WorkRoot: t.TempDir(),
+		Admin:    &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{}}
+	gitChecks := 0
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			gitChecks++
+			return nil
+		})
+	}, "-oneshot")
+	if code != 1 || gitChecks != 0 || !strings.Contains(output, "no repositories configured") {
+		t.Fatalf("one-shot started without repositories: code=%d git_checks=%d log=%q", code, gitChecks, output)
+	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("one-shot created state without repositories: %v", err)
 	}
 }
 

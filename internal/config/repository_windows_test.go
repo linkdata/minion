@@ -32,11 +32,29 @@ func TestAddRepositoryThroughJunctionWindows(t *testing.T) {
 }
 
 func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+	dir := t.TempDir()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	userSID := user.User.Sid.String()
+	parentSD, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + userSID + ")(A;OICI;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentDACL, _, err := parentSD.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, parentDACL, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + userSID + ")")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +73,20 @@ func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
 	control, _, err := before.Control()
 	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
 		t.Fatalf("config DACL was not protected: control=%#x error=%v", control, err)
+	}
+	temporary, err := newConfigTemp(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = temporary.Close()
+		if err := cleanupConfigTemp(temporary.Name()); err != nil {
+			t.Errorf("remove temporary config: %v", err)
+		}
+	})
+	tempACL, err := windows.GetNamedSecurityInfo(temporary.Name(), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || tempACL == nil || tempACL.String() != before.String() {
+		t.Fatalf("temporary config DACL differs from original before write: %v, %v", tempACL, err)
 	}
 	if _, err := Update(path, func(cfg *Config) error { cfg.BotLogin = "changed"; return nil }); err != nil {
 		t.Fatal(err)

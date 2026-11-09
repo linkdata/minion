@@ -1,9 +1,11 @@
 package config
 
 import (
+	"crypto/rand"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -14,7 +16,40 @@ import (
 var replaceFileW = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReplaceFileW")
 
 func newConfigTemp(target string) (*os.File, error) {
-	return os.CreateTemp(filepath.Dir(target), ".config-*")
+	sd, err := windows.GetNamedSecurityInfo(extendedWindowsPath(target), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	if sd == nil {
+		return nil, errors.New("config has no security descriptor")
+	}
+	abs, err := sd.ToAbsolute()
+	if err != nil {
+		return nil, err
+	}
+	if err := abs.SetControl(windows.SE_DACL_PROTECTED, windows.SE_DACL_PROTECTED); err != nil {
+		return nil, err
+	}
+	protected, err := abs.ToSelfRelative()
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Join(filepath.Dir(target), ".config-"+rand.Text())
+	path, err := windows.UTF16PtrFromString(extendedWindowsPath(name))
+	if err != nil {
+		return nil, err
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: protected,
+	}
+	handle, err := windows.CreateFile(path, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	runtime.KeepAlive(protected)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), name), nil
 }
 
 func cleanupConfigTemp(name string) error {
@@ -28,21 +63,22 @@ func preserveConfigMetadata(_ string, replacement *os.File, info os.FileInfo) er
 	return replacement.Chmod(info.Mode().Perm())
 }
 
-func replaceConfigFile(source, target string) error {
-	toWindowsPath := func(path string) string {
-		if strings.HasPrefix(path, `\\?\`) {
-			return path
-		}
-		if strings.HasPrefix(path, `\\`) {
-			return `\\?\UNC\` + path[2:]
-		}
-		return `\\?\` + path
+func extendedWindowsPath(path string) string {
+	if strings.HasPrefix(path, `\\?\`) {
+		return path
 	}
-	replaced, err := windows.UTF16PtrFromString(toWindowsPath(target))
+	if strings.HasPrefix(path, `\\`) {
+		return `\\?\UNC\` + path[2:]
+	}
+	return `\\?\` + path
+}
+
+func replaceConfigFile(source, target string) error {
+	replaced, err := windows.UTF16PtrFromString(extendedWindowsPath(target))
 	if err != nil {
 		return err
 	}
-	replacement, err := windows.UTF16PtrFromString(toWindowsPath(source))
+	replacement, err := windows.UTF16PtrFromString(extendedWindowsPath(source))
 	if err != nil {
 		return err
 	}

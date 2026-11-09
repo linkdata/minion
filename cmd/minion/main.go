@@ -181,6 +181,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("webserv flags require an admin block in the config")
 		return 2
 	}
+	if *oneshot && len(cfg.Repositories) == 0 {
+		logger.Print("no repositories configured")
+		return 1
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	// Restore default signal handling so a later signal can terminate shutdown.
 	context.AfterFunc(ctx, stop)
@@ -201,11 +205,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	canOfferSetup := cfg.Admin != nil && !*check && !*oneshot
 	setupIncomplete := canOfferSetup &&
 		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0)
-	_, stateErr := os.Stat(cfg.StatePath)
-	freshState := errors.Is(stateErr, os.ErrNotExist)
-	if setupIncomplete && freshState {
+	if setupIncomplete {
 		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 	}
+	_, stateErr := os.Stat(cfg.StatePath)
+	freshState := errors.Is(stateErr, os.ErrNotExist)
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
@@ -314,24 +318,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	if err != nil {
 		logger.Printf("state: %v", err)
 		return 1
-	}
-	pendingDurableWork := func() bool {
-		if store.Data.Accepted != nil {
-			return true
-		}
-		for _, write := range store.Data.PublicationWrites {
-			if write.Status == state.PublicationWritePending {
-				return true
-			}
-		}
-		return false
-	}
-	if setupIncomplete && !pendingDurableWork() {
-		if err := store.Close(); err != nil {
-			logger.Printf("close state before setup: %v", err)
-			return 1
-		}
-		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
