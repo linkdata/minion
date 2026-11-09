@@ -96,7 +96,7 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			}
 		}
 	}
-	inferredFallbackURL := fallbackTLS != nil && service.ListenURL == ""
+	inferredURL := service.ListenURL == ""
 	listener, err := service.Listen()
 	if err != nil {
 		return nil, fmt.Errorf("prepare listener: %w", err)
@@ -105,8 +105,26 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
 	entryURL := service.ListenURL
-	if inferredFallbackURL {
+	if fallbackTLS != nil && inferredURL {
 		entryURL = strings.Replace(entryURL, "http://", "https://", 1)
+	}
+	if inferredURL && certificate != nil {
+		advertised, err := url.Parse(entryURL)
+		if err == nil && certificate.Leaf.VerifyHostname(advertised.Hostname()) != nil {
+			host, port, err := net.SplitHostPort(listener.Addr().String())
+			ip := net.ParseIP(host)
+			if err == nil && ip != nil && ip.IsUnspecified() {
+				for _, candidate := range certificate.Leaf.IPAddresses {
+					if !candidate.IsUnspecified() {
+						host, ip = candidate.String(), candidate
+						break
+					}
+				}
+			}
+			if err == nil && ip != nil && !ip.IsUnspecified() && certificate.Leaf.VerifyHostname(host) == nil {
+				entryURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(host, port)}).String()
+			}
+		}
 	}
 	service.ListenURL = entryURL
 	jw, err := jaws.New()

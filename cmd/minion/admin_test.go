@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -503,6 +507,53 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	}
 }
 
+func TestAdminServerAdvertisesIPOnlyTLSCertificate(t *testing.T) {
+	t.Parallel()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+		t.Fatalf("IP-only certificate URL = %q, want %q", admin.entryURL, want)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := adminTLSClient(t, leaf).Get(admin.entryURL + "/jaws/.ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("advertised HTTPS URL returned %s", response.Status)
+	}
+}
+
 func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
@@ -531,7 +582,7 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "https://localhost:" + port; admin.entryURL != want {
+	if want := "https://" + net.JoinHostPort(leaf.IPAddresses[0].String(), port); admin.entryURL != want {
 		t.Fatalf("fallback HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)
@@ -559,7 +610,7 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "https://localhost:" + port; wildcard.entryURL != want {
+	if want := "https://" + net.JoinHostPort(leaf.IPAddresses[0].String(), port); wildcard.entryURL != want {
 		t.Fatalf("wildcard TLS listener URL = %q, want %q", wildcard.entryURL, want)
 	}
 }
