@@ -6,5 +6,4 @@ Copyright 2026 Julius Brussee.
 
 The bundled Caveman skill is licensed under Apache License 2.0; see `LICENSE`.
 `NOTICE` preserves attribution, and `LICENSE-MIT` preserves MIT terms for
-applicable contributions. Component paths in `NOTICE` refer to the upstream
-Caveman project.
+applicable contributions.

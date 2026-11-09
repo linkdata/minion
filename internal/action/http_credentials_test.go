@@ -53,10 +53,10 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 			}
 		})
 	}
-	if err := (WorkerCredentials{ClaudeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}).validate(); err == nil {
+	if err := (WorkerCredentials{ClaudeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}).Validate(); err == nil {
 		t.Fatal("oversized Claude key accepted")
 	}
-	if err := (WorkerCredentials{CodexNativeAPIKey: "x", ClaudeAPIKey: strings.Repeat("y", config.MaxProviderAPIKeyBytes)}).validate(); err != nil {
+	if err := (WorkerCredentials{CodexNativeAPIKey: "x", ClaudeAPIKey: strings.Repeat("y", config.MaxProviderAPIKeyBytes)}).Validate(); err != nil {
 		t.Fatalf("ambient Codex key with maximum saved Claude key: %v", err)
 	}
 	credentials := WorkerCredentials{CodexAPIKey: secret}

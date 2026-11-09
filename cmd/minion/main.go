@@ -624,6 +624,23 @@ func logCommandSkills(cfg config.Config, logger *log.Logger) {
 }
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
+	if cfg.RemoteExecutor == nil {
+		var credentials action.WorkerCredentials
+		if cfg.Main == "codex" || cfg.Adversarial == "codex" {
+			codex := codexcli.CaptureAmbientNativeCredentials(cfg.Codex)
+			credentials.CodexAPIKey = codex.APIKey
+			if codex.APIKey == "" {
+				credentials.CodexNativeAPIKey = codex.NativeAPIKey
+				credentials.CodexAccessToken = codex.NativeAccessToken
+			}
+		}
+		if cfg.Main == "claude" || cfg.Adversarial == "claude" {
+			credentials.ClaudeAPIKey = claudeRunnerKey(cfg.Claude.APIKey)
+		}
+		if err := credentials.Validate(); err != nil {
+			return fmt.Errorf("AI worker credentials: %w", err)
+		}
+	}
 	requested := [2]config.RoleModelConfig{cfg.MainSettings, cfg.CriticSettings}
 	base := *cfg
 	for i, provider := range []string{cfg.Main, cfg.Adversarial} {

@@ -78,7 +78,8 @@ func (e *Orchestrator) workerCredentials(main, critic string) WorkerCredentials 
 
 const maxWorkerAccessTokenBytes = 4 << 10
 
-func (credentials WorkerCredentials) validate() error {
+// Validate checks credentials before they cross the worker boundary.
+func (credentials WorkerCredentials) Validate() error {
 	if len(credentials.CodexAPIKey) > config.MaxProviderAPIKeyBytes || len(credentials.CodexNativeAPIKey) > config.MaxProviderAPIKeyBytes ||
 		len(credentials.CodexAccessToken) > maxWorkerAccessTokenBytes ||
 		len(credentials.ClaudeAPIKey) > config.MaxProviderAPIKeyBytes {
@@ -96,7 +97,7 @@ func (credentials WorkerCredentials) validate() error {
 }
 
 func (credentials WorkerCredentials) validateJob(job Job) error {
-	if err := credentials.validate(); err != nil {
+	if err := credentials.Validate(); err != nil {
 		return err
 	}
 	selected := func(provider string) bool {

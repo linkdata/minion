@@ -146,7 +146,7 @@ func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error
 	if e == nil {
 		return errors.New("HTTP executor is missing")
 	}
-	if err := credentials.validate(); err != nil {
+	if err := credentials.Validate(); err != nil {
 		return err
 	}
 	e.mu.Lock()
@@ -160,7 +160,7 @@ func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error
 
 // updateIdleWorkerCredentials commits only after the remote worker validates the candidate.
 func (e *HTTPExecutor) updateIdleWorkerCredentials(ctx context.Context, credentials WorkerCredentials) error {
-	if err := credentials.validate(); err != nil {
+	if err := credentials.Validate(); err != nil {
 		return err
 	}
 	e.mu.Lock()

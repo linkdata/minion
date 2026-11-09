@@ -35,7 +35,7 @@ func (s WorkerStartup) validate() error {
 		return fmt.Errorf("worker startup selection: %w", err)
 	}
 	credentials := WorkerCredentials{CodexAPIKey: s.CodexAPIKey, CodexNativeAPIKey: s.CodexNativeAPIKey, CodexAccessToken: s.CodexAccessToken, ClaudeAPIKey: s.ClaudeAPIKey}
-	if err := credentials.validate(); err != nil {
+	if err := credentials.Validate(); err != nil {
 		return err
 	}
 	selected := func(provider string) bool {

@@ -50,7 +50,7 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 			return err
 		}
 	}
-	if err := selection.Credentials.validate(); err != nil {
+	if err := selection.Credentials.Validate(); err != nil {
 		return err
 	}
 	selected := func(provider string) bool {
