@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -610,6 +609,10 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		return nil
 	}
 	seenIDs := make(map[string]bool, len(units))
+	selectedCompanions := make(map[string]bool, len(companions))
+	for _, companion := range companions {
+		selectedCompanions[companion] = true
+	}
 	reviewedCoverage := false
 	for _, unit := range units {
 		switch unit.Status {
@@ -699,14 +702,16 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			}
 		}
 		assignedClass := ordinaryBlock == unit.CanonicalRefs["attack_class"]
+		selectedBlocks := make(map[string]bool, len(unit.SelectedCompanionBlocks))
 		for _, block := range unit.SelectedCompanionBlocks {
 			if !auditVisibleText(block) {
 				return errors.New("audit coverage-ledger.json has invalid selected companion block")
 			}
 			file, _, _ := strings.Cut(block, "#")
-			if !slices.Contains(companions, file) {
+			if !selectedCompanions[file] {
 				return errors.New("audit coverage-ledger.json selects a companion file absent from metadata")
 			}
+			selectedBlocks[block] = true
 			assignedClass = assignedClass || block == unit.CanonicalRefs["attack_class"]
 		}
 		if !assignedClass {
@@ -717,7 +722,7 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 			file, section, hasSection := strings.Cut(block.Block, "#")
 			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) ||
 				!hasSection || !workspace.ValidPath(file) || !auditVisibleText(section) || strings.TrimSpace(section) != section ||
-				block.Block == ordinaryBlock || slices.Contains(unit.SelectedCompanionBlocks, block.Block) {
+				block.Block == ordinaryBlock || selectedBlocks[block.Block] {
 				return errors.New("audit coverage-ledger.json has invalid excluded block")
 			}
 		}

@@ -178,6 +178,89 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 	}
 }
 
+func TestServiceOffersRecoveryUIAfterLocalPreflightFailure(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	address := occupiedAdminAddress(t)
+	account := testAdminAccount()
+	for _, stateKind := range []string{"fresh", "existing"} {
+		for _, failure := range []string{"work root", "Git"} {
+			for _, mode := range []struct {
+				name         string
+				args         []string
+				wantRecovery bool
+			}{{name: "service", wantRecovery: true}, {name: "check", args: []string{"-check"}}, {name: "oneshot", args: []string{"-oneshot"}}} {
+				t.Run(stateKind+"/"+failure+"/"+mode.name, func(t *testing.T) {
+					statePath := filepath.Join(t.TempDir(), "state.json")
+					if stateKind == "existing" {
+						func() {
+							initial := time.Now().UTC()
+							store, err := state.Open(statePath, initial)
+							if err != nil {
+								t.Fatal(err)
+							}
+							defer func() {
+								if err := store.Close(); err != nil {
+									t.Error(err)
+								}
+							}()
+							store.Data.Processed["prior-job"] = initial
+							if err := store.Save(); err != nil {
+								t.Fatal(err)
+							}
+						}()
+					}
+					workRoot := t.TempDir()
+					if failure == "work root" {
+						workRoot = filepath.Join(workRoot, "not-a-directory")
+						if err := os.WriteFile(workRoot, nil, 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cfg := config.Config{Main: "codex", BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+						StatePath: statePath, WorkRoot: workRoot,
+						Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{account}},
+						Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+						Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+					gitChecks := 0
+					code, output := runStartupFixtureWithRun(t, cfg, func() int {
+						return runWithGitCheck(func(context.Context, string) error {
+							gitChecks++
+							return errors.New("fixture Git failure")
+						})
+					}, mode.args...)
+					wantGitChecks, wantLog := 1, "Git preflight: fixture Git failure"
+					if failure == "work root" {
+						wantGitChecks, wantLog = 0, "work root:"
+					}
+					if code != 1 || gitChecks != wantGitChecks || !strings.Contains(output, wantLog) ||
+						strings.Contains(output, "starting admin recovery UI") != mode.wantRecovery ||
+						strings.Contains(output, "setup UI:") != mode.wantRecovery {
+						t.Fatalf("local preflight recovery: code=%d git_checks=%d log=%q", code, gitChecks, output)
+					}
+					if stateKind == "fresh" {
+						if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+							t.Fatalf("preflight failure created state: %v", err)
+						}
+					} else {
+						store, err := state.Open(statePath, time.Time{})
+						if err != nil {
+							t.Fatal(err)
+						}
+						t.Cleanup(func() {
+							if err := store.Close(); err != nil {
+								t.Error(err)
+							}
+						})
+						if store.Data.Processed["prior-job"].IsZero() {
+							t.Fatal("preflight failure lost existing state")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	address := occupiedAdminAddress(t)

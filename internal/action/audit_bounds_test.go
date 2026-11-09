@@ -73,6 +73,36 @@ func TestAuditCoverageBoundsAndDuplicateSeeds(t *testing.T) {
 	}
 }
 
+func TestAuditCoverageRepeatedCompanionBlocksWithLargeMetadata(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	const companion = "WEB-PROTOCOL-AND-AUTH.md"
+	const blocks = `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline","WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF","WEB-PROTOCOL-AND-AUTH.md#Universal moves","WEB-PROTOCOL-AND-AUTH.md#Validation rules"]`
+	unit := strings.Replace(strings.Trim(auditCoveredLedgerFixture, "[]"), `"selected_companion_blocks":[]`, blocks, 1)
+	units := make([]string, 256)
+	for i := range units {
+		ref := fmt.Sprintf("source-%03d", i)
+		units[i] = strings.Replace(unit, `"coverage_id":"source::`, `"coverage_id":"`+ref+`::`, 1)
+		units[i] = strings.Replace(units[i], `"surface":"source"`, `"surface":"`+ref+`"`, 1)
+	}
+	ledger := "[" + strings.Join(units, ",") + "]"
+	companions := "[" + strings.Repeat(`"OTHER.md",`, 10_000) + `"` + companion + `"]`
+	if len(ledger) > maxAuditArtifactBytes || len(companions) > maxAuditArtifactBytes {
+		t.Fatal("test artifacts exceed wire limit")
+	}
+	for i := range result.Artifacts {
+		switch result.Artifacts[i].Path {
+		case "coverage-ledger.json":
+			result.Artifacts[i].Data = []byte(ledger)
+		case "run-metadata.json":
+			result.Artifacts[i].Data = []byte(strings.Replace(string(result.Artifacts[i].Data), `"selected_companion_files":[]`, `"selected_companion_files":`+companions, 1))
+		}
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("valid repeated companion blocks rejected: %v", err)
+	}
+}
+
 func TestAuditSeedsCheckedUsesReviewedFiles(t *testing.T) {
 	const count = 10_000
 	seeds, reviewed := make([]string, count), make([]string, count)
