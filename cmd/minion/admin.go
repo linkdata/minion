@@ -288,10 +288,22 @@ func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConf
 		address = net.JoinHostPort(strings.Trim(address, "[]"), "0")
 	}
 	host, _, _ := net.SplitHostPort(address)
-	if net.ParseIP(host) != nil && certifiedListenURL(address, certificate, cfg) == "" {
-		return errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
+	if net.ParseIP(host) == nil {
+		if certificate.Leaf.VerifyHostname(host) == nil || len(certificate.Leaf.IPAddresses) != 0 {
+			return nil
+		}
+		if listenHost, _, err := net.SplitHostPort(cfg.Listen); err == nil && net.ParseIP(listenHost) == nil && certificate.Leaf.VerifyHostname(listenHost) == nil {
+			return nil
+		}
+		for _, name := range certificate.Leaf.DNSNames {
+			if !strings.Contains(name, "*") {
+				return nil
+			}
+		}
+	} else if certifiedListenURL(address, certificate, cfg) != "" {
+		return nil
 	}
-	return nil
+	return errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
 }
 
 func certifiedListenURL(address string, certificate *tls.Certificate, cfg config.AdminConfig) string {

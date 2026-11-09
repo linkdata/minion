@@ -437,7 +437,7 @@ func TestCertifiedListenURL(t *testing.T) {
 	}
 }
 
-func TestAdminCertificateURLRejectsUncoveredBoundIP(t *testing.T) {
+func TestAdminCertificateURLRequiresPotentialCertifiedURL(t *testing.T) {
 	certificate := &tls.Certificate{Leaf: &x509.Certificate{IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}}
 	cfg := config.AdminConfig{Listen: "127.0.0.2:8443", TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"}
 	if err := checkAdminCertificateURL(certificate, cfg); err == nil || !strings.Contains(err.Error(), "startup URL") {
@@ -451,6 +451,21 @@ func TestAdminCertificateURLRejectsUncoveredBoundIP(t *testing.T) {
 	certificate.Leaf.DNSNames = []string{"admin.example"}
 	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
 		t.Fatalf("certified DNS fallback rejected: %v", err)
+	}
+	certificate.Leaf.DNSNames = []string{"*.example"}
+	certificate.Leaf.IPAddresses = nil
+	cfg.Listen = "localhost:8377"
+	if err := checkAdminCertificateURL(certificate, cfg); err == nil || !strings.Contains(err.Error(), "startup URL") {
+		t.Fatalf("unusable wildcard passed TLS preflight: %v", err)
+	}
+	cfg.Listen = "admin.example:8377"
+	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
+		t.Fatalf("wildcard-covered bind host rejected: %v", err)
+	}
+	cfg.Listen = "localhost:8377"
+	certificate.Leaf.IPAddresses = []net.IP{net.ParseIP("127.0.0.1")}
+	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
+		t.Fatalf("hostname with potential IP fallback rejected: %v", err)
 	}
 }
 
