@@ -635,6 +635,58 @@ func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
 	}
 }
 
+func TestLateRemoteOutcomeAfterAssignedRestartCannotRetainRotatedKey(t *testing.T) {
+	const oldKey = "fixture-prior-process-key"
+	f := newLateOutcomeFixture(t, true)
+	accepted := acceptedForJob(f.job)
+	accepted.Assigned = true
+	accepted.OutcomeBinding = httpBindingDigest(httpJobBinding(f.job))
+	f.store.Data.Accepted = accepted
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID)
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(f.statePath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted := *f.owner
+	restarted.Executor, restarted.Store, restarted.remoteAttachedAt, restarted.remotePriorAttempts, restarted.retiredProviderKeys = nil, reopened, time.Time{}, nil, nil
+	restarted.Runner.Codex.APIKey = "fixture-current-process-key"
+	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
+		t.Fatalf("prior key unexpectedly available for redaction: %q", got)
+	}
+	f.outcome.Result.Diagnostics[0].Message = "late " + oldKey
+	_, client, origin := lateOutcomeEndpoint(t, &restarted)
+	if got := restarted.remotePriorAttempts[accepted.JobID]; got != accepted.AttemptID {
+		t.Fatalf("assigned attempt missing from prior snapshot: %q", got)
+	}
+	if err := reopened.WithLock(func() error {
+		_, err := reopened.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened.Data.Accepted = nil
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("late receipt status=%d", status)
+	}
+	if _, err := os.Stat(filepath.Join(restarted.WorkRoot, "worker-diagnostics", accepted.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior key reached worker diagnostics: %v", err)
+	}
+	record, found, err := restarted.Usage.Load(accepted.AttemptID)
+	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+		t.Fatalf("safe late usage was lost: record=%+v found=%t error=%v", record, found, err)
+	}
+}
+
 func TestLateRemoteOutcomeRetainsDiagnosticsAfterClockStep(t *testing.T) {
 	f := newLateOutcomeFixture(t, false)
 	f.owner.Usage = nil

@@ -181,9 +181,9 @@ JaWS keeps sessions in memory, so they end on restart or ordinarily after one mi
 
 An empty `listen` uses `127.0.0.1:8377`. The admin server starts with the default persistent run; `-oneshot` skips the listener and its TLS files. Without TLS, the listener must use a literal loopback IP. Public addresses require `tls_cert_file` and `tls_key_file`, or Webserv's `-certdir` containing `fullchain.pem` and `privkey.pem`. Relative admin TLS paths resolve against the config directory. The certificate must be trusted by the browser and cover the address used.
 
-Webserv flags require an admin block:
+Webserv listener flags require an admin block:
 
-| Run | Accepted Webserv flags |
+| Run | Accepted listener flags |
 | --- | --- |
 | Persistent service | `-address`, `-certdir`, `-datadir`, `-listenurl` |
 | `-check` | `-address`, `-certdir`, `-listenurl`; verifies TLS without binding |

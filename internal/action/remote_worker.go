@@ -84,9 +84,14 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 			if err != nil {
 				return nil, nil, fmt.Errorf("read terminal decisions before remote attach: %w", err)
 			}
-			e.remotePriorDecisions = make(map[string]string, len(saved.TerminalDecisions))
+			e.remotePriorAttempts = make(map[string]string, len(saved.TerminalDecisions))
 			for jobID, decision := range saved.TerminalDecisions {
-				e.remotePriorDecisions[jobID] = decision.AttemptID
+				e.remotePriorAttempts[jobID] = decision.AttemptID
+			}
+			if accepted := saved.Accepted; accepted != nil && accepted.Assigned {
+				if _, decided := e.remotePriorAttempts[accepted.JobID]; !decided {
+					e.remotePriorAttempts[accepted.JobID] = accepted.AttemptID
+				}
 			}
 		}
 		e.remoteAttachedAt = time.Now().UTC()
