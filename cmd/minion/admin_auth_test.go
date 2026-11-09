@@ -464,14 +464,14 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 
 func TestAdminHTTPSProxyOffload(t *testing.T) {
 	server, err := startAdminServer(t.Context(), config.AdminConfig{
-		Listen: "127.0.0.1:0", WebservListenURL: "https://admin.example",
+		Listen: "127.0.0.1:0", WebservListenURL: "HTTPS://admin.example",
 		Administrators: []config.AdminAccount{testAdminAccount()},
 	}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = server.Close() })
-	if server.entryURL != "https://admin.example" || !server.jaws.TrustForwardedHeaders {
+	if server.entryURL != "HTTPS://admin.example" || !server.jaws.TrustForwardedHeaders {
 		t.Fatalf("proxy entry URL = %q, trusted forwarding = %t", server.entryURL, server.jaws.TrustForwardedHeaders)
 	}
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

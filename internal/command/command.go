@@ -4,6 +4,8 @@ package command
 import (
 	"errors"
 	"strings"
+
+	"github.com/linkdata/minion/internal/config"
 )
 
 // Action is one of the operations the bot recognizes.
@@ -41,7 +43,7 @@ type Command struct {
 // task context after authorization; a second configured directive returns
 // [ErrAmbiguous]. Inline arguments are rejected.
 func ParseForLoginCommands(markdown, login string, actions map[string]Action) (Command, error) {
-	if !validLogin(login) {
+	if !config.ValidGitHubLogin(login) {
 		return Command{}, ErrInvalidLogin
 	}
 	handle := "@" + login
@@ -87,22 +89,6 @@ func parseLine(line, handle string, actions map[string]Action) (Command, bool) {
 		return Command{}, false
 	}
 	return Command{Name: name, Action: action}, true
-}
-
-func validLogin(login string) bool {
-	if len(login) >= 5 && equalASCIIFold(login[len(login)-5:], "[bot]") {
-		login = login[:len(login)-5]
-	}
-	if login == "" || login[0] == '-' || login[len(login)-1] == '-' {
-		return false
-	}
-	for i := 0; i < len(login); i++ {
-		c := login[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' {
-			return false
-		}
-	}
-	return true
 }
 
 func equalASCIIFold(a, b string) bool {

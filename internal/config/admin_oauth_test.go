@@ -207,6 +207,10 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
 		t.Fatalf("HTTPS callback through an explicit proxy origin: %v", err)
 	}
+	proxiedHTTPS.Admin.WebservListenURL = "HTTPS://minion.example"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("uppercase HTTPS proxy origin: %v", err)
+	}
 	proxiedHTTPS.Admin.Listen = "127.0.0.1:8377"
 	proxiedHTTPS.Admin.WebservAddress = "0.0.0.0:9000"
 	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {

@@ -200,7 +200,7 @@ func TestParseConfiguredLogin(t *testing.T) {
 		action Action
 	}{
 		{"custom login", "my-bot", "@MY-BOT fix", Fix},
-		{"bot suffix", "github-actions[bot]", "@GitHub-Actions[Bot] review", Review},
+		{"managed login", "mona-cat_octo", "@MONA-CAT_OCTO review", Review},
 		{"custom security audit", "my-bot", "@my-bot security-audit", SecurityAudit},
 	}
 	for _, tt := range tests {
@@ -232,7 +232,7 @@ func TestParseConfiguredLoginRejectsLookalikes(t *testing.T) {
 }
 
 func TestParseConfiguredLoginRejectsInvalidLogins(t *testing.T) {
-	for _, login := range []string{"", "@my-bot", "my bot", "my/bot", "-mybot", "mybot-", "my_bot", "my-bot[bo]", "my-bоt"} {
+	for _, login := range []string{"", "@my-bot", "my bot", "my/bot", "-mybot", "mybot-", "my_bo", "my__bot", "github-actions[bot]", "my-bot[bo]", "my-bоt"} {
 		got, err := ParseForLoginCommands("@my-bot review", login, defaultActions)
 		if !errors.Is(err, ErrInvalidLogin) || got != (Command{}) {
 			t.Fatalf("ParseForLoginCommands(login %q) = (%#v, %v), want ErrInvalidLogin", login, got, err)

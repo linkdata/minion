@@ -207,9 +207,11 @@ func TestAdminListenerRejectsUnsafeWebservOptions(t *testing.T) {
 }
 
 func TestAdminListenerAllowsHTTPSProxyOffload(t *testing.T) {
-	cfg := config.AdminConfig{Listen: "0.0.0.0:8377", WebservListenURL: "https://admin.example"}
-	if err := validateWebservAdminAddress(cfg); err != nil {
-		t.Fatalf("HTTP backend behind HTTPS proxy: %v", err)
+	for _, publicURL := range []string{"https://admin.example", "HTTPS://admin.example"} {
+		cfg := config.AdminConfig{Listen: "0.0.0.0:8377", WebservListenURL: publicURL}
+		if err := validateWebservAdminAddress(cfg); err != nil {
+			t.Errorf("HTTP backend behind %q: %v", publicURL, err)
+		}
 	}
 }
 

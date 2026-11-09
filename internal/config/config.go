@@ -628,7 +628,7 @@ func (c *Config) Validate(configDir string) error {
 		}
 		addr, err := netip.ParseAddr(host)
 		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" && admin.WebservCertDir == "" &&
-			!strings.HasPrefix(admin.WebservListenURL, "https://") {
+			!strings.HasPrefix(strings.ToLower(admin.WebservListenURL), "https://") {
 			if admin.WebservAddress == "" {
 				return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file, or HTTPS -listenurl behind a proxy")
 			}
