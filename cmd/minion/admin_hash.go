@@ -58,10 +58,10 @@ func runHashMode() int {
 }
 
 func readAdminPassword(fd int) (password string, err error) {
-	return readAdminPasswordWithPrompt(fd, "Password to hash: ", bufio.NewReader(os.Stdin))
+	return readAdminPasswordWithPrompt(fd, "Password to hash: ", bufio.NewReader(os.Stdin), os.Stderr)
 }
 
-func readAdminPasswordWithPrompt(fd int, prompt string, reader *bufio.Reader) (password string, err error) {
+func readAdminPasswordWithPrompt(fd int, prompt string, reader *bufio.Reader, output io.Writer) (password string, err error) {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -89,7 +89,7 @@ func readAdminPasswordWithPrompt(fd int, prompt string, reader *bufio.Reader) (p
 		}
 		close(done)
 	}()
-	if _, err := fmt.Fprint(os.Stderr, prompt); err != nil {
+	if _, err := fmt.Fprint(output, prompt); err != nil {
 		return "", err
 	}
 	// x/term.NewTerminal.ReadPassword stalls on a valid U+FFFD rune.
@@ -121,7 +121,7 @@ func readAdminPasswordWithPrompt(fd int, prompt string, reader *bufio.Reader) (p
 		case '\x03', '\x04':
 			if !cancelled {
 				cancelled = true
-				fmt.Fprint(os.Stderr, "\r\nPress Enter to cancel: ")
+				fmt.Fprint(output, "\r\nPress Enter to cancel: ")
 			}
 		case '\b', '\x7f':
 			if count > 0 {

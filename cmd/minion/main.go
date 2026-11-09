@@ -154,8 +154,14 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("switch webserv user: %v", err)
 		return 2
 	}
-	if _, err := createInitialConfig(loadedPath, logger); err != nil {
-		logger.Printf("create config: %v", err)
+	var createErr error
+	if *installSkills {
+		_, createErr = createInitialConfigWithoutPrompt(loadedPath, logger)
+	} else {
+		_, createErr = createInitialConfig(loadedPath, logger)
+	}
+	if createErr != nil {
+		logger.Printf("create config: %v", createErr)
 		return 2
 	}
 	cfg, err := config.LoadWithAdminRuntime(loadedPath, config.AdminConfig{
@@ -187,13 +193,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
 	}
-	setupIncomplete := cfg.Admin != nil && !*check && !*oneshot &&
+	canOfferSetup := cfg.Admin != nil && !*check && !*oneshot
+	setupIncomplete := canOfferSetup &&
 		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0)
-	freshState := false
-	if cfg.Admin != nil && !*check && !*oneshot {
-		_, err := os.Stat(cfg.StatePath)
-		freshState = errors.Is(err, os.ErrNotExist)
-	}
+	_, stateErr := os.Stat(cfg.StatePath)
+	freshState := errors.Is(stateErr, os.ErrNotExist)
 	if setupIncomplete && freshState {
 		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 	}
@@ -273,17 +277,23 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	freshPreflightPassed := false
 	if freshState {
 		if !preflight() {
-			if aiPreflightFailed {
+			if aiPreflightFailed && canOfferSetup {
 				return startRecoverySetup()
 			}
 			return 1
 		}
 		freshPreflightPassed = true
 		if !authenticateGitHub() {
-			if githubCredentialsNeedSetup {
+			if githubCredentialsNeedSetup && canOfferSetup {
 				return startRecoverySetup()
 			}
 			return 1
+		}
+		if *check {
+			if err := checkRepositories(ctx, client, cfg, logger); err != nil {
+				logger.Printf("preflight failed: %v", err)
+				return 1
+			}
 		}
 	}
 	var store *state.Store
@@ -381,9 +391,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 1
 	}
 	if *check {
-		if err := checkRepositories(ctx, client, cfg, logger); err != nil {
-			logger.Printf("preflight failed: %v", err)
-			return 1
+		if !freshState {
+			if err := checkRepositories(ctx, client, cfg, logger); err != nil {
+				logger.Printf("preflight failed: %v", err)
+				return 1
+			}
 		}
 		logger.Printf("preflight passed as @%s", user.Login)
 		return 0

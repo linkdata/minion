@@ -16,16 +16,26 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
+func TestCreateInitialConfigPromptsWithRedirectedStderr(t *testing.T) {
 	master, terminal, _ := newHashPTY(t)
+	input, err := os.Open(terminal.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	errorLog, err := os.CreateTemp(t.TempDir(), "minion-stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var workers sync.WaitGroup
 	defer func() {
 		_ = master.Close()
+		_ = input.Close()
 		_ = terminal.Close()
+		_ = errorLog.Close()
 		workers.Wait()
 	}()
 	oldInput, oldError := os.Stdin, os.Stderr
-	os.Stdin, os.Stderr = terminal, terminal
+	os.Stdin, os.Stderr = input, errorLog
 	t.Cleanup(func() { os.Stdin, os.Stderr = oldInput, oldError })
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	var output bytes.Buffer
@@ -92,6 +102,9 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("initial password prompt timed out")
 	}
+	if err := input.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := terminal.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -99,9 +112,53 @@ func TestCreateInitialConfigPromptsAndSavesHash(t *testing.T) {
 	if strings.Contains(string(terminalOutput), "new-admin-password") {
 		t.Fatal("initial password was echoed")
 	}
+	if stderr, err := os.ReadFile(errorLog.Name()); err != nil || len(stderr) != 0 {
+		t.Fatalf("password prompt went to redirected stderr: %q, %v", stderr, err)
+	}
 	cfg, err := config.Load(path)
 	if err != nil || cfg.Admin == nil || len(cfg.Admin.Administrators) != 1 ||
 		!cfg.Admin.Administrators[0].VerifyPassword("new-admin-password") {
 		t.Fatalf("initial admin password was not saved: error=%v", err)
+	}
+}
+
+func TestCreateInitialConfigWithoutPromptFromTerminal(t *testing.T) {
+	master, terminal, _ := newHashPTY(t)
+	var worker sync.WaitGroup
+	defer func() {
+		_ = master.Close()
+		_ = terminal.Close()
+		worker.Wait()
+	}()
+	oldInput := os.Stdin
+	os.Stdin = terminal
+	defer func() { os.Stdin = oldInput }()
+	path := filepath.Join(t.TempDir(), "config.local.json")
+	done := make(chan error, 1)
+	worker.Add(1)
+	go func() {
+		defer worker.Done()
+		_, err := createInitialConfigWithoutPrompt(path, log.New(io.Discard, "", 0))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("install-only config creation waited for a password")
+	}
+	if err := terminal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	terminalOutput, _ := io.ReadAll(master)
+	if len(terminalOutput) != 0 {
+		t.Fatalf("install-only config creation prompted: %q", terminalOutput)
+	}
+	cfg, err := config.Load(path)
+	if err != nil || cfg.Admin == nil || len(cfg.Admin.Administrators) != 1 ||
+		cfg.Admin.Administrators[0].PasswordHash != config.AdminPasswordHashPlaceholder {
+		t.Fatalf("install-only config did not retain inert password placeholder: error=%v", err)
 	}
 }

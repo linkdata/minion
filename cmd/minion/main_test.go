@@ -238,6 +238,13 @@ func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
 				t.Fatalf("locked startup warned before admission: exit=%d log=%q", code, output)
 			}
 			cfg.StatePath = filepath.Join(t.TempDir(), "active-state.json")
+			activeState, err := state.Open(cfg.StatePath, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := activeState.Close(); err != nil {
+				t.Fatal(err)
+			}
 			code, output = runStartupFixtureWithRun(t, cfg, func() int {
 				return runWithGitCheck(func(context.Context, string) error { return errors.New("fixture Git stop") })
 			})

@@ -100,7 +100,7 @@ go build -buildvcs=false -o bin/minion ./cmd/minion
 ./bin/minion
 ```
 
-The first start creates `config.local.json` with mode 0600 on Unix and prompts for an admin password when stdin and stderr share a terminal. Protect its containing directory with the right ACL on Windows. Minion saves the hash, then runs the setup UI without GitHub credentials or an AI worker. Otherwise, the password remains unset; follow the password setup steps below. The signed-in setup page saves `bot_login`, `github.token`, and the first repository with its numeric GitHub IDs. Add `invitation_owners` only if the bot should accept invitations from those owners. The setup UI does not run jobs. The binary is the only Minion file needed for installation; Git and the selected AI CLI remain separate prerequisites.
+The first start creates `config.local.json` with mode 0600 on Unix and prompts for an admin password when stdin is a terminal. Protect its containing directory with the right ACL on Windows. Minion saves the hash, then runs the setup UI without GitHub credentials or an AI worker. Otherwise, the password remains unset; follow the password setup steps below. The signed-in setup page saves `bot_login`, `github.token`, and the first repository with its numeric GitHub IDs. Add `invitation_owners` only if the bot should accept invitations from those owners. The setup UI does not run jobs. The binary is the only Minion file needed for installation; Git and the selected AI CLI remain separate prerequisites.
 
 Local model tools share Minion's service account and can read `config.local.json`, including `github.token`. To isolate the token, run a remote worker on a separate host, container, or account without access to the orchestrator config.
 

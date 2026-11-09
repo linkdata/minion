@@ -144,7 +144,7 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 				if store.Data.Accepted == nil {
 					t.Fatal("AI recovery UI lost pending accepted work")
 				}
-			} else if tc.wantRecovery {
+			} else {
 				if _, err := os.Stat(cfg.StatePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("AI recovery created state before preflight passed: %v", err)
 				}
@@ -220,7 +220,7 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 				strings.Contains(output, "setup UI:") != tc.wantRecovery {
 				t.Fatalf("GitHub recovery mode: code=%d output=%q", code, output)
 			}
-			if tc.wantRecovery && !tc.pendingWrite {
+			if !tc.pendingWrite {
 				if _, err := os.Stat(cfg.StatePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("GitHub recovery created state before preflight passed: %v", err)
 				}
@@ -235,5 +235,39 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFreshCheckDoesNotSaveStateAfterRepositoryFailure(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		if request.URL.Path == "/user" {
+			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		} else {
+			recorder.WriteHeader(http.StatusForbidden)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Config{Main: "codex", BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+		Codex:     config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		StatePath: statePath, WorkRoot: t.TempDir(),
+		Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
+			TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "preflight failed:") {
+		t.Fatalf("repository preflight: code=%d log=%q", code, output)
+	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed -check saved notification cursor: %v", err)
 	}
 }

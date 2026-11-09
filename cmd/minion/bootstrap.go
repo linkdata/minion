@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/linkdata/minion"
@@ -17,6 +18,14 @@ import (
 
 // createInitialConfig writes the embedded template only when no config exists.
 func createInitialConfig(path string, logger *log.Logger) (created bool, resultErr error) {
+	return createInitialConfigWithPrompt(path, logger, true)
+}
+
+func createInitialConfigWithoutPrompt(path string, logger *log.Logger) (bool, error) {
+	return createInitialConfigWithPrompt(path, logger, false)
+}
+
+func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool) (created bool, resultErr error) {
 	if _, err := os.Lstat(path); err == nil {
 		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -27,13 +36,16 @@ func createInitialConfig(path string, logger *log.Logger) (created bool, resultE
 		return false, errors.New("embedded config has no unique admin password placeholder")
 	}
 	passwordSet := false
-	if fd, ok := adminPasswordTerminal(); ok {
+	if fd, output, err := adminPasswordTerminal(prompt); err != nil {
+		logger.Printf("admin password setup skipped: %v", err)
+	} else if output != nil {
+		defer output.Close()
 		reader := bufio.NewReader(os.Stdin)
 		for {
-			password, err := readAdminPasswordWithPrompt(fd, "Set admin password: ", reader)
-			fmt.Fprintln(os.Stderr)
+			password, err := readAdminPasswordWithPrompt(fd, "Set admin password: ", reader, output)
+			fmt.Fprintln(output)
 			if errors.Is(err, errInvalidAdminPassword) {
-				fmt.Fprintln(os.Stderr, err)
+				fmt.Fprintln(output, err)
 				continue
 			}
 			if err != nil {
@@ -42,7 +54,7 @@ func createInitialConfig(path string, logger *log.Logger) (created bool, resultE
 			}
 			hash, err := hashAdminPassword(password)
 			if errors.Is(err, errInvalidAdminPassword) {
-				fmt.Fprintln(os.Stderr, err)
+				fmt.Fprintln(output, err)
 				continue
 			}
 			if err != nil {
@@ -85,12 +97,18 @@ func createInitialConfig(path string, logger *log.Logger) (created bool, resultE
 	return true, nil
 }
 
-func adminPasswordTerminal() (int, bool) {
-	fd := int(os.Stdin.Fd())
-	if !term.IsTerminal(fd) || !term.IsTerminal(int(os.Stderr.Fd())) {
-		return 0, false
+func adminPasswordTerminal(prompt bool) (int, *os.File, error) {
+	if !prompt {
+		return 0, nil, nil
 	}
-	input, inputErr := os.Stdin.Stat()
-	output, outputErr := os.Stderr.Stat()
-	return fd, inputErr == nil && outputErr == nil && os.SameFile(input, output)
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return 0, nil, nil
+	}
+	path := os.Stdin.Name()
+	if runtime.GOOS == "windows" {
+		path = "CONOUT$"
+	}
+	output, err := os.OpenFile(path, os.O_WRONLY, 0)
+	return fd, output, err
 }
