@@ -95,7 +95,7 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 	}
 }
 
-func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
+func TestRemoteCredentialsChangeReachesNextAssignment(t *testing.T) {
 	job := testJob(command.Comment)
 	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
 	if err != nil {
@@ -108,127 +108,15 @@ func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
 		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
 	executor.choicesFetched = true
 	server := httptest.NewServer(executor)
-	client := server.Client()
 	t.Cleanup(func() {
-		client.CloseIdleConnections()
 		_ = executor.Close()
 		server.Close()
 	})
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	post := func(path string, body httpPull, output any) int {
-		t.Helper()
-		data, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+path, bytes.NewReader(data))
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Content-Type", "application/json")
-		response, err := client.Do(request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer response.Body.Close()
-		if err := httpDecode(response.Body, httpControlBytes, output); err != nil {
-			t.Fatal(err)
-		}
-		return response.StatusCode
-	}
-	pullBody, err := json.Marshal(httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pullRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/next", bytes.NewReader(pullBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	pullRequest.Header.Set("Content-Type", "application/json")
-	type pullResult struct {
-		status int
-		err    error
-	}
-	pulled := make(chan pullResult, 1)
-	t.Cleanup(func() {
-		for range pulled {
-		}
-	})
-	go func() {
-		defer close(pulled)
-		response, err := client.Do(pullRequest)
-		if err != nil {
-			pulled <- pullResult{err: err}
-			return
-		}
-		defer response.Body.Close()
-		_, err = io.Copy(io.Discard, response.Body)
-		pulled <- pullResult{status: response.StatusCode, err: err}
-	}()
-	for {
-		executor.mu.Lock()
-		pull, changed := executor.pull, executor.changed
-		executor.mu.Unlock()
-		if pull {
-			break
-		}
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			t.Fatal("worker did not hold a pull")
-		}
-	}
 	newCredentials := WorkerCredentials{CodexAPIKey: "new-key"}
-	updated := make(chan error, 1)
-	t.Cleanup(func() {
-		for range updated {
-		}
-	})
-	go func() {
-		defer close(updated)
-		updated <- executor.updateIdleWorkerCredentials(ctx, newCredentials)
-	}()
-	select {
-	case got := <-pulled:
-		if got.status != http.StatusTooEarly || got.err != nil {
-			t.Fatalf("old pull was not retired: status=%d error=%v", got.status, got.err)
-		}
-	case <-ctx.Done():
-		t.Fatal("old pull was not retired")
-	}
-	var rejection httpAcknowledgement
-	if status := post("/next", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &rejection); status != http.StatusPreconditionRequired {
-		t.Fatalf("unvalidated candidate admitted a pull: status=%d", status)
-	}
-	var selection remoteChoicePreflight
-	if status := post("/preflight", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID}, &selection); status != http.StatusOK ||
-		!selection.Refresh || selection.PreflightGeneration == 0 || selection.Credentials != newCredentials {
-		t.Fatalf("candidate preflight: status=%d selection=%+v", status, selection)
-	}
-	var stale httpAcknowledgement
-	if status := post("/preflight", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID,
-		PreflightGeneration: selection.PreflightGeneration + 1, PreflightResult: "ok"}, &stale); status != http.StatusPreconditionRequired {
-		t.Fatalf("stale validation acknowledged: status=%d", status)
-	}
-	executor.mu.Lock()
-	oldCredential, gateOpen := executor.credentials, executor.choicesFetched && !executor.preflightPending
-	executor.mu.Unlock()
-	if oldCredential.CodexAPIKey != "old-key" || gateOpen {
-		t.Fatal("candidate became active before matching validation")
-	}
-	select {
-	case err := <-updated:
-		t.Fatalf("candidate update finished before validation: %v", err)
-	default:
-	}
-	var ack httpAcknowledgement
-	if status := post("/preflight", httpPull{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID,
-		PreflightGeneration: selection.PreflightGeneration, PreflightResult: "ok"}, &ack); status != http.StatusOK {
-		t.Fatalf("candidate validation ACK status=%d", status)
-	}
-	if err := <-updated; err != nil {
-		t.Fatalf("candidate was not activated: %v", err)
+	if err := executor.updateIdleWorkerCredentials(newCredentials); err != nil {
+		t.Fatalf("change credentials while worker is absent: %v", err)
 	}
 	fixture := &httpServerTest{executor: executor, server: server, job: job, done: make(chan httpServerTestResult, 1)}
 	go func() {
@@ -239,7 +127,7 @@ func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
 	if assignment.Credentials != newCredentials {
 		t.Fatalf("next assignment credentials=%+v", assignment.Credentials)
 	}
-	if err := executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{}); err == nil {
+	if err := executor.updateIdleWorkerCredentials(WorkerCredentials{}); err == nil {
 		t.Fatal("credentials changed during an active assignment")
 	}
 	fixture.ack(t, "/outcome", fixture.outcome(1, nil), http.StatusOK, 1)

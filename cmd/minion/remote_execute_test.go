@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -120,29 +119,6 @@ func TestRemoteWorkerLoopDoesNotLogPrivateFailureText(t *testing.T) {
 	code := runRemoteWorkerLoop(t.Context(), cfg, client, log.New(&logs, "", 0))
 	if code != 1 || logs.String() != "remote worker: execution or protocol failure\n" || strings.Contains(logs.String(), privateText) {
 		t.Fatalf("remote worker exposed untrusted error text: exit=%d logs=%q", code, logs.String())
-	}
-}
-
-func TestRemoteWorkerLoopCancellationDuringRefreshIsClean(t *testing.T) {
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	var paths []string
-	client := &http.Client{Transport: startupTransport(func(request *http.Request) (*http.Response, error) {
-		paths = append(paths, request.URL.Path)
-		if request.URL.Path == "/next" {
-			return &http.Response{StatusCode: http.StatusPreconditionRequired,
-				Header: http.Header{"Content-Type": []string{"application/json"}},
-				Body:   io.NopCloser(strings.NewReader(`{"kind":"next","failure":{"message":"preflight required"}}`)), Request: request}, nil
-		}
-		cancel()
-		return nil, context.Canceled
-	})}
-	var logs bytes.Buffer
-	code := runRemoteWorkerLoop(ctx, remoteWorkerConfig{
-		BaseURL: "https://worker.invalid", ExecutorID: "remote", WorkRoot: t.TempDir(),
-	}, client, log.New(&logs, "", 0))
-	if code != 0 || logs.Len() != 0 || len(paths) != 2 || paths[0] != "/next" || paths[1] != "/preflight" {
-		t.Fatalf("canceled refresh: exit=%d paths=%v logs=%q", code, paths, logs.String())
 	}
 }
 

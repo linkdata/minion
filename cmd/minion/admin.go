@@ -343,6 +343,9 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 	}
 	if boundIP.IsUnspecified() {
 		for _, address := range certificate.Leaf.IPAddresses {
+			if address.IsUnspecified() {
+				continue
+			}
 			if candidate := covered(address.String()); candidate != "" {
 				return candidate
 			}

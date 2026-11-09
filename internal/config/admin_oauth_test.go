@@ -42,6 +42,17 @@ func TestWebservAddressBracketValidation(t *testing.T) {
 	}
 }
 
+func TestWebservListenURLRejectsUnspecifiedIP(t *testing.T) {
+	for _, entryURL := range []string{"https://0.0.0.0", "https://[::]", "https://[::ffff:0.0.0.0]"} {
+		t.Run(entryURL, func(t *testing.T) {
+			admin := AdminConfig{WebservCertDir: "/certs", WebservListenURL: entryURL}
+			if err := admin.ValidateWebservOptions(); err == nil || !strings.Contains(err.Error(), "-listenurl") {
+				t.Fatalf("unspecified -listenurl %q accepted: %v", entryURL, err)
+			}
+		})
+	}
+}
+
 func TestOAuthClientConfigValidation(t *testing.T) {
 	valid := func() Config {
 		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{
@@ -205,6 +216,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"scoped IPv6 callback host", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://[fe80::1%25Eth0]/auth/github/callback" }, "redirect_url"},
 		{"empty callback port", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://minion.example:/auth/github/callback" }, "redirect_url"},
 		{"public HTTP callback", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "http://minion.example/auth/github/callback" }, "redirect_url"},
+		{"unspecified HTTPS callback", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://0.0.0.0/auth/github/callback" }, "redirect_url"},
 		{"mixed HTTPS callback hosts", func(c *Config) {
 			c.Admin.GitLabOAuth.RedirectURL = "https://other.example/auth/gitlab/callback"
 		}, "hosts must match"},

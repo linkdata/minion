@@ -108,13 +108,13 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	return commands, endpoint, nil
 }
 
-// UpdateRemoteWorkerCredentials validates changed credentials before the next assignment.
-func (e *Orchestrator) UpdateRemoteWorkerCredentials(ctx context.Context) error {
+// UpdateRemoteWorkerCredentials applies changed credentials to the next assignment.
+func (e *Orchestrator) UpdateRemoteWorkerCredentials() error {
 	worker, ok := e.Executor.(*remoteWorker)
 	if !ok {
 		return errors.New("remote worker is not selected")
 	}
-	return worker.executor.updateIdleWorkerCredentials(ctx, e.workerCredentials(e.mainProvider(), e.Adversarial))
+	return worker.executor.updateIdleWorkerCredentials(e.workerCredentials(e.mainProvider(), e.Adversarial))
 }
 
 // WaitCapacity checks the live held pull, not a prior worker announcement.

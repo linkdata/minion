@@ -34,9 +34,6 @@ var ErrLocalWorkerUnavailable = errors.New("selected local worker unavailable")
 // ErrRemoteWorkerUnavailable means the selected remote endpoint cannot accept another Job.
 var ErrRemoteWorkerUnavailable = errors.New("selected remote worker unavailable")
 
-// ErrRemotePreflightRequired asks a remote worker to validate refreshed credentials before its next pull.
-var ErrRemotePreflightRequired = errors.New("remote worker preflight required")
-
 var modelLineBreaks = strings.NewReplacer(
 	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
 	"\x1c", "\n", "\x1d", "\n", "\x1e", "\n",

@@ -25,32 +25,28 @@ type pullGenerationContextKey struct{}
 
 // HTTPExecutor owns one supplied-data transaction. It does not prove worker readiness or cleanup.
 type HTTPExecutor struct {
-	mu                  sync.Mutex
-	lateOutcomeRead     sync.Mutex
-	outcomeReads        chan struct{}
-	executorID          string
-	workRoot            string
-	credentials         WorkerCredentials
-	credentialsSet      bool
-	remoteChoices       *remoteChoicePreflight
-	choicesFetched      bool
-	preflightGeneration uint64
-	preflightCandidate  WorkerCredentials
-	preflightPending    bool
-	preflightWait       chan error
-	auditHostSupported  bool
-	active              *httpTransaction
-	pull                bool
-	pullDone            <-chan struct{}
-	pullStale           bool
-	pullGeneration      uint64
-	closed              bool
-	unavailable         bool
-	changed             chan struct{}
-	outcomeGrace        time.Duration
-	status              Status
-	statusAt            time.Time
-	lateOutcome         func(httpOutcome) error
+	mu                 sync.Mutex
+	lateOutcomeRead    sync.Mutex
+	outcomeReads       chan struct{}
+	executorID         string
+	workRoot           string
+	credentials        WorkerCredentials
+	credentialsSet     bool
+	remoteChoices      *remoteChoicePreflight
+	choicesFetched     bool
+	auditHostSupported bool
+	active             *httpTransaction
+	pull               bool
+	pullDone           <-chan struct{}
+	pullStale          bool
+	pullGeneration     uint64
+	closed             bool
+	unavailable        bool
+	changed            chan struct{}
+	outcomeGrace       time.Duration
+	status             Status
+	statusAt           time.Time
+	lateOutcome        func(httpOutcome) error
 }
 
 type httpTransaction struct {
@@ -157,56 +153,18 @@ func (e *HTTPExecutor) SetWorkerCredentials(credentials WorkerCredentials) error
 	return nil
 }
 
-// updateIdleWorkerCredentials commits only after the remote worker validates the candidate.
-func (e *HTTPExecutor) updateIdleWorkerCredentials(ctx context.Context, credentials WorkerCredentials) error {
+// updateIdleWorkerCredentials applies a key to the next remote assignment.
+func (e *HTTPExecutor) updateIdleWorkerCredentials(credentials WorkerCredentials) error {
 	if err := credentials.Validate(); err != nil {
 		return err
 	}
 	e.mu.Lock()
-	if !e.credentialsSet || e.remoteChoices == nil || e.active != nil || e.closed || e.unavailable || e.preflightPending {
-		e.mu.Unlock()
-		return errors.New("remote worker credentials cannot change while active or unavailable")
+	defer e.mu.Unlock()
+	if !e.credentialsSet || e.remoteChoices == nil || e.active != nil || e.closed {
+		return errors.New("remote worker credentials cannot change while active or closed")
 	}
-	e.preflightGeneration++
-	e.preflightCandidate = credentials
-	e.preflightPending = true
-	e.preflightWait = make(chan error, 1)
-	wait := e.preflightWait
-	e.pullGeneration++
-	if e.pull {
-		e.pullStale = true
-	}
-	e.notifyLocked()
-	e.mu.Unlock()
-	deadline, cancel := context.WithTimeout(ctx, remoteChoicePreflightTimeout+2*httpControlTimeout)
-	defer cancel()
-	select {
-	case err := <-wait:
-		return err
-	case <-deadline.Done():
-		e.mu.Lock()
-		if e.preflightWait == wait && e.preflightPending {
-			e.rejectRemotePreflightLocked(deadline.Err())
-		}
-		e.mu.Unlock()
-		select {
-		case err := <-wait:
-			return err
-		default:
-			return deadline.Err()
-		}
-	}
-}
-
-func (e *HTTPExecutor) rejectRemotePreflightLocked(err error) {
-	e.preflightPending = false
-	e.preflightCandidate = WorkerCredentials{}
-	e.preflightGeneration++
-	if e.preflightWait != nil {
-		e.preflightWait <- err
-		e.preflightWait = nil
-	}
-	e.notifyLocked()
+	e.credentials = credentials
+	return nil
 }
 
 func (e *HTTPExecutor) notifyLocked() {
@@ -419,9 +377,6 @@ func httpExecutionContextError(ctx context.Context) error {
 func (e *HTTPExecutor) Close() error {
 	e.mu.Lock()
 	e.closed = true
-	if e.preflightPending {
-		e.rejectRemotePreflightLocked(ErrRemoteWorkerUnavailable)
-	}
 	tx := e.active
 	e.notifyLocked()
 	e.mu.Unlock()
@@ -484,66 +439,22 @@ func (e *HTTPExecutor) serveRemoteChoices(w http.ResponseWriter, r *http.Request
 		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("HTTP executor is closed or unavailable"))
 		return
 	}
-	if (e.choicesFetched || e.preflightGeneration != 0) && e.auditHostSupported != request.AuditHostSupported {
+	if e.choicesFetched && e.auditHostSupported != request.AuditHostSupported {
 		e.mu.Unlock()
 		httpServerReject(w, "preflight", http.StatusConflict, httpBinding{}, 0, errors.New("remote audit host capability changed"))
-		return
-	}
-	if request.PreflightResult != "" {
-		if request.PreflightResult != "ok" && request.PreflightResult != "failed" && !validPreflightMessage(request.PreflightResult) {
-			e.mu.Unlock()
-			httpServerReject(w, "preflight", http.StatusBadRequest, httpBinding{}, 0, errors.New("invalid remote preflight result"))
-			return
-		}
-		if !e.preflightPending || request.PreflightGeneration != e.preflightGeneration {
-			e.mu.Unlock()
-			httpServerReject(w, "preflight", http.StatusPreconditionRequired, httpBinding{}, 0, ErrRemotePreflightRequired)
-			return
-		}
-		generation := e.preflightGeneration
-		e.mu.Unlock()
-		writeErr := httpServerWrite(w, http.StatusOK, httpAcknowledgement{Kind: "preflight"})
-		e.mu.Lock()
-		if !e.preflightPending || e.preflightGeneration != generation {
-			e.mu.Unlock()
-			return
-		}
-		if writeErr != nil {
-			e.rejectRemotePreflightLocked(writeErr)
-		} else if request.PreflightResult != "ok" {
-			message := "remote worker rejected changed provider credentials"
-			if request.PreflightResult != "failed" {
-				message = "remote worker: " + request.PreflightResult
-			}
-			e.rejectRemotePreflightLocked(errors.New(message))
-		} else {
-			e.credentials = e.preflightCandidate
-			e.preflightCandidate = WorkerCredentials{}
-			e.preflightPending = false
-			e.choicesFetched = true
-			e.preflightWait <- nil
-			e.preflightWait = nil
-			e.notifyLocked()
-		}
-		e.mu.Unlock()
 		return
 	}
 	response := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: e.executorID}
 	if e.remoteChoices != nil {
 		response = *e.remoteChoices
 		response.Credentials = e.credentials
-		response.PreflightGeneration = e.preflightGeneration
-		if e.preflightPending {
-			response.Credentials = e.preflightCandidate
-			response.Refresh = true
-		}
 	}
 	body, err := httpEncode(response, httpControlBytes)
 	if err != nil {
 		e.mu.Unlock()
 		return
 	}
-	if response.Main.Provider != "" && !e.preflightPending {
+	if response.Main.Provider != "" {
 		e.auditHostSupported = request.AuditHostSupported
 		e.choicesFetched = true
 	}
@@ -573,13 +484,9 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	e.mu.Lock()
-	if e.remoteChoices != nil && (!e.choicesFetched || e.preflightPending) {
-		status := http.StatusConflict
-		if e.preflightGeneration != 0 {
-			status = http.StatusPreconditionRequired
-		}
+	if e.remoteChoices != nil && !e.choicesFetched {
 		e.mu.Unlock()
-		httpServerReject(w, "next", status, httpBinding{}, 0, ErrRemotePreflightRequired)
+		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("remote selection preflight required"))
 		return
 	}
 	// Keep a new pull pending while the pre-cleanup handler still owns its slot.

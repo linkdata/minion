@@ -636,9 +636,6 @@ func (c *httpExecutionClient) openObserved(ctx context.Context, kind string, dat
 		if kind == "next" && response.StatusCode == http.StatusTooEarly {
 			return nil, errPullRetired
 		}
-		if (kind == "next" || kind == "preflight") && response.StatusCode == http.StatusPreconditionRequired {
-			return nil, ErrRemotePreflightRequired
-		}
 		return nil, ack.Failure.err()
 	}
 	if response.StatusCode != http.StatusOK {

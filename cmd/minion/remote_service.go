@@ -133,10 +133,7 @@ func runSelectedRemoteService(ctx context.Context, owner *action.Orchestrator, w
 		if modelKeysChanged(watcher.Config, cfg) {
 			oldCodex, oldClaude := owner.Runner.Codex, owner.Runner.Claude
 			applyModelKeys(owner, cfg)
-			if err := owner.UpdateRemoteWorkerCredentials(ctx); err != nil {
-				if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
-					return 0
-				}
+			if err := owner.UpdateRemoteWorkerCredentials(); err != nil {
 				owner.SetRunnerCredentials(oldCodex, oldClaude)
 				live.applied(watcher.Config, generation, err)
 				logger.Printf("activate admin model key: %s", monitor.InertLogText(err.Error()))

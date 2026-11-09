@@ -182,6 +182,9 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
 		return false
 	}
+	if ip, err := netip.ParseAddr(host); err == nil && ip.Unmap().IsUnspecified() {
+		return false
+	}
 	if port := u.Port(); port != "" {
 		number, err := strconv.Atoi(port)
 		if err != nil || number < 1 || number > 65535 {
