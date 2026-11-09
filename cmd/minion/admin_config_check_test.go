@@ -74,6 +74,31 @@ func TestSavedGitHubAuthButtonWorksInSetupAndAdmin(t *testing.T) {
 				!strings.Contains(check.Body.String(), "Save a GitHub bot login and token before testing.") {
 				t.Fatalf("saved config check: status=%d body=%q", check.Code, check.Body.String())
 			}
+			cfg.BotLogin = "saved-bot"
+			cfg.GitHub.Token = "saved-token"
+			data, err = json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previousTransport := http.DefaultTransport
+			calls := 0
+			http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.URL.Host != "api.github.com" || request.URL.Path != "/user" || request.Header.Get("Authorization") != "Bearer saved-token" {
+					t.Errorf("unexpected GitHub request: %s, authorization=%q", request.URL, request.Header.Get("Authorization"))
+				}
+				response := httptest.NewRecorder()
+				_, _ = response.WriteString(`{"id":42,"login":"saved-bot"}`)
+				return response.Result(), nil
+			})
+			t.Cleanup(func() { http.DefaultTransport = previousTransport })
+			check = adminResponse(handler, http.MethodPost, "/admin/config/check", nil, cookie, "")
+			if calls != 1 || check.Code != http.StatusOK || !strings.Contains(check.Body.String(), "Authenticated as @saved-bot (ID 42).") {
+				t.Fatalf("saved token check: calls=%d status=%d body=%q", calls, check.Code, check.Body.String())
+			}
 		})
 	}
 }
