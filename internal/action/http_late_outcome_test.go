@@ -123,7 +123,7 @@ func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutco
 		t.Fatal(err)
 	}
 	f.owner.Store, f.owner.ExecutorID, f.owner.remoteSelected, f.owner.assignmentRequired = store, "remote", true, true
-	f.owner.remoteAttachedAt = time.Now().UTC() // This fixture's remote owner predates the terminal decision.
+	f.owner.remotePriorAttempts = make(map[string]string) // This fixture's remote owner predates the terminal decision.
 	f.owner.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	f.sink.assignmentContext = t.Context()
@@ -346,7 +346,7 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store, restarted.remoteAttachedAt = nil, reopened, time.Time{}
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts = nil, reopened, nil
 	f.owner = &restarted
 	_, client, origin = lateOutcomeEndpoint(t, f.owner)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
@@ -562,7 +562,7 @@ func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store, restarted.remoteAttachedAt = nil, reopened, time.Time{}
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts = nil, reopened, nil
 	_, client, origin := lateOutcomeEndpoint(t, &restarted)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("first late receipt after restart status=%d", status)
@@ -596,23 +596,14 @@ func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
-	decision := reopened.Data.TerminalDecisions[f.job.Identity.JobID]
-	decision.DecidedAt = time.Now().UTC().Add(time.Minute) // Simulate a clock rollback after the previous process exited.
-	reopened.Data.TerminalDecisions[f.job.Identity.JobID] = decision
-	if err := reopened.Save(); err != nil {
-		t.Fatal(err)
-	}
 	restarted := *f.owner
-	restarted.Executor, restarted.Store, restarted.remoteAttachedAt, restarted.retiredProviderKeys = nil, reopened, time.Time{}, nil
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts, restarted.retiredProviderKeys = nil, reopened, nil, nil
 	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
 		t.Fatalf("restart retained the old key: %q", got)
 	}
 	f.outcome.Result.Diagnostics[0].Message = "late " + oldKey
 	f.outcome.Failure.Message = "failed " + oldKey
 	_, client, origin := lateOutcomeEndpoint(t, &restarted)
-	if !decision.DecidedAt.After(restarted.remoteAttachedAt) {
-		t.Fatalf("clock rollback was not simulated: decision=%s attach=%s", decision.DecidedAt, restarted.remoteAttachedAt)
-	}
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("first late receipt after restart status=%d", status)
 	}
@@ -655,7 +646,7 @@ func TestLateRemoteOutcomeAfterAssignedRestartCannotRetainRotatedKey(t *testing.
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store, restarted.remoteAttachedAt, restarted.remotePriorAttempts, restarted.retiredProviderKeys = nil, reopened, time.Time{}, nil, nil
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts, restarted.retiredProviderKeys = nil, reopened, nil, nil
 	restarted.Runner.Codex.APIKey = "fixture-current-process-key"
 	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
 		t.Fatalf("prior key unexpectedly available for redaction: %q", got)
@@ -684,20 +675,6 @@ func TestLateRemoteOutcomeAfterAssignedRestartCannotRetainRotatedKey(t *testing.
 	record, found, err := restarted.Usage.Load(accepted.AttemptID)
 	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
 		t.Fatalf("safe late usage was lost: record=%+v found=%t error=%v", record, found, err)
-	}
-}
-
-func TestLateRemoteOutcomeRetainsDiagnosticsAfterClockStep(t *testing.T) {
-	f := newLateOutcomeFixture(t, false)
-	f.owner.Usage = nil
-	decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
-	f.owner.remoteAttachedAt = decision.DecidedAt.Add(time.Minute) // Attach happened first, then the wall clock moved back.
-	if err := f.owner.receiveLateOutcome("remote", f.outcome); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
-	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
-		t.Fatalf("late diagnostic after clock step: %q error=%v", data, err)
 	}
 }
 

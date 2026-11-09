@@ -46,7 +46,6 @@ var modelLineBreaks = strings.NewReplacer(
 // Orchestrator prepares portable actions and publishes results through trusted Git/GitHub access.
 type Orchestrator struct {
 	retiredProviderKeys []retiredProviderKey
-	remoteAttachedAt    time.Time
 	remotePriorAttempts map[string]string
 	attemptID           string
 	usageCheckpoint     *usageCheckpoint

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"slices"
 	"sync/atomic"
-	"time"
 
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
@@ -78,23 +77,23 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 		return nil, nil, err
 	}
 	executor.remoteChoices = &selection
-	if e.remoteAttachedAt.IsZero() {
+	if e.remotePriorAttempts == nil {
+		prior := make(map[string]string)
 		if e.Store != nil {
 			saved, err := e.Store.ReadSavedDurable()
 			if err != nil {
 				return nil, nil, fmt.Errorf("read terminal decisions before remote attach: %w", err)
 			}
-			e.remotePriorAttempts = make(map[string]string, len(saved.TerminalDecisions))
 			for jobID, decision := range saved.TerminalDecisions {
-				e.remotePriorAttempts[jobID] = decision.AttemptID
+				prior[jobID] = decision.AttemptID
 			}
 			if accepted := saved.Accepted; accepted != nil && accepted.Assigned {
-				if _, decided := e.remotePriorAttempts[accepted.JobID]; !decided {
-					e.remotePriorAttempts[accepted.JobID] = accepted.AttemptID
+				if _, decided := prior[accepted.JobID]; !decided {
+					prior[accepted.JobID] = accepted.AttemptID
 				}
 			}
 		}
-		e.remoteAttachedAt = time.Now().UTC()
+		e.remotePriorAttempts = prior
 	}
 	executor.lateOutcome = func(outcome httpOutcome) error { return e.receiveLateOutcome(remote.ExecutorID, outcome) }
 	endpoint, err := ListenRemoteExecution(executor, remote.Listen, certificate, remote.Token)
