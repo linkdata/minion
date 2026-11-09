@@ -44,7 +44,11 @@ func bundledFiles(src source) (files []skillFile, commit string, err error) {
 		if err != nil {
 			return err
 		}
-		files = append(files, skillFile{name: strings.TrimPrefix(path, root+"/"), data: data, mode: info.Mode()})
+		mode := info.Mode()
+		if path == "bundled/security-audit/validate-findings.cjs" || path == "bundled/security-audit/validate-coverage-ledger.cjs" {
+			mode |= 0o100 // embed.FS drops the execute bit from these scripts.
+		}
+		files = append(files, skillFile{name: strings.TrimPrefix(path, root+"/"), data: data, mode: mode})
 		return nil
 	})
 	if err != nil {

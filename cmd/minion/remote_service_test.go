@@ -125,37 +125,32 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		body   []byte
 		err    error
 	}
-	pullNext := func() <-chan pullResult {
-		t.Helper()
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
-			strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Authorization", "Bearer "+token)
-		request.Header.Set("Content-Type", "application/json")
-		done := make(chan pullResult, 1)
-		t.Cleanup(func() {
-			for range done {
-			}
-		})
-		go func() {
-			defer close(done)
-			response, err := client.Do(request)
-			if err != nil {
-				done <- pullResult{err: err}
-				return
-			}
-			body, readErr := io.ReadAll(response.Body)
-			closeErr := response.Body.Close()
-			if readErr == nil {
-				readErr = closeErr
-			}
-			done <- pullResult{status: response.StatusCode, body: body, err: readErr}
-		}()
-		return done
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+	if err != nil {
+		t.Fatal(err)
 	}
-	pullDone := pullNext()
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	pullDone := make(chan pullResult, 1)
+	t.Cleanup(func() {
+		for range pullDone {
+		}
+	})
+	go func() {
+		defer close(pullDone)
+		response, err := client.Do(request)
+		if err != nil {
+			pullDone <- pullResult{err: err}
+			return
+		}
+		body, readErr := io.ReadAll(response.Body)
+		closeErr := response.Body.Close()
+		if readErr == nil {
+			readErr = closeErr
+		}
+		pullDone <- pullResult{status: response.StatusCode, body: body, err: readErr}
+	}()
 	if err := owner.WaitCapacity(ctx); err != nil {
 		t.Fatalf("authenticated pull did not provide capacity: %v", err)
 	}

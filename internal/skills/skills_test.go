@@ -439,6 +439,12 @@ func TestInstallBundledDefaultsWithoutNetwork(t *testing.T) {
 				if err != nil || len(entries) != 22 { // Runtime skill files, LICENSE, and install metadata.
 					t.Fatalf("%s security-audit files = %d, %v", provider, len(entries), err)
 				}
+				for _, script := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
+					info, err := os.Stat(filepath.Join(dir, script))
+					if err != nil || runtime.GOOS != "windows" && info.Mode()&0o100 == 0 {
+						t.Fatalf("%s %s executable mode = %v, %v", provider, script, info, err)
+					}
+				}
 			}
 		}
 	}

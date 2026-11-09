@@ -466,6 +466,31 @@ func TestAdminCertificateValidity(t *testing.T) {
 	}
 }
 
+func TestAdminCertificateServerUsage(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name     string
+		usages   []x509.ExtKeyUsage
+		keyUsage x509.KeyUsage
+		want     string
+	}{
+		{name: "no usage restrictions"},
+		{name: "server authentication", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}},
+		{name: "any extended usage", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}},
+		{name: "client authentication only", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, want: "server authentication"},
+		{name: "cannot sign", keyUsage: x509.KeyUsageKeyEncipherment, want: "sign TLS handshakes"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"admin.example"},
+				NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), ExtKeyUsage: test.usages, KeyUsage: test.keyUsage}}
+			err := checkAdminCertificateURL(certificate, config.AdminConfig{WebservListenURL: "https://admin.example"})
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("certificate usage error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -270,6 +271,14 @@ func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConf
 	now := time.Now()
 	if now.Before(certificate.Leaf.NotBefore) || now.After(certificate.Leaf.NotAfter) {
 		return errors.New("admin TLS certificate is not currently valid")
+	}
+	usages := certificate.Leaf.ExtKeyUsage
+	if (len(usages) != 0 || len(certificate.Leaf.UnknownExtKeyUsage) != 0) &&
+		!slices.Contains(usages, x509.ExtKeyUsageServerAuth) && !slices.Contains(usages, x509.ExtKeyUsageAny) {
+		return errors.New("admin TLS certificate does not permit server authentication")
+	}
+	if certificate.Leaf.KeyUsage != 0 && certificate.Leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
+		return errors.New("admin TLS certificate cannot sign TLS handshakes")
 	}
 	if cfg.WebservListenURL != "" {
 		entry, _ := url.Parse(cfg.WebservListenURL) // validateWebservAdminAddress checked the URL.
