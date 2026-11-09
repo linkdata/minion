@@ -66,6 +66,12 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 }
 
 func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	workerAuditSupported := runtime.GOOS != "windows"
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -131,7 +137,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		cancel()
 		<-serviceDone
 	})
-	if credentials := fetchRemotePreflight(t, ctx, client, endpoint, token); credentials.CodexAPIKey != "" {
+	if credentials := fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported); credentials.CodexAPIKey != "" {
 		t.Fatal("remote preflight had an unexpected initial key")
 	}
 	if err := live.save(func(next *config.Config) error {
@@ -147,7 +153,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if !live.snapshot().Pending || len(watcher.Config.Repositories[0].AllowedActors) != 0 {
 		t.Fatal("saved remote policy was active before the service boundary")
 	}
-	for fetchRemotePreflight(t, ctx, client, endpoint, token).CodexAPIKey != "remote-next-job-key" {
+	for fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported).CodexAPIKey != "remote-next-job-key" {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if err := live.save(func(next *config.Config) error {
@@ -156,7 +162,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for fetchRemotePreflight(t, ctx, client, endpoint, token).CodexAPIKey != "" {
+	for fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported).CodexAPIKey != "" {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if err := live.save(func(next *config.Config) error {
@@ -165,7 +171,7 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for fetchRemotePreflight(t, ctx, client, endpoint, token).CodexAPIKey != "remote-next-job-key" {
+	for fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported).CodexAPIKey != "remote-next-job-key" {
 		time.Sleep(10 * time.Millisecond)
 	}
 	type pullResult struct {
@@ -205,6 +211,9 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if watcher.SelectedCommands["audit"] || live.snapshot().RemoteCommands["audit"] || !watcher.SelectedCommands["comment"] {
 		t.Fatalf("unsupported worker audit remained discoverable: monitor=%v admin=%v", watcher.SelectedCommands, live.snapshot().RemoteCommands)
 	}
+	if workerAuditSupported && !strings.Contains(logs.String(), "remote audit publishing prerequisites:") {
+		t.Fatalf("missing publisher prerequisites were not logged: %q", logs.String())
+	}
 	if live.snapshot().Pending || live.current().AIInstructions != "Read the selected task carefully." ||
 		owner.AIInstructions != "Read the selected task carefully." || len(watcher.Config.Repositories[0].AllowedActors) != 1 ||
 		watcher.Config.Repositories[0].AllowedActors[0] != "writer" || owner.CleanCriticRounds == nil || owner.CleanCriticRounds(1, 7) != 2 {
@@ -223,10 +232,10 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	}
 }
 
-func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string) action.WorkerCredentials {
+func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string, auditHostSupported bool) action.WorkerCredentials {
 	t.Helper()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
-		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote","audit_host_supported":%t}`, action.ProtocolVersion, auditHostSupported)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,5 +299,27 @@ func TestRemoteCheckWithValidTLSDoesNotRequireLocalAI(t *testing.T) {
 	}, "-check")
 	if code != 1 || !strings.Contains(output, "github.token is required") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "remote TLS preflight:") {
 		t.Fatalf("valid remote -check required local AI before GitHub: code=%d output=%q", code, output)
+	}
+}
+
+func TestRemoteCheckRequiresAuditPublisher(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	isolateHostPaths(t, t.TempDir())
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	cfg := config.Config{
+		BotLogin: "fixture", Main: "codex", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		Codex:          config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		Commands:       map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}}},
+		AlwaysOnSkills: []string{}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"audit"}}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443", TLSCertFile: certFile,
+			TLSKeyFile: keyFile, Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "audit publishing preflight:") || !strings.Contains(output, "security-audit") || strings.Contains(output, "GitHub authentication:") {
+		t.Fatalf("remote audit publisher preflight: code=%d output=%q", code, output)
 	}
 }

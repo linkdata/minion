@@ -7,14 +7,45 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestAuditPublisherChecksBundledDependencies(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	root := t.TempDir()
+	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+	if err := CheckAuditPublisher(t.Context(), root, cfg); err != nil {
+		t.Fatalf("installed publisher rejected: %v", err)
+	}
+	skill := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "report-schema.json")
+	if err := os.Remove(skill); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAuditPublisher(t.Context(), root, cfg); !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "report-schema.json") {
+		t.Fatalf("missing validator dependency accepted: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+	}
+}
 
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 	for _, scenario := range []struct{ name, script, node, want string }{

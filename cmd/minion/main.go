@@ -175,7 +175,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 	}
 	var createErr error
-	if !installDefaults {
+	if !installDefaults && !*check {
 		_, createErr = createInitialConfigWithPrompt(loadedPath, logger, !*installSkills, passwordOutput)
 	}
 	if passwordOutput != nil {
@@ -285,6 +285,12 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			if _, err := loadTLSCertificate("remote", remote.TLSCertFile, remote.TLSKeyFile); err != nil {
 				logger.Printf("remote TLS preflight: %v", err)
 				return false
+			}
+			if *check {
+				if err := action.CheckAuditPublisher(ctx, cfg.WorkRoot, cfg); err != nil {
+					logger.Printf("audit publishing preflight: %v", err)
+					return false
+				}
 			}
 		} else {
 			if err := checkModels(ctx, &cfg, logger); err != nil {

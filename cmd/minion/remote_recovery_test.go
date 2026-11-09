@@ -342,7 +342,7 @@ func TestRemoteStartupClearsOrphanResultBeforeReadiness(t *testing.T) {
 				roots.AddCert(leaf)
 				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}}
 				t.Cleanup(client.CloseIdleConnections)
-				fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token)
+				fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token, false)
 				finished := make(chan pullResult, 1)
 				pulled = finished
 				go func() {
@@ -536,7 +536,7 @@ func testRemoteLoopContinuesAfterRecoveryWithFreshPull(t *testing.T, service boo
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}}
 	t.Cleanup(client.CloseIdleConnections)
 	url := "https://" + endpoint.Addr().String()
-	fetchRemotePreflight(t, t.Context(), client, endpoint, cfg.RemoteExecutor.Token)
+	fetchRemotePreflight(t, t.Context(), client, endpoint, cfg.RemoteExecutor.Token, false)
 	pullBody := fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)
 	post := func(ctx context.Context, path, token, body string) (*http.Response, error) {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url+path, strings.NewReader(body))

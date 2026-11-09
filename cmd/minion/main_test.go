@@ -731,3 +731,32 @@ func TestInstallSkillsBeforeFirstStartLeavesConfigUncreated(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckMissingConfigDoesNotBootstrap(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.local.json")
+	logFile, err := os.CreateTemp(t.TempDir(), "stderr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFlags, oldArgs, oldStderr := flag.CommandLine, os.Args, os.Stderr
+	t.Cleanup(func() {
+		flag.CommandLine, os.Args, os.Stderr = oldFlags, oldArgs, oldStderr
+		_ = logFile.Close()
+	})
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", configPath, "-check"}
+	os.Stderr = logFile
+	if code := runWithGitCheck(func(context.Context, string) error {
+		t.Fatal("check with missing config reached Git preflight")
+		return nil
+	}); code != 2 {
+		t.Fatalf("check with missing config: exit=%d", code)
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("check created config: %v", err)
+	}
+	output, err := os.ReadFile(logFile.Name())
+	if err != nil || !strings.Contains(string(output), "config:") || !strings.Contains(string(output), "config.local.json") {
+		t.Fatalf("check did not report missing config: log=%q error=%v", output, err)
+	}
+}

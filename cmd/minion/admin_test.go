@@ -40,6 +40,38 @@ func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
 }
 
+func adminTestCertificateDir(t *testing.T, dnsNames []string, ipAddresses []net.IP) (string, *x509.Certificate) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames: dnsNames, IPAddresses: ipAddresses}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, leaf
+}
+
 func TestAdminServerWithoutSignInServesHomeAndSetupPage(t *testing.T) {
 	t.Parallel()
 	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin"}}}, nil, "", nil)
@@ -509,29 +541,7 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 
 func TestAdminServerAdvertisesIPOnlyTLSCertificate(t *testing.T) {
 	t.Parallel()
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}}
-	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := x509.MarshalPKCS8PrivateKey(privateKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0600); err != nil {
-		t.Fatal(err)
-	}
+	dir, leaf := adminTestCertificateDir(t, nil, []net.IP{net.IPv4(127, 0, 0, 1)})
 	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir}, nil, "", nil, true)
 	if err != nil {
 		t.Fatal(err)
@@ -539,10 +549,6 @@ func TestAdminServerAdvertisesIPOnlyTLSCertificate(t *testing.T) {
 	t.Cleanup(func() { _ = admin.Close() })
 	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
 		t.Fatalf("IP-only certificate URL = %q, want %q", admin.entryURL, want)
-	}
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatal(err)
 	}
 	response, err := adminTLSClient(t, leaf).Get(admin.entryURL + "/jaws/.ping")
 	if err != nil {
@@ -589,6 +595,26 @@ func TestAdminServerAdvertisesDNSCertificateOnSpecificIP(t *testing.T) {
 	t.Cleanup(func() { _ = response.Body.Close() })
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("advertised HTTPS URL returned %s", response.Status)
+	}
+}
+
+func TestAdminServerOmitsUnreachableInferredLocalhost(t *testing.T) {
+	t.Parallel()
+	probe, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := adminTestCertificateDir(t, []string{"localhost"}, nil)
+	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{Listen: "127.0.0.2:0", WebservCertDir: dir}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if admin.entryURL != "" {
+		t.Fatalf("unreachable inferred URL = %q, want no URL", admin.entryURL)
 	}
 }
 

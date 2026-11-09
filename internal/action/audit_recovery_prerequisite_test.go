@@ -208,6 +208,28 @@ func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
 	}
 }
 
+func TestMissingAuditSupportFileIsPublishingPrerequisite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(command.SecurityAudit)
+	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+	if err != nil || !installed {
+		t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+	}
+	if err := os.Remove(filepath.Join(filepath.Dir(skill), "report-schema.json")); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir()}
+	if err := orchestrator.validateAuditForPublication(t.Context(), job, completeAuditResult(job).Artifacts); !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing audit support file was treated as invalid result: %v", err)
+	}
+}
+
 func TestSavedAuditRetriesCompletedRetentionIO(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("directory permission fixture requires a non-root Unix account")

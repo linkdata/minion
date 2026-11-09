@@ -110,9 +110,11 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 	}
 	if inferredURL && certificate != nil {
 		advertised, err := url.Parse(entryURL)
-		if err == nil && certificate.Leaf.VerifyHostname(advertised.Hostname()) != nil {
+		if err != nil || certificate.Leaf.VerifyHostname(advertised.Hostname()) != nil {
+			entryURL = ""
 			host, port, err := net.SplitHostPort(listener.Addr().String())
 			ip := net.ParseIP(host)
+			localhostOK := ip != nil && (ip.IsUnspecified() || ip.Equal(net.IPv4(127, 0, 0, 1)) || ip.Equal(net.IPv6loopback))
 			if err == nil && ip != nil && ip.IsUnspecified() {
 				for _, candidate := range certificate.Leaf.IPAddresses {
 					if !candidate.IsUnspecified() {
@@ -125,7 +127,8 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 				entryURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(host, port)}).String()
 			} else if err == nil {
 				for _, name := range certificate.Leaf.DNSNames {
-					if name != "" && !strings.Contains(name, "*") && certificate.Leaf.VerifyHostname(name) == nil {
+					if name != "" && !strings.Contains(name, "*") && certificate.Leaf.VerifyHostname(name) == nil &&
+						(!strings.EqualFold(name, "localhost") || localhostOK) {
 						entryURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
 						break
 					}

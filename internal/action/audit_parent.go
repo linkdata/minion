@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 
+	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -17,6 +19,47 @@ var errAuditPublicationUnavailable = errors.New("audit publishing validator is u
 var removeAuditValidationDir = os.RemoveAll
 
 const auditValidationDirPrefix = ".minion-audit-validation-"
+
+// CheckAuditPublisher checks tools needed on the publishing host for configured remote audits.
+func CheckAuditPublisher(ctx context.Context, workRoot string, cfg config.Config) error {
+	checked := make(map[string]bool)
+	for _, repo := range cfg.Repositories {
+		for _, name := range repo.Actions {
+			mapping := cfg.Commands[name]
+			if checked[name] || mapping.Action != string(command.SecurityAudit) ||
+				!mapping.SupportsProvider(cfg.Main) || !mapping.SupportedOnHost() {
+				continue
+			}
+			checked[name] = true
+			configured := Runner{}
+			role := RoleSettings{Provider: "codex", Skills: mapping.Skills, AlwaysOnSkills: cfg.AlwaysOnSkills}
+			if err := configured.ConfigureRole(role); err != nil {
+				return fmt.Errorf("audit publishing skill for %q: %w", name, err)
+			}
+			skill := configured.Codex.SecurityAuditSkill()
+			if skill == "" {
+				return fmt.Errorf("audit publishing skill for %q is not installed", name)
+			}
+			if err := checkAuditPublisherSkill(ctx, workRoot, skill); err != nil {
+				return fmt.Errorf("audit publishing prerequisites for %q: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+func checkAuditPublisherSkill(ctx context.Context, workRoot, skill string) (resultErr error) {
+	dir, err := os.MkdirTemp(workRoot, ".minion-audit-preflight-")
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
+	tools, err := checkAuditTools(ctx, dir, skill)
+	if err != nil {
+		return err
+	}
+	return checkAuditValidatorSyntax(ctx, dir, skill, tools)
+}
 
 func auditValidationTempPattern(attemptID string) string {
 	return auditValidationDirPrefix + attemptID + "+"

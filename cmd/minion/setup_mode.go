@@ -15,7 +15,11 @@ func runSetupMode(ctx context.Context, adminConfig config.AdminConfig, configPat
 		logger.Printf("setup UI: %v", err)
 		return 1
 	}
-	logger.Printf("setup UI: %s (config %s)", server.entryURL, configPath)
+	if server.entryURL == "" {
+		logger.Printf("setup UI bound to %s (config %s); set -listenurl to a reachable HTTPS URL covered by the admin certificate", server.listener.Addr(), configPath)
+	} else {
+		logger.Printf("setup UI: %s (config %s)", server.entryURL, configPath)
+	}
 	<-setupCtx.Done()
 	if err := server.Close(); err != nil {
 		logger.Printf("close setup UI: %v", err)

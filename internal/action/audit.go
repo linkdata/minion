@@ -44,24 +44,42 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 }
 
 func checkAuditValidatorScripts(skill string) error {
+	dependencies := []string{"report-schema.json", "safe-input.cjs", "strict-json-keys.cjs"}
+	needed := make(map[string]bool)
 	for _, validator := range auditValidators {
-		script := filepath.Join(filepath.Dir(skill), validator.script)
-		info, err := os.Stat(script)
+		data, err := readAuditValidator(filepath.Join(filepath.Dir(skill), validator.script))
 		if err != nil {
-			return fmt.Errorf("audit validator %q: %w", script, err)
+			return err
 		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("audit validator %q is not a regular file", script)
+		for _, name := range dependencies {
+			if bytes.Contains(data, []byte(name)) {
+				needed[name] = true
+			}
 		}
-		file, err := os.Open(script)
-		if err != nil {
-			return fmt.Errorf("read audit validator %q: %w", script, err)
-		}
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("close audit validator %q: %w", script, err)
+	}
+	for _, name := range dependencies {
+		if needed[name] {
+			if _, err := readAuditValidator(filepath.Join(filepath.Dir(skill), name)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+func readAuditValidator(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("audit validator %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("audit validator %q is not a regular file", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read audit validator %q: %w", path, err)
+	}
+	return data, nil
 }
 
 func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {

@@ -120,6 +120,12 @@ capacity:
 		return 1
 	}
 	auditHostSupported := endpoint.AuditHostSupported()
+	if auditHostSupported {
+		if err := action.CheckAuditPublisher(ctx, owner.WorkRoot, watcher.Config); err != nil {
+			logger.Printf("remote audit publishing prerequisites: %s", monitor.InertLogText(err.Error()))
+			auditHostSupported = false
+		}
+	}
 	for name := range watcher.SelectedCommands {
 		mapping := watcher.Config.Commands[name]
 		if !mapping.SupportedOnHost() || mapping.Action == string(command.SecurityAudit) && !auditHostSupported {

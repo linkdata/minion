@@ -85,7 +85,7 @@ func TestRemoteAcceptedCleanupFailureClosesHeldPull(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token)
+	fetchRemotePreflight(t, ctx, client, endpoint, cfg.RemoteExecutor.Token, false)
 	serviceDone := make(chan int, 1)
 	go func() {
 		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, true, logger, endpoint, 5*time.Second, nil)
