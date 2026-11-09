@@ -69,7 +69,8 @@ func TestInProcessAuditRetainsIncompleteWhenValidatorUnavailable(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("PATH", t.TempDir())
 	e := &Orchestrator{WorkRoot: root}
-	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, exec.ErrNotFound) {
+	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) ||
+		(runtime.GOOS != "windows" && !errors.Is(err, exec.ErrNotFound)) {
 		t.Fatalf("missing validator was not terminal before a saved result: %v", err)
 	}
 	dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*"))
@@ -189,6 +190,9 @@ func TestSavedAuditWaitsForBrokenPublishingValidator(t *testing.T) {
 }
 
 func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
 	installActionTestSkills(t, testAuditSkillURL)
 	job := testJob(command.SecurityAudit)
 	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")

@@ -24,12 +24,12 @@ func auditValidationTempPattern(attemptID string) string {
 
 // validateAuditForPublication checks received data with the publishing host's installed skill.
 func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job, files []workspace.File) error {
-	if runtime.GOOS == "windows" {
-		return fmt.Errorf("%w: audit validators require POSIX file-open protections", errAuditPublicationUnavailable)
-	}
 	byPath, err := validateAuditArtifactInput(files, job.Identity.Repository, sourceIdentity(job), job.Source.Head)
 	if err != nil {
 		return err
+	}
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("%w: audit validators require POSIX file-open protections", errAuditPublicationUnavailable)
 	}
 	configured := e.Runner
 	if err := configured.ConfigureRole(job.Main); err != nil {

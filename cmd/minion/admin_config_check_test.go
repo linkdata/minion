@@ -57,16 +57,19 @@ func TestSavedGitHubAuthButtonWorksInSetupAndAdmin(t *testing.T) {
 			done := make(chan struct{})
 			go func() { jw.Serve(); close(done) }()
 			t.Cleanup(func() { jw.Close(); <-done })
-			if denied := adminResponse(handler, http.MethodGet, "/admin/config/check", nil, nil, ""); denied.Code != http.StatusForbidden {
+			if denied := adminResponse(handler, http.MethodPost, "/admin/config/check", nil, nil, ""); denied.Code != http.StatusForbidden {
 				t.Fatalf("anonymous check status=%d", denied.Code)
 			}
 			cookie := dashboardTestCookie(t, handler)
 			page := adminResponse(handler, http.MethodGet, "/admin/config", nil, cookie, "")
-			if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `action="/admin/config/check"`) ||
+			if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `method="post" action="/admin/config/check"`) ||
 				!strings.Contains(page.Body.String(), "Test saved GitHub auth") {
 				t.Fatalf("config page lacks test button: status=%d body=%q", page.Code, page.Body.String())
 			}
-			check := adminResponse(handler, http.MethodGet, "/admin/config/check", nil, cookie, "")
+			if got := adminResponse(handler, http.MethodGet, "/admin/config/check", nil, cookie, ""); got.Code < http.StatusBadRequest {
+				t.Fatalf("GET check status=%d, want rejection", got.Code)
+			}
+			check := adminResponse(handler, http.MethodPost, "/admin/config/check", nil, cookie, "")
 			if check.Code != http.StatusOK || check.Header().Get("Cache-Control") != "no-store" ||
 				!strings.Contains(check.Body.String(), "Save a GitHub bot login and token before testing.") {
 				t.Fatalf("saved config check: status=%d body=%q", check.Code, check.Body.String())

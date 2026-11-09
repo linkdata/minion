@@ -100,8 +100,8 @@ func TestRemoteStartupCompletesUnsupportedAuditRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = endpoint.Close() })
-	if !watcher.SelectedCommands["audit"] {
-		t.Fatal("audit was not initially selected")
+	if watcher.SelectedCommands["audit"] != (runtime.GOOS != "windows") {
+		t.Fatalf("audit initial selection on %s: %v", runtime.GOOS, watcher.SelectedCommands)
 	}
 	watcher.Handler = unsupportedAuditRecoveryHandler{}
 	if code := runSelectedRemoteService(t.Context(), owner, watcher, store, false, logger, endpoint, time.Second, nil); code != 0 ||

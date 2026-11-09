@@ -239,7 +239,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	if len(liveConfigs) != 0 && liveConfigs[0] != nil {
 		live := liveConfigs[0]
 		mux.Handle("GET /admin/status", adminStatusHandler(jw, owner, live.current, false))
-		mux.Handle("GET /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
+		mux.Handle("POST /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
 		for _, page := range []string{"users", "repositories", "skills"} {
 			mux.Handle("GET /admin/"+page, adminConfigurationHandler(jw, live.snapshot, page))
 		}
@@ -367,7 +367,7 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		}
 		return r.Method == http.MethodPost && r.URL.Path == "/admin/setup" ||
 			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost) ||
-			r.URL.Path == "/admin/config/check" && r.Method == http.MethodGet
+			r.URL.Path == "/admin/config/check" && r.Method == http.MethodPost
 	}
 	return a.sessionUsername(a.jaws.GetSession(r)) != ""
 }

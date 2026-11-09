@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -256,11 +257,18 @@ func TestAdminRepositoryCommandsRejectUnsupportedMainAI(t *testing.T) {
 	post("owner/new", http.StatusConflict)
 }
 
-func TestAdminRepositoryCommandsUseRemoteWorkerCapability(t *testing.T) {
+func TestAdminRepositoryCommandsRequirePublishingHostAndRemoteWorkerCapability(t *testing.T) {
 	cfg := config.Config{Main: "codex", RemoteExecutor: &config.RemoteExecutorConfig{},
 		Commands: map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"builtin://anti-prompt-injection"}}}}
 	selected := map[string]bool{"audit": true}
-	if view := configurationView(adminConfigSnapshot{Config: cfg, Remote: true, RemoteCommands: selected}); len(view.Commands) != 1 || view.Commands[0] != "audit" {
+	view := configurationView(adminConfigSnapshot{Config: cfg, Remote: true, RemoteCommands: selected})
+	if runtime.GOOS == "windows" {
+		if len(view.Commands) != 0 || validateAdminActions(cfg, []string{"audit"}, nil) == nil {
+			t.Fatalf("Windows publishing host offered audit: %v", view.Commands)
+		}
+		return
+	}
+	if len(view.Commands) != 1 || view.Commands[0] != "audit" {
 		t.Fatalf("supported remote audit not offered: %v", view.Commands)
 	}
 	if err := validateAdminActions(cfg, []string{"audit"}, nil); err != nil {

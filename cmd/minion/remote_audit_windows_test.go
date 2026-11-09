@@ -35,11 +35,7 @@ func TestWindowsSetupDoesNotSelectRemoteAudit(t *testing.T) {
 	}
 	post := func() *httptest.ResponseRecorder {
 		t.Helper()
-		loaded, err := config.Load(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		version, err := advancedVersion(loaded)
+		loaded, version, err := loadSetupConfig(path, *cfg.Admin)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -50,7 +50,7 @@ var adminAdvancedHTML = template.Must(template.New("admin advanced").Parse(headH
 <textarea class="form-control font-monospace" id="config-json" name="config" rows="30" spellcheck="false" required>{{.Dot.JSON}}</textarea>
 <button class="btn btn-primary mt-3" type="submit">Save configuration</button>
 </form>
-<form method="get" action="/admin/config/check" class="mt-3"><button class="btn btn-outline-primary" type="submit">Test saved GitHub auth</button></form>
+<form method="post" action="/admin/config/check" class="mt-3"><button class="btn btn-outline-primary" type="submit">Test saved GitHub auth</button></form>
 {{if .Dot.GitHubCheck.Checked}}<p role="status" class="alert {{if .Dot.GitHubCheck.OK}}alert-success{{else}}alert-danger{{end}} mt-3">{{.Dot.GitHubCheck.Message}}</p>{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
@@ -69,7 +69,7 @@ func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string,
 		ui.Handler(jw, "admin advanced", view).ServeHTTP(w, r)
 	})
 	mux.Handle("GET /admin/config", configPage)
-	mux.Handle("GET /admin/config/check", configPage)
+	mux.Handle("POST /admin/config/check", configPage)
 	mux.Handle("POST /admin/config", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		r.Body = http.MaxBytesReader(w, r.Body, 4*maxAdvancedConfig)
