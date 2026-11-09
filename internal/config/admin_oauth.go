@@ -179,10 +179,7 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 		return false
 	}
 	host := u.Hostname()
-	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
-		return false
-	}
-	if ip, err := netip.ParseAddr(host); err == nil && ip.Unmap().IsUnspecified() {
+	if !ValidURLHost(host) {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -199,4 +196,33 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.Unmap().IsLoopback()
+}
+
+// ValidURLHost checks the host syntax used by admin URLs, including certificate names.
+func ValidURLHost(host string) bool {
+	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return !ip.Unmap().IsUnspecified()
+	}
+	if len(host) > 254 || len(host) == 254 && !strings.HasSuffix(host, ".") {
+		return false
+	}
+	name := strings.TrimSuffix(host, ".")
+	nonNumeric := false
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c == '-' {
+				nonNumeric = true
+			} else if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return nonNumeric
 }

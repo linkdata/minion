@@ -19,7 +19,7 @@ func hasUnselectedCommand(selected map[string]bool, cfg config.Config, auditHost
 	for _, repo := range cfg.Repositories {
 		for _, name := range repo.Actions {
 			mapping := cfg.Commands[name]
-			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) &&
+			if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() &&
 				(mapping.Action != string(command.SecurityAudit) || auditHostSupported) && !selected[name] {
 				return true
 			}
@@ -120,11 +120,10 @@ capacity:
 		return 1
 	}
 	auditHostSupported := endpoint.AuditHostSupported()
-	if !auditHostSupported {
-		for name := range watcher.SelectedCommands {
-			if watcher.Config.Commands[name].Action == string(command.SecurityAudit) {
-				delete(watcher.SelectedCommands, name)
-			}
+	for name := range watcher.SelectedCommands {
+		mapping := watcher.Config.Commands[name]
+		if !mapping.SupportedOnHost() || mapping.Action == string(command.SecurityAudit) && !auditHostSupported {
+			delete(watcher.SelectedCommands, name)
 		}
 	}
 	if live != nil {

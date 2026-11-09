@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -243,14 +244,15 @@ func TestAdminLiveConfigHidesRemoteAuditUntilWorkerCapabilityKnown(t *testing.T)
 		t.Fatalf("rejected remote audit changed the saved repository: %v", err)
 	}
 	live.setRemoteSelected(map[string]bool{"review": true, "security-audit": true}, true)
-	if !slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") {
-		t.Fatal("supported remote audit was not offered after worker connection")
+	if slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") != (runtime.GOOS != "windows") {
+		t.Fatalf("remote audit offered on publishing host %s", runtime.GOOS)
 	}
-	if err := live.save(func(next *config.Config) error {
+	err = live.save(func(next *config.Config) error {
 		next.Repositories[1].Actions = []string{"review", "security-audit"}
 		return nil
-	}); err != nil {
-		t.Fatalf("supported remote audit was rejected: %v", err)
+	})
+	if (err == nil) != (runtime.GOOS != "windows") {
+		t.Fatalf("remote audit save on publishing host %s: %v", runtime.GOOS, err)
 	}
 }
 

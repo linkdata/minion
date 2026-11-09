@@ -225,6 +225,9 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
 			"alpha": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
 		}, "alpha", ""},
+		{"trimmed provider", " codex ", map[string]config.CommandMapping{
+			"review": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
+		}, "review", ""},
 		{"unsupported command is skipped", "claude", map[string]config.CommandMapping{
 			"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},

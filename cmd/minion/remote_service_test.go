@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
 	if hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, false) ||
-		!hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) {
+		hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) != (runtime.GOOS != "windows") {
 		t.Fatal("remote audit capability did not distinguish unsupported from unselected")
 	}
 }
@@ -109,8 +110,8 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if watcher.Handler != owner || watcher.SelectedExecutorID != "remote" || !watcher.SelectedCommands["comment"] {
 		t.Fatalf("remote service selection missing: executor=%q commands=%v", watcher.SelectedExecutorID, watcher.SelectedCommands)
 	}
-	if !watcher.SelectedCommands["audit"] {
-		t.Fatal("orchestrator did not initially offer audit for the simulated Windows worker")
+	if watcher.SelectedCommands["audit"] != (runtime.GOOS != "windows") {
+		t.Fatalf("orchestrator offered audit on publishing host %s: %v", runtime.GOOS, watcher.SelectedCommands)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)

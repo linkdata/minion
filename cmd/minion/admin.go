@@ -106,8 +106,8 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 	}
 	entryURL := service.ListenURL
 	if cfg.WebservListenURL == "" && certificate != nil {
-		entry, _ := url.Parse(entryURL)
-		if entry.Scheme != "https" || certificate.Leaf.VerifyHostname(entry.Hostname()) != nil {
+		entry, parseErr := url.Parse(entryURL)
+		if parseErr != nil || entry.Scheme != "https" || !config.ValidURLHost(entry.Hostname()) || certificate.Leaf.VerifyHostname(entry.Hostname()) != nil {
 			entryURL = certifiedListenURL(listener.Addr().String(), certificate, cfg)
 			if entryURL == "" {
 				_ = listener.Close()
@@ -310,7 +310,7 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 			continue
 		}
 		callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
-		if certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
+		if !config.ValidURLHost(callback.Hostname()) || certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
 			return ""
 		}
 		return (&url.URL{Scheme: "https", Host: callback.Host}).String()
@@ -323,7 +323,7 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 		if strings.EqualFold(name, "localhost") && !localhostOK {
 			return ""
 		}
-		if strings.Contains(name, "*") || certificate.Leaf.VerifyHostname(name) != nil {
+		if !config.ValidURLHost(name) || certificate.Leaf.VerifyHostname(name) != nil {
 			return ""
 		}
 		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()

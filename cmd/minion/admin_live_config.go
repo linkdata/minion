@@ -220,11 +220,12 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 			return errAdminRestartRequired
 		}
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
-		if activate.RemoteExecutor != nil && !a.remoteAuditHostSupported {
+		if activate.RemoteExecutor != nil {
 			for _, repo := range activate.Repositories {
 				previous, _ := a.desired.Repository(repo.Name)
 				for _, name := range repo.Actions {
-					if activate.Commands[name].Action == string(command.SecurityAudit) && !slices.Contains(previous.Actions, name) {
+					mapping := activate.Commands[name]
+					if mapping.Action == string(command.SecurityAudit) && (!a.remoteAuditHostSupported || !mapping.SupportedOnHost()) && !slices.Contains(previous.Actions, name) {
 						return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 					}
 				}

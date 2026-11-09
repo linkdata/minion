@@ -53,6 +53,20 @@ func TestWebservListenURLRejectsUnspecifiedIP(t *testing.T) {
 	}
 }
 
+func TestWebservListenURLRejectsMalformedDNS(t *testing.T) {
+	for _, host := range []string{
+		"bad..example", ".example", "-bad.example", "bad-.example", "bad!.example",
+		strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 126) + "aa",
+	} {
+		t.Run(host, func(t *testing.T) {
+			admin := AdminConfig{WebservCertDir: "/certs", WebservListenURL: "https://" + host}
+			if err := admin.ValidateWebservOptions(); err == nil {
+				t.Fatalf("malformed -listenurl host %q accepted", host)
+			}
+		})
+	}
+}
+
 func TestOAuthClientConfigValidation(t *testing.T) {
 	valid := func() Config {
 		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{
@@ -64,6 +78,11 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	good := valid()
 	if err := good.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
+	}
+	malformedRedirect := valid()
+	malformedRedirect.Admin.GitHubOAuth.RedirectURL = "https://bad..example/auth/github/callback"
+	if err := malformedRedirect.Validate(t.TempDir()); err == nil {
+		t.Fatal("malformed OAuth callback host accepted")
 	}
 	if good.Admin.GitLabOAuth.BaseURL != "https://gitlab.com" {
 		t.Fatalf("default GitLab origin = %q", good.Admin.GitLabOAuth.BaseURL)

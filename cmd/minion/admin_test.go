@@ -440,6 +440,11 @@ func TestCertifiedListenURL(t *testing.T) {
 	if got := certifiedListenURL("127.0.0.1:8080", certificate, callback); got != "" {
 		t.Errorf("uncovered OAuth URL = %q, want none", got)
 	}
+	callback.GitHubOAuth.RedirectURL = "https://bad..example/auth/github/callback"
+	certificate.Leaf.DNSNames = []string{"bad..example"}
+	if got := certifiedListenURL("127.0.0.1:8080", certificate, callback); got != "" {
+		t.Errorf("malformed OAuth URL = %q, want none", got)
+	}
 }
 
 func TestAdminCertificateValidity(t *testing.T) {

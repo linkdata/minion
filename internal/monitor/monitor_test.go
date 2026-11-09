@@ -405,7 +405,7 @@ func TestAvailableCommandsRequireHostSupport(t *testing.T) {
 		}
 		m := &Monitor{Config: cfg, SelectedCommands: selected}
 		got := m.availableCommands(cfg.Repositories[0])
-		if _, offered := got["security-audit"]; offered != (remote || runtime.GOOS != "windows") || got["review"] != command.Review {
+		if _, offered := got["security-audit"]; offered != (runtime.GOOS != "windows") || got["review"] != command.Review {
 			t.Errorf("remote=%t host=%s available commands = %v", remote, runtime.GOOS, got)
 		}
 		if remote {

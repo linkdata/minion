@@ -50,12 +50,12 @@ func (a *adminAccess) setupPost() http.Handler {
 				if cfg.Commands == nil {
 					first.Actions = []string{"review"}
 				} else {
-					if mapping, ok := cfg.Commands["review"]; ok && mapping.SupportsProvider(cfg.Main) && (cfg.RemoteExecutor != nil || mapping.SupportedOnHost()) {
+					if mapping, ok := cfg.Commands["review"]; ok && mapping.SupportsProvider(before.Main) && mapping.SupportedOnHost() {
 						first.Actions = []string{"review"}
 					} else {
 						for _, name := range cfg.CommandNames() {
 							mapping := cfg.Commands[name]
-							if mapping.SupportsProvider(cfg.Main) && (cfg.RemoteExecutor != nil || mapping.SupportedOnHost()) {
+							if mapping.SupportsProvider(before.Main) && mapping.SupportedOnHost() {
 								first.Actions = []string{name}
 								break
 							}

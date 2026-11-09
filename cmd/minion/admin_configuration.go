@@ -65,7 +65,7 @@ func configurationView(snapshot adminConfigSnapshot) adminConfigurationView {
 	view := adminConfigurationView{Pending: snapshot.Pending, Error: snapshot.Error, Remote: snapshot.Remote, RestartRequired: snapshot.RestartRequired}
 	view.AllCommands = cfg.CommandNames()
 	for _, name := range view.AllCommands {
-		if cfg.Commands[name].SupportsProvider(cfg.Main) && (snapshot.Remote || cfg.Commands[name].SupportedOnHost()) && (!snapshot.Remote || snapshot.RemoteCommands[name]) {
+		if cfg.Commands[name].SupportsProvider(cfg.Main) && cfg.Commands[name].SupportedOnHost() && (!snapshot.Remote || snapshot.RemoteCommands[name]) {
 			view.Commands = append(view.Commands, name)
 		}
 	}

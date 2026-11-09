@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/config"
 )
@@ -241,6 +248,68 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 		_ = server.Close()
 		t.Fatal("certificate without callback hostname was accepted")
 	}
+}
+
+func TestWebservCertificateSkipsMalformedDNSName(t *testing.T) {
+	for _, badName := range []string{"bad..example", "bad%example"} {
+		t.Run(badName, func(t *testing.T) {
+			certDir := testAdminDNSCertificate(t, badName, "good.example")
+			cfg := config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: certDir}
+			if err := checkAdminServerConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = server.Close() })
+			_, port, err := net.SplitHostPort(server.listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := "https://good.example:" + port; server.entryURL != want {
+				t.Fatalf("certified URL = %q, want %q", server.entryURL, want)
+			}
+
+			cfg.WebservListenURL = "https://" + badName
+			if err := checkAdminServerConfig(cfg); err == nil {
+				t.Fatal("malformed explicit -listenurl passed preflight")
+			}
+			cfg.WebservListenURL = ""
+			cfg.WebservCertDir = testAdminDNSCertificate(t, badName)
+			if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
+				_ = server.Close()
+				t.Fatal("malformed only certificate name was advertised")
+			}
+		})
+	}
+}
+
+func testAdminDNSCertificate(t *testing.T, names ...string) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: names,
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestWebservFlagsAcceptedForServiceAndCheck(t *testing.T) {

@@ -46,7 +46,7 @@ After accepting an authorized command, the bot adds a 👀 reaction to the exact
 
 An enabled command used on the wrong supported thread type gets a fixed reply; see the commands table.
 
-The `security-audit` action requires Codex as main, Cloudflare's skill, the standard profile, independent agents and its six-phase workflow. Claude can serve as critic. With Claude as main, the command is disabled at startup and ignored without a reaction or reply. Native Windows workers cannot run it because its validators require POSIX file-open protections. POSIX remote workers can run it even when the orchestrator runs on Windows.
+The `security-audit` action requires Codex as main, Cloudflare's skill, the standard profile, independent agents and its six-phase workflow. Claude can serve as critic. With Claude as main, the command is disabled at startup and ignored without a reaction or reply. Both the worker and publishing host must run on a POSIX system because the validators require POSIX file-open protections.
 
 Source remains read-only. Validated reports are retained under `work_root/audits/`, with the path logged in `journalctl`; returned metadata names the target as `owner/repository@commit`. The GitHub reply gives the audited commit and a parent-rendered summary of structured findings and coverage, without an attachment. Retained Markdown is executor narrative, not mechanically verified findings. Audit agents are instructed to inspect source and run report validators without executing repository code, builds, tests, fixtures or live services. The sandbox permits local commands, so this source-only rule relies on those instructions.
 

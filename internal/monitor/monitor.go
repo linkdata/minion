@@ -1166,7 +1166,7 @@ func (m *Monitor) availableCommands(repo config.Repository) map[string]command.A
 			continue
 		}
 		if m.Config.RemoteExecutor != nil {
-			if mapping.SupportsProvider(m.Config.Main) {
+			if mapping.SupportsProvider(m.Config.Main) && mapping.SupportedOnHost() {
 				available[name] = command.Action(mapping.Action)
 			}
 			continue
