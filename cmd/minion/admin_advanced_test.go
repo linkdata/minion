@@ -342,7 +342,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	}
 }
 
-func TestAdvancedConfigCanRemoveAdminBlock(t *testing.T) {
+func TestAdvancedConfigCannotRemoveAdminBlock(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
@@ -372,45 +372,20 @@ func TestAdvancedConfigCanRemoveAdminBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	edited.Admin = nil
-	data, err = json.Marshal(edited)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := saveAdvancedConfig(path, live, runtime, view.Version, string(data)); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if saved.Admin != nil || !live.restartRequired || live.pending || live.active.Admin == nil {
-		t.Fatal("admin removal did not save as a restart-required change")
-	}
-	view, err = advancedConfigView(path, live, runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
-		t.Fatal(err)
-	}
 	edited.BotLogin = "new-bot"
 	data, err = json.Marshal(edited)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := saveAdvancedConfig(path, live, runtime, view.Version, string(data)); err != nil {
-		t.Fatalf("later edit after admin removal: %v", err)
-	}
-	edited.Admin = &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: advancedPasswordMarker}}}
-	data, err = json.Marshal(edited)
-	if err != nil {
-		t.Fatal(err)
-	}
-	view, err = advancedConfigView(path, live, runtime)
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err := saveAdvancedConfig(path, live, runtime, view.Version, string(data)); err == nil || !strings.Contains(err.Error(), "admin password") {
-		t.Fatalf("admin password was reintroduced through the editor: %v", err)
+		t.Fatalf("admin account removal accepted: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Admin == nil || saved.Admin.Administrators[0].PasswordHash != cfg.Admin.Administrators[0].PasswordHash ||
+		saved.BotLogin != "bot" || live.restartRequired || live.pending {
+		t.Fatal("rejected admin removal changed saved or running configuration")
 	}
 }
