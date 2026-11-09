@@ -16,11 +16,7 @@ import (
 	"golang.org/x/term"
 )
 
-// createInitialConfig writes the embedded template only when no config exists.
-func createInitialConfig(path string, logger *log.Logger) (created bool, resultErr error) {
-	return createInitialConfigWithPrompt(path, logger, true, nil)
-}
-
+// createInitialConfigWithPrompt writes the embedded template only when no config exists.
 func createInitialConfigWithPrompt(path string, logger *log.Logger, prompt bool, output *os.File) (created bool, resultErr error) {
 	if _, err := os.Lstat(path); err == nil {
 		return false, nil

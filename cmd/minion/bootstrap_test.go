@@ -26,7 +26,7 @@ func TestCreateInitialConfigWithoutTerminal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	var output bytes.Buffer
 	logger := log.New(&output, "", 0)
-	created, err := createInitialConfig(path, logger)
+	created, err := createInitialConfigWithPrompt(path, logger, true, nil)
 	if err != nil || !created {
 		t.Fatalf("create initial config: created=%t error=%v", created, err)
 	}
@@ -43,7 +43,7 @@ func TestCreateInitialConfigWithoutTerminal(t *testing.T) {
 		cfg.BotLogin != "" || len(cfg.Repositories) != 0 {
 		t.Fatalf("initial config is not a setup config: config=%+v error=%v", cfg, err)
 	}
-	created, err = createInitialConfig(path, logger)
+	created, err = createInitialConfigWithPrompt(path, logger, true, nil)
 	if err != nil || created {
 		t.Fatalf("existing config was recreated: created=%t error=%v", created, err)
 	}
@@ -62,7 +62,7 @@ func TestCreateInitialConfigWithoutTerminal(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			created, err := createInitialConfig(path, logger)
+			created, err := createInitialConfigWithPrompt(path, logger, true, nil)
 			results <- result{created, err}
 		}()
 	}

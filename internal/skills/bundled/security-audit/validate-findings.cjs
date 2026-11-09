@@ -570,8 +570,6 @@ function collectFindingSemanticErrors(findings) {
 }
 
 function validateDocument(findings, schema) {
-  const schemaErrors = collectSchemaErrors(schema);
-  if (schemaErrors.length > 0) return schemaErrors;
   const limitErrors = collectDataLimitErrors(findings, "$");
   if (limitErrors.length > 0) return limitErrors;
   const errors = collectUnchecked(findings, schema, "$");

@@ -556,6 +556,13 @@ func TestAdminServerAdvertisesIPOnlyTLSCertificate(t *testing.T) {
 
 func TestAdminServerAdvertisesDNSCertificateOnSpecificIP(t *testing.T) {
 	t.Parallel()
+	probe, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{
 		Listen: "127.0.0.2:0", TLSCertFile: certFile, TLSKeyFile: keyFile,

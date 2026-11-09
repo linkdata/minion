@@ -96,7 +96,7 @@ func TestLogCommandSkillsRequiresPublishingHost(t *testing.T) {
 	}}
 	var output bytes.Buffer
 	logCommandSkills(cfg, log.New(&output, "", 0))
-	if disabled := strings.Contains(output.String(), "command security disabled"); disabled != (runtime.GOOS == "windows") {
+	if disabled := strings.Contains(output.String(), "command security disabled: action security-audit is unsupported on windows"); disabled != (runtime.GOOS == "windows") {
 		t.Fatalf("publishing host audit diagnostic: %s", output.String())
 	}
 }

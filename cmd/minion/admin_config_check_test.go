@@ -36,6 +36,7 @@ func TestSavedGitHubAuthButtonWorksInSetupAndAdmin(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			defer jw.Close()
 			var handler http.Handler
 			if setup {
 				handler, err = newAdminHandlerWithSetupPath(jw, *cfg.Admin, nil, nil, true, path)
@@ -51,12 +52,11 @@ func TestSavedGitHubAuthButtonWorksInSetupAndAdmin(t *testing.T) {
 				handler, err = newAdminHandler(jw, *cfg.Admin, nil, nil, live)
 			}
 			if err != nil {
-				jw.Close()
 				t.Fatal(err)
 			}
 			done := make(chan struct{})
 			go func() { jw.Serve(); close(done) }()
-			t.Cleanup(func() { jw.Close(); <-done })
+			t.Cleanup(func() { <-done })
 			if denied := adminResponse(handler, http.MethodPost, "/admin/config/check", nil, nil, ""); denied.Code != http.StatusForbidden {
 				t.Fatalf("anonymous check status=%d", denied.Code)
 			}

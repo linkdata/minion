@@ -47,7 +47,7 @@ func TestCreateInitialConfigPromptsWithRedirectedStderr(t *testing.T) {
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
-		created, err := createInitialConfig(path, log.New(&output, "", 0))
+		created, err := createInitialConfigWithPrompt(path, log.New(&output, "", 0), true, nil)
 		done <- result{created, err}
 	}()
 	prompt := make([]byte, len("Set admin password: "))
