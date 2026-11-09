@@ -46,6 +46,24 @@ func configAttributeBytes(file *os.File, name string) ([]byte, error) {
 	return value, nil
 }
 
+func preserveConfigAttribute(original, replacement *os.File, name string) error {
+	oldValue, err := configAttributeBytes(original, name)
+	if err != nil {
+		return err
+	}
+	newValue, err := configAttributeBytes(replacement, name)
+	if err != nil {
+		return err
+	}
+	if (newValue == nil) != (oldValue == nil) || !bytes.Equal(newValue, oldValue) {
+		if oldValue == nil {
+			return unix.Fremovexattr(int(replacement.Fd()), name)
+		}
+		return unix.Fsetxattr(int(replacement.Fd()), name, oldValue, 0)
+	}
+	return nil
+}
+
 func preserveConfigMetadata(target string, replacement *os.File, info os.FileInfo) error {
 	original, err := os.Open(target)
 	if err != nil {
@@ -80,6 +98,9 @@ func preserveConfigMetadata(target string, replacement *os.File, info os.FileInf
 	} else if err := unix.Fsetxattr(int(replacement.Fd()), configACL, acl, 0); err != nil {
 		return fmt.Errorf("preserve config ACL: %w", err)
 	}
+	if err := preserveConfigAttribute(original, replacement, configSELinuxLabel); err != nil {
+		return fmt.Errorf("preserve config SELinux label: %w", err)
+	}
 	if err := replacement.Chmod(info.Mode() & configPermissionBits); err != nil {
 		return err
 	}
@@ -100,7 +121,7 @@ func preserveConfigMetadata(target string, replacement *os.File, info os.FileInf
 	if err != nil {
 		return fmt.Errorf("read replacement SELinux label: %w", err)
 	}
-	if newOwner.Uid != owner.Uid || newOwner.Gid != owner.Gid || newInfo.Mode()&configPermissionBits != info.Mode()&configPermissionBits || !bytes.Equal(newACL, acl) || !bytes.Equal(newLabel, oldLabel) {
+	if newOwner.Uid != owner.Uid || newOwner.Gid != owner.Gid || newInfo.Mode()&configPermissionBits != info.Mode()&configPermissionBits || !bytes.Equal(newACL, acl) || (newLabel == nil) != (oldLabel == nil) || !bytes.Equal(newLabel, oldLabel) {
 		return errors.New("replacement config permissions differ from original")
 	}
 	return nil

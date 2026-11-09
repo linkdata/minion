@@ -86,9 +86,9 @@ func update(path string, runtime *AdminConfig, mutate func(*Config) error) (cand
 	defer func() {
 		err = errors.Join(err, cleanupConfigTemp(f.Name()))
 	}()
-	_, err = f.Write(append(updated, '\n'))
+	err = preserveConfigMetadata(target, f, info)
 	if err == nil {
-		err = preserveConfigMetadata(target, f, info)
+		_, err = f.Write(append(updated, '\n'))
 	}
 	if err == nil {
 		err = f.Sync()

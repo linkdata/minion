@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,12 +83,24 @@ func replaceConfigFile(source, target string) error {
 	if err != nil {
 		return err
 	}
-	result, _, callErr := syscall.SyscallN(replaceFileW.Addr(), uintptr(unsafe.Pointer(replaced)), uintptr(unsafe.Pointer(replacement)), 0, 0, 0, 0)
+	backupName := source + ".backup"
+	backup, err := windows.UTF16PtrFromString(extendedWindowsPath(backupName))
+	if err != nil {
+		return err
+	}
+	result, _, callErr := syscall.SyscallN(replaceFileW.Addr(), uintptr(unsafe.Pointer(replaced)), uintptr(unsafe.Pointer(replacement)), uintptr(unsafe.Pointer(backup)), 0, 0, 0)
 	if result == 0 {
+		if errors.Is(callErr, windows.ERROR_UNABLE_TO_MOVE_REPLACEMENT_2) {
+			if restoreErr := windows.MoveFileEx(backup, replaced, 0); restoreErr != nil {
+				return errors.Join(callErr, fmt.Errorf("restore original config from %q: %w", backupName, restoreErr))
+			}
+		}
 		if callErr != 0 {
 			return callErr
 		}
 		return errors.New("ReplaceFileW failed")
 	}
+	// The replacement has committed; backup removal cannot make the save fail.
+	_ = os.Remove(backupName)
 	return nil
 }

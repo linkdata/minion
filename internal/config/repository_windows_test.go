@@ -85,11 +85,22 @@ func TestUpdatePreservesWindowsConfigACL(t *testing.T) {
 		}
 	})
 	tempACL, err := windows.GetNamedSecurityInfo(temporary.Name(), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil || tempACL == nil || tempACL.String() != before.String() {
-		t.Fatalf("temporary config DACL differs from original before write: %v, %v", tempACL, err)
+	if err != nil || tempACL == nil {
+		t.Fatalf("read temporary config DACL: %v", err)
+	}
+	tempControl, _, err := tempACL.Control()
+	beforeSDDL, tempSDDL := before.String(), tempACL.String()
+	_, beforeACEs, beforeHasACE := strings.Cut(beforeSDDL, "(")
+	_, tempACEs, tempHasACE := strings.Cut(tempSDDL, "(")
+	if err != nil || tempControl&windows.SE_DACL_PROTECTED == 0 || !beforeHasACE || !tempHasACE || beforeACEs != tempACEs {
+		t.Fatalf("temporary config DACL differs from original before write: original=%q temporary=%q control=%#x error=%v", beforeSDDL, tempSDDL, tempControl, err)
 	}
 	if _, err := Update(path, func(cfg *Config) error { cfg.BotLogin = "changed"; return nil }); err != nil {
 		t.Fatal(err)
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, ".config-*.backup"))
+	if err != nil || len(backups) != 0 {
+		t.Fatalf("successful config update left backup files: %v, %v", backups, err)
 	}
 	after, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {

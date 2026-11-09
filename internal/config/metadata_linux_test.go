@@ -71,3 +71,42 @@ func TestUpdatePreservesPOSIXACL(t *testing.T) {
 		t.Fatalf("config ACL mask or mode changed: %v, %v", info, err)
 	}
 }
+
+func TestPreserveConfigAttribute(t *testing.T) {
+	dir := t.TempDir()
+	original, err := os.CreateTemp(dir, "original-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer original.Close()
+	replacement, err := os.CreateTemp(dir, "replacement-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Close()
+	const name = "user.minion_config_metadata_test"
+	if err := unix.Fsetxattr(int(original.Fd()), name, []byte("operator"), 0); err != nil {
+		if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EPERM) {
+			t.Skipf("filesystem cannot set test attribute: %v", err)
+		}
+		t.Fatal(err)
+	}
+	if err := unix.Fsetxattr(int(replacement.Fd()), name, []byte("directory"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := preserveConfigAttribute(original, replacement, name); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := configAttributeBytes(replacement, name); err != nil || string(got) != "operator" {
+		t.Fatalf("attribute was not copied: %q, %v", got, err)
+	}
+	if err := unix.Fremovexattr(int(original.Fd()), name); err != nil {
+		t.Fatal(err)
+	}
+	if err := preserveConfigAttribute(original, replacement, name); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := configAttributeBytes(replacement, name); err != nil || got != nil {
+		t.Fatalf("extra attribute was not cleared: %q, %v", got, err)
+	}
+}
