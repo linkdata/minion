@@ -170,7 +170,7 @@ func TestRemotePreflightACKHoldsFetchAndPullUntilReported(t *testing.T) {
 	}
 }
 
-func TestRemoteAuditCapabilityIsFrozenAcrossPreflightAndPull(t *testing.T) {
+func TestRemoteAuditCapabilityIsFrozenAcrossPreflight(t *testing.T) {
 	for _, supported := range []bool{false, true} {
 		executor, err := NewHTTPExecutor("remote")
 		if err != nil {
@@ -196,9 +196,6 @@ func TestRemoteAuditCapabilityIsFrozenAcrossPreflightAndPull(t *testing.T) {
 		}
 		if got := post("/preflight", !supported); got != http.StatusConflict || endpoint.AuditHostSupported() != supported {
 			t.Fatalf("changed capability %t preflight: status=%d stored=%t", !supported, got, endpoint.AuditHostSupported())
-		}
-		if got := post("/next", !supported); got != http.StatusConflict || executor.pull {
-			t.Fatalf("changed capability %t pull: status=%d pull=%t", !supported, got, executor.pull)
 		}
 	}
 }

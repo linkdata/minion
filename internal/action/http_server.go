@@ -613,11 +613,6 @@ func (e *HTTPExecutor) serveNextEncoded(w http.ResponseWriter, r *http.Request, 
 		httpServerReject(w, "next", status, httpBinding{}, 0, ErrRemotePreflightRequired)
 		return
 	}
-	if e.remoteChoices != nil && pull.AuditHostSupported != e.auditHostSupported {
-		e.mu.Unlock()
-		httpServerReject(w, "next", http.StatusConflict, httpBinding{}, 0, errors.New("remote audit host capability differs from preflight"))
-		return
-	}
 	// Keep a new pull pending while the pre-cleanup handler still owns its slot.
 	for e.pull && e.pullStale && !e.closed && !e.unavailable && generation == e.pullGeneration && r.Context().Err() == nil {
 		changed := e.changed

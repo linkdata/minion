@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -35,8 +36,10 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 		{"mixed Codex auth", WorkerCredentials{CodexAPIKey: secret, CodexNativeAPIKey: "native-secret"}, false},
 		{"invalid UTF-8", WorkerCredentials{CodexAPIKey: string([]byte{0xff})}, false},
 		{"newline", WorkerCredentials{CodexAPIKey: secret + "\n"}, false},
-		{"oversized", WorkerCredentials{CodexAPIKey: strings.Repeat("x", maxWorkerCredentialBytes+1)}, false},
-		{"native key and token above old aggregate limit", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", 4096), CodexAccessToken: strings.Repeat("y", 4097)}, true},
+		{"oversized Codex key", WorkerCredentials{CodexAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}, false},
+		{"oversized native Codex key", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}, false},
+		{"oversized access token", WorkerCredentials{CodexAccessToken: strings.Repeat("x", maxWorkerAccessTokenBytes+1)}, false},
+		{"native key and access token", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes), CodexAccessToken: strings.Repeat("y", maxWorkerAccessTokenBytes)}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.credentials.validateJob(job)
@@ -50,7 +53,10 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 			}
 		})
 	}
-	if err := (WorkerCredentials{CodexNativeAPIKey: "x", ClaudeAPIKey: strings.Repeat("y", maxWorkerCredentialBytes)}).validate(); err != nil {
+	if err := (WorkerCredentials{ClaudeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}).validate(); err == nil {
+		t.Fatal("oversized Claude key accepted")
+	}
+	if err := (WorkerCredentials{CodexNativeAPIKey: "x", ClaudeAPIKey: strings.Repeat("y", config.MaxProviderAPIKeyBytes)}).validate(); err != nil {
 		t.Fatalf("ambient Codex key with maximum saved Claude key: %v", err)
 	}
 	credentials := WorkerCredentials{CodexAPIKey: secret}
@@ -244,16 +250,16 @@ func TestRemoteCredentialsChangeRequiresFreshPreflight(t *testing.T) {
 
 func TestHTTPAssignmentBoundIncludesCredentialEscaping(t *testing.T) {
 	job := testJob(command.Comment)
-	credentials := WorkerCredentials{CodexAPIKey: strings.Repeat("\x01", 1024)}
+	credentials := WorkerCredentials{CodexAPIKey: strings.Repeat("\x01", config.MaxProviderAPIKeyBytes)}
 	bound := httpAssignmentBound(job, credentials)
 	encoded, err := httpEncode(httpAssignment{Job: job, Credentials: credentials, HeldFor: math.MaxInt64}, httpJobBytes)
 	if err != nil || bound < int64(len(encoded)) {
 		t.Fatalf("assignment bound=%d encoded=%d error=%v", bound, len(encoded), err)
 	}
 	job.Description = ""
-	room := (int64(httpJobBytes) - httpJobBound(job) - 3*maxWorkerCredentialBytes) / 6
+	room := (int64(httpJobBytes) - httpJobBound(job) - 3*maxWorkerAccessTokenBytes) / 6
 	job.Description = strings.Repeat("d", int(room))
-	credentials.CodexAPIKey = strings.Repeat("x", maxWorkerCredentialBytes)
+	credentials = WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes), CodexAccessToken: strings.Repeat("y", maxWorkerAccessTokenBytes)}
 	if err := job.Validate(); err != nil || credentials.validateJob(job) != nil || httpJobBound(job) > httpJobBytes || httpAssignmentBound(job, credentials) <= httpJobBytes {
 		t.Fatalf("credential growth bypassed pre-encoding limit: job=%d assignment=%d error=%v", httpJobBound(job), httpAssignmentBound(job, credentials), err)
 	}

@@ -36,7 +36,7 @@ func httpBindingDigest(binding httpBinding) string {
 type httpPull struct {
 	Version             int    `json:"version"`
 	ExecutorID          string `json:"executor_id"`
-	AuditHostSupported  bool   `json:"audit_host_supported"`
+	AuditHostSupported  bool   `json:"audit_host_supported,omitempty"`
 	PreflightGeneration uint64 `json:"preflight_generation,omitempty"`
 	PreflightResult     string `json:"preflight_result,omitempty"`
 }
@@ -76,12 +76,12 @@ func (e *Orchestrator) workerCredentials(main, critic string) WorkerCredentials 
 	return credentials
 }
 
-const maxWorkerCredentialBytes = 8 << 10
+const maxWorkerAccessTokenBytes = 4 << 10
 
 func (credentials WorkerCredentials) validate() error {
-	if len(credentials.CodexAPIKey) > maxWorkerCredentialBytes || len(credentials.CodexNativeAPIKey) > maxWorkerCredentialBytes ||
-		len(credentials.CodexAccessToken) > maxWorkerCredentialBytes ||
-		len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes {
+	if len(credentials.CodexAPIKey) > config.MaxProviderAPIKeyBytes || len(credentials.CodexNativeAPIKey) > config.MaxProviderAPIKeyBytes ||
+		len(credentials.CodexAccessToken) > maxWorkerAccessTokenBytes ||
+		len(credentials.ClaudeAPIKey) > config.MaxProviderAPIKeyBytes {
 		return errors.New("worker credentials exceed limit")
 	}
 	for _, value := range []string{credentials.CodexAPIKey, credentials.CodexNativeAPIKey, credentials.CodexAccessToken, credentials.ClaudeAPIKey} {
