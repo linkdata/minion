@@ -66,6 +66,8 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 // Leave time for the worker to open its first pull before the orchestrator's two-minute wait expires.
 const remoteChoicePreflightTimeout = 90 * time.Second
 
+var errRemoteClaudeHostCheck = errors.New(preflightRemoteClaudeHostCheckFailed)
+
 func auditSupportedOnHost() bool {
 	return (config.CommandMapping{Action: string(command.SecurityAudit)}).SupportedOnHost()
 }
@@ -125,7 +127,9 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	result := "ok"
 	if validationErr != nil {
 		result = validationErr.Error()
-		if !validPreflightMessage(result) {
+		if errors.Is(validationErr, errRemoteClaudeHostCheck) {
+			result = preflightRemoteClaudeHostCheckFailed
+		} else if !validPreflightMessage(result) {
 			result = "failed"
 		}
 	}
@@ -168,7 +172,7 @@ func validateRemoteSelection(ctx context.Context, selection remoteChoicePrefligh
 					return ctx.Err()
 				}
 				// The short host probe deadline must not look like the whole preflight deadline.
-				return preflightError{message: "remote Claude host check failed: " + redactActionText(err.Error(), runner.secretValues()...)}
+				return preflightError{message: preflightRemoteClaudeHostCheckFailed + ": " + redactActionText(err.Error(), runner.secretValues()...), cause: errRemoteClaudeHostCheck}
 			}
 			break
 		}

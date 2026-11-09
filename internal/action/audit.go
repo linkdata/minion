@@ -26,7 +26,7 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
-var auditValidatorHelpers = []string{"strict-json-keys.cjs", "safe-input.cjs"}
+var auditValidatorResources = []string{"strict-json-keys.cjs", "safe-input.cjs", "report-schema.json"}
 
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
 var auditBlockFile = regexp.MustCompile(`^[A-Z][A-Z0-9-]*\.md$`)
@@ -48,7 +48,7 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 }
 
 func checkAuditValidatorScripts(skill string) error {
-	scripts := slices.Clone(auditValidatorHelpers)
+	scripts := slices.Clone(auditValidatorResources)
 	for _, validator := range auditValidators {
 		scripts = append(scripts, validator.script)
 	}

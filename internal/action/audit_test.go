@@ -290,7 +290,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 			t.Fatal(err)
 		}
 	}
-	for _, name := range auditValidatorHelpers {
+	for _, name := range auditValidatorResources {
 		if err := os.WriteFile(filepath.Join(skillDir, name), nil, 0600); err != nil {
 			t.Fatal(err)
 		}

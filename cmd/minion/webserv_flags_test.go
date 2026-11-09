@@ -52,6 +52,7 @@ func TestWebservFlagsRejectExplicitEmptyOutsideAdminService(t *testing.T) {
 		want string
 	}{
 		{[]string{"-mode=execute", "-address="}, "webserv flags require orchestrate mode"},
+		{[]string{"-mode=execute", "-user="}, "webserv flags require orchestrate mode"},
 		{[]string{"-certdir="}, "webserv flags require an admin block"},
 	} {
 		code, output := runStartupFixtureWithRun(t, cfg, func() int {
@@ -63,6 +64,39 @@ func TestWebservFlagsRejectExplicitEmptyOutsideAdminService(t *testing.T) {
 		if code != 2 || !strings.Contains(output, test.want) {
 			t.Fatalf("explicit empty webserv flag %v: exit=%d log=%q", test.args, code, output)
 		}
+	}
+}
+
+func TestWebservFlagsRejectUnusedWithoutListener(t *testing.T) {
+	for _, shortcut := range []string{"-oneshot", "-install-skills"} {
+		for _, option := range []string{"-address=", "-certdir=", "-datadir=", "-listenurl="} {
+			code, output := runStartupFixture(t, config.Config{}, shortcut, option)
+			if code != 2 || !strings.Contains(output, "cannot be combined with -oneshot or -install-skills") {
+				t.Fatalf("%s accepted %s: exit=%d log=%q", shortcut, option, code, output)
+			}
+		}
+	}
+	code, output := runStartupFixture(t, config.Config{}, "-check", "-datadir=")
+	if code != 2 || !strings.Contains(output, "-datadir requires a persistent admin listener") {
+		t.Fatalf("-check accepted -datadir: exit=%d log=%q", code, output)
+	}
+}
+
+func TestWebservUserSwitchWithoutAdminListener(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
+	for _, args := range [][]string{{"-oneshot", "-user="}, {"-check", "-user="}, {"-user="}} {
+		code, output := runStartupFixtureWithRun(t, cfg, func() int {
+			return runWithGitCheck(func(context.Context, string) error { return errors.New("stop after config") })
+		}, args...)
+		if code != 1 || !strings.Contains(output, "Git preflight: stop after config") {
+			t.Fatalf("-user without admin listener %v: exit=%d log=%q", args, code, output)
+		}
+	}
+	code, output := runStartupFixture(t, cfg, "-install-skills", "-user=minion-no-such-user-!")
+	if code != 2 || !strings.Contains(output, "switch webserv user:") {
+		t.Fatalf("-install-skills rejected -user before switching: exit=%d log=%q", code, output)
 	}
 }
 
@@ -170,21 +204,28 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 	}
 }
 
-func TestWebservTLSOverrideValidatesWithoutListener(t *testing.T) {
-	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{Listen: "0.0.0.0:8443", Administrators: []config.AdminAccount{{Username: "admin"}}},
+func TestWebservFlagsAcceptedForServiceAndCheck(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"}, Main: "codex", Admin: &config.AdminConfig{Listen: "0.0.0.0:8443", Administrators: []config.AdminAccount{{Username: "admin"}}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
 		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
-	certDir := t.TempDir() // No certificate is needed without a listener.
-	code, output := runStartupFixtureWithRun(t, cfg, func() int {
-		return runWithGitCheck(func(context.Context, string) error { return errors.New("stop after config") })
-	}, "-oneshot", "-certdir", certDir)
-	if code != 1 || !strings.Contains(output, "Git preflight: stop after config") || strings.Contains(output, "config:") {
-		t.Fatalf("oneshot runtime TLS validation: exit=%d log=%q", code, output)
+	certDir := t.TempDir() // Git preflight stops before certificate file checks.
+	for _, args := range [][]string{
+		{"-check", "-address", "0.0.0.0:8443", "-certdir", certDir, "-listenurl", "https://127.0.0.1:8443"},
+		{"-address", "0.0.0.0:8443", "-certdir", certDir, "-datadir", t.TempDir(), "-listenurl", "https://127.0.0.1:8443"},
+	} {
+		code, output := runStartupFixtureWithRun(t, cfg, func() int {
+			return runWithGitCheck(func(context.Context, string) error { return errors.New("stop after config") })
+		}, args...)
+		if code != 1 || !strings.Contains(output, "Git preflight: stop after config") || strings.Contains(output, "config:") {
+			t.Fatalf("rejected valid webserv flags %v: exit=%d log=%q", args, code, output)
+		}
 	}
-	code, output = runStartupFixture(t, cfg, "-install-skills", "-certdir", certDir)
-	if code != 0 || strings.Contains(output, "config:") {
-		t.Fatalf("install-skills runtime TLS validation: exit=%d log=%q", code, output)
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check", "-address", "0.0.0.0:8443", "-certdir", certDir, "-listenurl", "https://127.0.0.1:8443")
+	if code != 1 || !strings.Contains(output, "admin TLS preflight:") || !strings.Contains(output, "fullchain.pem") {
+		t.Fatalf("-check skipped webserv TLS preflight: exit=%d log=%q", code, output)
 	}
 	code, output = runStartupFixture(t, cfg, "-check", "-address", "127.0.0.1:99999")
 	if code != 2 || !strings.Contains(output, "-address port") {

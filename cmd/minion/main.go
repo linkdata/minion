@@ -58,10 +58,17 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
-	webservFlagsUsed := false
+	webservFlagsUsed, listenerFlagsUsed, dataDirUsed := false, false, false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
-		case "address", "certdir", "user", "datadir", "listenurl":
+		case "address", "certdir", "listenurl":
+			webservFlagsUsed = true
+			listenerFlagsUsed = true
+		case "datadir":
+			webservFlagsUsed = true
+			listenerFlagsUsed = true
+			dataDirUsed = true
+		case "user":
 			webservFlagsUsed = true
 		}
 	})
@@ -130,6 +137,14 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("-install-skills cannot be combined with -oneshot or -check")
 		return 2
 	}
+	if (*oneshot || *installSkills) && listenerFlagsUsed {
+		logger.Print("-address, -certdir, -datadir, and -listenurl cannot be combined with -oneshot or -install-skills")
+		return 2
+	}
+	if *check && dataDirUsed {
+		logger.Print("-datadir requires a persistent admin listener")
+		return 2
+	}
 	loadedPath, err := filepath.Abs(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
@@ -151,7 +166,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("config: %v", err)
 		return 2
 	}
-	if webservFlagsUsed && cfg.Admin == nil {
+	if listenerFlagsUsed && cfg.Admin == nil {
 		logger.Print("webserv flags require an admin block in the config")
 		return 2
 	}

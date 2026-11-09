@@ -99,6 +99,69 @@ func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
 	}
 }
 
+func TestAdminPartialTLSUsesRuntimeCertDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, cert, key string
+	}{
+		{"cert only", "cert.pem", ""},
+		{"key only", "", "key.pem"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
+				Listen: "0.0.0.0:8443", TLSCertFile: tc.cert, TLSKeyFile: tc.key,
+				Administrators: []AdminAccount{{Username: "admin"}},
+			}}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "tls_cert_file and tls_key_file must both be set") {
+				t.Fatalf("incomplete pair accepted without -certdir: %v", err)
+			}
+			runtime := AdminConfig{WebservCertDir: "/certs"}
+			loaded, err := LoadWithAdminRuntime(path, runtime)
+			if err != nil {
+				t.Fatalf("runtime -certdir rejected: %v", err)
+			}
+			wantCert, wantKey := tc.cert, tc.key
+			if wantCert != "" {
+				wantCert = filepath.Join(filepath.Dir(path), wantCert)
+			}
+			if wantKey != "" {
+				wantKey = filepath.Join(filepath.Dir(path), wantKey)
+			}
+			if loaded.Admin.TLSCertFile != wantCert || loaded.Admin.TLSKeyFile != wantKey {
+				t.Fatalf("loaded paths: cert=%q key=%q, want cert=%q key=%q", loaded.Admin.TLSCertFile, loaded.Admin.TLSKeyFile, wantCert, wantKey)
+			}
+			updated, err := UpdateWithAdminRuntime(path, runtime, func(cfg *Config) error {
+				cfg.BotLogin = "updated-bot"
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("runtime -certdir update rejected: %v", err)
+			}
+			if updated.Admin.TLSCertFile != wantCert || updated.Admin.TLSKeyFile != wantKey {
+				t.Fatalf("updated paths: cert=%q key=%q, want cert=%q key=%q", updated.Admin.TLSCertFile, updated.Admin.TLSKeyFile, wantCert, wantKey)
+			}
+			data, err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved Config
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.BotLogin != "updated-bot" || saved.Admin.TLSCertFile != tc.cert || saved.Admin.TLSKeyFile != tc.key || saved.Admin.WebservCertDir != "" {
+				t.Fatalf("saved config changed runtime or raw TLS paths: %+v", saved.Admin)
+			}
+		})
+	}
+}
+
 func TestGitHubTokenValidation(t *testing.T) {
 	config := Config{BotLogin: "bot", Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 	if err := config.Validate(t.TempDir()); err != nil {

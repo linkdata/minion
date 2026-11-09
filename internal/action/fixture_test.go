@@ -585,7 +585,7 @@ func writeActionTestSkills(t *testing.T, home, parent string, sources ...string)
 					t.Fatal(err)
 				}
 			}
-			for _, helper := range auditValidatorHelpers {
+			for _, helper := range auditValidatorResources {
 				if err := os.WriteFile(filepath.Join(dir, helper), []byte("module.exports = {};\n"), 0600); err != nil {
 					t.Fatal(err)
 				}

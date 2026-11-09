@@ -592,7 +592,7 @@ func (c *Config) Validate(configDir string) error {
 		if admin.Listen == "" {
 			admin.Listen = DefaultAdminListen
 		}
-		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
+		if admin.WebservCertDir == "" && (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
 		var host string
@@ -633,6 +633,8 @@ func (c *Config) Validate(configDir string) error {
 		}
 		if admin.TLSCertFile != "" {
 			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)
+		}
+		if admin.TLSKeyFile != "" {
 			admin.TLSKeyFile = resolveAdminTLSPath(configDir, admin.TLSKeyFile)
 		}
 	}

@@ -96,6 +96,52 @@ func TestAdvancedConfigMasksSecretsAndStagesOnlyKeys(t *testing.T) {
 	}
 }
 
+func TestAdvancedConfigUsesRuntimeCertDirWithPartialSavedTLS(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{
+		Listen: "0.0.0.0:8443", TLSKeyFile: "key.pem",
+		Administrators: []config.AdminAccount{testAdminAccount()},
+	}}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := config.AdminConfig{WebservCertDir: "/certs"}
+	view, err := advancedConfigView(path, nil, runtime)
+	if err != nil {
+		t.Fatalf("advanced editor rejected runtime -certdir: %v", err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	if edited.Admin.TLSCertFile != "" || edited.Admin.TLSKeyFile != "key.pem" {
+		t.Fatalf("advanced editor changed raw TLS paths: %+v", edited.Admin)
+	}
+	edited.BotLogin = "updated-bot"
+	data, err = json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, nil, runtime, view.Version, string(data)); err != nil {
+		t.Fatalf("advanced save rejected runtime -certdir: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved config.Config
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.BotLogin != "updated-bot" || saved.Admin.TLSCertFile != "" || saved.Admin.TLSKeyFile != "key.pem" || saved.Admin.WebservCertDir != "" {
+		t.Fatalf("advanced save changed runtime or raw TLS paths: %+v", saved.Admin)
+	}
+}
+
 func TestAdvancedConfigRoutesRequireAdminAndSaveMaskedForm(t *testing.T) {
 	account := testAdminAccount()
 	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "github-secret"},

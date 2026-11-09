@@ -635,6 +635,20 @@ func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
 	}
 }
 
+func TestLateRemoteOutcomeRetainsDiagnosticsAfterClockStep(t *testing.T) {
+	f := newLateOutcomeFixture(t, false)
+	f.owner.Usage = nil
+	decision := f.store.Data.TerminalDecisions[f.job.Identity.JobID]
+	f.owner.remoteAttachedAt = decision.DecidedAt.Add(time.Minute) // Attach happened first, then the wall clock moved back.
+	if err := f.owner.receiveLateOutcome("remote", f.outcome); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
+	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
+		t.Fatalf("late diagnostic after clock step: %q error=%v", data, err)
+	}
+}
+
 func TestLateRemoteOutcomeRetainsDiagnosticsWithoutUsageStore(t *testing.T) {
 	f := newLateOutcomeFixture(t, true)
 	usageStore := f.owner.Usage

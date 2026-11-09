@@ -33,6 +33,8 @@ const (
 	preflightClaudeSettingsUnavailable  = "Claude settings check failed"
 )
 
+const preflightRemoteClaudeHostCheckFailed = "remote Claude host check failed"
+
 func validPreflightMessage(message string) bool {
 	switch message {
 	case preflightRunnerUnavailable, preflightSelectionUnavailable, preflightRolePairUnavailable, preflightWorkRootUnavailable,
@@ -40,7 +42,7 @@ func validPreflightMessage(message string) bool {
 		preflightCommandSkillUnavailable, preflightAuditSkillUnavailable,
 		preflightAuditToolchainUnavailable, preflightGitReadinessUnavailable,
 		preflightCodexLoginUnavailable, preflightCodexBoundaryUnavailable,
-		preflightCodexInvocationUnsupported, preflightClaudeSettingsUnavailable:
+		preflightCodexInvocationUnsupported, preflightClaudeSettingsUnavailable, preflightRemoteClaudeHostCheckFailed:
 		return true
 	}
 	return false

@@ -490,3 +490,61 @@ func TestRemoteClaudePreflightReportsHostFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoteClaudeHostFailureRefreshReportsSafeReason(t *testing.T) {
+	const secret = "private-claude-key"
+	root := filepath.Join(t.TempDir(), secret, strings.Repeat("x", 60))
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", root)
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := WorkerCredentials{ClaudeAPIKey: "old-key"}
+	if err := executor.SetWorkerCredentials(old); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+		Main: RoleSettings{Provider: "claude", Model: "claude-pinned", Effort: "low"}}
+	executor.choicesFetched = true
+	executor.auditHostSupported = auditSupportedOnHost()
+	server := httptest.NewTLSServer(executor)
+	t.Cleanup(func() {
+		_ = executor.Close()
+		server.Close()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	updated := make(chan error, 1)
+	go func() {
+		updated <- executor.updateIdleWorkerCredentials(ctx, WorkerCredentials{ClaudeAPIKey: secret})
+	}()
+	for {
+		executor.mu.Lock()
+		pending, changed := executor.preflightPending, executor.changed
+		executor.mu.Unlock()
+		if pending {
+			break
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			t.Fatal("credential candidate was not staged")
+		}
+	}
+	if err := PreflightRemoteChoices(ctx, server.Client(), server.URL, "remote", false); err != nil {
+		t.Fatalf("refresh acknowledgement failed: %v", err)
+	}
+	want := "remote worker: " + preflightRemoteClaudeHostCheckFailed
+	if err := <-updated; err == nil || err.Error() != want || strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), root) {
+		t.Fatalf("parent refresh reason = %v, want %q without host details", err, want)
+	}
+	executor.mu.Lock()
+	current, pending, gate := executor.credentials, executor.preflightPending, executor.choicesFetched
+	executor.mu.Unlock()
+	if current != old || pending || !gate {
+		t.Fatal("failed host check did not restore the prior credential and pull gate")
+	}
+}
