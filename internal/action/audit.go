@@ -344,7 +344,7 @@ type auditCoverageEvidence struct {
 }
 
 // This checks structured audit claims against coverage and assigned source; it cannot prove a reviewer ran.
-func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, source *workspace.Snapshot) error {
+func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, source *workspace.Snapshot, companions []string) error {
 	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
 		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
 		"ordinary_attack_class_block", "selected_companion_blocks", "excluded_blocks", "prior_status", "attempts", "wave", "status",
@@ -704,6 +704,10 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		for _, block := range unit.SelectedCompanionBlocks {
 			if !auditVisibleText(block) {
 				return errors.New("audit coverage-ledger.json has invalid selected companion block")
+			}
+			file, _, _ := strings.Cut(block, "#")
+			if !slices.Contains(companions, file) {
+				return errors.New("audit coverage-ledger.json selects a companion file absent from metadata")
 			}
 			assignedClass = assignedClass || block == unit.CanonicalRefs["attack_class"]
 		}

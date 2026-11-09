@@ -197,7 +197,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{"active finding with another applicable candidate", applicableCandidate, auditCandidateFindingFixture, ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateAuditCoverage([]byte(test.ledger), []byte(test.findings), []byte("Audit report"), nil)
+			err := validateAuditCoverage([]byte(test.ledger), []byte(test.findings), []byte("Audit report"), nil, nil)
 			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
 				t.Fatalf("validateAuditCoverage() = %v; want %q", err, test.want)
 			}
@@ -207,6 +207,7 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 	withContext = strings.Replace(withContext, `"excluded_blocks":[]`, `"excluded_blocks":[{"block":"ATTACK-CLASSES.md#Injection","reason":"Outside this boundary."}]`, 1)
 	for _, test := range []struct {
 		name, ledger, findings, report, want string
+		companion                            bool
 	}{
 		{name: "covered"},
 		{name: "invisible report", report: "\u200b", want: "no visible content"},
@@ -226,11 +227,11 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 		{name: "reserved agent ID", ledger: strings.Replace(validLedger, `"agent_id":"hunter"`, `"agent_id":"con"`, 1), want: "lacks assigned review evidence"},
 		{name: "excluded unit declares exhausted critic budget", ledger: incompleteExcluded, want: "incomplete audit budget"},
 		{name: "archived attempt declares unaffordable budget", ledger: incompleteArchive, want: "incomplete audit budget"},
-		{name: "covered with populated context", ledger: withContext},
-		{name: "malformed excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "Companion B", 1), want: "invalid excluded block"},
-		{name: "custom excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "CUSTOM-AUDIT.md#New class", 1)},
-		{name: "assigned ordinary excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "ATTACK-CLASSES.md#Access control", 1), want: "invalid excluded block"},
-		{name: "selected companion excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF", 1), want: "invalid excluded block"},
+		{name: "covered with populated context", ledger: withContext, companion: true},
+		{name: "malformed excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "Companion B", 1), want: "invalid excluded block", companion: true},
+		{name: "custom excluded block", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "CUSTOM-AUDIT.md#New class", 1), companion: true},
+		{name: "assigned ordinary excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "ATTACK-CLASSES.md#Access control", 1), want: "invalid excluded block", companion: true},
+		{name: "selected companion excluded", ledger: strings.Replace(withContext, "ATTACK-CLASSES.md#Injection", "WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF", 1), want: "invalid excluded block", companion: true},
 		{name: "covered with archived attempt and distinct check owners", ledger: withAttempt},
 		{name: "covered with lifecycle", ledger: withLifecycle},
 		{name: "invisible surface label", ledger: strings.Replace(validLedger, `"surface":"Source"`, `"surface":"\u200b"`, 1), want: "lacks unique coverage identity"},
@@ -340,6 +341,10 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 			}
 			for i := range result.Artifacts {
 				switch result.Artifacts[i].Path {
+				case "run-metadata.json":
+					if test.companion {
+						result.Artifacts[i].Data = []byte(strings.Replace(string(result.Artifacts[i].Data), `"selected_companion_files":[]`, `"selected_companion_files":["WEB-PROTOCOL-AND-AUTH.md"]`, 1))
+					}
 				case "REPORT.md":
 					result.Artifacts[i].Data = []byte(result.Answer)
 				case "coverage-ledger.json":
@@ -368,6 +373,27 @@ func TestCompleteAuditResultValidatesCoverage(t *testing.T) {
 				t.Fatalf("partial audit evidence rejected: %v", err)
 			}
 		})
+	}
+}
+
+func TestCompleteAuditCompanionBlocksMatchMetadata(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "coverage-ledger.json" {
+			result.Artifacts[i].Data = []byte(strings.Replace(string(result.Artifacts[i].Data), `"selected_companion_blocks":[]`, `"selected_companion_blocks":["WEB-PROTOCOL-AND-AUTH.md#Core discipline"]`, 1))
+		}
+	}
+	if err := result.Validate(job); err == nil || !strings.Contains(err.Error(), "companion file absent from metadata") {
+		t.Fatalf("ledger companion without metadata: %v", err)
+	}
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "run-metadata.json" {
+			result.Artifacts[i].Data = []byte(strings.Replace(string(result.Artifacts[i].Data), `"selected_companion_files":[]`, `"selected_companion_files":["WEB-PROTOCOL-AND-AUTH.md"]`, 1))
+		}
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("matching companion metadata rejected: %v", err)
 	}
 }
 
