@@ -42,6 +42,9 @@ func TestBundledAuditValidatorCoverageRules(t *testing.T) {
 	}{
 		{name: "assigned", ledger: auditCoveredLedgerFixture, valid: true},
 		{name: "archived assignment", ledger: archived, valid: true},
+		{name: "empty ledger", ledger: `[]`, wantError: "at least one coverage unit"},
+		{name: "unsafe current wave", ledger: strings.Replace(auditCoveredLedgerFixture, `"wave":1`, `"wave":9007199254740992`, 1), wantError: "positive integer"},
+		{name: "unsafe archived wave", ledger: strings.Replace(archived, `"wave":1,"status":"covered","agent_id":"older"`, `"wave":9007199254740992,"status":"covered","agent_id":"older"`, 1), wantError: "positive integer"},
 		{name: "current owner has no check", ledger: missingCurrentOwner, wantError: "assigned agent must own a local check"},
 		{name: "archived owner has no check", ledger: missingArchivedOwner, wantError: "assigned agent must own a local check"},
 		{name: "archived check owner reused", ledger: reusedArchivedCheck, wantError: "prior assignment owner evidence"},
@@ -75,6 +78,61 @@ func TestBundledAuditValidatorCoverageRules(t *testing.T) {
 			}
 			if test.wantError != "" && !strings.Contains(string(output), test.wantError) {
 				t.Fatalf("validator output = %s; want %q", output, test.wantError)
+			}
+		})
+	}
+}
+
+func TestBundledAuditValidatorRejectsUnsafeLineNumbers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	script := filepath.Join("..", "skills", "bundled", "security-audit", "validate-findings.cjs")
+	for _, test := range []struct{ name, old string }{
+		{"trace", `"trace":[{"kind":"entrypoint","file":"source.txt","line":1`},
+		{"evidence", `"evidence":[{"file":"source.txt","line":1`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			findings := strings.Replace(auditConfirmedFindingFixture, test.old, strings.Replace(test.old, `"line":1`, `"line":9007199254740992`, 1), 1)
+			file := filepath.Join(t.TempDir(), "findings.json")
+			if err := os.WriteFile(file, []byte(findings), 0600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.CommandContext(t.Context(), node, script, file).CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "must be a positive integer") {
+				t.Fatalf("unsafe %s line accepted: %v, %s", test.name, err, output)
+			}
+		})
+	}
+}
+
+func TestBundledAuditValidatorsRejectSymlinkInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	for _, name := range []string{"validate-findings.cjs", "validate-coverage-ledger.cjs"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "audit.json")
+			if err := os.WriteFile(file, []byte(`[]`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			link := filepath.Join(dir, "link.json")
+			if err := os.Symlink(file, link); err != nil {
+				t.Fatal(err)
+			}
+			script := filepath.Join("..", "skills", "bundled", "security-audit", name)
+			output, err := exec.CommandContext(t.Context(), node, script, link).CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "input must not be a symlink") {
+				t.Fatalf("symlink input accepted: %v, %s", err, output)
 			}
 		})
 	}

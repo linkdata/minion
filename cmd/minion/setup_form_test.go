@@ -99,6 +99,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Save setup") ||
 		!strings.Contains(home.Body.String(), "Save the bot account and first repository below") ||
+		!strings.Contains(home.Body.String(), `name="repository" value="" maxlength="201"`) ||
 		strings.Contains(home.Body.String(), "Sign in as admin to save") ||
 		strings.Contains(home.Body.String(), `name="repository_id"`) || strings.Contains(home.Body.String(), `name="owner_id"`) ||
 		strings.Contains(home.Body.String(), "secret-token") {
