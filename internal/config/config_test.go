@@ -94,8 +94,11 @@ func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080", WebservListenURL: "https://minion.example"}); err == nil {
-		t.Fatal("HTTPS OAuth through a plaintext listener was accepted")
+	if _, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080", WebservListenURL: "https://minion.example"}); err != nil {
+		t.Fatalf("HTTPS OAuth through an explicit proxy origin was rejected: %v", err)
+	}
+	if _, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080"}); err == nil {
+		t.Fatal("HTTPS OAuth through a plaintext listener without a proxy origin was accepted")
 	}
 }
 

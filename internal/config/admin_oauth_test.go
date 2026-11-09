@@ -67,6 +67,13 @@ func TestWebservListenURLRejectsMalformedDNS(t *testing.T) {
 	}
 }
 
+func TestWebservListenURLRejectsUnsupportedScheme(t *testing.T) {
+	admin := AdminConfig{WebservListenURL: "ftp://minion.example"}
+	if err := admin.ValidateWebservOptions(); err == nil || !strings.Contains(err.Error(), "HTTP or HTTPS") {
+		t.Fatalf("unsupported -listenurl scheme: %v", err)
+	}
+}
+
 func TestOAuthClientConfigValidation(t *testing.T) {
 	valid := func() Config {
 		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{
@@ -194,6 +201,24 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	proxiedHTTPS.Admin.TLSCertFile, proxiedHTTPS.Admin.TLSKeyFile = "", ""
 	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "requires TLS") {
 		t.Fatalf("HTTPS callback without listener TLS: %v", err)
+	}
+	proxiedHTTPS.Admin.Listen = "0.0.0.0:8377"
+	proxiedHTTPS.Admin.WebservListenURL = "https://minion.example"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("HTTPS callback through an explicit proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.Listen = "127.0.0.1:8377"
+	proxiedHTTPS.Admin.WebservAddress = "0.0.0.0:9000"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("public HTTP -address with an explicit proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.WebservListenURL = ""
+	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "outside literal loopback") {
+		t.Fatalf("public HTTP -address without a proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.WebservListenURL = "https://other.example"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "origin must match") {
+		t.Fatalf("HTTPS callback with mismatched proxy origin: %v", err)
 	}
 	defaultPort := valid()
 	defaultPort.Admin.GitLabOAuth.BaseURL = "https://GITLAB.example:443"

@@ -40,8 +40,9 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 		if redirect.Scheme == "http" && (a.TLSCertFile != "" || a.WebservCertDir != "") {
 			return fmt.Errorf("admin.%s redirect_url must use HTTPS when the admin listener uses TLS", entry.name)
 		}
-		if redirect.Scheme == "https" && a.TLSCertFile == "" && a.WebservCertDir == "" {
-			return fmt.Errorf("admin.%s redirect_url requires TLS on the admin listener", entry.name)
+		if redirect.Scheme == "https" && a.TLSCertFile == "" && a.WebservCertDir == "" &&
+			(entryURL == nil || entryURL.Scheme != "https") {
+			return fmt.Errorf("admin.%s redirect_url requires TLS on the admin listener or an HTTPS -listenurl behind a proxy", entry.name)
 		}
 		if entryURL != nil && !sameOrigin(redirect, entryURL) {
 			return fmt.Errorf("admin.%s redirect_url origin must match -listenurl", entry.name)
@@ -142,8 +143,11 @@ func (a *AdminConfig) ValidateWebservOptions() error {
 		return errors.New("-listenurl must be an HTTP or HTTPS origin without a path, query, or fragment")
 	}
 	listenerTLS := a.TLSCertFile != "" || a.WebservCertDir != ""
-	if listenerTLS && entry.Scheme != "https" || !listenerTLS && entry.Scheme != "http" {
-		return errors.New("-listenurl scheme must match the admin listener TLS")
+	if entry.Scheme != "http" && entry.Scheme != "https" {
+		return errors.New("-listenurl must use HTTP or HTTPS")
+	}
+	if listenerTLS && entry.Scheme != "https" {
+		return errors.New("-listenurl must use HTTPS when the admin listener uses TLS")
 	}
 	if entry.Scheme == "http" {
 		addr, err := netip.ParseAddr(entry.Hostname())

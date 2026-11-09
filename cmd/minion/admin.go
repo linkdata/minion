@@ -114,6 +114,8 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		_ = listener.Close()
 		return nil, fmt.Errorf("initialize admin dashboard: %w", err)
 	}
+	// An explicit HTTPS URL without a local certificate opts into a trusted TLS-offloading proxy.
+	jw.TrustForwardedHeaders = certificate == nil && strings.HasPrefix(cfg.WebservListenURL, "https://")
 	jw.Logger = slog.Default()
 	var oauth *oauthAccess
 	if !setup {
@@ -221,7 +223,10 @@ func validateWebservAdminAddress(cfg config.AdminConfig) error {
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	addr, err := netip.ParseAddr(host)
 	if err != nil || !addr.Unmap().IsLoopback() {
-		return errors.New("webserv address outside literal loopback requires a certificate directory or admin TLS files")
+		if strings.HasPrefix(cfg.WebservListenURL, "https://") {
+			return nil
+		}
+		return errors.New("webserv address outside literal loopback requires a certificate directory, admin TLS files, or HTTPS -listenurl behind a proxy")
 	}
 	return nil
 }

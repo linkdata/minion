@@ -179,7 +179,7 @@ Open the current action's detail link for saved private discussion, reports, dia
 
 JaWS keeps sessions in memory, so they end on restart or ordinarily after one minute without an attached JaWS page. The `/admin/login` page keeps its session live while its JaWS browser connection is attached. Successful password sign-in requires a current live JaWS session. Open or reload `/admin/login` if you have none. With OAuth enabled, new home and admin login pages return 503 at 479 sessions; an already open login page can still sign in. With an admin password set and no OAuth, new home requests redirect to admin login at that limit, and new login pages can use the remaining slots. Sessions are bound to the client address seen by Minion, so changing networks can require signing in again. The listener caps sessions at 512 total. Each guest session can hold four outstanding public JaWS page requests. Failed admin sign-ins are limited to five per minute. At most two password hashes run concurrently.
 
-An empty `listen` uses `127.0.0.1:8377`. The admin server starts with the default persistent run; `-oneshot` skips the listener and its TLS files. Without TLS, the listener must use a literal loopback IP. Public addresses require `tls_cert_file` and `tls_key_file`, or Webserv's `-certdir` containing `fullchain.pem` and `privkey.pem`. Relative admin TLS paths resolve against the config directory. Direct browser connections to Minion's TLS listener must trust its certificate and use a covered hostname.
+An empty `listen` uses `127.0.0.1:8377`. The admin server starts with the default persistent run; `-oneshot` skips the listener and its TLS files. A public address requires `tls_cert_file` and `tls_key_file`, Webserv's `-certdir` containing `fullchain.pem` and `privkey.pem`, or an explicit HTTPS `-listenurl` for TLS termination at a reverse proxy. Without one of these, the listener must use a literal loopback IP. Relative admin TLS paths resolve against the config directory. Direct browser connections to Minion's TLS listener must trust its certificate and use a covered hostname.
 
 Webserv listener flags require an admin block:
 
@@ -187,11 +187,9 @@ Webserv listener flags require an admin block:
 | --- | --- |
 | Persistent service | `-address`, `-certdir`, `-datadir`, `-listenurl` |
 | `-check` | `-address`, `-certdir`, `-listenurl`; verifies TLS without binding |
-| `-oneshot`, `-install-skills` | `-certdir` only, to validate a saved public admin address |
+| `-oneshot`, `-install-skills` | `-certdir`, `-listenurl`; validates config without starting the listener or opening TLS files |
 
-`-listenurl` sets the external origin: HTTPS with listener TLS, or HTTP on `localhost` or a literal loopback IP. OAuth callbacks must match that origin and share one host; HTTP OAuth requires a literal loopback IP. Without `-listenurl`, Minion passes a configured OAuth callback origin to Webserv or logs Webserv's inferred URL. Behind a proxy, set `-listenurl` to the public URL; Minion's backend listener still uses TLS. `-datadir` is Webserv data, separate from Minion's state and work paths.
-
-`-oneshot` and `-install-skills` accept `-certdir` for config validation but do not start the admin listener or open its TLS files.
+`-listenurl` sets the external origin: HTTPS with listener TLS or proxy TLS termination, or HTTP on `localhost` or a literal loopback IP. OAuth callbacks must match that origin and share one host; HTTP OAuth requires a literal loopback IP. Without `-listenurl`, Minion passes a configured OAuth callback origin to Webserv or logs Webserv's inferred URL. For TLS offload, set `-listenurl` to the public HTTPS origin and restrict access to the HTTP backend to the trusted proxy. The proxy must preserve the public Host and WebSocket upgrades, replace client-supplied forwarding headers, set `X-Forwarded-Proto: https` and the client IP, and set HSTS. `-datadir` is Webserv data, separate from Minion's state and work paths.
 
 `-user` switches the whole process before config creation and preflight, even without an admin block. That account needs access to the config, state, work root, and certificates, and must be able to bind the port. `-user` is unavailable on Windows. An admin listener failure exits with status 1. The admin listener is separate from the worker HTTPS endpoint and does not use its token.
 

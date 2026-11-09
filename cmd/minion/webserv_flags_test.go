@@ -69,12 +69,19 @@ func TestWebservFlagsRejectExplicitEmptyOutsideAdminService(t *testing.T) {
 }
 
 func TestWebservFlagsRejectUnusedWithoutListener(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Main: "codex", Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
 	for _, shortcut := range []string{"-oneshot", "-install-skills"} {
-		for _, option := range []string{"-address=", "-datadir=", "-listenurl="} {
+		for _, option := range []string{"-address=", "-datadir="} {
 			code, output := runStartupFixture(t, config.Config{}, shortcut, option)
 			if code != 2 || !strings.Contains(output, "cannot be combined with -oneshot or -install-skills") {
 				t.Fatalf("%s accepted %s: exit=%d log=%q", shortcut, option, code, output)
 			}
+		}
+		code, output := runStartupFixture(t, cfg, shortcut, "-listenurl=https://admin.example")
+		if code != 2 || !strings.Contains(output, "webserv flags require an admin block") {
+			t.Fatalf("%s rejected -listenurl before config validation: exit=%d log=%q", shortcut, code, output)
 		}
 	}
 	code, output := runStartupFixture(t, config.Config{}, "-check", "-datadir=")
@@ -181,7 +188,6 @@ func TestAdminServerUsesHTTPOAuthCallbackOrigin(t *testing.T) {
 func TestAdminListenerRejectsUnsafeWebservOptions(t *testing.T) {
 	for _, cfg := range []config.AdminConfig{
 		{Listen: "127.0.0.1:8377", WebservListenURL: "http://public.example"},
-		{Listen: "127.0.0.1:8377", WebservListenURL: "https://public.example"},
 		{Listen: "127.0.0.1:8377", WebservListenURL: "http://localhost/setup"},
 		{Listen: "127.0.0.1:8377", TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", WebservListenURL: "http://localhost"},
 	} {
@@ -197,6 +203,13 @@ func TestAdminListenerRejectsUnsafeWebservOptions(t *testing.T) {
 	if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
 		_ = server.Close()
 		t.Fatal("empty expanded certificate directory reached the listener")
+	}
+}
+
+func TestAdminListenerAllowsHTTPSProxyOffload(t *testing.T) {
+	cfg := config.AdminConfig{Listen: "0.0.0.0:8377", WebservListenURL: "https://admin.example"}
+	if err := validateWebservAdminAddress(cfg); err != nil {
+		t.Fatalf("HTTP backend behind HTTPS proxy: %v", err)
 	}
 }
 

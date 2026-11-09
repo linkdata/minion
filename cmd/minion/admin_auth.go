@@ -19,6 +19,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
+	"github.com/linkdata/secureheaders"
 )
 
 const adminSessionKey = "minion.admin.username"
@@ -267,7 +268,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	})
 	crossOrigin := http.NewCrossOriginProtection()
 	return jw.SecureHeadersMiddleware(access.browserErrors(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if crossSchemeAdminOrigin(r) || crossOrigin.Check(r) != nil {
+		if crossSchemeAdminOrigin(r, jw.TrustForwardedHeaders) || crossOrigin.Check(r) != nil {
 			closeUnreadAdminBody(w, r)
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -316,12 +317,12 @@ func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action
 }
 
 // CrossOriginProtection's legacy Origin fallback compares hosts but not schemes.
-func crossSchemeAdminOrigin(r *http.Request) bool {
+func crossSchemeAdminOrigin(r *http.Request, trustForwardedHeaders bool) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return false
 	}
 	scheme := "http"
-	if r.TLS != nil {
+	if secureheaders.RequestIsSecure(r, trustForwardedHeaders) {
 		scheme = "https"
 	}
 	if raw := r.Header.Get("Origin"); raw != "" {

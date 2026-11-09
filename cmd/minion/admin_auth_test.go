@@ -462,6 +462,91 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 	}
 }
 
+func TestAdminHTTPSProxyOffload(t *testing.T) {
+	server, err := startAdminServer(t.Context(), config.AdminConfig{
+		Listen: "127.0.0.1:0", WebservListenURL: "https://admin.example",
+		Administrators: []config.AdminAccount{testAdminAccount()},
+	}, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if server.entryURL != "https://admin.example" || !server.jaws.TrustForwardedHeaders {
+		t.Fatalf("proxy entry URL = %q, trusted forwarding = %t", server.entryURL, server.jaws.TrustForwardedHeaders)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	t.Cleanup(client.CloseIdleConnections)
+	request := func(method, path string, body io.Reader, origin string, cookie *http.Cookie) *http.Request {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), method, "http://"+server.listener.Addr().String()+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "admin.example"
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-For", "203.0.113.9")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		return req
+	}
+	page, err := client.Do(request(http.MethodGet, "/admin/login", nil, "", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, readErr := io.ReadAll(page.Body)
+	closeErr := page.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read login page: read=%v close=%v", readErr, closeErr)
+	}
+	if page.StatusCode != http.StatusOK || len(page.Cookies()) != 1 || !page.Cookies()[0].Secure {
+		t.Fatalf("proxied login page: status=%d cookies=%v", page.StatusCode, page.Cookies())
+	}
+	guestCookie := page.Cookies()[0]
+	wsContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Origin", "https://admin.example")
+	header.Set("X-Forwarded-Proto", "https")
+	header.Set("X-Forwarded-For", "203.0.113.9")
+	header.Set("Cookie", guestCookie.Name+"="+guestCookie.Value)
+	conn, upgrade, err := websocket.Dial(wsContext,
+		"ws://"+server.listener.Addr().String()+"/jaws/"+adminJaWSKey(t, string(pageBody)),
+		&websocket.DialOptions{Host: "admin.example", HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("proxied WebSocket: response=%v error=%v", upgrade, err)
+	}
+	defer conn.CloseNow()
+	form := url.Values{"password": {"correct-password"}}.Encode()
+	for _, tc := range []struct {
+		origin string
+		want   int
+	}{
+		{"http://admin.example", http.StatusForbidden},
+		{"https://admin.example", http.StatusSeeOther},
+	} {
+		response, err := client.Do(request(http.MethodPost, "/admin/login", strings.NewReader(form), tc.origin, guestCookie))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != tc.want {
+			t.Fatalf("proxied login from %q: status=%d, want %d", tc.origin, response.StatusCode, tc.want)
+		}
+		if tc.want == http.StatusSeeOther && (len(response.Cookies()) != 1 || !response.Cookies()[0].Secure) {
+			t.Fatalf("proxied login cookie = %v", response.Cookies())
+		}
+	}
+}
+
 func TestAdminGuestSessionLimit(t *testing.T) {
 	jw, err := jaws.New()
 	if err != nil {

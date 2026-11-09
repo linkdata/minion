@@ -57,19 +57,19 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
-	webservFlagsUsed, listenerFlagsUsed, nonCertListenerFlagsUsed, dataDirUsed := false, false, false, false
+	webservFlagsUsed, listenerFlagsUsed, nonValidationFlagsUsed, dataDirUsed := false, false, false, false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "address", "certdir", "listenurl":
 			webservFlagsUsed = true
 			listenerFlagsUsed = true
-			if f.Name != "certdir" {
-				nonCertListenerFlagsUsed = true
+			if f.Name == "address" {
+				nonValidationFlagsUsed = true
 			}
 		case "datadir":
 			webservFlagsUsed = true
 			listenerFlagsUsed = true
-			nonCertListenerFlagsUsed = true
+			nonValidationFlagsUsed = true
 			dataDirUsed = true
 		case "user":
 			webservFlagsUsed = true
@@ -140,8 +140,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("-install-skills cannot be combined with -oneshot or -check")
 		return 2
 	}
-	if (*oneshot || *installSkills) && nonCertListenerFlagsUsed {
-		logger.Print("-address, -datadir, and -listenurl cannot be combined with -oneshot or -install-skills")
+	if (*oneshot || *installSkills) && nonValidationFlagsUsed {
+		logger.Print("-address and -datadir cannot be combined with -oneshot or -install-skills")
 		return 2
 	}
 	if *check && dataDirUsed {

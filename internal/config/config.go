@@ -627,11 +627,12 @@ func (c *Config) Validate(configDir string) error {
 			return err
 		}
 		addr, err := netip.ParseAddr(host)
-		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" && admin.WebservCertDir == "" {
+		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" && admin.WebservCertDir == "" &&
+			!strings.HasPrefix(admin.WebservListenURL, "https://") {
 			if admin.WebservAddress == "" {
-				return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+				return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file, or HTTPS -listenurl behind a proxy")
 			}
-			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files")
+			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files, or HTTPS -listenurl behind a proxy")
 		}
 		if err := admin.validateOAuth(host, number); err != nil {
 			return err
