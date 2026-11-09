@@ -749,6 +749,9 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 }
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {
+	if len(cfg.Repositories) == 0 {
+		return errors.New("no repositories configured")
+	}
 	var problems []error
 	for _, repo := range cfg.Repositories {
 		if _, _, err := client.ListRepositoryNotifications(ctx, repo.Name, time.Now().UTC()); err != nil {

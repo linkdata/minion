@@ -151,6 +151,14 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	if code != 0 || !strings.Contains(output, "preflight passed as @bot") {
 		t.Fatalf("configured GitHub account failed preflight: code=%d output=%q", code, output)
 	}
+	cfg.Admin = &config.AdminConfig{Listen: "127.0.0.1:8080", Administrators: []config.AdminAccount{testAdminAccount()}}
+	cfg.Repositories = nil
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "no repositories configured") {
+		t.Fatalf("empty setup passed repository preflight: code=%d output=%q", code, output)
+	}
 }
 
 func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
