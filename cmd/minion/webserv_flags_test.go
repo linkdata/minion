@@ -2,20 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
-	"math/big"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/linkdata/minion/internal/config"
 )
@@ -208,7 +200,7 @@ func TestAdminListenerRejectsUnsafeWebservOptions(t *testing.T) {
 	}
 }
 
-func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
+func TestWebservCertificateAllowsProxyOrigin(t *testing.T) {
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	dir := filepath.Dir(certFile)
 	if err := os.Rename(certFile, filepath.Join(dir, "fullchain.pem")); err != nil {
@@ -217,141 +209,33 @@ func TestWebservCertificateUsesOAuthCallbackURL(t *testing.T) {
 	if err := os.Rename(keyFile, filepath.Join(dir, "privkey.pem")); err != nil {
 		t.Fatal(err)
 	}
-	want := "https://" + leaf.IPAddresses[0].String()
-	cfg := config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir,
-		GitHubOAuth: &config.OAuthClient{RedirectURL: want + "/auth/github/callback"}}
-	server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = server.Close() })
-	if server.entryURL != want {
-		t.Fatalf("Webserv entry URL = %q, want callback origin %q", server.entryURL, want)
-	}
-	cfg.WebservListenURL = want
-	if err := checkAdminServerConfig(cfg); err != nil {
-		t.Fatalf("certificate rejected matching -listenurl: %v", err)
-	}
-	cfg.WebservListenURL = "https://other.example"
-	if err := checkAdminServerConfig(cfg); err == nil {
-		t.Fatal("certificate without -listenurl hostname passed preflight")
-	}
-	if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
-		_ = server.Close()
-		t.Fatal("certificate without -listenurl hostname reached the listener")
-	}
-	cfg.WebservListenURL = ""
-	cfg.GitHubOAuth.RedirectURL = "https://other.example/auth/github/callback"
-	if err := checkAdminServerConfig(cfg); err == nil || !strings.Contains(err.Error(), "OAuth callback host") {
-		t.Fatalf("certificate without callback hostname passed preflight: %v", err)
-	}
-	if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
-		_ = server.Close()
-		t.Fatal("certificate without callback hostname was accepted")
-	}
-}
-
-func TestWebservCertificateSkipsMalformedDNSName(t *testing.T) {
-	for _, badName := range []string{"bad..example", "bad%example"} {
-		t.Run(badName, func(t *testing.T) {
-			certDir := testAdminDNSCertificate(t, badName, "good.example")
-			cfg := config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: certDir}
+	for _, test := range []struct {
+		name, origin string
+		explicit     bool
+	}{
+		{name: "certificate host", origin: "https://" + leaf.IPAddresses[0].String()},
+		{name: "proxy callback", origin: "https://proxy.example"},
+		{name: "proxy explicit URL", origin: "https://proxy.example", explicit: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir,
+				GitHubOAuth: &config.OAuthClient{RedirectURL: test.origin + "/auth/github/callback"}}
+			if test.explicit {
+				cfg.WebservListenURL = test.origin
+			}
 			if err := checkAdminServerConfig(cfg); err != nil {
-				t.Fatal(err)
+				t.Fatalf("TLS preflight rejected origin %q: %v", test.origin, err)
 			}
 			server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true)
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = server.Close() })
-			_, port, err := net.SplitHostPort(server.listener.Addr().String())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want := "https://good.example:" + port; server.entryURL != want {
-				t.Fatalf("certified URL = %q, want %q", server.entryURL, want)
-			}
-
-			cfg.WebservListenURL = "https://" + badName
-			if err := checkAdminServerConfig(cfg); err == nil {
-				t.Fatal("malformed explicit -listenurl passed preflight")
-			}
-			cfg.WebservListenURL = ""
-			cfg.WebservCertDir = testAdminDNSCertificate(t, badName)
-			if err := checkAdminServerConfig(cfg); err == nil || !strings.Contains(err.Error(), "no valid startup URL") {
-				t.Fatalf("malformed only certificate name passed preflight: %v", err)
-			}
-			if server, err := startAdminServerWithSetup(t.Context(), cfg, nil, "", nil, true); err == nil {
-				_ = server.Close()
-				t.Fatal("malformed only certificate name was advertised")
+			if server.entryURL != test.origin {
+				t.Fatalf("Webserv entry URL = %q, want %q", server.entryURL, test.origin)
 			}
 		})
 	}
-}
-
-func TestAdminTLSPreflightRequiresUsableURL(t *testing.T) {
-	for _, test := range []struct {
-		listen, name string
-		wantError    bool
-	}{
-		{"127.0.0.1:0", "*.example", true},
-		{"127.0.0.2:0", "localhost", true},
-		{"minion.example:8443", "*.example", false},
-	} {
-		cfg := config.AdminConfig{Listen: test.listen, WebservCertDir: testAdminDNSCertificate(t, test.name)}
-		if err := checkAdminServerConfig(cfg); (err != nil) != test.wantError {
-			t.Errorf("listen %q, certificate %q: preflight error = %v", test.listen, test.name, err)
-		}
-	}
-	for _, test := range []struct {
-		listen, name string
-		ip           net.IP
-		wantError    bool
-	}{
-		{listen: "minion.example:8443", ip: net.ParseIP("192.0.2.8")},
-		{listen: "localhost:8443", ip: net.ParseIP("::1")},
-		{listen: "minion.example:8443", name: "localhost"},
-		{listen: "minion.example:8443", ip: net.ParseIP("0.0.0.0"), wantError: true},
-	} {
-		leaf := &x509.Certificate{NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour)}
-		if test.name != "" {
-			leaf.DNSNames = []string{test.name}
-		}
-		if test.ip != nil {
-			leaf.IPAddresses = []net.IP{test.ip}
-		}
-		certificate := &tls.Certificate{Leaf: leaf}
-		if err := checkAdminCertificateURL(certificate, config.AdminConfig{Listen: test.listen}); (err != nil) != test.wantError {
-			t.Errorf("listen %q, name %q, IP %v: preflight error = %v", test.listen, test.name, test.ip, err)
-		}
-	}
-}
-
-func testAdminDNSCertificate(t *testing.T, names ...string) string {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	certificate := &x509.Certificate{SerialNumber: big.NewInt(1), DNSNames: names,
-		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
-		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
-	der, err := x509.CreateCertificate(rand.Reader, certificate, certificate, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
-		t.Fatal(err)
-	}
-	return dir
 }
 
 func TestWebservFlagsAcceptedForServiceAndCheck(t *testing.T) {
@@ -384,22 +268,5 @@ func TestWebservFlagsAcceptedForServiceAndCheck(t *testing.T) {
 	code, output = runStartupFixture(t, cfg, "-check", "-address", "bad/address", "-certdir", certDir)
 	if code != 2 || !strings.Contains(output, "-address contains invalid host characters") {
 		t.Fatalf("-check accepted invalid webserv host: exit=%d log=%q", code, output)
-	}
-}
-
-func TestCheckRejectsUncoveredOAuthCallbackHost(t *testing.T) {
-	isolateHostPaths(t, t.TempDir())
-	certFile, keyFile, _ := remoteTestTLSFiles(t)
-	cfg := config.Config{BotLogin: "bot", Main: "codex", Admin: &config.AdminConfig{
-		TLSCertFile: certFile, TLSKeyFile: keyFile, Administrators: []config.AdminAccount{{Username: "admin"}}, GitHubOAuth: &config.OAuthClient{
-			ClientID: "id", ClientSecret: "secret", RedirectURL: "https://other.example/auth/github/callback"}},
-		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
-		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
-	code, output := runStartupFixtureWithRun(t, cfg, func() int {
-		return runWithGitCheck(func(context.Context, string) error { return nil })
-	}, "-check")
-	if code != 1 || !strings.Contains(output, "admin TLS preflight:") || !strings.Contains(output, "OAuth callback host") {
-		t.Fatalf("-check accepted uncovered callback: code=%d output=%q", code, output)
 	}
 }

@@ -58,7 +58,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	done := make(chan struct{})
 	go func() { jw.Serve(); close(done) }()
 	t.Cleanup(func() { jw.Close(); <-done })
-	form := url.Values{"bot_login": {"example-bot"}, "github_token": {"secret-token"},
+	form := url.Values{"bot_login": {"mona-cat_octo"}, "github_token": {"secret-token"},
 		"repository": {"Example/Repo"}, "repository_id": {"42"}, "owner_id": {"7"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/setup", form, nil, ""); response.Code != http.StatusForbidden {
 		t.Fatalf("anonymous setup save status=%d, want 403", response.Code)
@@ -136,7 +136,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("setup save status=%d body=%q", saved.Code, saved.Body.String())
 	}
 	cfg, err := config.Load(path)
-	if err != nil || cfg.BotLogin != "example-bot" || cfg.GitHub.Token != "secret-token" ||
+	if err != nil || cfg.BotLogin != "mona-cat_octo" || cfg.GitHub.Token != "secret-token" ||
 		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example/repo" ||
 		cfg.Repositories[0].ID != 42 || cfg.Repositories[0].OwnerID != 7 ||
 		!cfg.Repositories[0].DenyAllActors || len(cfg.Repositories[0].Actions) != 1 || cfg.Repositories[0].Actions[0] != "review" {
@@ -195,7 +195,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("partial setup save status=%d body=%q", saved.Code, saved.Body.String())
 	}
 	cfg, err = config.Load(path)
-	if err != nil || cfg.BotLogin != "example-bot" || cfg.GitHub.Token != "new-token" {
+	if err != nil || cfg.BotLogin != "mona-cat_octo" || cfg.GitHub.Token != "new-token" {
 		t.Fatalf("partial setup lost saved token: bot=%q token=%q error=%v", cfg.BotLogin, cfg.GitHub.Token, err)
 	}
 	_, err = config.Update(path, func(cfg *config.Config) error {

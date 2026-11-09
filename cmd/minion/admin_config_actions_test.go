@@ -279,15 +279,15 @@ func TestAdminRepositoryCommandsRequirePublishingHostAndRemoteWorkerCapability(t
 func TestAdminRemovesConfiguredLegacyRequester(t *testing.T) {
 	live, path := liveConfigFixture(t, false)
 	if err := live.save(func(cfg *config.Config) error {
-		cfg.Repositories[0].AllowedActors = []string{"old_user"}
-		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"old_user": 77}
+		cfg.Repositories[0].AllowedActors = []string{"old__user"}
+		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"old__user": 77}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
 	registerAdminConfigActions(mux, live, nil)
-	form := url.Values{"repository": {"owner/repo"}, "login": {"old_user"}}
+	form := url.Values{"repository": {"owner/repo"}, "login": {"old__user"}}
 	add := httptest.NewRequest(http.MethodPost, "/admin/users/add", strings.NewReader(form.Encode()))
 	add.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	addResponse := httptest.NewRecorder()

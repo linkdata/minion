@@ -24,7 +24,7 @@ import (
 )
 
 var (
-	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:_[A-Za-z0-9]{3,8})?$`)
 	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,99}$`)
 )
 

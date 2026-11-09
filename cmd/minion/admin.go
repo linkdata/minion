@@ -47,7 +47,6 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		return nil, err
 	}
 	service := adminWebservConfig(cfg)
-	cfg.Listen = service.Address
 	var fallbackTLS *tls.Config
 	var certificate *tls.Certificate
 	if cfg.WebservCertDir != "" {
@@ -85,7 +84,7 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			service.PrivkeyPem = relKey
 		}
 	}
-	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
+	if err := checkAdminCertificate(certificate); err != nil {
 		return nil, err
 	}
 	if service.ListenURL == "" {
@@ -97,6 +96,7 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			}
 		}
 	}
+	inferredFallbackURL := fallbackTLS != nil && service.ListenURL == ""
 	listener, err := service.Listen()
 	if err != nil {
 		return nil, fmt.Errorf("prepare listener: %w", err)
@@ -105,15 +105,8 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		listener = tls.NewListener(listener, fallbackTLS)
 	}
 	entryURL := service.ListenURL
-	if cfg.WebservListenURL == "" && certificate != nil {
-		entry, parseErr := url.Parse(entryURL)
-		if parseErr != nil || entry.Scheme != "https" || !config.ValidURLHost(entry.Hostname()) || certificate.Leaf.VerifyHostname(entry.Hostname()) != nil {
-			entryURL = certifiedListenURL(listener.Addr().String(), certificate, cfg)
-			if entryURL == "" {
-				_ = listener.Close()
-				return nil, errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
-			}
-		}
+	if inferredFallbackURL {
+		entryURL = strings.Replace(entryURL, "http://", "https://", 1)
 	}
 	service.ListenURL = entryURL
 	jw, err := jaws.New()
@@ -245,19 +238,19 @@ func checkAdminServerConfig(cfg config.AdminConfig) error {
 		if certificate == nil {
 			return errors.New("admin certificate directory expanded to an empty path")
 		}
-		return checkAdminCertificateURL(certificate, cfg)
+		return checkAdminCertificate(certificate)
 	}
 	if cfg.TLSCertFile != "" {
 		certificate, err := loadTLSCertificate("admin", cfg.TLSCertFile, cfg.TLSKeyFile)
 		if err != nil {
 			return err
 		}
-		return checkAdminCertificateURL(&certificate, cfg)
+		return checkAdminCertificate(&certificate)
 	}
 	return nil
 }
 
-func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConfig) error {
+func checkAdminCertificate(certificate *tls.Certificate) error {
 	if certificate == nil {
 		return nil
 	}
@@ -280,119 +273,7 @@ func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConf
 	if certificate.Leaf.KeyUsage != 0 && certificate.Leaf.KeyUsage&x509.KeyUsageDigitalSignature == 0 {
 		return errors.New("admin TLS certificate cannot sign TLS handshakes")
 	}
-	if cfg.WebservListenURL != "" {
-		entry, _ := url.Parse(cfg.WebservListenURL) // validateWebservAdminAddress checked the URL.
-		if err := certificate.Leaf.VerifyHostname(entry.Hostname()); err != nil {
-			return fmt.Errorf("admin certificate does not cover -listenurl host %q: %w", entry.Hostname(), err)
-		}
-		return nil
-	}
-	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
-		if client == nil {
-			continue
-		}
-		callback, _ := url.Parse(client.RedirectURL) // Validated before preflight and service startup.
-		if err := certificate.Leaf.VerifyHostname(callback.Hostname()); err != nil {
-			return fmt.Errorf("admin certificate does not cover OAuth callback host %q: %w", callback.Hostname(), err)
-		}
-	}
-	if cfg.GitHubOAuth != nil || cfg.GitLabOAuth != nil {
-		return nil
-	}
-	cfg.Listen = adminWebservConfig(cfg).Address
-	host, port, err := net.SplitHostPort(cfg.Listen)
-	if err != nil {
-		host = strings.TrimSuffix(strings.TrimPrefix(cfg.Listen, "["), "]")
-		port = "0" // Only hostname viability matters before the listener chooses its port.
-	}
-	if host == "" {
-		host = "0.0.0.0"
-	}
-	if net.ParseIP(host) != nil {
-		if certifiedListenURL(net.JoinHostPort(host, port), certificate, cfg) != "" {
-			return nil
-		}
-	} else if !strings.Contains(host, "%") {
-		if config.ValidURLHost(host) && certificate.Leaf.VerifyHostname(host) == nil {
-			return nil
-		}
-		for _, name := range certificate.Leaf.DNSNames {
-			if config.ValidURLHost(name) && certificate.Leaf.VerifyHostname(name) == nil {
-				return nil
-			}
-		}
-		// A DNS listen address may resolve to an IP covered only by an IP SAN.
-		for _, address := range certificate.Leaf.IPAddresses {
-			if config.ValidURLHost(address.String()) {
-				return nil
-			}
-		}
-	}
-	return errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
-}
-
-func certifiedListenURL(address string, certificate *tls.Certificate, cfg config.AdminConfig) string {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil || certificate.Leaf == nil {
-		return ""
-	}
-	boundIP := net.ParseIP(host)
-	for _, client := range []*config.OAuthClient{cfg.GitHubOAuth, cfg.GitLabOAuth} {
-		if client == nil {
-			continue
-		}
-		callback, _ := url.Parse(client.RedirectURL) // Validated before service startup.
-		if !config.ValidURLHost(callback.Hostname()) || certificate.Leaf.VerifyHostname(callback.Hostname()) != nil {
-			return ""
-		}
-		return (&url.URL{Scheme: "https", Host: callback.Host}).String()
-	}
-	if boundIP == nil {
-		return ""
-	}
-	localhostOK := boundIP.IsUnspecified() || boundIP.Equal(net.IPv4(127, 0, 0, 1)) || boundIP.Equal(net.IPv6loopback)
-	covered := func(name string) string {
-		if strings.EqualFold(name, "localhost") && !localhostOK {
-			return ""
-		}
-		if !config.ValidURLHost(name) || certificate.Leaf.VerifyHostname(name) != nil {
-			return ""
-		}
-		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
-	}
-	listenHost, _, err := net.SplitHostPort(cfg.Listen)
-	if err != nil && !strings.Contains(cfg.Listen, ":") {
-		listenHost = cfg.Listen
-	}
-	if listenHost != "" && net.ParseIP(listenHost) == nil {
-		if candidate := covered(listenHost); candidate != "" {
-			return candidate
-		}
-	}
-	if !boundIP.IsUnspecified() {
-		if candidate := covered(host); candidate != "" {
-			return candidate
-		}
-		if candidate := covered("localhost"); candidate != "" {
-			return candidate
-		}
-	}
-	for _, name := range certificate.Leaf.DNSNames {
-		if candidate := covered(name); candidate != "" {
-			return candidate
-		}
-	}
-	if boundIP.IsUnspecified() {
-		for _, address := range certificate.Leaf.IPAddresses {
-			if address.IsUnspecified() {
-				continue
-			}
-			if candidate := covered(address.String()); candidate != "" {
-				return candidate
-			}
-		}
-	}
-	return ""
+	return nil
 }
 
 // adminGuard is the single entry gate for all dashboard routes.

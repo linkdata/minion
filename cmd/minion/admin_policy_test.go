@@ -172,7 +172,7 @@ func TestAdminRequesterRoutesRequireVerifiedWriteAccess(t *testing.T) {
 		for _, tc := range []struct {
 			name, repository, login, permission, identity, want string
 		}{
-			{name: "invalid login", repository: "owner/repo", login: "old_user", want: "valid GitHub login"},
+			{name: "invalid login", repository: "owner/repo", login: "old__user", want: "valid GitHub login"},
 			{name: "unconfigured repository", repository: "owner/other", login: "writer", want: "Repository is not configured"},
 			{name: "wrong identity", repository: "owner/repo", login: "writer", permission: "write", identity: "different", want: "Requester must have write"},
 			{name: "read only", repository: "owner/repo", login: "writer", permission: "read", identity: "writer", want: "Requester must have write"},

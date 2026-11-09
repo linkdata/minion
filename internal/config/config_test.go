@@ -186,17 +186,32 @@ func TestGitHubTokenValidation(t *testing.T) {
 }
 
 func TestBotLoginValidation(t *testing.T) {
-	for _, login := range []string{"Bot-1", strings.Repeat("a", 39)} {
+	for _, login := range []string{"Bot-1", "mona-cat_octo", "2abvd19d_admin", strings.Repeat("a", 39)} {
 		cfg := Config{BotLogin: login, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 		if err := cfg.Validate(t.TempDir()); err != nil {
 			t.Fatalf("valid bot login %q: %v", login, err)
 		}
 	}
-	for _, login := range []string{"bad_user", "bad!", "-bad", "bad-", "bad--name", "bad\nname", strings.Repeat("a", 40)} {
+	for _, login := range []string{"bad_u", "bad__octo", "bad_octo12345", "bad!", "-bad", "bad-", "bad--name", "bad\nname", strings.Repeat("a", 40)} {
 		cfg := Config{BotLogin: login, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 		if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "bot_login") {
 			t.Fatalf("invalid bot login %q accepted: %v", login, err)
 		}
+	}
+}
+
+func TestManagedGitHubLoginsLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"bot_login":"mona-cat_octo","invitation_owners":["Mona-Cat_Octo"],"invitation_owner_ids":{"mona-cat_octo":2},"requester_policies":[{"login":"Mona-Cat_Octo","id":3}],"repositories":[{"name":"mona-cat_octo/repo","id":1,"owner_id":2,"actions":["review"]}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.BotLogin != "mona-cat_octo" ||
+		len(cfg.InvitationOwners) != 1 || len(cfg.RequesterPolicies) != 1 || len(cfg.Repositories) != 1 ||
+		cfg.InvitationOwners[0] != "mona-cat_octo" ||
+		cfg.RequesterPolicies[0].Login != "mona-cat_octo" || cfg.Repositories[0].Name != "mona-cat_octo/repo" {
+		t.Fatalf("managed GitHub logins did not load: %+v, %v", cfg, err)
 	}
 }
 

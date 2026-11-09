@@ -466,7 +466,7 @@ func TestAdvancedConfigRejectsInvalidBotLogin(t *testing.T) {
 	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
 		t.Fatal(err)
 	}
-	edited.BotLogin = "bad_user"
+	edited.BotLogin = "bad__user"
 	source, err := json.Marshal(edited)
 	if err != nil {
 		t.Fatal(err)
