@@ -108,9 +108,9 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 		entry, _ := url.Parse(entryURL)
 		if entry.Scheme != "https" || certificate.Leaf.VerifyHostname(entry.Hostname()) != nil {
 			entryURL = certifiedListenURL(listener.Addr().String(), certificate, cfg)
-			if entryURL == "" && (cfg.GitHubOAuth != nil || cfg.GitLabOAuth != nil) {
+			if entryURL == "" {
 				_ = listener.Close()
-				return nil, errors.New("admin TLS certificate does not cover the OAuth callback host")
+				return nil, errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
 			}
 		}
 	}
@@ -282,6 +282,14 @@ func checkAdminCertificateURL(certificate *tls.Certificate, cfg config.AdminConf
 		if err := certificate.Leaf.VerifyHostname(callback.Hostname()); err != nil {
 			return fmt.Errorf("admin certificate does not cover OAuth callback host %q: %w", callback.Hostname(), err)
 		}
+	}
+	address := adminWebservConfig(cfg).Address
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		address = net.JoinHostPort(strings.Trim(address, "[]"), "0")
+	}
+	host, _, _ := net.SplitHostPort(address)
+	if net.ParseIP(host) != nil && certifiedListenURL(address, certificate, cfg) == "" {
+		return errors.New("admin TLS certificate has no valid startup URL; set a matching -listenurl or certificate")
 	}
 	return nil
 }

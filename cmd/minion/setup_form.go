@@ -39,11 +39,23 @@ func (a *adminAccess) setupPost() http.Handler {
 				return errors.New("admin setup is no longer configured; restart Minion")
 			}
 			if len(cfg.Repositories) == 0 {
-				_, review := cfg.Commands["review"]
-				if review || cfg.Commands == nil {
+				if cfg.Commands == nil {
 					first.Actions = []string{"review"}
-				} else if names := cfg.CommandNames(); len(names) > 0 {
-					first.Actions = names[:1]
+				} else {
+					if mapping, ok := cfg.Commands["review"]; ok && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() {
+						first.Actions = []string{"review"}
+					} else {
+						for _, name := range cfg.CommandNames() {
+							mapping := cfg.Commands[name]
+							if mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() {
+								first.Actions = []string{name}
+								break
+							}
+						}
+						if len(cfg.Commands) > 0 && len(first.Actions) == 0 {
+							return errors.New("No configured command can run with the selected main AI on this host")
+						}
+					}
 				}
 				cfg.Repositories = []config.Repository{first}
 			} else if !strings.EqualFold(cfg.Repositories[0].Name, name) || !cfg.Repositories[0].MatchesIdentity(details.ID, details.Owner.ID) {

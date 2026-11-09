@@ -93,7 +93,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	}
 	cookie := login.Result().Cookies()[0]
 	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, cookie, ""); page.Code != http.StatusOK ||
-		!strings.Contains(page.Body.String(), "Open home page") {
+		!strings.Contains(page.Body.String(), "Continue to Minion") {
 		t.Fatalf("signed-in setup login page status=%d body=%q", page.Code, page.Body.String())
 	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
@@ -178,19 +178,30 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 			unchanged.GitHub.Token != "", len(unchanged.Repositories), err)
 	}
 	for _, tc := range []struct {
-		name     string
-		commands map[string]config.CommandMapping
-		want     string
+		name, main      string
+		commands        map[string]config.CommandMapping
+		want, wantError string
 	}{
-		{"custom commands", map[string]config.CommandMapping{
+		{"custom commands", "", map[string]config.CommandMapping{
 			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
 			"alpha": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
-		}, "alpha"},
-		{"no commands", map[string]config.CommandMapping{}, ""},
+		}, "alpha", ""},
+		{"unsupported command is skipped", "claude", map[string]config.CommandMapping{
+			"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
+		}, "zeta", ""},
+		{"only unsupported command", "claude", map[string]config.CommandMapping{
+			"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+		}, "", "No configured command can run"},
+		{"no commands", "", map[string]config.CommandMapping{}, "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := config.Update(path, func(cfg *config.Config) error {
 				cfg.Repositories = nil
+				cfg.Main = tc.main
+				if tc.main == "claude" {
+					cfg.Claude.Effort = "medium"
+				}
 				cfg.Commands = tc.commands
 				cfg.GitHub.Token = ""
 				return nil
@@ -198,6 +209,16 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 				t.Fatal(err)
 			}
 			response := adminResponse(handler, http.MethodPost, "/admin/setup", form, cookie, "")
+			if tc.wantError != "" {
+				if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), tc.wantError) {
+					t.Fatalf("unsupported setup status=%d body=%q", response.Code, response.Body.String())
+				}
+				cfg, err := config.Load(path)
+				if err != nil || len(cfg.Repositories) != 0 || cfg.GitHub.Token != "" {
+					t.Fatalf("failed setup changed config: repositories=%v tokenSet=%t error=%v", cfg.Repositories, cfg.GitHub.Token != "", err)
+				}
+				return
+			}
 			if response.Code != http.StatusSeeOther {
 				t.Fatalf("custom setup save status=%d body=%q", response.Code, response.Body.String())
 			}

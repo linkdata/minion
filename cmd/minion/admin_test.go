@@ -437,6 +437,23 @@ func TestCertifiedListenURL(t *testing.T) {
 	}
 }
 
+func TestAdminCertificateURLRejectsUncoveredBoundIP(t *testing.T) {
+	certificate := &tls.Certificate{Leaf: &x509.Certificate{IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}}
+	cfg := config.AdminConfig{Listen: "127.0.0.2:8443", TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"}
+	if err := checkAdminCertificateURL(certificate, cfg); err == nil || !strings.Contains(err.Error(), "startup URL") {
+		t.Fatalf("uncovered bound IP passed TLS preflight: %v", err)
+	}
+	cfg.WebservListenURL = "https://127.0.0.1:8443"
+	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
+		t.Fatalf("explicit certified URL rejected: %v", err)
+	}
+	cfg.WebservListenURL = ""
+	certificate.Leaf.DNSNames = []string{"admin.example"}
+	if err := checkAdminCertificateURL(certificate, cfg); err != nil {
+		t.Fatalf("certified DNS fallback rejected: %v", err)
+	}
+}
+
 func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)

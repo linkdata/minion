@@ -27,7 +27,7 @@ var headHTML string
 var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin</title></head>
 <body><main class="container py-5">
 {{if .Dot.SignedIn}}
-<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open home page</a></p>
+<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Continue to Minion</a></p>
 <form method="post" action="/admin/logout"><button class="btn btn-outline-light">Sign out</button></form>
 {{else if .Dot.PasswordSet}}
 <h1 class="h3 mb-3">Minion admin</h1>
