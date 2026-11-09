@@ -187,6 +187,13 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
 	}
+	setupIncomplete := cfg.Admin != nil && !*check && !*oneshot &&
+		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0)
+	if setupIncomplete {
+		if _, err := os.Stat(cfg.StatePath); errors.Is(err, os.ErrNotExist) {
+			return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+		}
+	}
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
@@ -215,8 +222,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		return false
 	}
-	if cfg.Admin != nil && !*check && !*oneshot && !pendingDurableWork() &&
-		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0) {
+	if setupIncomplete && !pendingDurableWork() {
 		if err := store.Close(); err != nil {
 			logger.Printf("close state before setup: %v", err)
 			return 1

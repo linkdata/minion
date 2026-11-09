@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,6 +73,11 @@ func TestSetupWaitsForPendingDurableWork(t *testing.T) {
 			if code != 1 || strings.Contains(output, "setup UI:") != wantSetup ||
 				!wantSetup && !strings.Contains(output, "GitHub authentication:") {
 				t.Fatalf("setup with %s state: code=%d log=%q", kind, code, output)
+			}
+			if kind == "empty" {
+				if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("first-run setup created state before start_at can be saved: %v", err)
+				}
 			}
 			reopened, err := state.Open(statePath, at)
 			if err != nil {

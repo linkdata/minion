@@ -74,6 +74,10 @@ func createInitialConfig(path string, logger *log.Logger) (created bool, resultE
 	if err != nil {
 		return false, err
 	}
+	if dir, openErr := os.Open(filepath.Dir(path)); openErr == nil {
+		_ = dir.Sync() // Best effort; some filesystems do not support directory sync.
+		_ = dir.Close()
+	}
 	logger.Printf("created config %s", path)
 	if !passwordSet {
 		logger.Print("admin password is not set; run minion -mode=hash and put the hash in the config")
