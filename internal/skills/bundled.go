@@ -2,7 +2,6 @@ package skills
 
 import (
 	"embed"
-	"fmt"
 	"io/fs"
 	"strings"
 )
@@ -33,20 +32,13 @@ func bundledFiles(src source) (files []skillFile, commit string, err error) {
 		if entry.IsDir() {
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("bundled skill %q contains a non-file entry", src.name)
-		}
 		data, err := bundledSkills.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		mode := info.Mode()
+		var mode fs.FileMode
 		if path == "bundled/security-audit/validate-findings.cjs" || path == "bundled/security-audit/validate-coverage-ledger.cjs" {
-			mode |= 0o100 // embed.FS drops the execute bit from these scripts.
+			mode = 0o100 // embed.FS drops the execute bit from these scripts.
 		}
 		files = append(files, skillFile{name: strings.TrimPrefix(path, root+"/"), data: data, mode: mode})
 		return nil
