@@ -51,7 +51,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>admin</code> account's <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
-{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file), install skills with <code>minion -config CONFIG_FILE -install-skills</code> using this service's config file, then restart Minion. No jobs run during setup or recovery.</p>
+{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion. No jobs run during setup or recovery.</p>
 {{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the bot account and first repository below.{{else}}Sign in as admin to save the bot account and first repository.{{end}} No jobs run during setup.</p>
 {{if .Dot.SignedAdmin}}
 <form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
@@ -75,10 +75,11 @@ type adminHomeView struct {
 type adminLoginView struct{ SignedIn, PasswordSet bool }
 
 const (
-	maxAdminSessions          = 512
-	maxGuestPageRequests      = 4
-	adminSignInReserve        = 32
-	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve // OAuth starts stop here; home and OAuth login pages stop one slot earlier.
+	maxAdminSessions     = 512
+	maxGuestPageRequests = 4
+	// Spare slots support OAuth callback rotation; existing admin login sessions can still sign in.
+	authCompletionReserve     = 32
+	maxGuestAdmissionSessions = maxAdminSessions - authCompletionReserve // OAuth starts stop here; home and OAuth login pages stop one slot earlier.
 	maxGuestPageSessions      = maxGuestAdmissionSessions - 1
 )
 

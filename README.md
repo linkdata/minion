@@ -104,7 +104,7 @@ The first start creates `config.local.json` with mode 0600 on Unix and prompts f
 
 Local model tools share Minion's service account and can read `config.local.json`, including `github.token`. To isolate the token, run a remote worker on a separate host, container, or account without access to the orchestrator config.
 
-Use the config path selected at startup in the following commands; replace `./config.local.json` if needed. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. On a local worker, run `./bin/minion -config ./config.local.json -install-skills` for the selected skills. With a remote worker, install its CLIs and skills on the worker host as described below. After configuring GitHub, stop the setup service, create the configured `work_root` (the default is `var/work` beside the config file), give the service account access, run `./bin/minion -config ./config.local.json -check` on the orchestrator, then restart Minion.
+Use the config path selected at startup in the following commands; replace `./config.local.json` if needed. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. On a local worker, run `./bin/minion -config ./config.local.json -install-skills` as Minion's service account (or with the same `-user` on Unix). With a remote worker, install its CLIs and skills on the worker host as its worker account, as described below. After configuring GitHub, stop the setup service, create the configured `work_root` (the default is `var/work` beside the config file), give the service account access, run `./bin/minion -config ./config.local.json -check` on the orchestrator, then restart Minion.
 
 On native Windows, use PowerShell to create `bin` and run `go build -buildvcs=false -o bin/minion.exe ./cmd/minion`, then start `bin/minion.exe`. Install the standalone `codex.exe`; npm's `codex.cmd` launcher cannot be started directly by Minion. The Codex CLI selects and enforces its native Windows sandbox backend; Minion requests a read-only or writable workspace. An elevated backend may allow broad same-user reads, including saved credentials, so choose the service account and host with that access in mind. Set `adversarial` to `"codex"` for a Codex critic, or leave it empty to disable the critic. Native Windows fixes preserve existing Git executable modes, including case-only renames, but cannot create or change executable modes or preserve them across other renames; use Linux or macOS for those fixes. Place `config.local.json` and provider logins outside source snapshots. The operator manages the service account and work-root ACL; Minion validates paths but does not audit host directory permissions. Windows file ACLs, rather than Unix `chmod`, protect these paths.
 
@@ -207,7 +207,7 @@ To use one remote executor, add `remote_executor` to the orchestrator config wit
 {"base_url":"https://minion.example:8443","executor_id":"worker-1","token":"REPLACE_WITH_RANDOM_TOKEN","work_root":"/path/to/worker/work","claude":{"allow_all_unix_sockets":false}}
 ```
 
-On the worker host, create the configured `work_root` before starting Minion (for the example above, `mkdir -p /path/to/worker/work` on Unix) and give the worker account access using the host's normal permissions. Create `worker-skills.json` with `bot_login`, `repositories`, and the same `commands` and `always_on_skills` as the orchestrator config. Omit credentials and `remote_executor`, then install the skills:
+On the worker host, create the configured `work_root` before starting Minion (for the example above, `mkdir -p /path/to/worker/work` on Unix) and give the worker account access using the host's normal permissions. Create `worker-skills.json` with `bot_login`, `repositories`, and the same `commands` and `always_on_skills` as the orchestrator config. Omit credentials and `remote_executor`, then install the skills as the worker account:
 
 ```sh
 ./bin/minion -config=worker-skills.json -install-skills
@@ -253,7 +253,7 @@ The `always_on_skills` list selects optional skills for every run. Omit it or se
 
 `-install-skills` installs the configured skill sources into `$HOME/.agents/skills/` for Codex and `$HOME/.claude/skills/` for Claude, then exits. The five default external skills and anti-prompt-injection skill install offline from the binary; custom GitHub sources are downloaded anonymously and need publicly readable repositories. The installer records each source and commit; for bundled skills, that commit is the upstream base of Minion's embedded copy. It replaces existing same-name skill directories in both locations, including manually installed copies; keep local customizations under other names. Run it when adding or updating skills; ordinary Minion runs never download them. Update the binary to get newer bundled skill snapshots. Review custom sources: skill instructions guide the models, and Minion runs the security-audit skill's validator scripts under the service account.
 
-Stop Minion before editing its configuration. Install skills and run `-check` after editing it.
+Stop Minion before editing the config file directly; then install skills and run `-check` before restarting.
 
 ### Main model and adversarial critic
 

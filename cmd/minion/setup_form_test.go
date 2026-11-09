@@ -155,6 +155,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Setup saved") ||
 		!strings.Contains(home.Body.String(), "For each selected AI, set its API key") ||
 		!strings.Contains(home.Body.String(), "sign in to its CLI on the executor host") ||
+		!strings.Contains(home.Body.String(), "install skills as its service account") ||
 		strings.Contains(home.Body.String(), "secret-token") || strings.Contains(home.Body.String(), "Save setup") {
 		t.Fatalf("saved setup home status=%d body=%q", home.Code, home.Body.String())
 	}
