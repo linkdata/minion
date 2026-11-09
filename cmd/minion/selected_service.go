@@ -184,9 +184,6 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			continue
 		}
 		if err := closeWorker(); err != nil {
-			if ctx.Err() != nil {
-				return 0
-			}
 			logger.Printf("close selected worker for config change: %s", monitor.InertLogText(err.Error()))
 			live.applied(oldCfg, generation, err)
 			return 1

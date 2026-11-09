@@ -105,6 +105,10 @@ func DecodeAcceptedResultRecord(data []byte) (AcceptedResultRecord, error) {
 	if err := httpDecodeBytes(data, int(AcceptedResultMaxBytes), &record); err != nil {
 		return AcceptedResultRecord{}, fmt.Errorf("accepted result: %w", err)
 	}
+	// Version 22 sidecars have the same Job and Result shape as version 24.
+	if record.Job.Version == 22 && record.Result.Version == 22 {
+		record.Job.Version, record.Result.Version = 24, 24
+	}
 	if err := record.Validate(); err != nil {
 		return AcceptedResultRecord{}, err
 	}

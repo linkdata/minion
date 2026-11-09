@@ -24,6 +24,15 @@ import (
 )
 
 func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T) {
+	testStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t, action.ProtocolVersion)
+}
+
+func TestStartupPublishesVersion22StoredResultBeforeSelectedWorkerPreflight(t *testing.T) {
+	testStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t, 22)
+}
+
+func testStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T, storedVersion int) {
+	t.Helper()
 	isolateHostPaths(t, t.TempDir())
 	markers := startupCommandMarkers(t)
 	t.Setenv("GH_TOKEN", "offline-token")
@@ -59,6 +68,20 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	if err := record.Validate(); err != nil {
 		t.Fatalf("invalid saved result fixture: %v", err)
 	}
+	if storedVersion == 22 {
+		for _, versions := range [][2]int{{22, action.ProtocolVersion}, {action.ProtocolVersion, 22}, {23, 23}} {
+			mixed := record
+			mixed.Job.Version, mixed.Result.Version = versions[0], versions[1]
+			data, err := json.Marshal(mixed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := action.DecodeAcceptedResultRecord(data); err == nil {
+				t.Fatalf("accepted stored result versions %d/%d", versions[0], versions[1])
+			}
+		}
+	}
+	record.Job.Version, record.Result.Version = storedVersion, storedVersion
 	store, err := state.Open(statePath, at.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)
