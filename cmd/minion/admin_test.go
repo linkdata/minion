@@ -397,6 +397,8 @@ func TestCertifiedListenURL(t *testing.T) {
 		{address: "192.0.2.8:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "127.0.0.1:8080", listen: "minion.example:8080", want: "https://minion.example:8080", certificateNames: []string{"admin.example", "minion.example"}},
 		{address: "192.0.2.8:8080", listen: "minion.example.com:8080", want: "https://minion.example.com:8080", certificateNames: []string{"*.example.com"}},
+		{address: "192.0.2.8:8080", listen: "minion.example", want: "https://minion.example:8080", certificateNames: []string{"other.example", "minion.example"}},
+		{address: "192.0.2.8:8080", listen: "minion.example.com", want: "https://minion.example.com:8080", certificateNames: []string{"*.example.com"}},
 		{address: "0.0.0.0:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "[::1]:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
 		{address: "127.0.0.1:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},

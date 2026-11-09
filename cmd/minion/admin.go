@@ -319,7 +319,11 @@ func certifiedListenURL(address string, certificate *tls.Certificate, cfg config
 		}
 		return (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
 	}
-	if listenHost, _, err := net.SplitHostPort(cfg.Listen); err == nil && net.ParseIP(listenHost) == nil {
+	listenHost, _, err := net.SplitHostPort(cfg.Listen)
+	if err != nil && !strings.Contains(cfg.Listen, ":") {
+		listenHost = cfg.Listen
+	}
+	if listenHost != "" && net.ParseIP(listenHost) == nil {
 		if candidate := covered(listenHost); candidate != "" {
 			return candidate
 		}
