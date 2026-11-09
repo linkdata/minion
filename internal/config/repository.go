@@ -15,7 +15,7 @@ import (
 
 var updateMu sync.Mutex
 
-const configPermissionBits = os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+const configPermissionBits = os.ModePerm
 
 // Update validates and atomically saves a change to the JSON configuration.
 // It serializes Minion's config writers; callers still need the state lock when

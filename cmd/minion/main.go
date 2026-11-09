@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -215,7 +214,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	var client *github.Client
 	var user github.User
-	githubCredentialsNeedSetup := true
 	authenticateGitHub := func() bool {
 		if client != nil {
 			return true
@@ -227,8 +225,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		candidate := github.New(cfg.GitHub.Token)
 		user, err = candidate.AuthenticatedUser(ctx)
 		if err != nil {
-			var status *github.StatusError
-			githubCredentialsNeedSetup = errors.As(err, &status) && status.StatusCode == http.StatusUnauthorized
 			logger.Printf("GitHub identity check: %v", err)
 			return false
 		}
@@ -293,7 +289,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		freshPreflightPassed = true
 		if !authenticateGitHub() {
-			if githubCredentialsNeedSetup && canOfferSetup {
+			if canOfferSetup {
 				return startRecoverySetup()
 			}
 			return 1
@@ -353,10 +349,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 				continue
 			}
 			if !authenticateGitHub() {
-				if githubCredentialsNeedSetup {
-					return recoverySetup()
-				}
-				return 1
+				return recoverySetup()
 			}
 			watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}
 			if err := watcher.ReconcilePublicationWrites(ctx, store); err != nil {
@@ -376,10 +369,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		terminalRecovery = true
 	}
 	if !authenticateGitHub() {
-		if githubCredentialsNeedSetup {
-			return recoverySetup()
-		}
-		return 1
+		return recoverySetup()
 	}
 	if *check {
 		if !freshState {

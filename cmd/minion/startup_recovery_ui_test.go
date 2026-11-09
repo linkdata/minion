@@ -194,8 +194,11 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 		{name: "check", args: []string{"-check"}, status: http.StatusUnauthorized},
 		{name: "oneshot", args: []string{"-oneshot"}, status: http.StatusUnauthorized},
 		{name: "pending publication", pendingWrite: true, wantRecovery: true, status: http.StatusUnauthorized},
-		{name: "GitHub unavailable", status: http.StatusServiceUnavailable},
-		{name: "transport error", transportError: true},
+		{name: "GitHub unavailable", wantRecovery: true, status: http.StatusServiceUnavailable},
+		{name: "transport error", wantRecovery: true, transportError: true},
+		{name: "pending publication while unavailable", pendingWrite: true, wantRecovery: true, status: http.StatusServiceUnavailable},
+		{name: "check while unavailable", args: []string{"-check"}, status: http.StatusServiceUnavailable},
+		{name: "oneshot while unavailable", args: []string{"-oneshot"}, status: http.StatusServiceUnavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			previousTransport := http.DefaultTransport
