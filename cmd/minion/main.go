@@ -339,7 +339,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}()
 	}
 	recoverySetup := func() int {
-		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil || pendingDurableWork() {
+		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil {
 			return 1
 		}
 		return startRecoverySetup()
@@ -352,6 +352,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 				continue
 			}
 			if !authenticateGitHub() {
+				if githubCredentialsNeedSetup {
+					return recoverySetup()
+				}
 				return 1
 			}
 			watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}

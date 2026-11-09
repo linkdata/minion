@@ -30,7 +30,7 @@ func occupiedAdminAddress(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func TestSetupWaitsForPendingDurableWork(t *testing.T) {
+func TestSetupPreservesPendingDurableWork(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	address := occupiedAdminAddress(t)
 	for _, kind := range []string{"empty", "accepted", "publication"} {
@@ -69,9 +69,9 @@ func TestSetupWaitsForPendingDurableWork(t *testing.T) {
 			code, output := runStartupFixtureWithRun(t, cfg, func() int {
 				return runWithGitCheck(func(context.Context, string) error { return nil })
 			})
-			wantSetup := kind == "empty"
-			if code != 1 || strings.Contains(output, "setup UI:") != wantSetup ||
-				!wantSetup && !strings.Contains(output, "GitHub authentication:") {
+			if code != 1 || !strings.Contains(output, "setup UI:") ||
+				kind != "empty" && (!strings.Contains(output, "GitHub authentication:") ||
+					!strings.Contains(output, "starting admin recovery UI")) {
 				t.Fatalf("setup with %s state: code=%d log=%q", kind, code, output)
 			}
 			if kind == "empty" {
@@ -96,10 +96,12 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	address := occupiedAdminAddress(t)
 	for _, tc := range []struct {
-		name         string
-		args         []string
-		wantRecovery bool
-	}{{"service", nil, true}, {"check", []string{"-check"}, false}, {"oneshot", []string{"-oneshot"}, false}} {
+		name            string
+		args            []string
+		wantRecovery    bool
+		pendingAccepted bool
+	}{{name: "service", wantRecovery: true}, {name: "pending accepted", wantRecovery: true, pendingAccepted: true},
+		{name: "check", args: []string{"-check"}}, {name: "oneshot", args: []string{"-oneshot"}}} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{Main: "claude", Adversarial: "claude", BotLogin: "bot",
 				GitHub: config.GitHubConfig{Token: "configured-token"}, Claude: config.ClaudeConfig{Effort: "medium"},
@@ -107,6 +109,21 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 				Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+			if tc.pendingAccepted {
+				store, err := state.Open(cfg.StatePath, time.Now().UTC())
+				if err != nil {
+					t.Fatal(err)
+				}
+				accepted := dashboardTestAccepted(time.Now().UTC())
+				store.Data.Accepted = accepted
+				store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(*accepted)
+				if err := store.Save(); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			code, output := runStartupFixtureWithRun(t, cfg, func() int {
 				return runWithGitCheck(func(context.Context, string) error {
 					t.Fatal("AI preflight failure reached Git")
@@ -118,7 +135,16 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 				strings.Contains(output, "setup UI:") != tc.wantRecovery {
 				t.Fatalf("AI recovery mode: code=%d output=%q", code, output)
 			}
-			if tc.wantRecovery {
+			if tc.pendingAccepted {
+				store, err := state.Open(cfg.StatePath, time.Time{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				if store.Data.Accepted == nil {
+					t.Fatal("AI recovery UI lost pending accepted work")
+				}
+			} else if tc.wantRecovery {
 				if _, err := os.Stat(cfg.StatePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("AI recovery created state before preflight passed: %v", err)
 				}
@@ -142,7 +168,7 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 		{name: "service", wantRecovery: true, status: http.StatusUnauthorized},
 		{name: "check", args: []string{"-check"}, status: http.StatusUnauthorized},
 		{name: "oneshot", args: []string{"-oneshot"}, status: http.StatusUnauthorized},
-		{name: "pending publication", pendingWrite: true, status: http.StatusUnauthorized},
+		{name: "pending publication", pendingWrite: true, wantRecovery: true, status: http.StatusUnauthorized},
 		{name: "GitHub unavailable", status: http.StatusServiceUnavailable},
 		{name: "transport error", transportError: true},
 	} {
@@ -194,9 +220,18 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 				strings.Contains(output, "setup UI:") != tc.wantRecovery {
 				t.Fatalf("GitHub recovery mode: code=%d output=%q", code, output)
 			}
-			if tc.wantRecovery {
+			if tc.wantRecovery && !tc.pendingWrite {
 				if _, err := os.Stat(cfg.StatePath); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("GitHub recovery created state before preflight passed: %v", err)
+				}
+			} else if tc.pendingWrite {
+				store, err := state.Open(cfg.StatePath, time.Time{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				if store.Data.PublicationWrites["issued-job"].Status != state.PublicationWritePending {
+					t.Fatal("GitHub recovery UI lost pending publication")
 				}
 			}
 		})
