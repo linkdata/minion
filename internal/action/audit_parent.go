@@ -106,9 +106,6 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		if auditValidationUnavailable(err) {
 			return fmt.Errorf("%w: audit validator execution: %w", errAuditPublicationUnavailable, err)
 		}
-		if scriptErr := checkAuditValidatorScripts(skill); scriptErr != nil {
-			return fmt.Errorf("%w: audit validator unavailable after execution failure: %w", errAuditPublicationUnavailable, errors.Join(err, scriptErr))
-		}
 		if scriptErr := checkAuditValidatorSyntax(ctx, validationDir, skill, tools); scriptErr != nil {
 			return fmt.Errorf("%w: audit validator unavailable after execution failure: %w", errAuditPublicationUnavailable, errors.Join(err, scriptErr))
 		}
@@ -118,8 +115,11 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 }
 
 func checkAuditValidatorSyntax(ctx context.Context, dir, skill string, tools auditTools) error {
-	for _, validator := range auditValidators {
-		script := filepath.Join(filepath.Dir(skill), validator.script)
+	scripts, err := checkAuditValidatorScripts(skill)
+	if err != nil {
+		return err
+	}
+	for _, script := range scripts {
 		cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--check", script)
 		if err := executil.Run(cmd); err != nil {

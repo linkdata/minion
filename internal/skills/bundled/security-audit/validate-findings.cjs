@@ -2,7 +2,7 @@
 
 /**
  * Validates findings.json against report-schema.json.
- * Usage: node validate-findings.cjs <path-to-findings.json>
+ * Usage: node validate-findings.cjs <path-to-findings.json> [--source-only]
  *
  * This is a dependency-free interpreter for the JSON Schema keywords used by
  * report-schema.json, plus finding-specific checks that are clearer in code.
@@ -469,7 +469,7 @@ function isSafeRelativeSourcePath(value) {
     !WINDOWS_RESERVED_COMPONENT.test(segment));
 }
 
-function collectFindingSemanticErrors(findings) {
+function collectFindingSemanticErrors(findings, sourceOnly) {
   const errors = createErrorList();
   if (!Array.isArray(findings)) return errors;
 
@@ -537,8 +537,13 @@ function collectFindingSemanticErrors(findings) {
       for (const forbidden of ["claimed_root_cause", "blockers", "validation_plan", "reason"]) {
         if (hasOwn(finding, forbidden)) errors.push(`${base}: confirmed finding must not contain ${safeQuote(forbidden)}`);
       }
-      if (!finding.execution || typeof finding.execution !== "object" || typeof finding.execution.observed_result !== "string" || !hasVisibleProse(finding.execution.observed_result)) {
-        errors.push(`${base}: confirmed finding requires a visible execution observed_result`);
+      const observedResult = finding.execution && finding.execution.observed_result;
+      if (typeof observedResult !== "string" || (sourceOnly
+        ? !observedResult.startsWith("Source-derived: ") || !hasVisibleProse(observedResult.slice("Source-derived: ".length))
+        : !hasVisibleProse(observedResult))) {
+        errors.push(sourceOnly
+          ? `${base}.execution.observed_result: confirmed finding requires Source-derived: followed by a visible result`
+          : `${base}: confirmed finding requires a visible execution observed_result`);
       }
       if (!finding.remediation || typeof finding.remediation !== "object" || typeof finding.remediation.strategy !== "string" || !hasVisibleProse(finding.remediation.strategy)) {
         errors.push(`${base}: confirmed finding requires visible remediation`);
@@ -569,12 +574,12 @@ function collectFindingSemanticErrors(findings) {
   return errors;
 }
 
-function validateDocument(findings, schema) {
+function validateDocument(findings, schema, sourceOnly) {
   const limitErrors = collectDataLimitErrors(findings, "$");
   if (limitErrors.length > 0) return limitErrors;
   const errors = collectUnchecked(findings, schema, "$");
   if (errors.length < LIMITS.validationErrors) {
-    errors.push(...collectFindingSemanticErrors(findings));
+    errors.push(...collectFindingSemanticErrors(findings, sourceOnly));
   }
   return errors;
 }
@@ -638,9 +643,9 @@ function enforceJsonTextLimits(contents) {
   }
 }
 
-function run(file) {
+function run(file, sourceOnly) {
   if (!file) {
-    console.error("Usage: node validate-findings.cjs <path-to-findings.json>");
+    console.error("Usage: node validate-findings.cjs <path-to-findings.json> [--source-only]");
     return 1;
   }
 
@@ -684,7 +689,7 @@ function run(file) {
 
   let errors;
   try {
-    errors = validateDocument(findings, schema);
+    errors = validateDocument(findings, schema, sourceOnly);
   } catch {
     console.error("Failed to validate findings JSON: unexpected validation error");
     return 1;
@@ -699,4 +704,4 @@ function run(file) {
   return 0;
 }
 
-process.exit(run(process.argv[2]));
+process.exit(run(process.argv[2], process.argv[3] === "--source-only"));

@@ -146,7 +146,7 @@
                 "type": "string",
                 "minLength": 1,
                 "visibleContent": true,
-                "description": "Actual local result, or Source-derived: followed by the deterministic effect when target execution is forbidden."
+                "description": "In Minion's source-only runs, Source-derived: followed by the deterministic effect visible in source."
               }
             },
             "required": ["attacker_perspective", "payloads", "instructions", "observed_result"],

@@ -96,13 +96,13 @@ If a strict total-agent budget cannot cover every candidate, set the run status 
 
 The parent writes all independently decided records to `<output-dir>/findings.json`, sorted by fingerprint. Include:
 
-- `confirmed`: source-grounded vulnerabilities with complete evidence of the boundary and result, conditions, specific remediation, likelihood/impact/overall severity, and confidence. When a runner forbids target execution, a deterministic source trace may establish the result; prefix `observed_result` with `Source-derived: ` and do not claim a test ran. If the result depends on runtime behavior, use `needs_validation`.
+- `confirmed`: source-grounded vulnerabilities with complete evidence of the boundary and result, conditions, specific remediation, likelihood/impact/overall severity, and confidence. In Minion's source-only runs, a deterministic source trace may establish the result; prefix `observed_result` with `Source-derived: ` and do not claim a test ran. If the result depends on runtime behavior, use `needs_validation`.
 - `needs_validation`: source-grounded candidates with an exact unresolved blocker and at least one applicable local or owner-observed deployment plan.
 - `rejected`: source-grounded candidates disproved during validation, retained so future runs do not repeat the unsupported claim without changed evidence.
 
 Read `report-schema.json` immediately before writing. It uses `additionalProperties: false`; do not carry hunter wrapper fields into a record. Keep these verdict contracts distinct:
 
-- A `confirmed` record uses `root_cause`, `intended_behavior`, `conditions`, `execution`, `remediation`, `severity`, and `confidence`. It must not use `claimed_root_cause`, `blockers`, `validation_plan`, or `reason`. `execution` is target-neutral and uses the target's native interface: API/HTTP input, CLI call, library call, message, file fixture, browser action, rendered policy, or local harness as applicable. `observed_result` is nonempty, factual, and labels a source-derived result when execution was forbidden.
+- A `confirmed` record uses `root_cause`, `intended_behavior`, `conditions`, `execution`, `remediation`, `severity`, and `confidence`. It must not use `claimed_root_cause`, `blockers`, `validation_plan`, or `reason`. `execution` is target-neutral and uses the target's native interface: API/HTTP input, CLI call, library call, message, file fixture, browser action, rendered policy, or local harness as applicable. In Minion's source-only runs, `observed_result` begins with `Source-derived: ` and a visible, factual result.
 - A `needs_validation` record uses `claimed_root_cause`, `trace`, `evidence`, `blockers`, and at least one nonempty `validation_plan.local` or `validation_plan.deployment` field. Include both only when both contexts can resolve distinct facts. It must not use severity, execution, remediation, reason, or confirmed root cause.
 - A `rejected` record uses `claimed_root_cause`, `trace`, `evidence`, and `reason`. It must not use severity, execution, remediation, blockers, validation plan, or confirmed root cause.
 

@@ -25,6 +25,7 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
+var auditCompanionFileLink = regexp.MustCompile(`\]\(([A-Z][A-Z0-9-]*\.md)\)`)
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
 
 type auditTools struct {
@@ -32,7 +33,7 @@ type auditTools struct {
 }
 
 func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
-	if err := checkAuditValidatorScripts(skill); err != nil {
+	if _, err := checkAuditValidatorScripts(skill); err != nil {
 		return auditTools{}, err
 	}
 	binary, err := aicli.AbsoluteExecutable("node")
@@ -43,14 +44,17 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 	return auditTools{binary: binary, permissionFlag: flag}, err
 }
 
-func checkAuditValidatorScripts(skill string) error {
-	dependencies := []string{"report-schema.json", "safe-input.cjs", "strict-json-keys.cjs"}
+func checkAuditValidatorScripts(skill string) ([]string, error) {
+	dependencies := []string{"report-schema.json", "ATTACK-CLASSES.md", "safe-input.cjs", "strict-json-keys.cjs"}
 	needed := make(map[string]bool)
+	var scripts []string
 	for _, validator := range auditValidators {
-		data, err := readAuditValidator(filepath.Join(filepath.Dir(skill), validator.script))
+		path := filepath.Join(filepath.Dir(skill), validator.script)
+		data, err := readAuditValidator(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		scripts = append(scripts, path)
 		for _, name := range dependencies {
 			if bytes.Contains(data, []byte(name)) {
 				needed[name] = true
@@ -59,12 +63,24 @@ func checkAuditValidatorScripts(skill string) error {
 	}
 	for _, name := range dependencies {
 		if needed[name] {
-			if _, err := readAuditValidator(filepath.Join(filepath.Dir(skill), name)); err != nil {
-				return err
+			path := filepath.Join(filepath.Dir(skill), name)
+			data, err := readAuditValidator(path)
+			if err != nil {
+				return nil, err
+			}
+			if name == "ATTACK-CLASSES.md" {
+				for _, match := range auditCompanionFileLink.FindAllSubmatch(data, -1) {
+					if _, err := readAuditValidator(filepath.Join(filepath.Dir(skill), string(match[1]))); err != nil {
+						return nil, err
+					}
+				}
+			}
+			if strings.HasSuffix(name, ".cjs") {
+				scripts = append(scripts, path)
 			}
 		}
 	}
-	return nil
+	return scripts, nil
 }
 
 func readAuditValidator(path string) ([]byte, error) {
@@ -317,6 +333,9 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
+		if validator.artifact == "findings.json" {
+			cmd.Args = append(cmd.Args, "--source-only")
+		}
 		executil.Prepare(cmd)
 		err := cmd.Start()
 		if err == nil {

@@ -23,27 +23,31 @@ func TestAuditPublisherChecksBundledDependencies(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("security audits are unsupported on Windows")
 	}
-	installActionTestSkills(t, testAuditSkillURL)
-	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
-		t.Fatal(err)
-	}
-	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
-	root := t.TempDir()
-	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
-		"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
-	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
-	if err := CheckAuditPublisher(t.Context(), root, cfg); err != nil {
-		t.Fatalf("installed publisher rejected: %v", err)
-	}
-	skill := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "report-schema.json")
-	if err := os.Remove(skill); err != nil {
-		t.Fatal(err)
-	}
-	if err := CheckAuditPublisher(t.Context(), root, cfg); !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), "report-schema.json") {
-		t.Fatalf("missing validator dependency accepted: %v", err)
-	}
-	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
-		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+	for _, name := range []string{"report-schema.json", "ATTACK-CLASSES.md", "WEB-PROTOCOL-AND-AUTH.md"} {
+		t.Run(name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+			root := t.TempDir()
+			cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+				"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+			}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); err != nil {
+				t.Fatalf("installed publisher rejected: %v", err)
+			}
+			path := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", name)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), name) {
+				t.Fatalf("missing validator dependency accepted: %v", err)
+			}
+			if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+				t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+			}
+		})
 	}
 }
 
@@ -121,6 +125,9 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				}
 				if strings.Count(string(data), " -e ") != 1 {
 					t.Fatalf("audit repeated the permission probe: %q", data)
+				}
+				if strings.Count(string(data), " --source-only") != 1 {
+					t.Fatalf("audit did not pass source-only mode to findings validator: %q", data)
 				}
 			} else if err == nil || !strings.Contains(err.Error(), scenario.want) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
 				t.Fatalf("invalid tools reached models or were misclassified: calls=%d recorded=%d error=%v", calls, len(result.Calls), err)

@@ -110,6 +110,48 @@ func TestBundledAuditValidatorRejectsUnsafeLineNumbers(t *testing.T) {
 	}
 }
 
+func TestBundledAuditValidatorSourceOnlyMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	script := filepath.Join("..", "skills", "bundled", "security-audit", "validate-findings.cjs")
+	const original = `"observed_result":"Source-derived: the branch writes the other user's object."`
+	for _, test := range []struct {
+		name, findings string
+		sourceOnly     bool
+		valid          bool
+	}{
+		{"confirmed source result", auditConfirmedFindingFixture, true, true},
+		{"standalone local result", strings.Replace(auditConfirmedFindingFixture, original, `"observed_result":"The local check changed the other user's object."`, 1), false, true},
+		{"source-only local result", strings.Replace(auditConfirmedFindingFixture, original, `"observed_result":"The local check changed the other user's object."`, 1), true, false},
+		{"confirmed empty source result", strings.Replace(auditConfirmedFindingFixture, original, `"observed_result":"Source-derived: "`, 1), true, false},
+		{"needs validation", auditCandidateFindingFixture, true, true},
+		{"rejected", `[{"verdict":"rejected","fingerprint":"F","title":"Guard bypass refuted","description":"The alleged bypass does not reach the operation.","claimed_root_cause":"The guard was claimed to be absent.","trace":[{"kind":"entrypoint","file":"source.txt","line":1,"scope":"source","description":"The request reaches the guard."}],"evidence":[{"file":"source.txt","line":1,"description":"The guard executes before the operation."}],"reason":"The request is stopped by the guard."}]`, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "findings.json")
+			if err := os.WriteFile(file, []byte(test.findings), 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{script, file}
+			if test.sourceOnly {
+				args = append(args, "--source-only")
+			}
+			output, err := exec.CommandContext(t.Context(), node, args...).CombinedOutput()
+			if (err == nil) != test.valid {
+				t.Fatalf("validator error = %v; output = %s", err, output)
+			}
+			if !test.valid && !strings.Contains(string(output), "Source-derived: followed by a visible result") {
+				t.Fatalf("validator output = %s; want source-derived result error", output)
+			}
+		})
+	}
+}
+
 func TestBundledAuditValidatorsRejectSymlinkInput(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
