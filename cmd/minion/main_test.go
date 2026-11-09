@@ -706,3 +706,28 @@ func TestInstallSkillsBypassesGitAndProviderPreflight(t *testing.T) {
 		})
 	}
 }
+
+func TestInstallSkillsBeforeFirstStartLeavesConfigUncreated(t *testing.T) {
+	home := t.TempDir()
+	isolateHostPaths(t, home)
+	configPath := filepath.Join(t.TempDir(), "config.local.json")
+	oldFlags, oldArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() { flag.CommandLine, os.Args = oldFlags, oldArgs })
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", configPath, "-install-skills"}
+	if code := runWithGitCheck(func(context.Context, string) error {
+		t.Fatal("install-only reached Git preflight")
+		return nil
+	}); code != 0 {
+		t.Fatalf("install default skills: exit=%d", code)
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("install-only consumed first-start config creation: %v", err)
+	}
+	for _, provider := range []string{".agents", ".claude"} {
+		path := filepath.Join(home, provider, "skills", "security-audit", "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("default skill was not installed at %s: %v", path, err)
+		}
+	}
+}

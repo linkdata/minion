@@ -123,6 +123,13 @@ func startAdminServerWithSetup(ctx context.Context, cfg config.AdminConfig, owne
 			}
 			if err == nil && ip != nil && !ip.IsUnspecified() && certificate.Leaf.VerifyHostname(host) == nil {
 				entryURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(host, port)}).String()
+			} else if err == nil {
+				for _, name := range certificate.Leaf.DNSNames {
+					if name != "" && !strings.Contains(name, "*") && certificate.Leaf.VerifyHostname(name) == nil {
+						entryURL = (&url.URL{Scheme: "https", Host: net.JoinHostPort(name, port)}).String()
+						break
+					}
+				}
 			}
 		}
 	}

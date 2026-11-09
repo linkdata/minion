@@ -554,6 +554,37 @@ func TestAdminServerAdvertisesIPOnlyTLSCertificate(t *testing.T) {
 	}
 }
 
+func TestAdminServerAdvertisesDNSCertificateOnSpecificIP(t *testing.T) {
+	t.Parallel()
+	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{
+		Listen: "127.0.0.2:0", TLSCertFile: certFile, TLSKeyFile: keyFile,
+	}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://" + net.JoinHostPort(leaf.DNSNames[0], port); admin.entryURL != want {
+		t.Fatalf("DNS certificate URL = %q, want %q", admin.entryURL, want)
+	}
+	client := adminTLSClient(t, leaf)
+	client.Transport.(*http.Transport).DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", admin.listener.Addr().String())
+	}
+	response, err := client.Get(admin.entryURL + "/jaws/.ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("advertised HTTPS URL returned %s", response.Status)
+	}
+}
+
 func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)

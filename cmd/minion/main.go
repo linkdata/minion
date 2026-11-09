@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linkdata/minion"
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
@@ -164,7 +165,19 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("switch user: %v", err)
 		return 2
 	}
-	_, createErr := createInitialConfigWithPrompt(loadedPath, logger, !*installSkills, passwordOutput)
+	installDefaults := false
+	if *installSkills {
+		if _, err := os.Lstat(loadedPath); errors.Is(err, os.ErrNotExist) {
+			installDefaults = true
+		} else if err != nil {
+			logger.Printf("config: %v", err)
+			return 2
+		}
+	}
+	var createErr error
+	if !installDefaults {
+		_, createErr = createInitialConfigWithPrompt(loadedPath, logger, !*installSkills, passwordOutput)
+	}
 	if passwordOutput != nil {
 		_ = passwordOutput.Close()
 	}
@@ -172,10 +185,16 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("create config: %v", createErr)
 		return 2
 	}
-	cfg, err := config.LoadWithAdminRuntime(loadedPath, config.AdminConfig{
+	runtimeAdmin := config.AdminConfig{
 		WebservAddress: *address, WebservCertDir: *certDir,
 		WebservDataDir: *dataDir, WebservListenURL: *listenURL,
-	})
+	}
+	var cfg config.Config
+	if installDefaults {
+		cfg, err = config.ParseWithAdminRuntime(strings.NewReader(minion.DefaultConfig()), filepath.Dir(loadedPath), runtimeAdmin)
+	} else {
+		cfg, err = config.LoadWithAdminRuntime(loadedPath, runtimeAdmin)
+	}
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2

@@ -375,6 +375,15 @@ func LoadWithAdminRuntime(path string, runtime AdminConfig) (Config, error) {
 	return load(path, &runtime)
 }
 
+// ParseWithAdminRuntime validates embedded config without creating a file.
+func ParseWithAdminRuntime(r io.Reader, configDir string, runtime AdminConfig) (Config, error) {
+	cfg, err := decode(r)
+	if err != nil {
+		return cfg, err
+	}
+	return validateLoadedConfig(cfg, configDir, &runtime)
+}
+
 // LoadStatePath reads only the setting needed by the usage report.
 // Listener validation depends on runtime flags that are unavailable to `minion usage`.
 func LoadStatePath(path string) (string, error) {
@@ -416,8 +425,12 @@ func load(path string, runtime *AdminConfig) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	return validateLoadedConfig(cfg, filepath.Dir(path), runtime)
+}
+
+func validateLoadedConfig(cfg Config, configDir string, runtime *AdminConfig) (Config, error) {
 	applyAdminRuntime(&cfg, runtime)
-	if err := cfg.Validate(filepath.Dir(path)); err != nil {
+	if err := cfg.Validate(configDir); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
