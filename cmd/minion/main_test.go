@@ -180,6 +180,15 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	if code != 0 || !strings.Contains(output, "setup incomplete: no repositories configured") || strings.Join(requests, ",") != "/user" {
 		t.Fatalf("empty setup check: code=%d GitHub requests=%v output=%q", code, requests, output)
 	}
+	cfg.BotLogin = "other"
+	requests = nil
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "GitHub identity is @bot; config requires @other") ||
+		strings.Contains(output, "setup incomplete:") || strings.Join(requests, ",") != "/user" {
+		t.Fatalf("wrong bot identity passed setup check: code=%d GitHub requests=%v output=%q", code, requests, output)
+	}
 }
 
 func TestCheckWithoutRepositoriesSkipsUnavailableGitHubAndState(t *testing.T) {
@@ -210,11 +219,17 @@ func TestCheckWithoutRepositoriesSkipsUnavailableGitHubAndState(t *testing.T) {
 		})
 	}, "-check")
 	if code != 0 || gitChecks != 1 || !strings.Contains(output, "setup incomplete: no repositories configured") ||
-		strings.Contains(output, "GitHub authentication:") || strings.Contains(output, "audit publishing preflight:") {
+		!strings.Contains(output, "GitHub identity not checked:") || strings.Contains(output, "GitHub authentication:") {
 		t.Fatalf("setup check: code=%d gitChecks=%d output=%q", code, gitChecks, output)
 	}
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("setup check created state: %v", err)
+	}
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return errors.New("fixture Git failure") })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "Git preflight: fixture Git failure") || strings.Contains(output, "setup incomplete:") {
+		t.Fatalf("failed Git preflight passed setup check: code=%d output=%q", code, output)
 	}
 }
 

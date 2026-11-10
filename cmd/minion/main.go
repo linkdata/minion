@@ -297,7 +297,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 					!accepted.ResultReady && !terminalRecoveryPendingAt(store, now())
 			}
 			// An audit-only service has no other command if publishing tools are missing.
-			if pendingAudit || (len(cfg.Repositories) > 0 && (*check || !hasUnselectedCommand(nil, cfg, false))) {
+			if *check || pendingAudit || !hasUnselectedCommand(nil, cfg, false) {
 				if err := action.CheckAuditPublisher(ctx, cfg.WorkRoot, cfg); err != nil {
 					logger.Printf("audit publishing preflight: %v", err)
 					return false
@@ -315,7 +315,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if !preflight() {
 			return 1
 		}
-		if cfg.BotLogin != "" && cfg.GitHub.Token != "" && !authenticateGitHub() {
+		if cfg.BotLogin == "" || cfg.GitHub.Token == "" {
+			logger.Print("GitHub identity not checked: bot_login and github.token are not both set")
+		} else if !authenticateGitHub() {
 			return 1
 		}
 		logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
