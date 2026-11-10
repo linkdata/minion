@@ -134,7 +134,8 @@ func advancedConfigView(path string, live *adminLiveConfig, runtime config.Admin
 	view.Setup = live == nil
 	if live != nil {
 		live.mu.RLock()
-		view.RestartRequired, view.PendingActivation, view.Error = live.restartRequired, live.pending, live.lastError
+		view.RestartRequired = live.restartRequired || !reflect.DeepEqual(verified.Repositories, live.desired.Repositories)
+		view.PendingActivation, view.Error = live.pending, live.lastError
 		live.mu.RUnlock()
 	}
 	return view, nil

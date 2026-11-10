@@ -360,6 +360,9 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !view.RestartRequired {
+		t.Fatal("repository added on disk did not show a restart notice")
+	}
 	var edited config.Config
 	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
 		t.Fatal(err)
@@ -374,6 +377,10 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	}
 	if live.restartRequired || !live.pending || live.desired.Codex.APIKey != "new-key1" {
 		t.Fatalf("key-only edit: restart=%t pending=%t key_staged=%t", live.restartRequired, live.pending, live.desired.Codex.APIKey == "new-key1")
+	}
+	view, err = advancedConfigView(path, live, *loaded.Admin)
+	if err != nil || !view.RestartRequired {
+		t.Fatalf("key-only save lost repository restart notice: restart=%t error=%v", view.RestartRequired, err)
 	}
 	if err := live.save(func(cfg *config.Config) error { cfg.AIInstructions = "updated"; return nil }); err != nil {
 		t.Fatalf("later live edit was blocked after key-only save: %v", err)

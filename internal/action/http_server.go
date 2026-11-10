@@ -160,8 +160,8 @@ func (e *HTTPExecutor) updateIdleWorkerCredentials(credentials WorkerCredentials
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if !e.credentialsSet || e.remoteChoices == nil || e.active != nil || e.closed {
-		return errors.New("remote worker credentials cannot change while active or closed")
+	if !e.credentialsSet || e.remoteChoices == nil || e.active != nil || e.closed || e.unavailable {
+		return errors.New("remote worker credentials cannot change while active or unavailable")
 	}
 	e.credentials = credentials
 	return nil

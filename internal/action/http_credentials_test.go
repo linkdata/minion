@@ -134,6 +134,12 @@ func TestRemoteCredentialsChangeReachesNextAssignment(t *testing.T) {
 	if got := fixture.result(t); got.err != nil {
 		t.Fatalf("known outcome failed: %v", got.err)
 	}
+	executor.mu.Lock()
+	executor.unavailable = true
+	executor.mu.Unlock()
+	if err := executor.updateIdleWorkerCredentials(WorkerCredentials{CodexAPIKey: "unused-key"}); err == nil {
+		t.Fatal("quarantined worker accepted credentials it cannot use")
+	}
 }
 
 func TestHTTPAssignmentBoundIncludesCredentialEscaping(t *testing.T) {
