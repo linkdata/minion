@@ -22,7 +22,10 @@ func TestHostileHTTPAuditRunsPublishingHostValidator(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	skillDir := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit")
 	validator := `const findings = JSON.parse(require("node:fs").readFileSync(process.argv[2], "utf8"));
-if (findings.some(finding => finding.unexpected === true)) process.exit(17);
+if (findings.some(finding => finding.unexpected === true)) {
+  console.error("FAIL: 1 validation error(s)");
+  process.exit(17);
+}
 `
 	if err := os.WriteFile(filepath.Join(skillDir, "validate-findings.cjs"), []byte(validator), 0600); err != nil {
 		t.Fatal(err)

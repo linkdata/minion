@@ -257,6 +257,101 @@ func TestSavedAuditWaitsForInvalidPublishingSchema(t *testing.T) {
 	}
 }
 
+func TestSavedAuditWaitsForValidatorRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, test := range []struct{ name, prefix string }{
+		{"missing module", "require('./extra.cjs');\n"},
+		{"uncaught error", "throw new Error('validator failed');\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+			if err != nil || !installed {
+				t.Fatalf("installed audit skill: installed=%t error=%v", installed, err)
+			}
+			script := filepath.Join(filepath.Dir(skill), auditValidators[1].script)
+			original, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			modified := strings.Replace(string(original), "#!/usr/bin/env node\n", "#!/usr/bin/env node\n"+test.prefix, 1)
+			if err := os.WriteFile(script, []byte(modified), 0600); err != nil {
+				t.Fatal(err)
+			}
+			job := testJob(command.SecurityAudit)
+			job.Identity.Repository = "o/r"
+			result := completeAuditResult(job)
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+				t.Fatalf("validator runtime discarded saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("validator runtime lost saved result: present=%t error=%v", present, err)
+			}
+			if test.name == "missing module" {
+				if err := os.WriteFile(filepath.Join(filepath.Dir(script), "extra.cjs"), []byte("module.exports = {};\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(script, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
+
+func TestInvalidAuditClassRemainsTerminal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "coverage-ledger.json" {
+			ledger := strings.ReplaceAll(string(result.Artifacts[i].Data), "Access control", "Imaginary")
+			result.Artifacts[i].Data = []byte(strings.ReplaceAll(ledger, "Access%20control", "Imaginary"))
+		}
+	}
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("Go contract rejected the validator-only defect: %v", err)
+	}
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir()}
+	if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err == nil ||
+		errors.Is(err, errAuditPublicationUnavailable) || !strings.Contains(err.Error(), "coverage-ledger.cjs failed") {
+		t.Fatalf("invalid audit class was treated as validator runtime failure: %v", err)
+	}
+}
+
 func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("audit validators cannot run on Windows")

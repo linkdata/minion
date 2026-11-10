@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -27,6 +28,7 @@ var auditValidators = []struct{ script, artifact string }{
 }
 var auditCompanionFileLink = regexp.MustCompile(`\]\(([A-Z][A-Z0-9-]*\.md)\)`)
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
+var errAuditValidatorRuntime = errors.New("audit validator runtime failed")
 
 type auditTools struct {
 	binary, permissionFlag string
@@ -344,6 +346,8 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
+		var diagnostic bounded.Tail
+		cmd.Stderr = &diagnostic
 		if validator.artifact == "findings.json" {
 			cmd.Args = append(cmd.Args, "--source-only")
 		}
@@ -362,10 +366,19 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 			err = errors.Join(cause, err)
 		}
 		if err != nil {
-			return fmt.Errorf("audit %s failed: %w", validator.script, err)
+			failure := fmt.Errorf("audit %s failed: %w", validator.script, err)
+			if !auditValidatorRejected(diagnostic.String()) {
+				return fmt.Errorf("%w: %w", errAuditValidatorRuntime, failure)
+			}
+			return failure
 		}
 	}
 	return nil
+}
+
+func auditValidatorRejected(diagnostic string) bool {
+	return strings.HasPrefix(diagnostic, "FAIL: ") || strings.Contains(diagnostic, "\nFAIL: ") ||
+		strings.HasPrefix(diagnostic, "Failed to parse findings JSON:") || strings.HasPrefix(diagnostic, "Failed to parse coverage ledger:")
 }
 
 type auditCoverageCheck struct {

@@ -120,6 +120,46 @@ func TestAuditPublisherChecksFindingsSchema(t *testing.T) {
 	}
 }
 
+func TestAuditPublisherChecksCoverageModule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+	if err != nil || !installed {
+		t.Fatalf("installed audit skill: installed=%t error=%v", installed, err)
+	}
+	script := filepath.Join(filepath.Dir(skill), auditValidators[1].script)
+	original, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := strings.Replace(string(original), "#!/usr/bin/env node\n", "#!/usr/bin/env node\nrequire('./extra.cjs');\n", 1)
+	if err := os.WriteFile(script, []byte(modified), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+	if err := CheckAuditPublisher(t.Context(), root, cfg); err == nil || !strings.Contains(err.Error(), "coverage validator dependencies") {
+		t.Fatalf("missing local module passed publisher preflight: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+	}
+}
+
 func TestSelfContainedAuditValidatorsNeedNoBundledSchema(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("security audits are unsupported on Windows")

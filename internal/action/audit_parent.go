@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
@@ -56,8 +58,11 @@ func checkAuditPublisherSkill(ctx context.Context, workRoot, skill string) (resu
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
-	_, err = checkAuditTools(ctx, dir, skill)
-	return err
+	tools, err := checkAuditTools(ctx, dir, skill)
+	if err != nil {
+		return err
+	}
+	return checkAuditCoverageModule(ctx, dir, skill, tools)
 }
 
 func auditValidationTempPattern(attemptID string) string {
@@ -145,7 +150,31 @@ func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, to
 	return nil
 }
 
+func checkAuditCoverageModule(ctx context.Context, dir, skill string, tools auditTools) error {
+	probe := filepath.Join(dir, "coverage-probe.json")
+	if err := os.WriteFile(probe, []byte("[]"), 0600); err != nil {
+		return err
+	}
+	cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
+		"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+dir,
+		filepath.Join(filepath.Dir(skill), auditValidators[1].script), probe)
+	var diagnostic bounded.Tail
+	cmd.Stderr = &diagnostic
+	checkErr := executil.Run(cmd)
+	removeErr := os.Remove(probe)
+	if cause := ctx.Err(); cause != nil {
+		return errors.Join(cause, removeErr)
+	}
+	if checkErr != nil && (strings.Contains(diagnostic.String(), "MODULE_NOT_FOUND") || strings.Contains(diagnostic.String(), "code: 'ENOENT'")) {
+		return errors.Join(fmt.Errorf("check audit coverage validator dependencies: %w", checkErr), removeErr)
+	}
+	return removeErr
+}
+
 func auditValidationUnavailable(err error) bool {
+	if errors.Is(err, errAuditValidatorRuntime) {
+		return true
+	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		causes := joined.Unwrap()
 		if len(causes) == 0 {

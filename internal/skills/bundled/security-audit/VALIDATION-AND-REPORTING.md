@@ -111,7 +111,7 @@ Every record has a stable fingerprint, title, description, and repository-relati
 Run:
 
 ```sh
-node <skill-dir>/validate-findings.cjs <output-dir>/findings.json
+node <skill-dir>/validate-findings.cjs <output-dir>/findings.json --source-only
 node <skill-dir>/validate-coverage-ledger.cjs <output-dir>/coverage-ledger.json
 ```
 
