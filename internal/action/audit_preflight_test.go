@@ -51,6 +51,63 @@ func TestAuditPublisherChecksBundledDependencies(t *testing.T) {
 	}
 }
 
+func TestAuditPublisherChecksFindingsSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, test := range []struct{ name, schema string }{
+		{"malformed", "{"},
+		{"unsupported", `{"unknownKeyword": true}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+				"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+			}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); err != nil {
+				t.Fatalf("valid findings schema rejected: %v", err)
+			}
+			path := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "report-schema.json")
+			if err := os.WriteFile(path, []byte(test.schema), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); err == nil || !strings.Contains(err.Error(), "check audit findings schema") {
+				t.Fatalf("invalid findings schema passed publisher preflight: %v", err)
+			}
+			if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+				t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+			}
+		})
+	}
+}
+
+func TestSelfContainedAuditValidatorsNeedNoBundledSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	dir := t.TempDir()
+	for _, validator := range auditValidators {
+		if err := os.WriteFile(filepath.Join(dir, validator.script), []byte("process.exit(0)\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := filepath.Join(fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' --check '*) exit 0;; esac\nexit 1\n"), "node")
+	if err := checkAuditValidatorPrerequisites(t.Context(), t.TempDir(), filepath.Join(dir, "SKILL.md"), auditTools{binary: node, permissionFlag: "--permission"}); err != nil {
+		t.Fatalf("self-contained validators were probed for a bundled schema: %v", err)
+	}
+}
+
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 	for _, scenario := range []struct{ name, script, node, want string }{
 		{"missing findings validator", "validate-findings.cjs", "valid", "audit validator"},

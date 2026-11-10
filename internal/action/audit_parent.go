@@ -58,7 +58,7 @@ func checkAuditPublisherSkill(ctx context.Context, workRoot, skill string) (resu
 	if err != nil {
 		return err
 	}
-	return checkAuditValidatorSyntax(ctx, dir, skill, tools)
+	return checkAuditValidatorPrerequisites(ctx, dir, skill, tools)
 }
 
 func auditValidationTempPattern(attemptID string) string {
@@ -106,7 +106,7 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 		if auditValidationUnavailable(err) {
 			return fmt.Errorf("%w: audit validator execution: %w", errAuditPublicationUnavailable, err)
 		}
-		if scriptErr := checkAuditValidatorSyntax(ctx, validationDir, skill, tools); scriptErr != nil {
+		if scriptErr := checkAuditValidatorPrerequisites(ctx, validationDir, skill, tools); scriptErr != nil {
 			return fmt.Errorf("%w: audit validator unavailable after execution failure: %w", errAuditPublicationUnavailable, errors.Join(err, scriptErr))
 		}
 		return err
@@ -114,8 +114,8 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	return nil
 }
 
-func checkAuditValidatorSyntax(ctx context.Context, dir, skill string, tools auditTools) error {
-	scripts, err := checkAuditValidatorScripts(skill)
+func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, tools auditTools) error {
+	scripts, findingsSchema, err := checkAuditValidatorScripts(skill)
 	if err != nil {
 		return err
 	}
@@ -124,6 +124,18 @@ func checkAuditValidatorSyntax(ctx context.Context, dir, skill string, tools aud
 			"--allow-fs-read="+filepath.Dir(skill), "--check", script)
 		if err := executil.Run(cmd); err != nil {
 			return fmt.Errorf("check audit validator %q syntax: %w", script, err)
+		}
+	}
+	if findingsSchema {
+		probe := filepath.Join(dir, "schema-probe.json")
+		if err := os.WriteFile(probe, []byte("[]"), 0600); err != nil {
+			return err
+		}
+		cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
+			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+dir,
+			scripts[0], probe, "--source-only")
+		if err := executil.Run(cmd); err != nil {
+			return fmt.Errorf("check audit findings schema: %w", err)
 		}
 	}
 	return nil

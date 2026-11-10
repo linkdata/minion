@@ -183,7 +183,7 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 		return false
 	}
 	host := u.Hostname()
-	if !ValidURLHost(host) {
+	if !validURLHost(host) {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -202,8 +202,7 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	return err == nil && addr.Unmap().IsLoopback()
 }
 
-// ValidURLHost checks the host syntax used by admin URLs, including certificate names.
-func ValidURLHost(host string) bool {
+func validURLHost(host string) bool {
 	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
 		return false
 	}

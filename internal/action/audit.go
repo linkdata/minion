@@ -33,7 +33,7 @@ type auditTools struct {
 }
 
 func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
-	if _, err := checkAuditValidatorScripts(skill); err != nil {
+	if _, _, err := checkAuditValidatorScripts(skill); err != nil {
 		return auditTools{}, err
 	}
 	binary, err := aicli.AbsoluteExecutable("node")
@@ -44,17 +44,21 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 	return auditTools{binary: binary, permissionFlag: flag}, err
 }
 
-func checkAuditValidatorScripts(skill string) ([]string, error) {
+func checkAuditValidatorScripts(skill string) ([]string, bool, error) {
 	dependencies := []string{"report-schema.json", "ATTACK-CLASSES.md", "safe-input.cjs", "strict-json-keys.cjs"}
 	needed := make(map[string]bool)
 	var scripts []string
+	var findingsSchema bool
 	for _, validator := range auditValidators {
 		path := filepath.Join(filepath.Dir(skill), validator.script)
 		data, err := readAuditValidator(path)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		scripts = append(scripts, path)
+		if validator.artifact == "findings.json" && bytes.Contains(data, []byte("report-schema.json")) {
+			findingsSchema = true
+		}
 		for _, name := range dependencies {
 			if bytes.Contains(data, []byte(name)) {
 				needed[name] = true
@@ -66,12 +70,12 @@ func checkAuditValidatorScripts(skill string) ([]string, error) {
 			path := filepath.Join(filepath.Dir(skill), name)
 			data, err := readAuditValidator(path)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if name == "ATTACK-CLASSES.md" {
 				for _, match := range auditCompanionFileLink.FindAllSubmatch(data, -1) {
 					if _, err := readAuditValidator(filepath.Join(filepath.Dir(skill), string(match[1]))); err != nil {
-						return nil, err
+						return nil, false, err
 					}
 				}
 			}
@@ -80,7 +84,7 @@ func checkAuditValidatorScripts(skill string) ([]string, error) {
 			}
 		}
 	}
-	return scripts, nil
+	return scripts, findingsSchema, nil
 }
 
 func readAuditValidator(path string) ([]byte, error) {

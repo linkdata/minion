@@ -197,6 +197,66 @@ func TestSavedAuditWaitsForBrokenPublishingValidator(t *testing.T) {
 	}
 }
 
+func TestSavedAuditWaitsForInvalidPublishingSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, test := range []struct{ name, schema string }{
+		{"malformed", "{"},
+		{"unsupported", `{"unknownKeyword": true}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			job := testJob(command.SecurityAudit)
+			job.Identity.Repository = "o/r"
+			result := completeAuditResult(job)
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+			if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
+				t.Fatalf("valid findings schema rejected saved audit: %v", err)
+			}
+			skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+			if err != nil || !installed {
+				t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+			}
+			path := filepath.Join(filepath.Dir(skill), "report-schema.json")
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.schema), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+				t.Fatalf("invalid findings schema discarded saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("invalid findings schema lost saved result: present=%t error=%v", present, err)
+			}
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored findings schema did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
+
 func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("audit validators cannot run on Windows")
