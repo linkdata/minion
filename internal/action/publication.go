@@ -88,7 +88,7 @@ func auditPublicSummary(artifacts []workspace.File) (string, error) {
 		counts[finding.Verdict]++
 	}
 	var summary strings.Builder
-	fmt.Fprintf(&summary, "Executor-reported security audit summary. Record structure and cited source locations were checked; reviewer activity and behavior remain executor claims.\n\nCoverage units: %d covered, %d candidate, %d blocked, %d not applicable.\nFindings: %d confirmed, %d need validation, %d rejected.\n", counts["covered"], counts["candidate"], counts["blocked"], counts["not_applicable"], counts["confirmed"], counts["needs_validation"], counts["rejected"])
+	fmt.Fprintf(&summary, "Executor-reported security audit summary. Record structure and cited source locations were checked; reviewer activity, behavior, and artifact authorship remain executor claims.\n\nCoverage units: %d covered, %d candidate, %d blocked, %d not applicable.\nFindings: %d confirmed, %d need validation, %d rejected.\n", counts["covered"], counts["candidate"], counts["blocked"], counts["not_applicable"], counts["confirmed"], counts["needs_validation"], counts["rejected"])
 	for _, finding := range findings {
 		if finding.Verdict == "rejected" {
 			continue

@@ -191,7 +191,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = listener.Close() })
-		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String()}
+		watcher.Config.Admin = &config.AdminConfig{Listen: listener.Addr().String(), Administrators: []config.AdminAccount{{Username: "admin"}}}
 	} else if adminSetup == "active" {
 		watcher.Config.Admin = &config.AdminConfig{Listen: freeAdminListen(t), Administrators: []config.AdminAccount{testAdminAccount()}}
 	} else if adminSetup == "placeholder" {
@@ -219,7 +219,7 @@ func testOrchestrateReconcilesIssuedWriteBeforeWorkerStartup(t *testing.T, withA
 		}
 		homeURL, bound, _ := strings.Cut(addressLine, " (bound to ")
 		parsed, err := url.Parse(homeURL)
-		if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.Path != "" || parsed.Port() == "" {
+		if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "localhost" || parsed.Path != "" || parsed.Port() == "" {
 			t.Fatalf("admin home URL is not clickable: %q: %v", homeURL, err)
 		}
 		address := net.JoinHostPort("127.0.0.1", parsed.Port())

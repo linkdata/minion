@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/codexcli"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
@@ -42,6 +43,37 @@ func hasNewInstalledCommand(cfg config.Config, selected map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+func modelKeysChanged(before, after config.Config) bool {
+	return (before.Main == "codex" || before.Adversarial == "codex") && before.Codex.APIKey != after.Codex.APIKey ||
+		(before.Main == "claude" || before.Adversarial == "claude") && before.Claude.APIKey != after.Claude.APIKey
+}
+
+func applyModelKeys(owner *action.Orchestrator, cfg config.Config) {
+	codex, claude := owner.Runner.Codex, owner.Runner.Claude
+	codex.APIKey = cfg.Codex.APIKey
+	if cfg.Codex.APIKey == "" && cfg.RemoteExecutor == nil {
+		codex = codexcli.CaptureAmbientNativeCredentials(codex)
+	}
+	claude.APIKey = cfg.Claude.APIKey
+	if cfg.RemoteExecutor == nil {
+		claude.APIKey = claudeRunnerKey(cfg.Claude.APIKey)
+	}
+	owner.SetRunnerCredentials(codex, claude)
+}
+
+func syncUnselectedModelKeys(owner *action.Orchestrator, cfg config.Config) {
+	codex, claude := owner.Runner.Codex, owner.Runner.Claude
+	if cfg.Main != "codex" && cfg.Adversarial != "codex" {
+		codex.APIKey = cfg.Codex.APIKey
+	}
+	if cfg.Main != "claude" && cfg.Adversarial != "claude" {
+		claude.APIKey = cfg.Claude.APIKey
+	}
+	if codex.APIKey != owner.Runner.Codex.APIKey || claude.APIKey != owner.Runner.Claude.APIKey {
+		owner.SetRunnerCredentials(codex, claude)
+	}
 }
 
 // attachSelectedLocalWorker prepares one selected child before the monitor can
@@ -124,8 +156,9 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 		}
 		retryConfig = false
 		cfg, generation := live.next()
-		refresh := selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || hasNewInstalledCommand(cfg, watcher.SelectedCommands)
+		refresh := modelKeysChanged(watcher.Config, cfg) || selectedSkillConfigChanged(watcher.Config, cfg, watcher.SelectedCommands) || hasNewInstalledCommand(cfg, watcher.SelectedCommands)
 		if !refresh {
+			syncUnselectedModelKeys(owner, cfg)
 			owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 			owner.AIInstructions = cfg.AIInstructions
 			owner.CleanCriticRounds = cfg.RequiredCleanRounds
@@ -135,9 +168,13 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			continue
 		}
 		oldCfg, oldCommands, oldSkills := watcher.Config, owner.Commands, owner.AlwaysOnSkills
+		oldCodex, oldClaude := owner.Runner.Codex, owner.Runner.Claude
 		owner.Commands, owner.AlwaysOnSkills = cfg.Commands, cfg.AlwaysOnSkills
 		if _, err := owner.WorkerSelection(cfg); err != nil {
 			owner.Commands, owner.AlwaysOnSkills = oldCommands, oldSkills
+			if ctx.Err() != nil {
+				return 0
+			}
 			logger.Printf("activate admin skill change: %s", monitor.InertLogText(err.Error()))
 			live.applied(oldCfg, generation, err)
 			if code = waitForConfigRetry(ctx, live.updates, done); code != monitorConfigChanged {
@@ -154,6 +191,7 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 		owner.ClearSelectedExecutor()
 		watcher.Config = cfg
 		watcher.SelectedCommands = nil
+		applyModelKeys(owner, cfg)
 		var err error
 		done, closeWorker, err = attachSelectedLocalWorker(ctx, owner, watcher, path, args, readyTimeout)
 		if err == nil {
@@ -162,8 +200,12 @@ func runSelectedLocalServiceLive(ctx context.Context, owner *action.Orchestrator
 			live.applied(cfg, generation, nil)
 			continue
 		}
-		logger.Printf("activate admin skill change: %s", monitor.InertLogText(err.Error()))
+		if ctx.Err() != nil {
+			return 0
+		}
+		logger.Printf("activate admin worker change: %s", monitor.InertLogText(err.Error()))
 		owner.Commands, owner.AlwaysOnSkills = oldCommands, oldSkills
+		owner.SetRunnerCredentials(oldCodex, oldClaude)
 		watcher.Config = oldCfg
 		watcher.SelectedCommands = nil
 		var rollbackErr error

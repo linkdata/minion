@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -256,18 +257,37 @@ func TestAdminRepositoryCommandsRejectUnsupportedMainAI(t *testing.T) {
 	post("owner/new", http.StatusConflict)
 }
 
+func TestAdminRepositoryCommandsRequirePublishingHostAndRemoteWorkerCapability(t *testing.T) {
+	cfg := config.Config{Main: "codex", RemoteExecutor: &config.RemoteExecutorConfig{},
+		Commands: map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"builtin://anti-prompt-injection"}}}}
+	selected := map[string]bool{"audit": true}
+	view := configurationView(adminConfigSnapshot{Config: cfg, Remote: true, RemoteCommands: selected})
+	if runtime.GOOS == "windows" {
+		if len(view.Commands) != 0 || validateAdminActions(cfg, []string{"audit"}, nil) == nil {
+			t.Fatalf("Windows publishing host offered audit: %v", view.Commands)
+		}
+		return
+	}
+	if len(view.Commands) != 1 || view.Commands[0] != "audit" {
+		t.Fatalf("supported remote audit not offered: %v", view.Commands)
+	}
+	if err := validateAdminActions(cfg, []string{"audit"}, nil); err != nil {
+		t.Fatalf("supported remote audit rejected: %v", err)
+	}
+}
+
 func TestAdminRemovesConfiguredLegacyRequester(t *testing.T) {
 	live, path := liveConfigFixture(t, false)
 	if err := live.save(func(cfg *config.Config) error {
-		cfg.Repositories[0].AllowedActors = []string{"old_user"}
-		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"old_user": 77}
+		cfg.Repositories[0].AllowedActors = []string{"old__user"}
+		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"old__user": 77}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
 	registerAdminConfigActions(mux, live, nil)
-	form := url.Values{"repository": {"owner/repo"}, "login": {"old_user"}}
+	form := url.Values{"repository": {"owner/repo"}, "login": {"old__user"}}
 	add := httptest.NewRequest(http.MethodPost, "/admin/users/add", strings.NewReader(form.Encode()))
 	add.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	addResponse := httptest.NewRecorder()

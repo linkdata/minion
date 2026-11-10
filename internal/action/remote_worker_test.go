@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +122,28 @@ func TestRemoteWorkerRejectsAssignmentAfterPullDisconnect(t *testing.T) {
 	if !errors.Is(err, monitor.ErrRequestTransport) || probe.undelivered != 1 || result.Version != ProtocolVersion {
 		t.Fatalf("disconnected pull reached assignment: result=%+v error=%v undelivered=%d", result, err, probe.undelivered)
 	}
+}
+
+func TestRemoteWorkerFailsUnsupportedAuditWithoutAssignment(t *testing.T) {
+	executor, err := NewHTTPExecutor("remote")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pullDone := make(chan struct{})
+	executor.mu.Lock()
+	executor.pull, executor.pullDone = true, pullDone
+	executor.mu.Unlock()
+	worker := &remoteWorker{executor: executor, endpoint: &RemoteEndpoint{executor: executor, serveDone: make(chan struct{})}}
+	probe := &remoteAssignmentProbe{before: func(Job) error { t.Fatal("unsupported audit reached assignment"); return nil }}
+	result, err := worker.Execute(t.Context(), testJob(command.SecurityAudit), probe)
+	executor.mu.Lock()
+	active := executor.active
+	executor.mu.Unlock()
+	if !errors.Is(err, monitor.ErrTerminalJob) || errors.Is(err, ErrRemoteWorkerUnavailable) || errors.Is(err, monitor.ErrRequestTransport) ||
+		probe.undelivered != 1 || active != nil || result.Version != ProtocolVersion {
+		t.Fatalf("unsupported audit was not failed before assignment: result=%+v error=%v undelivered=%d active=%v", result, err, probe.undelivered, active)
+	}
+	close(pullDone)
 }
 
 func TestRemoteWorkerLostPullStopsBeforeAssignmentClaim(t *testing.T) {
@@ -369,10 +392,13 @@ func TestAttachRemoteWorkerSelectsConfiguredIdentityWithoutHostSkills(t *testing
 	certificate, _ := testRemoteCertificate(t)
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, 32))
 	const missingSkill = "https://github.com/example/skills/tree/main/skills/not-installed"
-	commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{missingSkill}}}
+	commands := map[string]config.CommandMapping{
+		"inspect": {Action: "comment", Skills: []string{missingSkill}},
+		"audit":   {Action: "security-audit", Skills: []string{missingSkill}},
+	}
 	cfg := config.Config{Main: "codex", Commands: commands,
 		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
-		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect"}}},
+		Repositories:   []config.Repository{{Name: "owner/repo", Actions: []string{"inspect", "audit"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:0", Token: token}}
 	orchestrator := &Orchestrator{Main: "codex", Commands: commands, CodexModel: "main-1", CodexEffort: "high"}
 	selected, endpoint, err := orchestrator.AttachRemoteWorker(cfg, certificate)
@@ -384,7 +410,12 @@ func TestAttachRemoteWorkerSelectsConfiguredIdentityWithoutHostSkills(t *testing
 			t.Error(err)
 		}
 	})
-	if !selected["inspect"] || len(selected) != 1 || orchestrator.ExecutorID != "remote" || !orchestrator.assignmentRequired || !orchestrator.remoteSelected {
+	wantAudit := runtime.GOOS != "windows"
+	wantCommands := 1
+	if wantAudit {
+		wantCommands++
+	}
+	if !selected["inspect"] || selected["audit"] != wantAudit || len(selected) != wantCommands || orchestrator.ExecutorID != "remote" || !orchestrator.assignmentRequired || !orchestrator.remoteSelected {
 		t.Fatalf("wrong remote selection: commands=%v executor=%q", selected, orchestrator.ExecutorID)
 	}
 	job := monitor.Job{Repository: cfg.Repositories[0], Command: command.Command{Name: "inspect", Action: command.Comment}}

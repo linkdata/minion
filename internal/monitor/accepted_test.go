@@ -180,6 +180,36 @@ func TestSelectedUnassignedRecoveryFailsWhenFrozenProviderIsUnavailable(t *testi
 	}
 }
 
+func TestSelectedUnassignedRecoveryEndsWhenWorkerLosesCommand(t *testing.T) {
+	at := time.Now().UTC()
+	item := selectedItem(at)
+	reactionErr := errors.New("reaction unavailable")
+	gh := &fakeGitHub{notifications: []github.Notification{testNotification(at)}, items: []github.Item{item},
+		permission: github.Permission{Permission: "write"}, reactionErr: reactionErr}
+	store := openState(t, at.Add(-time.Minute))
+	executions := 0
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		executions++
+		return nil
+	}))
+	if _, err := m.RunOnce(t.Context(), store); !errors.Is(err, reactionErr) || store.Data.Accepted == nil {
+		t.Fatalf("reaction failure did not retain acceptance: error=%v state=%+v", err, store.Data)
+	}
+	accepted := *store.Data.Accepted
+	store.Data.Accepted.RetryAt = at.Add(-time.Second)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	m.SelectedCommands = map[string]bool{"audit": true}
+	gh.reactionErr = nil
+	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
+	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 0 || store.Data.Accepted != nil ||
+		store.Data.Processed[accepted.JobID].IsZero() || store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" ||
+		len(gh.comments) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("unavailable selected command did not terminate with a failure reply: error=%v executions=%d comments=%v state=%+v", err, executions, gh.comments, store.Data)
+	}
+}
+
 func TestSelectedPreparationRetryFailsWhenFrozenProviderIsUnavailable(t *testing.T) {
 	for _, change := range []struct {
 		name, initialCritic, nextMain, nextCritic string

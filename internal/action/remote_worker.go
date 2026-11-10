@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sync/atomic"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
@@ -43,7 +44,7 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 			if !ok || !present || configured.Action != used.Action || !slices.Equal(configured.Skills, used.Skills) {
 				return nil, nil, fmt.Errorf("remote command %q differs from orchestrator mapping", name)
 			}
-			if len(configured.Skills) != 0 && configured.SupportsProvider(e.mainProvider()) {
+			if len(configured.Skills) != 0 && configured.SupportsProvider(e.mainProvider()) && configured.SupportedOnHost() {
 				commands[name] = true
 			}
 		}
@@ -61,21 +62,7 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 			return nil, nil, err
 		}
 	}
-	credentials := WorkerCredentials{}
-	uses := func(provider string) bool {
-		return e.mainProvider() == provider || e.Adversarial == provider
-	}
-	if uses("codex") {
-		credentials.CodexAPIKey = e.Runner.Codex.APIKey
-		if credentials.CodexAPIKey == "" {
-			credentials.CodexNativeAPIKey = e.Runner.Codex.NativeAPIKey
-			credentials.CodexAccessToken = e.Runner.Codex.NativeAccessToken
-		}
-	}
-	if uses("claude") {
-		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
-	}
-	if err := executor.SetWorkerCredentials(credentials); err != nil {
+	if err := executor.SetWorkerCredentials(e.workerCredentials(e.mainProvider(), e.Adversarial)); err != nil {
 		return nil, nil, err
 	}
 	selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: remote.ExecutorID,
@@ -90,6 +77,24 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 		return nil, nil, err
 	}
 	executor.remoteChoices = &selection
+	if e.remotePriorAttempts == nil {
+		prior := make(map[string]string)
+		if e.Store != nil {
+			saved, err := e.Store.ReadSavedDurable()
+			if err != nil {
+				return nil, nil, fmt.Errorf("read terminal decisions before remote attach: %w", err)
+			}
+			for jobID, decision := range saved.TerminalDecisions {
+				prior[jobID] = decision.AttemptID
+			}
+			if accepted := saved.Accepted; accepted != nil && accepted.Assigned {
+				if _, decided := prior[accepted.JobID]; !decided {
+					prior[accepted.JobID] = accepted.AttemptID
+				}
+			}
+		}
+		e.remotePriorAttempts = prior
+	}
 	executor.lateOutcome = func(outcome httpOutcome) error { return e.receiveLateOutcome(remote.ExecutorID, outcome) }
 	endpoint, err := ListenRemoteExecution(executor, remote.Listen, certificate, remote.Token)
 	if err != nil {
@@ -101,6 +106,15 @@ func (e *Orchestrator) AttachRemoteWorker(cfg config.Config, certificate tls.Cer
 	e.remoteSelected = true
 	e.assignmentRequired = true
 	return commands, endpoint, nil
+}
+
+// UpdateRemoteWorkerCredentials applies changed credentials to the next assignment.
+func (e *Orchestrator) UpdateRemoteWorkerCredentials() error {
+	worker, ok := e.Executor.(*remoteWorker)
+	if !ok {
+		return errors.New("remote worker is not selected")
+	}
+	return worker.executor.updateIdleWorkerCredentials(e.workerCredentials(e.mainProvider(), e.Adversarial))
 }
 
 // WaitCapacity checks the live held pull, not a prior worker announcement.
@@ -162,6 +176,13 @@ func (w *remoteWorker) Execute(ctx context.Context, job Job, sink Checkpoints) (
 	pullDone := w.heldPull()
 	if pullDone == nil {
 		err := fmt.Errorf("%w: remote worker has no live pull", monitor.ErrRequestTransport)
+		if hasCheckpoint {
+			err = errors.Join(err, checkpoint.AssignmentNotDelivered())
+		}
+		return result, err
+	}
+	if job.Action == command.SecurityAudit && !w.endpoint.AuditHostSupported() {
+		err := fmt.Errorf("%w: audit unsupported on remote host", monitor.ErrTerminalJob)
 		if hasCheckpoint {
 			err = errors.Join(err, checkpoint.AssignmentNotDelivered())
 		}

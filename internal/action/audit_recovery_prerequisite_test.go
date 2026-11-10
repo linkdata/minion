@@ -69,7 +69,8 @@ func TestInProcessAuditRetainsIncompleteWhenValidatorUnavailable(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("PATH", t.TempDir())
 	e := &Orchestrator{WorkRoot: root}
-	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, exec.ErrNotFound) {
+	if _, err := e.preparePublication(t.Context(), &preparedAction{job: job}, result); !errors.Is(err, monitor.ErrPostModelPublication) || !errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) ||
+		(runtime.GOOS != "windows" && !errors.Is(err, exec.ErrNotFound)) {
 		t.Fatalf("missing validator was not terminal before a saved result: %v", err)
 	}
 	dirs, err := filepath.Glob(filepath.Join(root, "audits", "incomplete-*"))
@@ -144,51 +145,217 @@ func TestSavedAuditWaitsForPublishingValidator(t *testing.T) {
 }
 
 func TestSavedAuditWaitsForBrokenPublishingValidator(t *testing.T) {
-	installActionTestSkills(t, testAuditSkillURL)
-	marker := filepath.Join(t.TempDir(), "syntax-checked")
-	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*) exit 0;; esac\ncase \" $* \" in *' --check '*) printf checked > "+shellQuote(marker)+";; esac\nfor arg do case \"$arg\" in *.cjs) validator=$arg;; esac; done\nIFS= read -r first < \"$validator\"\n[ \"$first\" = 'function (' ] && exit 1\nexit 0\n")
-	job := testJob(command.SecurityAudit)
-	job.Identity.Repository = "o/r"
-	result := completeAuditResult(job)
-	store, _, request := savedRecoveryFixture(t, job, result)
-	var posts atomic.Int32
-	server := auditRecoveryServer(t, &posts)
-	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
-		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
-	if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
-		t.Fatalf("original validator rejected saved audit: %v", err)
+	for _, name := range []string{auditValidators[0].script, "safe-input.cjs"} {
+		t.Run(name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(t.TempDir(), "syntax-checked")
+			fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*) exit 0;; esac\nfor arg do case \"$arg\" in *.cjs) validator=$arg;; esac; done\ncase \" $* \" in *' --check '*) printf '%s\\n' \"$validator\" >> "+shellQuote(marker)+";; *) IFS= read -r first < \"${validator%/*}/safe-input.cjs\"; [ \"$first\" = 'function (' ] && exit 1;; esac\nIFS= read -r first < \"$validator\"\n[ \"$first\" = 'function (' ] && exit 1\nexit 0\n")
+			job := testJob(command.SecurityAudit)
+			job.Identity.Repository = "o/r"
+			result := completeAuditResult(job)
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+			if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
+				t.Fatalf("original validator rejected saved audit: %v", err)
+			}
+			skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+			if err != nil || !installed {
+				t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+			}
+			script := filepath.Join(filepath.Dir(skill), name)
+			original, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(script, []byte("function (\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+				t.Fatalf("broken validator discarded saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+			checked, err := os.ReadFile(marker)
+			if err != nil || !strings.Contains(string(checked), name) {
+				t.Fatalf("validator syntax was not checked: checked=%q error=%v", checked, err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("broken validator lost saved result: present=%t error=%v", present, err)
+			}
+			if err := os.WriteFile(script, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+		})
 	}
-	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
-	if err != nil || !installed {
-		t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+}
+
+func TestSavedAuditWaitsForInvalidPublishingSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
 	}
-	script := filepath.Join(filepath.Dir(skill), auditValidators[0].script)
-	original, err := os.ReadFile(script)
+	node, err := exec.LookPath("node")
 	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, test := range []struct{ name, schema string }{
+		{"malformed", "{"},
+		{"unsupported", `{"unknownKeyword": true}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			job := testJob(command.SecurityAudit)
+			job.Identity.Repository = "o/r"
+			result := completeAuditResult(job)
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+			if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err != nil {
+				t.Fatalf("valid findings schema rejected saved audit: %v", err)
+			}
+			skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+			if err != nil || !installed {
+				t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+			}
+			path := filepath.Join(filepath.Dir(skill), "report-schema.json")
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.schema), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+				t.Fatalf("invalid findings schema discarded saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("invalid findings schema lost saved result: present=%t error=%v", present, err)
+			}
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored findings schema did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
+
+func TestSavedAuditWaitsForValidatorRuntime(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, test := range []struct{ name, prefix string }{
+		{"missing module", "require('./extra.cjs');\n"},
+		{"uncaught error", "throw new Error('validator failed');\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+			if err != nil || !installed {
+				t.Fatalf("installed audit skill: installed=%t error=%v", installed, err)
+			}
+			script := filepath.Join(filepath.Dir(skill), auditValidators[1].script)
+			original, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			modified := strings.Replace(string(original), "#!/usr/bin/env node\n", "#!/usr/bin/env node\n"+test.prefix, 1)
+			if err := os.WriteFile(script, []byte(modified), 0600); err != nil {
+				t.Fatal(err)
+			}
+			job := testJob(command.SecurityAudit)
+			job.Identity.Repository = "o/r"
+			result := completeAuditResult(job)
+			store, _, request := savedRecoveryFixture(t, job, result)
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
+				t.Fatalf("validator runtime discarded saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("validator runtime lost saved result: present=%t error=%v", present, err)
+			}
+			if test.name == "missing module" {
+				if err := os.WriteFile(filepath.Join(filepath.Dir(script), "extra.cjs"), []byte("module.exports = {};\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(script, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+		})
+	}
+}
+
+func TestInvalidAuditClassRemainsTerminal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(script, []byte("function (\n"), 0600); err != nil {
-		t.Fatal(err)
+	job := testJob(command.SecurityAudit)
+	result := completeAuditResult(job)
+	for i := range result.Artifacts {
+		if result.Artifacts[i].Path == "coverage-ledger.json" {
+			ledger := strings.ReplaceAll(string(result.Artifacts[i].Data), "Access control", "Imaginary")
+			result.Artifacts[i].Data = []byte(strings.ReplaceAll(ledger, "Access%20control", "Imaginary"))
+		}
 	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
-		errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || posts.Load() != 0 {
-		t.Fatalf("broken validator discarded saved audit: posts=%d error=%v", posts.Load(), err)
+	if err := result.Validate(job); err != nil {
+		t.Fatalf("Go contract rejected the validator-only defect: %v", err)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("validator syntax was not checked: %v", err)
-	}
-	if present, err := store.HasAcceptedResult(); err != nil || !present {
-		t.Fatalf("broken validator lost saved result: present=%t error=%v", present, err)
-	}
-	if err := os.WriteFile(script, original, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
-		t.Fatalf("restored validator did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+	orchestrator := &Orchestrator{WorkRoot: t.TempDir()}
+	if err := orchestrator.validateAuditForPublication(t.Context(), job, result.Artifacts); err == nil ||
+		errors.Is(err, errAuditPublicationUnavailable) || !strings.Contains(err.Error(), "coverage-ledger.cjs failed") {
+		t.Fatalf("invalid audit class was treated as validator runtime failure: %v", err)
 	}
 }
 
 func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
 	installActionTestSkills(t, testAuditSkillURL)
 	job := testJob(command.SecurityAudit)
 	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
@@ -201,6 +368,54 @@ func TestMissingAuditScriptIsPublishingPrerequisite(t *testing.T) {
 	orchestrator := &Orchestrator{WorkRoot: t.TempDir()}
 	if err := orchestrator.validateAuditForPublication(t.Context(), job, completeAuditResult(job).Artifacts); !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing audit validator was treated as invalid result: %v", err)
+	}
+}
+
+func TestMissingAuditSupportFileIsPublishingPrerequisite(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	for _, name := range []string{"report-schema.json", "ATTACK-CLASSES.md", "WEB-PROTOCOL-AND-AUTH.md"} {
+		t.Run(name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+			job := testJob(command.SecurityAudit)
+			job.Identity.Repository = "o/r"
+			result := completeAuditResult(job)
+			store, _, request := savedRecoveryFixture(t, job, result)
+			skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+			if err != nil || !installed {
+				t.Fatalf("test audit skill: installed=%t error=%v", installed, err)
+			}
+			path := filepath.Join(filepath.Dir(skill), name)
+			original, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			var posts atomic.Int32
+			server := auditRecoveryServer(t, &posts)
+			orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+				Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+			if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrPostModelPublication) ||
+				errors.Is(err, monitor.ErrTerminalJob) || !errors.Is(err, errAuditPublicationUnavailable) || !errors.Is(err, os.ErrNotExist) || posts.Load() != 0 {
+				t.Fatalf("missing support file discarded saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+			if present, err := store.HasAcceptedResult(); err != nil || !present {
+				t.Fatalf("missing support file lost saved result: present=%t error=%v", present, err)
+			}
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+				t.Fatalf("restored support file did not publish saved audit: posts=%d error=%v", posts.Load(), err)
+			}
+		})
 	}
 }
 

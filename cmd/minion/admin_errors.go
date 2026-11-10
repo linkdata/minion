@@ -131,7 +131,7 @@ func (a *adminAccess) browserErrors(next http.Handler) http.Handler {
 			}
 		}
 		page := &adminNoticeWriter{ResponseWriter: w, status: capture.status}
-		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: status, AdminLogin: len(a.accounts) != 0 && a.sessionUsername(sess) == ""}).ServeHTTP(page, r)
+		ui.Handler(a.jaws, "admin notice", adminNoticeView{Status: status, AdminLogin: a.passwordSet && a.sessionUsername(sess) == ""}).ServeHTTP(page, r)
 		if !page.wrote {
 			w.Header().Del("Content-Type")
 			w.WriteHeader(http.StatusServiceUnavailable)

@@ -24,6 +24,125 @@ import (
 )
 
 func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T) {
+	testStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t, action.ProtocolVersion)
+}
+
+func TestStartupPublishesVersion22StoredResultBeforeSelectedWorkerPreflight(t *testing.T) {
+	testStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t, 22)
+}
+
+func TestAcceptedRecoveryGitHubFailureOpensAdminUI(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	markers := startupCommandMarkers(t)
+	root := t.TempDir()
+	statePath := filepath.Join(root, "state.json")
+	at := time.Now().UTC()
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: action.LocalExecutorID,
+		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+		SubjectType: "Issue", SubjectNumber: 7,
+		SourceKey: "issue-comment:42", SourceNodeID: "source-node",
+		SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-42", SourceUpdatedAt: at,
+		Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
+		AcceptedAt: at, Deadline: at.Add(time.Hour), Assigned: true,
+	}
+	job := action.Job{Version: action.ProtocolVersion,
+		Identity: action.Identity{JobID: accepted.JobID, AttemptID: accepted.AttemptID, ExecutorID: accepted.ExecutorID,
+			Repository: accepted.Repository, RepositoryID: accepted.RepositoryID, OwnerID: accepted.OwnerID,
+			Requester: accepted.Requester, RequesterID: accepted.RequesterID, Number: accepted.SubjectNumber, SubjectType: accepted.SubjectType},
+		Command: accepted.CommandName, Action: command.Comment,
+		Source: workspace.Snapshot{Head: strings.Repeat("a", 40), Repository: []byte("saved source bundle")},
+		Main: action.RoleSettings{Provider: "codex", Model: accepted.MainSettings.Model, Effort: accepted.MainSettings.Effort,
+			Skills: []string{skills.BuiltinAntiPromptInjection}},
+		RuntimeBudget: time.Second, InactivityTimeout: config.DefaultInactivityTimeout,
+	}
+	result := action.Result{Version: action.ProtocolVersion, Identity: job.Identity, SourceRef: job.Source.Head,
+		Answer: "Saved answer", Calls: []action.CallUsage{{Provider: "codex", Role: "main", Round: 1,
+			Model: accepted.MainSettings.Model, Effort: accepted.MainSettings.Effort, Complete: true}}}
+	record := action.AcceptedResultRecord{Accepted: accepted, Job: job, Result: result}
+	if err := record.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(statePath, at.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialStore := store
+	t.Cleanup(func() { _ = initialStore.Close() })
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
+	store.Data.NextPollAt = at.Add(time.Hour)
+	store.Data.NextInviteCheckAt = at.Add(time.Hour)
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted.ResultReady = true
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var repoCalls int
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/user":
+			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		case "/repos/owner/repo":
+			repoCalls++
+			recorder.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = recorder.WriteString(`{"message":"repository unavailable"}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", request.Method, request.URL.Path)
+			recorder.WriteHeader(http.StatusNotFound)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"}, StatePath: statePath, WorkRoot: root,
+		Admin:          &config.AdminConfig{Listen: occupiedAdminAddress(t), Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands:       map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}},
+		AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"},
+			AllowedActors: []string{"writer"}, AllowedActorIDs: map[string]int64{"writer": 7}}},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Error("accepted recovery reached Git preflight")
+			return nil
+		})
+	})
+	if code != 1 || repoCalls == 0 || !strings.Contains(output, "starting admin recovery UI") ||
+		!strings.Contains(output, "setup UI:") || strings.Contains(output, "start selected worker:") {
+		t.Fatalf("repository failure hid recovery UI: code=%d repo_calls=%d log=%q", code, repoCalls, output)
+	}
+	assertNoStartupCommands(t, markers)
+	store, err = state.Open(statePath, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Data.Accepted == nil || store.Data.Accepted.JobID != accepted.JobID || store.Data.Accepted.RetryAt.IsZero() {
+		t.Fatalf("repository failure lost accepted work: %+v", store.Data.Accepted)
+	}
+	if present, err := store.HasAcceptedResult(); err != nil || !present {
+		t.Fatalf("repository failure lost saved result: present=%t error=%v", present, err)
+	}
+}
+
+func testStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T, storedVersion int) {
+	t.Helper()
 	isolateHostPaths(t, t.TempDir())
 	markers := startupCommandMarkers(t)
 	t.Setenv("GH_TOKEN", "offline-token")
@@ -59,6 +178,20 @@ func TestStartupPublishesStoredResultBeforeSelectedWorkerPreflight(t *testing.T)
 	if err := record.Validate(); err != nil {
 		t.Fatalf("invalid saved result fixture: %v", err)
 	}
+	if storedVersion == 22 {
+		for _, versions := range [][2]int{{22, action.ProtocolVersion}, {action.ProtocolVersion, 22}, {23, 23}} {
+			mixed := record
+			mixed.Job.Version, mixed.Result.Version = versions[0], versions[1]
+			data, err := json.Marshal(mixed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := action.DecodeAcceptedResultRecord(data); err == nil {
+				t.Fatalf("accepted stored result versions %d/%d", versions[0], versions[1])
+			}
+		}
+	}
+	record.Job.Version, record.Result.Version = storedVersion, storedVersion
 	store, err := state.Open(statePath, at.Add(-time.Minute))
 	if err != nil {
 		t.Fatal(err)

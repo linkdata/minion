@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -103,6 +105,25 @@ func TestAdminLiveConfigRejectsRestartOnlyChanges(t *testing.T) {
 	}
 }
 
+func TestAdminLiveConfigRejectsExternalAPIKeyEdit(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Codex.APIKey = "external-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Review carefully."
+		return nil
+	}); !errors.Is(err, errAdminRestartRequired) {
+		t.Fatalf("external API key edit was not detected: %v", err)
+	}
+	if got := configForAdminTest(t, path); got.Codex.APIKey != "external-key" || got.AIInstructions != "" {
+		t.Fatalf("external edit was overwritten: %+v", got)
+	}
+}
+
 func TestAdminLiveConfigRejectsRemoteSkillChanges(t *testing.T) {
 	live, path := liveConfigFixture(t, true)
 	before, err := os.ReadFile(path)
@@ -170,6 +191,71 @@ func TestAdminLiveConfigAllowsRemotePolicySaveWithUnsupportedAction(t *testing.T
 	}
 }
 
+func TestAdminLiveConfigAllowsPolicySaveWithUnsupportedRemoteAudit(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Repositories[0].Actions = []string{"review", "security-audit"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.setRemoteSelected(map[string]bool{"review": true}, false)
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.AIInstructions = "Use the configured review style."
+		return nil
+	}); err != nil {
+		t.Fatalf("unrelated policy save was blocked by the worker host: %v", err)
+	}
+	if !live.snapshot().Pending || live.snapshot().RemoteCommands["security-audit"] {
+		t.Fatal("unsupported audit appeared in selected commands")
+	}
+}
+
+func TestAdminLiveConfigHidesRemoteAuditUntilWorkerCapabilityKnown(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Repositories[0].Actions = []string{"review", "security-audit"}
+		cfg.Repositories = append(cfg.Repositories, config.Repository{Name: "owner/second", ID: 12, OwnerID: 22, Actions: []string{"review"}})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.snapshot().RemoteCommands["security-audit"] || slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") {
+		t.Fatal("remote audit was offered before the worker reported its capability")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[1].Actions = []string{"review", "security-audit"}
+		return nil
+	}); err == nil {
+		t.Fatal("remote audit was added before the worker reported its capability")
+	}
+	saved, err := config.Load(path)
+	if err != nil || slices.Contains(saved.Repositories[1].Actions, "security-audit") {
+		t.Fatalf("rejected remote audit changed the saved repository: %v", err)
+	}
+	live.setRemoteSelected(map[string]bool{"review": true, "security-audit": true}, true)
+	if slices.Contains(configurationView(live.snapshot()).Commands, "security-audit") != (runtime.GOOS != "windows") {
+		t.Fatalf("remote audit offered on publishing host %s", runtime.GOOS)
+	}
+	err = live.save(func(next *config.Config) error {
+		next.Repositories[1].Actions = []string{"review", "security-audit"}
+		return nil
+	})
+	if (err == nil) != (runtime.GOOS != "windows") {
+		t.Fatalf("remote audit save on publishing host %s: %v", runtime.GOOS, err)
+	}
+}
+
 func TestAdminLiveConfigAllowsRemoteSelectedCommandReenable(t *testing.T) {
 	_, path := liveConfigFixture(t, true)
 	cfg, err := config.Load(path)
@@ -225,6 +311,10 @@ func TestAdminLiveConfigRetriesFailedActivation(t *testing.T) {
 	if live.snapshot().Pending || live.snapshot().Error == "" {
 		t.Fatal("failed activation was not reported")
 	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); !errors.Is(err, monitor.ErrConfigUpdatePending) || called {
+		t.Fatalf("failed activation admitted old policy: called=%t error=%v", called, err)
+	}
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -244,9 +334,54 @@ func TestAdminLiveConfigRetriesFailedActivation(t *testing.T) {
 	if retryGeneration <= generation || current.AIInstructions != selected.AIInstructions {
 		t.Fatal("retry did not retain the saved configuration")
 	}
+	live.applied(current, retryGeneration, nil)
+	if err := live.admit(func() error { called = true; return nil }); err != nil || !called {
+		t.Fatalf("successful retry did not resume admission: called=%t error=%v", called, err)
+	}
 	after, err := os.ReadFile(path)
 	if err != nil || string(after) != string(before) {
 		t.Fatalf("retry rewrote unchanged JSON: %v", err)
+	}
+}
+
+func TestAdminLiveConfigRestoresRejectedAIKey(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	active := live.current()
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.Codex.APIKey = "rejected-key"
+		cfg.AIInstructions = "Keep this edit."
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, generation := live.next()
+	live.applied(active, generation, errors.New("key preflight failed"))
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Codex.APIKey != active.Codex.APIKey || saved.AIInstructions != "Keep this edit." ||
+		live.desired.Codex.APIKey != active.Codex.APIKey || live.snapshot().Error == "" {
+		t.Fatal("failed activation left the rejected key on disk or lost another edit")
+	}
+	if restarted, err := newAdminLiveConfig(path, saved); err != nil || restarted.current().Codex.APIKey != active.Codex.APIKey {
+		t.Fatalf("rejected key survived restart: live=%+v error=%v", restarted, err)
+	}
+}
+
+func TestAdminLiveConfigDoesNotOverwriteNewerAIKey(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if err := live.save(func(cfg *config.Config) error { cfg.Codex.APIKey = "rejected-key"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	_, generation := live.next()
+	if _, err := config.Update(path, func(cfg *config.Config) error { cfg.Codex.APIKey = "newer-key"; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	live.applied(live.current(), generation, errors.New("key preflight failed"))
+	saved, err := config.Load(path)
+	if err != nil || saved.Codex.APIKey != "newer-key" {
+		t.Fatalf("failed activation overwrote a later key: saved=%+v error=%v", saved, err)
 	}
 }
 

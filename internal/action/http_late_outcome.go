@@ -111,6 +111,9 @@ func (e *Orchestrator) receiveLateOutcome(executorID string, outcome httpOutcome
 		if errors.Is(usageErr, errLateOutcomeRejected) {
 			return usageErr // A conflicting receipt cannot write private facts.
 		}
+		if e.remotePriorAttempts == nil || e.remotePriorAttempts[result.Identity.JobID] == result.Identity.AttemptID {
+			return usageErr // Keys used before this process attached are unavailable for text checks.
+		}
 		job := Job{Version: ProtocolVersion, Identity: result.Identity, Source: workspace.Snapshot{Head: result.SourceRef}}
 		failure := outcome.Failure.workerErr()
 		diagnosticErr := e.retainWorkerDiagnosticsLocked(job, result, failure)

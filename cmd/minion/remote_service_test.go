@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -39,24 +40,38 @@ func TestRemoteCommandReenableUsesFrozenSelection(t *testing.T) {
 	selected := map[string]bool{"comment": true, "review": true}
 	reenabled := current
 	reenabled.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "review"}}}
-	if !sameSkillConfig(current, reenabled) || hasUnselectedCommand(selected, reenabled) {
+	if !sameSkillConfig(current, reenabled) || hasUnselectedCommand(selected, reenabled, true) {
 		t.Fatal("re-enabling a frozen command incorrectly requires remote restart")
 	}
 	newCommand := current
 	newCommand.Repositories = []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "fix"}}}
-	if !sameSkillConfig(current, newCommand) || !hasUnselectedCommand(selected, newCommand) {
+	if !sameSkillConfig(current, newCommand) || !hasUnselectedCommand(selected, newCommand, true) {
 		t.Fatal("unselected command bypassed remote restart")
 	}
 	unsupported := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
 		"comment":        {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
 		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
-	if hasUnselectedCommand(map[string]bool{"comment": true}, unsupported) {
+	if hasUnselectedCommand(map[string]bool{"comment": true}, unsupported, true) {
 		t.Fatal("unchanged provider-unsupported command incorrectly requires remote restart")
+	}
+	workerUnsupported := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"comment":        {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"security-audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+	}, Repositories: []config.Repository{{Name: "owner/repo", Actions: []string{"comment", "security-audit"}}}}
+	if hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, false) ||
+		hasUnselectedCommand(map[string]bool{"comment": true}, workerUnsupported, true) != (runtime.GOOS != "windows") {
+		t.Fatal("remote audit capability did not distinguish unsupported from unselected")
 	}
 }
 
 func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+	}
+	workerAuditSupported := runtime.GOOS != "windows"
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -67,10 +82,13 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		t.Fatal(err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
-	commands := map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
+	commands := map[string]config.CommandMapping{
+		"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"audit":   {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
+	}
 	cfg := config.Config{BotLogin: "bot", Main: "codex", Commands: commands, AlwaysOnSkills: []string{},
 		Codex:          config.CodexConfig{Model: "main-1", ReasoningEffort: "high"},
-		Repositories:   []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}},
+		Repositories:   []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment", "audit"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: listen, TLSCertFile: certFile, TLSKeyFile: keyFile, Token: token}}
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	data, err := json.Marshal(cfg)
@@ -98,13 +116,69 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	if watcher.Handler != owner || watcher.SelectedExecutorID != "remote" || !watcher.SelectedCommands["comment"] {
 		t.Fatalf("remote service selection missing: executor=%q commands=%v", watcher.SelectedExecutorID, watcher.SelectedCommands)
 	}
+	if watcher.SelectedCommands["audit"] != (runtime.GOOS != "windows") {
+		t.Fatalf("orchestrator offered audit on publishing host %s: %v", runtime.GOOS, watcher.SelectedCommands)
+	}
 	roots := x509.NewCertPool()
 	roots.AddCert(leaf)
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS13}}}
 	defer client.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	fetchRemotePreflight(t, ctx, client, endpoint, token)
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	var logs bytes.Buffer
+	serviceDone := make(chan int, 1)
+	go func() {
+		defer close(serviceDone)
+		serviceDone <- runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, 5*time.Second, live)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-serviceDone
+	})
+	if credentials := fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported); credentials.CodexAPIKey != "" {
+		t.Fatal("remote preflight had an unexpected initial key")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories[0].AllowedActors = []string{"writer"}
+		next.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+		next.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
+		next.AIInstructions = "Read the selected task carefully."
+		next.Codex.APIKey = "remote-next-job-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().Pending || len(watcher.Config.Repositories[0].AllowedActors) != 0 {
+		t.Fatal("saved remote policy was active before the service boundary")
+	}
+	for fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported).CodexAPIKey != "remote-next-job-key" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported).CodexAPIKey != "" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = "remote-next-job-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for fetchRemotePreflight(t, ctx, client, endpoint, token, workerAuditSupported).CodexAPIKey != "remote-next-job-key" {
+		time.Sleep(10 * time.Millisecond)
+	}
+	type pullResult struct {
+		status int
+		body   []byte
+		err    error
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/next",
 		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
 	if err != nil {
@@ -112,13 +186,13 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	type pullResult struct {
-		status int
-		body   []byte
-		err    error
-	}
 	pullDone := make(chan pullResult, 1)
+	t.Cleanup(func() {
+		for range pullDone {
+		}
+	})
 	go func() {
+		defer close(pullDone)
 		response, err := client.Do(request)
 		if err != nil {
 			pullDone <- pullResult{err: err}
@@ -131,43 +205,37 @@ func TestSelectedRemoteServiceUsesAuthenticatedPullAndStopsWithEndpoint(t *testi
 		}
 		pullDone <- pullResult{status: response.StatusCode, body: body, err: readErr}
 	}()
-	if err := owner.WaitCapacity(ctx); err != nil {
-		t.Fatalf("authenticated pull did not provide capacity: %v", err)
-	}
-	if err := live.save(func(next *config.Config) error {
-		next.Repositories[0].AllowedActors = []string{"writer"}
-		next.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
-		next.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
-		next.AIInstructions = "Read the selected task carefully."
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if !live.snapshot().Pending || len(watcher.Config.Repositories[0].AllowedActors) != 0 {
-		t.Fatal("saved remote policy was active before the service boundary")
-	}
-	now := time.Now().UTC()
-	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
-	var logs bytes.Buffer
-	if code := runSelectedRemoteService(ctx, owner, watcher, store, false, log.New(&logs, "", 0), endpoint, time.Second, live); code != 0 {
+	if code := <-serviceDone; code != 0 {
 		t.Fatalf("remote one-pass service failed: code=%d logs=%q", code, logs.String())
+	}
+	if watcher.SelectedCommands["audit"] || live.snapshot().RemoteCommands["audit"] || !watcher.SelectedCommands["comment"] {
+		t.Fatalf("unsupported worker audit remained discoverable: monitor=%v admin=%v", watcher.SelectedCommands, live.snapshot().RemoteCommands)
+	}
+	if workerAuditSupported && !strings.Contains(logs.String(), "remote audit publishing prerequisites:") {
+		t.Fatalf("missing publisher prerequisites were not logged: %q", logs.String())
 	}
 	if live.snapshot().Pending || live.current().AIInstructions != "Read the selected task carefully." ||
 		owner.AIInstructions != "Read the selected task carefully." || len(watcher.Config.Repositories[0].AllowedActors) != 1 ||
 		watcher.Config.Repositories[0].AllowedActors[0] != "writer" || owner.CleanCriticRounds == nil || owner.CleanCriticRounds(1, 7) != 2 {
 		t.Fatalf("remote policy was not activated: current=%+v worker=%+v owner=%+v", live.current(), watcher.Config, owner)
 	}
+	if owner.Runner.Codex.APIKey != "remote-next-job-key" {
+		t.Fatal("remote worker key was not activated")
+	}
+	if saved, err := config.Load(configPath); err != nil || saved.Codex.APIKey != "remote-next-job-key" {
+		t.Fatalf("remote key save was not durable: key=%q error=%v", saved.Codex.APIKey, err)
+	}
 	<-endpoint.Done()
 	got := <-pullDone
 	if got.status != http.StatusConflict || got.err != nil || !bytes.Contains(got.body, []byte(`"kind":"next"`)) || !bytes.Contains(got.body, []byte(`"failure"`)) {
-		t.Fatalf("held pull did not receive idle shutdown: status=%d body=%q error=%v", got.status, got.body, got.err)
+		t.Fatalf("fresh pull did not receive idle shutdown: status=%d body=%q error=%v", got.status, got.body, got.err)
 	}
 }
 
-func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string) {
+func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client, endpoint *action.RemoteEndpoint, token string, auditHostSupported bool) action.WorkerCredentials {
 	t.Helper()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://"+endpoint.Addr().String()+"/preflight",
-		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, action.ProtocolVersion)))
+		strings.NewReader(fmt.Sprintf(`{"version":%d,"executor_id":"remote","audit_host_supported":%t}`, action.ProtocolVersion, auditHostSupported)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,12 +245,18 @@ func fetchRemotePreflight(t *testing.T, ctx context.Context, client *http.Client
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.Copy(io.Discard, response.Body); err != nil {
+	data, readErr := io.ReadAll(response.Body)
+	closeErr := response.Body.Close()
+	if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("remote preflight fixture status=%d read=%v close=%v", response.StatusCode, readErr, closeErr)
+	}
+	var selection struct {
+		Credentials action.WorkerCredentials `json:"credentials"`
+	}
+	if err := json.Unmarshal(data, &selection); err != nil {
 		t.Fatal(err)
 	}
-	if err := response.Body.Close(); err != nil || response.StatusCode != http.StatusOK {
-		t.Fatalf("remote preflight fixture status=%d error=%v", response.StatusCode, err)
-	}
+	return selection.Credentials
 }
 
 func remoteTestTLSFiles(t *testing.T) (certFile, keyFile string, leaf *x509.Certificate) {
@@ -225,5 +299,37 @@ func TestRemoteCheckWithValidTLSDoesNotRequireLocalAI(t *testing.T) {
 	}, "-check")
 	if code != 1 || !strings.Contains(output, "github.token is required") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "remote TLS preflight:") {
 		t.Fatalf("valid remote -check required local AI before GitHub: code=%d output=%q", code, output)
+	}
+}
+
+func TestRemoteStartupRequiresAuditPublisher(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	isolateHostPaths(t, t.TempDir())
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	cfg := config.Config{
+		BotLogin: "fixture", Main: "codex", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		Codex:          config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		Commands:       map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}}},
+		AlwaysOnSkills: []string{}, Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"audit"}}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443", TLSCertFile: certFile,
+			TLSKeyFile: keyFile, Token: base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "audit publishing preflight:") || !strings.Contains(output, "security-audit") || strings.Contains(output, "GitHub authentication:") {
+		t.Fatalf("remote audit publisher preflight: code=%d output=%q", code, output)
+	}
+	cfg.GitHub.Token = "configured-token"
+	cfg.Admin = &config.AdminConfig{Listen: occupiedAdminAddress(t), Administrators: []config.AdminAccount{testAdminAccount()}}
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	})
+	if code != 1 || !strings.Contains(output, "audit publishing preflight:") ||
+		!strings.Contains(output, "starting admin recovery UI") || !strings.Contains(output, "setup UI:") ||
+		strings.Contains(output, "GitHub authentication:") {
+		t.Fatalf("remote audit-only service did not offer recovery UI: code=%d output=%q", code, output)
 	}
 }

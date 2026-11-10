@@ -1166,7 +1166,7 @@ func (m *Monitor) availableCommands(repo config.Repository) map[string]command.A
 			continue
 		}
 		if m.Config.RemoteExecutor != nil {
-			if mapping.SupportsProvider(m.Config.Main) {
+			if mapping.SupportsProvider(m.Config.Main) && mapping.SupportedOnHost() {
 				available[name] = command.Action(mapping.Action)
 			}
 			continue
@@ -2140,6 +2140,10 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
 		return fmt.Errorf("%w: selected executor changed before recovery", ErrAcceptanceState)
+	}
+	if m.SelectedCommands != nil && !m.SelectedCommands[accepted.CommandName] {
+		m.logf("finish %s: selected worker no longer offers %s", job.ID, accepted.CommandName)
+		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	acceptedForPreparation := *accepted
 	resumeCtx, cancel := context.WithDeadline(ctx, job.Deadline)
@@ -3552,7 +3556,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			deferred = append(deferred, strings.ToLower(fullName))
 			actions := m.Config.CommandNames()
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepository(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions})
+			repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions}, m.Config.Admin)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
 				continue

@@ -15,10 +15,21 @@ import (
 
 var updateMu sync.Mutex
 
+const configPermissionBits = os.ModePerm
+
 // Update validates and atomically saves a change to the JSON configuration.
 // It serializes Minion's config writers; callers still need the state lock when
 // coordinating a write with monitor state.
 func Update(path string, mutate func(*Config) error) (candidate Config, err error) {
+	return update(path, nil, mutate)
+}
+
+// UpdateWithAdminRuntime validates a saved edit with active listener overrides.
+func UpdateWithAdminRuntime(path string, runtime AdminConfig, mutate func(*Config) error) (Config, error) {
+	return update(path, &runtime, mutate)
+}
+
+func update(path string, runtime *AdminConfig, mutate func(*Config) error) (candidate Config, err error) {
 	if mutate == nil {
 		return Config{}, errors.New("config mutation is required")
 	}
@@ -41,6 +52,7 @@ func Update(path string, mutate func(*Config) error) (candidate Config, err erro
 	if err != nil {
 		return Config{}, err
 	}
+	applyAdminRuntime(&candidate, runtime)
 	before, err := json.Marshal(candidate)
 	if err != nil {
 		return Config{}, err
@@ -67,16 +79,14 @@ func Update(path string, mutate func(*Config) error) (candidate Config, err erro
 	if err != nil {
 		return Config{}, err
 	}
-	f, err := os.CreateTemp(filepath.Dir(target), ".config-*")
+	f, err := newConfigTemp(target)
 	if err != nil {
 		return Config{}, err
 	}
 	defer func() {
-		if removeErr := os.Remove(f.Name()); !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, removeErr)
-		}
+		err = errors.Join(err, cleanupConfigTemp(f.Name()))
 	}()
-	err = f.Chmod(info.Mode().Perm())
+	err = preserveConfigMetadata(target, f, info)
 	if err == nil {
 		_, err = f.Write(append(updated, '\n'))
 	}
@@ -94,7 +104,7 @@ func Update(path string, mutate func(*Config) error) (candidate Config, err erro
 	if !bytes.Equal(data, current) {
 		return Config{}, fmt.Errorf("config changed while updating; retry")
 	}
-	if err := os.Rename(f.Name(), target); err != nil {
+	if err := replaceConfigFile(f.Name(), target); err != nil {
 		return Config{}, err
 	}
 	if dir, openErr := os.Open(filepath.Dir(target)); openErr == nil {
@@ -107,7 +117,16 @@ func Update(path string, mutate func(*Config) error) (candidate Config, err erro
 // AddRepository preserves existing settings and atomically appends a repository.
 // Update serializes config writes; the monitor saves invitation cursors separately.
 func AddRepository(path string, repo Repository) (Repository, error) {
-	cfg, err := Update(path, func(cfg *Config) error {
+	return addRepository(path, repo, nil)
+}
+
+// AddRepositoryWithAdminRuntime validates an invitation with active listener settings.
+func AddRepositoryWithAdminRuntime(path string, repo Repository, runtime *AdminConfig) (Repository, error) {
+	return addRepository(path, repo, runtime)
+}
+
+func addRepository(path string, repo Repository, runtime *AdminConfig) (Repository, error) {
+	cfg, err := update(path, runtime, func(cfg *Config) error {
 		for _, existing := range cfg.Repositories {
 			if strings.EqualFold(existing.Name, repo.Name) {
 				return nil

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
+	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/claudecli"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -49,7 +52,7 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 			return err
 		}
 	}
-	if err := selection.Credentials.validate(); err != nil {
+	if err := selection.Credentials.Validate(); err != nil {
 		return err
 	}
 	selected := func(provider string) bool {
@@ -64,6 +67,25 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 
 // Leave time for the worker to open its first pull before the orchestrator's two-minute wait expires.
 const remoteChoicePreflightTimeout = 90 * time.Second
+
+func auditSupportedOnHost(ctx context.Context, timeout time.Duration) bool {
+	if !(config.CommandMapping{Action: string(command.SecurityAudit)}).SupportedOnHost() {
+		return false
+	}
+	probeCtx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
+	binary, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		return false
+	}
+	dir, err := os.MkdirTemp("", ".minion-audit-preflight-")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(dir)
+	_, err = auditNodePermissionFlag(probeCtx, dir, binary)
+	return err == nil
+}
 
 // PreflightRemoteChoices checks configured role pairs before a remote worker opens its first pull.
 func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool) error {
@@ -81,13 +103,14 @@ func PreflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 }
 
 func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, executorID string, allowAllUnixSockets bool, timeout time.Duration) error {
-	preflightCtx, stop := context.WithTimeout(ctx, timeout)
-	defer stop()
 	u, err := url.Parse(origin)
 	if err != nil || u == nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawFragment != "" || u.Opaque != "" || !workspace.ValidIdentitySegment(executorID) || client == nil {
 		return errors.New("invalid remote preflight endpoint")
 	}
-	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID}, httpControlBytes)
+	preflightCtx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
+	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
+		AuditHostSupported: auditSupportedOnHost(preflightCtx, httpControlTimeout)}, httpControlBytes)
 	if err != nil {
 		return err
 	}
@@ -102,6 +125,10 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	if selection.Version != ProtocolVersion || selection.ExecutorID != executorID {
 		return errors.New("remote preflight version or executor differs")
 	}
+	return validateRemoteSelection(preflightCtx, selection, allowAllUnixSockets)
+}
+
+func validateRemoteSelection(ctx context.Context, selection remoteChoicePreflight, allowAllUnixSockets bool) error {
 	if err := validateRemoteChoices(selection); err != nil {
 		return err
 	}
@@ -113,9 +140,9 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	roles := offeredPreflightRoles(selection.Main, selection.MainChoices, selection.Critic, selection.CriticChoices)
 	for _, role := range roles {
 		if role.Provider == "claude" {
-			if _, err := claudecli.CheckHost(preflightCtx, allowAllUnixSockets); err != nil {
-				if preflightCtx.Err() != nil {
-					return preflightCtx.Err()
+			if _, err := claudecli.CheckHost(ctx, allowAllUnixSockets); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
 				// The short host probe deadline must not look like the whole preflight deadline.
 				return preflightError{message: "remote Claude host check failed: " + redactActionText(err.Error(), runner.secretValues()...)}
@@ -123,8 +150,8 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 			break
 		}
 	}
-	if message, err := checkOfferedRolesCLI(preflightCtx, &runner, roles); err != nil {
+	if message, err := checkOfferedRolesCLI(ctx, &runner, roles); err != nil {
 		return preflightError{message: message, cause: redactActionError(err, runner.secretValues()...)}
 	}
-	return preflightCtx.Err()
+	return ctx.Err()
 }

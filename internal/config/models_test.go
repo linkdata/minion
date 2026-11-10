@@ -140,6 +140,40 @@ func TestLoadProviderAPIKeys(t *testing.T) {
 	if err != nil || cfg.Codex.APIKey != "dummy-codex-key" || cfg.Claude.APIKey != "dummy-claude-key" {
 		t.Fatalf("API keys not loaded: %v", err)
 	}
+	cfg.Codex.APIKey, cfg.Claude.APIKey = "", ""
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatalf("empty keys rejected: %v", err)
+	}
+	for _, provider := range []string{"codex", "claude"} {
+		invalid := cfg
+		if provider == "codex" {
+			invalid.Codex.APIKey = "x"
+		} else {
+			invalid.Claude.APIKey = "x"
+		}
+		if err := invalid.Validate(t.TempDir()); err == nil || strings.Contains(err.Error(), "x") {
+			t.Fatalf("short %s key accepted or exposed: %v", provider, err)
+		}
+	}
+	atMinimum := strings.Repeat("x", MinProviderAPIKeyBytes)
+	cfg.Codex.APIKey, cfg.Claude.APIKey = atMinimum, atMinimum
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatalf("minimum-length keys rejected: %v", err)
+	}
+	atLimit := strings.Repeat("x", MaxProviderAPIKeyBytes)
+	cfg.Codex.APIKey, cfg.Claude.APIKey = atLimit, atLimit
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatalf("two independent maximum-length keys rejected: %v", err)
+	}
+	cfg.Codex.APIKey = atLimit + "x"
+	if err := cfg.Validate(t.TempDir()); err == nil {
+		t.Fatal("oversized Codex key accepted")
+	}
+	cfg.Codex.APIKey, cfg.Claude.APIKey = atLimit, atLimit+"x"
+	if err := cfg.Validate(t.TempDir()); err == nil {
+		t.Fatal("oversized Claude key accepted")
+	}
+	cfg.Codex.APIKey, cfg.Claude.APIKey = "dummy-codex-key", "dummy-claude-key"
 	for _, bad := range []string{"dummy secret", "dummy\tsecret", "dummy\rsecret", "dummy\nsecret", "dummy\x00secret"} {
 		for _, provider := range []string{"codex", "claude"} {
 			invalid := cfg
@@ -206,10 +240,15 @@ func TestCommandProviderCapabilities(t *testing.T) {
 	for _, provider := range []string{"", "codex", "claude", "unknown"} {
 		for _, action := range []string{"review", "fix", "comment", "security-audit"} {
 			mapping := CommandMapping{Action: action, Skills: []string{defaultAntiInjectionSkill}}
-			want := provider != "unknown" && (provider != "claude" || action != "security-audit")
-			if got := mapping.SupportsProvider(provider); got != want {
-				t.Errorf("%s/%s supported = %t; want %t", provider, action, got, want)
+			providerSupported := provider != "unknown" && (provider != "claude" || action != "security-audit")
+			if got := mapping.SupportsProvider(provider); got != providerSupported {
+				t.Errorf("%s/%s provider supported = %t; want %t", provider, action, got, providerSupported)
 			}
+			hostSupported := runtime.GOOS != "windows" || action != "security-audit"
+			if got := mapping.SupportedOnHost(); got != hostSupported {
+				t.Errorf("%s host supported = %t; want %t", action, got, hostSupported)
+			}
+			want := providerSupported && hostSupported
 			cfg := Config{Main: provider, Commands: map[string]CommandMapping{"test": mapping}}
 			if installed, err := cfg.CommandInstalled("test"); err != nil || installed != want {
 				t.Errorf("%s/%s installed = %t, %v; want %t", provider, action, installed, err, want)

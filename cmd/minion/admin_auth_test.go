@@ -35,7 +35,7 @@ func testAdminAccount() config.AdminAccount {
 func testAdminAccountWithPassword(password string) config.AdminAccount {
 	salt := bytes.Repeat([]byte{7}, 16)
 	tag := argon2.IDKey([]byte(password), salt, 2, 19456, 1, 32)
-	return config.AdminAccount{Username: "operator", PasswordHash: fmt.Sprintf("$argon2id$v=19$m=19456,t=2,p=1$%s$%s",
+	return config.AdminAccount{Username: "admin", PasswordHash: fmt.Sprintf("$argon2id$v=19$m=19456,t=2,p=1$%s$%s",
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(tag))}
 }
 
@@ -150,6 +150,7 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 	first := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
 	if first.Code != http.StatusOK || len(first.Result().Cookies()) != 1 ||
 		!strings.Contains(first.Body.String(), `name="password"`) ||
+		strings.Contains(first.Body.String(), `name="username"`) ||
 		!strings.Contains(first.Body.String(), `<script defer src="/admin/login.js"></script>`) ||
 		!strings.Contains(first.Body.String(), `/jaws/.tail/`) ||
 		first.Header().Get("Cache-Control") != "no-store" ||
@@ -211,7 +212,7 @@ func TestAdminLoginJaWSKeyIsolationAndRotation(t *testing.T) {
 		}
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, firstCookie, "https://admin.example")
+		url.Values{"password": {"correct-password"}}, firstCookie, "https://admin.example")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("login after guest page: status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
@@ -384,7 +385,7 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
+	form := url.Values{"password": {"correct-password"}}
 	postCtx, postCancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer postCancel()
 	request, err := http.NewRequestWithContext(postCtx, http.MethodPost, server.URL+"/admin/login", strings.NewReader(form.Encode()))
@@ -461,6 +462,91 @@ func TestAdminGuestLoginWebSocket(t *testing.T) {
 	}
 }
 
+func TestAdminHTTPSProxyOffload(t *testing.T) {
+	server, err := startAdminServer(t.Context(), config.AdminConfig{
+		Listen: "127.0.0.1:0", WebservListenURL: "HTTPS://admin.example",
+		Administrators: []config.AdminAccount{testAdminAccount()},
+	}, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	if server.entryURL != "HTTPS://admin.example" || !server.jaws.TrustForwardedHeaders {
+		t.Fatalf("proxy entry URL = %q, trusted forwarding = %t", server.entryURL, server.jaws.TrustForwardedHeaders)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	t.Cleanup(client.CloseIdleConnections)
+	request := func(method, path string, body io.Reader, origin string, cookie *http.Cookie) *http.Request {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), method, "http://"+server.listener.Addr().String()+path, body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "admin.example"
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-For", "203.0.113.9")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		if cookie != nil {
+			req.AddCookie(cookie)
+		}
+		if body != nil {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		return req
+	}
+	page, err := client.Do(request(http.MethodGet, "/admin/login", nil, "", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageBody, readErr := io.ReadAll(page.Body)
+	closeErr := page.Body.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read login page: read=%v close=%v", readErr, closeErr)
+	}
+	if page.StatusCode != http.StatusOK || len(page.Cookies()) != 1 || !page.Cookies()[0].Secure {
+		t.Fatalf("proxied login page: status=%d cookies=%v", page.StatusCode, page.Cookies())
+	}
+	guestCookie := page.Cookies()[0]
+	wsContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	header := http.Header{}
+	header.Set("Origin", "https://admin.example")
+	header.Set("X-Forwarded-Proto", "https")
+	header.Set("X-Forwarded-For", "203.0.113.9")
+	header.Set("Cookie", guestCookie.Name+"="+guestCookie.Value)
+	conn, upgrade, err := websocket.Dial(wsContext,
+		"ws://"+server.listener.Addr().String()+"/jaws/"+adminJaWSKey(t, string(pageBody)),
+		&websocket.DialOptions{Host: "admin.example", HTTPHeader: header})
+	if err != nil {
+		t.Fatalf("proxied WebSocket: response=%v error=%v", upgrade, err)
+	}
+	defer conn.CloseNow()
+	form := url.Values{"password": {"correct-password"}}.Encode()
+	for _, tc := range []struct {
+		origin string
+		want   int
+	}{
+		{"http://admin.example", http.StatusForbidden},
+		{"https://admin.example", http.StatusSeeOther},
+	} {
+		response, err := client.Do(request(http.MethodPost, "/admin/login", strings.NewReader(form), tc.origin, guestCookie))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := response.Body.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != tc.want {
+			t.Fatalf("proxied login from %q: status=%d, want %d", tc.origin, response.StatusCode, tc.want)
+		}
+		if tc.want == http.StatusSeeOther && (len(response.Cookies()) != 1 || !response.Cookies()[0].Secure) {
+			t.Fatalf("proxied login cookie = %v", response.Cookies())
+		}
+	}
+}
+
 func TestAdminGuestSessionLimit(t *testing.T) {
 	jw, err := jaws.New()
 	if err != nil {
@@ -491,7 +577,7 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 		t.Fatalf("session cap blocked existing guest or replaced its cookie: status=%d cookies=%v", existing.Code, existing.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guestCookie, "https://admin.example")
+		url.Values{"password": {"correct-password"}}, guestCookie, "https://admin.example")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("valid login at session cap: status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
@@ -504,8 +590,9 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 	}
 }
 
-func TestHomeReservesSessionsForSignIn(t *testing.T) {
+func TestHomeReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testOAuthAdminHandler(t, config.AdminConfig{
+		Administrators: []config.AdminAccount{testAdminAccount()},
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}, nil)
@@ -518,12 +605,25 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("home admission: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
 	}
-	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], ""); start.Code != http.StatusFound {
-		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
+	page := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("fresh admin sign-in page at OAuth guest cap: status=%d sessions=%d cookies=%v", page.Code, jw.SessionCount(), page.Result().Cookies())
+	}
+	if denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); denied.Code != http.StatusServiceUnavailable ||
+		denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("new admin page at OAuth callback reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
+	}
+	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{"password": {"correct-password"}},
+		page.Result().Cookies()[0], "https://admin.example")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("admin sign-in at OAuth guest cap: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
+	}
+	if dashboard := adminResponse(handler, http.MethodGet, "/", nil, login.Result().Cookies()[0], ""); dashboard.Code != http.StatusOK {
+		t.Fatalf("new admin cookie cannot open dashboard: status=%d", dashboard.Code)
 	}
 	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
-		t.Fatalf("home exhausted sign-in reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("home exhausted guest reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
 	}
 }
 
@@ -592,14 +692,19 @@ func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	if existing := adminResponse(handler, http.MethodGet, "/", nil, home.Result().Cookies()[0], ""); existing.Code != http.StatusOK || len(existing.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("existing home session: status=%d sessions=%d cookies=%v", existing.Code, jw.SessionCount(), existing.Result().Cookies())
 	}
-	denied := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
-	if denied.Code != http.StatusServiceUnavailable || denied.Header().Get("Retry-After") != "60" ||
-		len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
-		t.Fatalf("home exhausted admin sign-in reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
+	redirect := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
+	if redirect.Code != http.StatusSeeOther || redirect.Header().Get("Location") != "/admin/login" ||
+		len(redirect.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
+		t.Fatalf("home at admin sign-in reserve: status=%d location=%q sessions=%d cookies=%v", redirect.Code,
+			redirect.Header().Get("Location"), jw.SessionCount(), redirect.Result().Cookies())
 	}
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
 	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("admin sign-in at home reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
+	}
+	if next := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); next.Code != http.StatusOK ||
+		len(next.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions+1 {
+		t.Fatalf("admin sign-in without OAuth above callback reserve: status=%d sessions=%d cookies=%v", next.Code, jw.SessionCount(), next.Result().Cookies())
 	}
 }
 
@@ -640,7 +745,7 @@ func TestHomeSharesOAuthGuestAdmissionLock(t *testing.T) {
 
 func TestAdminLoginRequiresLiveSession(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
+	form := url.Values{"password": {"correct-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusConflict || len(response.Result().Cookies()) != 0 {
 		t.Fatalf("cookie-free login: status=%d cookies=%v, want 409 without session", response.Code, response.Result().Cookies())
 	}
@@ -655,7 +760,7 @@ func TestAdminLoginRequiresLiveSession(t *testing.T) {
 
 func TestAdminReloginRetiresOldSession(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
+	form := url.Values{"password": {"correct-password"}}
 	first := adminResponse(handler, http.MethodPost, "/admin/login", form, adminGuestCookie(t, handler), "")
 	if first.Code != http.StatusSeeOther || len(first.Result().Cookies()) != 1 {
 		t.Fatalf("first login: status=%d cookies=%v", first.Code, first.Result().Cookies())
@@ -689,13 +794,17 @@ func TestCheckedInAdminPlaceholderCannotSignIn(t *testing.T) {
 		t.Fatal("checked-in admin placeholder account is missing")
 	}
 	placeholder := cfg.Admin.Administrators[0]
+	if placeholder.Username != "admin" || placeholder.PasswordHash != config.AdminPasswordHashPlaceholder {
+		t.Fatal("checked-in account must be the disabled admin placeholder")
+	}
 	handler, _, _ := testAdminHandler(t, cfg.Admin.Administrators)
 	home := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
 	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 ||
-		!strings.Contains(home.Body.String(), `disabled>Sign in</button>`) ||
+		!strings.Contains(home.Body.String(), "The admin password is not set") ||
+		!strings.Contains(home.Body.String(), "minion -mode=hash") ||
 		strings.Contains(home.Body.String(), `href="/admin/login"`) ||
 		strings.Contains(home.Body.String(), `href="/auth/login"`) {
-		t.Fatalf("sample home enabled sign-in: status=%d cookies=%v body=%q", home.Code, home.Result().Cookies(), home.Body.String())
+		t.Fatalf("sample home omitted password setup guidance or enabled sign-in: status=%d cookies=%v body=%q", home.Code, home.Result().Cookies(), home.Body.String())
 	}
 	if asset := adminResponse(handler, http.MethodGet, bootstrapAssetPath(t, home.Body.String(), ".css"), nil, nil, ""); asset.Code != http.StatusOK {
 		t.Fatalf("sample home Bootstrap asset: status=%d", asset.Code)
@@ -703,26 +812,33 @@ func TestCheckedInAdminPlaceholderCannotSignIn(t *testing.T) {
 	if tail := adminResponse(handler, http.MethodGet, "/jaws/.tail/"+adminJaWSKey(t, home.Body.String()), nil, home.Result().Cookies()[0], ""); tail.Code != http.StatusOK {
 		t.Fatalf("sample home JaWS tail: status=%d", tail.Code)
 	}
-	for _, test := range []struct {
-		method, path string
-		form         url.Values
-	}{
-		{method: http.MethodGet, path: "/admin/login"},
-		{method: http.MethodPost, path: "/admin/login", form: url.Values{"username": {"admin"}, "password": {"PASTE_GENERATED_HASH_HERE"}}},
-	} {
-		response := adminResponse(handler, test.method, test.path, test.form, nil, "")
-		if response.Code != http.StatusForbidden || len(response.Result().Cookies()) != 0 {
-			t.Fatalf("sample admin %s %s: status=%d cookies=%d, want 403 without session", test.method, test.path, response.Code, len(response.Result().Cookies()))
+	loginPage := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if loginPage.Code != http.StatusOK || len(loginPage.Result().Cookies()) != 1 ||
+		!strings.Contains(loginPage.Body.String(), "The admin password is not set") ||
+		strings.Contains(loginPage.Body.String(), `name="password"`) ||
+		strings.Contains(loginPage.Body.String(), `/admin/login.js`) {
+		t.Fatalf("sample login page: status=%d cookies=%v body=%q", loginPage.Code, loginPage.Result().Cookies(), loginPage.Body.String())
+	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"password": {"PASTE_GENERATED_HASH_HERE"}}, loginPage.Result().Cookies()[0], ""); response.Code != http.StatusForbidden || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("sample admin password sign-in: status=%d cookies=%d, want 403", response.Code, len(response.Result().Cookies()))
+	}
+}
+
+func TestUnsetAdminPasswordShowsSetupAndDeniesLogin(t *testing.T) {
+	handler, _, _ := testAdminHandler(t, []config.AdminAccount{{Username: "admin"}})
+	for _, path := range []string{"/", "/admin/login"} {
+		page := adminResponse(handler, http.MethodGet, path, nil, nil, "")
+		if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "The admin password is not set") ||
+			!strings.Contains(page.Body.String(), "minion -mode=hash") ||
+			strings.Contains(page.Body.String(), `name="password"`) ||
+			strings.Contains(page.Body.String(), `href="/admin/login"`) {
+			t.Fatalf("unset password page %s: status=%d body=%q", path, page.Code, page.Body.String())
 		}
 	}
-	mixed, _, _ := testAdminHandler(t, []config.AdminAccount{placeholder, testAdminAccount()})
-	if response := adminResponse(mixed, http.MethodPost, "/admin/login",
-		url.Values{"username": {"admin"}, "password": {"PASTE_GENERATED_HASH_HERE"}}, nil, ""); response.Code != http.StatusUnauthorized || len(response.Result().Cookies()) != 0 {
-		t.Fatalf("placeholder among real accounts: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
-	}
-	if response := adminResponse(mixed, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, adminGuestCookie(t, mixed), ""); response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
-		t.Fatalf("real account alongside placeholder: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
+	if response := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"password": {"guess"}}, adminGuestCookie(t, handler), ""); response.Code != http.StatusForbidden || len(response.Result().Cookies()) != 0 {
+		t.Fatalf("unset password sign-in: status=%d cookies=%d, want 403", response.Code, len(response.Result().Cookies()))
 	}
 }
 
@@ -739,7 +855,7 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 	if response := adminResponse(handler, http.MethodHead, "/admin/login", nil, nil, ""); response.Code != http.StatusOK {
 		t.Fatalf("public HEAD login: status=%d, want 200", response.Code)
 	}
-	form := url.Values{"username": {"operator"}, "password": {"wrong-password"}}
+	form := url.Values{"password": {"wrong-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusUnauthorized ||
 		len(response.Result().Cookies()) != 0 || strings.Contains(response.Body.String(), "wrong-password") {
 		t.Fatalf("invalid login: status=%d cookieCount=%d echoedPassword=%t", response.Code,
@@ -774,7 +890,7 @@ func TestAdminLoginAndRevocation(t *testing.T) {
 		t.Fatal("JaWS template authorization did not use the admin session")
 	}
 	session := jaWSRequest.Session()
-	if session == nil || session.Get(adminSessionKey) != "operator" {
+	if session == nil || session.Get(adminSessionKey) != "admin" {
 		t.Fatal("admin session did not contain the signed-in identity")
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/logout", nil, cookie, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
@@ -837,7 +953,7 @@ func TestAdminServerLoginOverConfiguredTLS(t *testing.T) {
 	client := adminTLSClient(t, leaf)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	baseURL := "https://" + admin.listener.Addr().String()
-	response, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
+	response, _ := adminNetworkLogin(t, client, baseURL, url.Values{"password": {"correct-password"}})
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 || !response.Cookies()[0].Secure {
 		t.Fatalf("TLS login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
@@ -886,7 +1002,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	t.Cleanup(client.CloseIdleConnections)
 	baseURL := "http://" + admin.listener.Addr().String()
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
+	if err != nil || admin.entryURL != "http://localhost:"+port {
 		t.Fatalf("admin home URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	entry, err := client.Get(baseURL + "/")
@@ -902,7 +1018,7 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 		!strings.Contains(string(entryBody), `name="jawsKey"`) {
 		t.Fatalf("loopback home: status=%d body=%q", entry.StatusCode, entryBody)
 	}
-	response, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
+	response, _ := adminNetworkLogin(t, client, baseURL, url.Values{"password": {"correct-password"}})
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 || response.Cookies()[0].Secure {
 		t.Fatalf("loopback login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
@@ -951,7 +1067,7 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	t.Cleanup(func() { _ = admin.Close() })
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, _ := adminNetworkLogin(t, client, "http://"+admin.listener.Addr().String(),
-		url.Values{"username": {"operator"}, "password": {"correct-password"}})
+		url.Values{"password": {"correct-password"}})
 	response.Body.Close()
 	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
 		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
@@ -1033,11 +1149,10 @@ func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
 	}
 }
 
-func TestAdminWithoutConfiguredAccountsServesPublicHome(t *testing.T) {
-	handler, jw, _ := testAdminHandler(t, nil)
+func TestAdminWithoutConfiguredPasswordServesPublicHome(t *testing.T) {
+	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{{Username: "admin"}})
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/admin/login"}, {http.MethodPost, "/admin/login"},
-		{http.MethodHead, "/admin/login"},
+		{http.MethodPost, "/admin/login"},
 		{http.MethodPost, "/admin/logout"},
 		{http.MethodGet, "/jaws/test-websocket"}, {http.MethodPost, "/jaws/invalid-key"},
 	} {
@@ -1047,8 +1162,15 @@ func TestAdminWithoutConfiguredAccountsServesPublicHome(t *testing.T) {
 		}
 	}
 	if home := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); home.Code != http.StatusOK ||
-		!strings.Contains(home.Body.String(), "Sign-in is not configured") {
+		!strings.Contains(home.Body.String(), "The admin password is not set") {
 		t.Fatalf("unconfigured home: status=%d body=%q", home.Code, home.Body.String())
+	}
+	if login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); login.Code != http.StatusOK ||
+		!strings.Contains(login.Body.String(), "The admin password is not set") {
+		t.Fatalf("unconfigured login: status=%d body=%q", login.Code, login.Body.String())
+	}
+	if head := adminResponse(handler, http.MethodHead, "/admin/login", nil, nil, ""); head.Code != http.StatusOK || head.Body.Len() != 0 {
+		t.Fatalf("unconfigured login HEAD: status=%d body=%q", head.Code, head.Body.String())
 	}
 	if ping := adminResponse(handler, http.MethodGet, "/jaws/.ping", nil, nil, ""); ping.Code != http.StatusNoContent {
 		t.Fatalf("public JaWS ping: status=%d", ping.Code)
@@ -1062,7 +1184,7 @@ func TestAdminWithoutConfiguredAccountsServesPublicHome(t *testing.T) {
 func TestAdminLoginBoundsAndCrossOrigin(t *testing.T) {
 	account := testAdminAccount()
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{account})
-	form := url.Values{"username": {"operator"}, "password": {"wrong-password"}}
+	form := url.Values{"password": {"wrong-password"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "https://other.example"); response.Code != http.StatusForbidden || response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatalf("cross-origin login: status=%d hasHSTS=%t", response.Code, response.Header().Get("Strict-Transport-Security") != "")
 	}
@@ -1078,7 +1200,7 @@ func TestAdminLoginBoundsAndCrossOrigin(t *testing.T) {
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("login after five failures: status=%d, want 429", response.Code)
 	}
-	form = url.Values{"username": {"operator"}, "password": {strings.Repeat("x", 8192)}}
+	form = url.Values{"password": {strings.Repeat("x", 8192)}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusBadRequest {
 		t.Fatalf("oversized password: status=%d, want 400", response.Code)
 	}
@@ -1089,7 +1211,7 @@ func TestAdminHashCapacityReturnsBusy(t *testing.T) {
 	access.hashSlots <- struct{}{}
 	access.hashSlots <- struct{}{}
 	request := httptest.NewRequest(http.MethodPost, "/admin/login",
-		strings.NewReader(url.Values{"username": {"operator"}, "password": {"password"}}.Encode()))
+		strings.NewReader(url.Values{"password": {"password"}}.Encode()))
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response := httptest.NewRecorder()
 	access.login(response, request)
@@ -1098,26 +1220,22 @@ func TestAdminHashCapacityReturnsBusy(t *testing.T) {
 	}
 }
 
-func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
+func TestAdminLoginFormValidation(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	for _, form := range []url.Values{
-		{"username": {"operator", "operator"}, "password": {"correct-password"}},
-		{"username": {"operator"}, "password": {"correct-password", "correct-password"}},
+		{"username": {"admin"}, "password": {"correct-password"}},
+		{"password": {"correct-password", "correct-password"}},
 	} {
 		if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusBadRequest || len(response.Result().Cookies()) != 0 {
-			t.Fatalf("duplicate credential field: status=%d cookieCount=%d", response.Code, len(response.Result().Cookies()))
+			t.Fatalf("extra or duplicate credential field: status=%d cookieCount=%d", response.Code, len(response.Result().Cookies()))
 		}
-	}
-	if response := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {strings.Repeat("x", 101)}, "password": {"wrong"}}, nil, ""); response.Code != http.StatusBadRequest {
-		t.Fatalf("username beyond config limit: status=%d, want 400", response.Code)
 	}
 	for _, tc := range []struct{ name, password string }{
 		{name: "reserved", password: strings.Repeat("&", 64)},
 		{name: "non-ASCII", password: strings.Repeat("😀", 64)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			form := url.Values{"username": {"operator"}, "password": {tc.password}}
+			form := url.Values{"password": {tc.password}}
 			if got := len(form.Encode()); got <= len(tc.password) || got >= 2<<10 {
 				t.Fatalf("escaped valid password: password bytes=%d form bytes=%d", len(tc.password), got)
 			}
@@ -1129,60 +1247,33 @@ func TestAdminLoginBodyBoundaryAndDuplicateFields(t *testing.T) {
 	}
 	for _, password := range []string{strings.Repeat("a", 65), strings.Repeat("😀", 65), string([]byte{0xff})} {
 		if response := adminResponse(handler, http.MethodPost, "/admin/login",
-			url.Values{"username": {"operator"}, "password": {password}}, nil, ""); response.Code != http.StatusBadRequest {
+			url.Values{"password": {password}}, nil, ""); response.Code != http.StatusBadRequest {
 			t.Fatalf("invalid password: bytes=%d status=%d, want 400", len(password), response.Code)
 		}
-	}
-	form := url.Values{"username": {"unknown"}, "password": {"wrong"}, "padding": {""}}
-	form.Set("padding", strings.Repeat("x", (2<<10)-len(form.Encode())))
-	if got := len(form.Encode()); got != 2<<10 {
-		t.Fatalf("fixture body length=%d, want 2048", got)
-	}
-	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusUnauthorized {
-		t.Fatalf("2048-byte login: status=%d, want 401", response.Code)
-	}
-	form.Set("padding", form.Get("padding")+"x")
-	if response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); response.Code != http.StatusBadRequest {
-		t.Fatalf("2049-byte login: status=%d, want 400", response.Code)
 	}
 }
 
 func TestAdminAttemptReservationIsConcurrentAndExpires(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		access := &adminAccess{accounts: map[string]config.AdminAccount{"operator": {}}, attempts: make(map[string]loginWindow)}
+		access := &adminAccess{}
 		var allowed atomic.Int32
 		var group sync.WaitGroup
 		for range 20 {
 			group.Go(func() {
-				if access.reserveAttempt("operator") {
+				if access.reserveAttempt() {
 					allowed.Add(1)
 				}
 			})
 		}
 		group.Wait()
-		if allowed.Load() != 5 || access.reserveAttempt("operator") {
+		if allowed.Load() != 5 || access.reserveAttempt() {
 			t.Fatalf("concurrent reserved attempts=%d, want 5", allowed.Load())
 		}
 		time.Sleep(time.Minute)
-		if !access.reserveAttempt("operator") {
+		if !access.reserveAttempt() {
 			t.Fatal("expired login window did not reopen")
 		}
 	})
-}
-
-func TestAdminUnknownNamesShareAttemptLimit(t *testing.T) {
-	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	for i := range 6 {
-		form := url.Values{"username": {fmt.Sprintf("unknown-%d", i)}, "password": {"wrong"}}
-		response := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, "")
-		want := http.StatusUnauthorized
-		if i == 5 {
-			want = http.StatusTooManyRequests
-		}
-		if response.Code != want {
-			t.Fatalf("unknown name %d: status=%d, want %d", i, response.Code, want)
-		}
-	}
 }
 
 func TestAdminUnattachedSessionExpires(t *testing.T) {
@@ -1199,7 +1290,7 @@ func TestAdminUnattachedSessionExpires(t *testing.T) {
 		done := make(chan struct{})
 		go func() { jw.Serve(); close(done) }()
 		defer func() { jw.Close(); <-done }()
-		form := url.Values{"username": {"operator"}, "password": {"correct-password"}}
+		form := url.Values{"password": {"correct-password"}}
 		expiredGuest := adminGuestCookie(t, handler)
 		time.Sleep(time.Minute + time.Second)
 		if response := adminResponse(handler, http.MethodPost, "/admin/login", form, expiredGuest, ""); response.Code != http.StatusConflict || len(response.Result().Cookies()) != 0 {

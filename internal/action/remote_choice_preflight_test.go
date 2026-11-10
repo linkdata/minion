@@ -50,6 +50,36 @@ func TestRemoteChoicePreflightOpensGateBeforeResponse(t *testing.T) {
 	}
 }
 
+func TestRemoteAuditCapabilityIsFrozenAcrossPreflight(t *testing.T) {
+	for _, supported := range []bool{false, true} {
+		executor, err := NewHTTPExecutor("remote")
+		if err != nil {
+			t.Fatal(err)
+		}
+		executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
+			Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+		endpoint := &RemoteEndpoint{executor: executor}
+		post := func(path string, capability bool) int {
+			t.Helper()
+			body, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: "remote", AuditHostSupported: capability}, httpControlBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			response := &preflightGateWriter{ResponseRecorder: httptest.NewRecorder(), executor: executor}
+			executor.ServeHTTP(response, request)
+			return response.Code
+		}
+		if got := post("/preflight", supported); got != http.StatusOK || endpoint.AuditHostSupported() != supported {
+			t.Fatalf("capability %t preflight: status=%d stored=%t", supported, got, endpoint.AuditHostSupported())
+		}
+		if got := post("/preflight", !supported); got != http.StatusConflict || endpoint.AuditHostSupported() != supported {
+			t.Fatalf("changed capability %t preflight: status=%d stored=%t", !supported, got, endpoint.AuditHostSupported())
+		}
+	}
+}
+
 func TestRemoteChoicePreflightRejectsUnavailableExecutor(t *testing.T) {
 	const secret = "private-preflight-credential"
 	for _, state := range []string{"closed", "unavailable"} {

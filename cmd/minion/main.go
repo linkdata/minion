@@ -14,9 +14,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/linkdata/minion"
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -26,6 +28,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 	"github.com/linkdata/minion/internal/workroot"
 	"github.com/linkdata/minion/internal/workspace"
+	"github.com/linkdata/webserv"
 )
 
 func main() {
@@ -48,9 +51,36 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, remote-execute, or hash")
 	oneshot := flag.Bool("oneshot", false, "run one polling pass, then exit; default is a continuous service")
 	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
-	installSkills := flag.Bool("install-skills", false, "download configured skills for Codex and Claude, then exit")
+	installSkills := flag.Bool("install-skills", false, "install configured skills for Codex and Claude, then exit")
+	address := flag.String("address", "", "webserv listen address for the admin UI")
+	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
+	webUser := flag.String("user", "", "switch the whole Minion process to this user before config creation")
+	dataDir := flag.String("datadir", "", "webserv data directory (Minion stores no files there)")
+	listenURL := flag.String("listenurl", "", "external URL for the admin UI")
 	flag.Parse()
 	logger := log.New(os.Stderr, "minion: ", log.LstdFlags|log.LUTC)
+	webservFlagsUsed, listenerFlagsUsed, nonValidationFlagsUsed, dataDirUsed := false, false, false, false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "address", "certdir", "listenurl":
+			webservFlagsUsed = true
+			listenerFlagsUsed = true
+			if f.Name == "address" {
+				nonValidationFlagsUsed = true
+			}
+		case "datadir":
+			webservFlagsUsed = true
+			listenerFlagsUsed = true
+			nonValidationFlagsUsed = true
+			dataDirUsed = true
+		case "user":
+			webservFlagsUsed = true
+		}
+	})
+	if webservFlagsUsed && *mode != "orchestrate" {
+		logger.Print("webserv flags require orchestrate mode")
+		return 2
+	}
 	if flag.NArg() != 0 {
 		if *mode == "hash" {
 			logger.Print("-mode=hash prompts for a password; do not pass it as an argument")
@@ -112,15 +142,71 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("-install-skills cannot be combined with -oneshot or -check")
 		return 2
 	}
+	if (*oneshot || *installSkills) && nonValidationFlagsUsed {
+		logger.Print("-address and -datadir cannot be combined with -oneshot or -install-skills")
+		return 2
+	}
+	if *check && dataDirUsed {
+		logger.Print("-datadir requires a persistent admin listener")
+		return 2
+	}
 	loadedPath, err := filepath.Abs(*configPath)
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2
 	}
-	cfg, err := config.Load(loadedPath)
+	var passwordOutput *os.File
+	if *webUser != "" && !*installSkills {
+		passwordOutput, _ = adminPasswordTerminal()
+	}
+	if err := webserv.BecomeUser(*webUser); err != nil {
+		if passwordOutput != nil {
+			_ = passwordOutput.Close()
+		}
+		logger.Printf("switch user: %v", err)
+		return 2
+	}
+	installDefaults := false
+	if *installSkills {
+		if _, err := os.Lstat(loadedPath); errors.Is(err, os.ErrNotExist) {
+			installDefaults = true
+		} else if err != nil {
+			logger.Printf("config: %v", err)
+			return 2
+		}
+	}
+	var createErr error
+	if !installDefaults && !*check {
+		_, createErr = createInitialConfigWithPrompt(loadedPath, logger, !*installSkills, passwordOutput)
+	}
+	if passwordOutput != nil {
+		_ = passwordOutput.Close()
+	}
+	if createErr != nil {
+		logger.Printf("create config: %v", createErr)
+		return 2
+	}
+	runtimeAdmin := config.AdminConfig{
+		WebservAddress: *address, WebservCertDir: *certDir,
+		WebservDataDir: *dataDir, WebservListenURL: *listenURL,
+	}
+	var cfg config.Config
+	if installDefaults {
+		cfg, err = config.ParseWithAdminRuntime(strings.NewReader(minion.DefaultConfig()), filepath.Dir(loadedPath), runtimeAdmin)
+	} else {
+		cfg, err = config.LoadWithAdminRuntime(loadedPath, runtimeAdmin)
+	}
 	if err != nil {
 		logger.Printf("config: %v", err)
 		return 2
+	}
+	if listenerFlagsUsed && cfg.Admin == nil {
+		logger.Print("webserv flags require an admin block in the config")
+		return 2
+	}
+	if *oneshot && len(cfg.Repositories) == 0 {
+		logger.Print("no repositories configured")
+		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	// Restore default signal handling so a later signal can terminate shutdown.
@@ -139,45 +225,22 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Printf("configured skills installed for Codex and Claude")
 		return 0
 	}
-	logCommandSkills(cfg, logger)
+	canOfferSetup := cfg.Admin != nil && !*check && !*oneshot
+	setupIncomplete := canOfferSetup &&
+		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0 ||
+			cfg.RemoteExecutor == nil && !hasRunnableLocalCommand(cfg) ||
+			cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true))
+	_, stateErr := os.Stat(cfg.StatePath)
+	freshState := errors.Is(stateErr, os.ErrNotExist)
+	if setupIncomplete && (stateErr != nil || cfg.BotLogin == "" || cfg.GitHub.Token == "") {
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
-	var store *state.Store
-	initial := time.Now().UTC()
-	if cfg.StartAt != "" {
-		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
-	}
-	store, err = state.Open(cfg.StatePath, initial)
-	if errors.Is(err, state.ErrLocked) && *oneshot {
-		logger.Printf("another run is active; skipping this cron pass")
-		return 0
-	}
-	if err != nil {
-		logger.Printf("state: %v", err)
-		return 1
-	}
-	defer func() {
-		if err := store.Close(); err != nil {
-			logger.Printf("close state: %v", err)
-		}
-	}()
-	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
-		logger.Print(claudeUnixSocketWarning)
-	}
-	if !*check {
-		defer func() {
-			if ctx.Err() != nil {
-				return
-			}
-			pruner := &action.Orchestrator{WorkRoot: cfg.WorkRoot, Logger: logger}
-			if err := pruner.PrunePrivateRecords(ctx, store, now().UTC()); err != nil {
-				logger.Printf("private record retention: %s", monitor.InertLogText(err.Error()))
-			}
-		}()
-	}
 	var client *github.Client
 	var user github.User
+	var store *state.Store
 	authenticateGitHub := func() bool {
 		if client != nil {
 			return true
@@ -203,7 +266,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		client = candidate
 		return true
 	}
-	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
 	preflight := func() bool {
 		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
 			logger.Printf("AI preflight: %v", err)
@@ -217,8 +279,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("Git preflight: %v", err)
 			return false
 		}
-		if cfg.Admin != nil && cfg.Admin.TLSCertFile != "" && !*oneshot {
-			if _, err := loadTLSCertificate("admin", cfg.Admin.TLSCertFile, cfg.Admin.TLSKeyFile); err != nil {
+		if cfg.Admin != nil && !*oneshot {
+			if err := checkAdminServerConfig(*cfg.Admin); err != nil {
 				logger.Printf("admin TLS preflight: %v", err)
 				return false
 			}
@@ -228,6 +290,19 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 				logger.Printf("remote TLS preflight: %v", err)
 				return false
 			}
+			pendingAudit := false
+			if store != nil && store.Data.Accepted != nil {
+				accepted := store.Data.Accepted
+				pendingAudit = accepted.Action == string(command.SecurityAudit) &&
+					!accepted.ResultReady && !terminalRecoveryPendingAt(store, now())
+			}
+			// An audit-only service has no other command if publishing tools are missing.
+			if *check || pendingAudit || !hasUnselectedCommand(nil, cfg, false) {
+				if err := action.CheckAuditPublisher(ctx, cfg.WorkRoot, cfg); err != nil {
+					logger.Printf("audit publishing preflight: %v", err)
+					return false
+				}
+			}
 		} else {
 			if err := checkModels(ctx, &cfg, logger); err != nil {
 				logger.Printf("AI preflight: %v", err)
@@ -236,14 +311,83 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		return true
 	}
-	failedPreflight := !terminalRecovery && !preflight()
+	startRecoverySetup := func() int {
+		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
+	freshPreflightPassed := false
+	if freshState {
+		if !preflight() {
+			if canOfferSetup {
+				return startRecoverySetup()
+			}
+			return 1
+		}
+		freshPreflightPassed = true
+		if !authenticateGitHub() {
+			if canOfferSetup {
+				return startRecoverySetup()
+			}
+			return 1
+		}
+		if *check {
+			if err := checkRepositories(ctx, client, cfg, logger); err != nil {
+				logger.Printf("preflight failed: %v", err)
+				return 1
+			}
+		}
+	}
+	initial := time.Now().UTC()
+	if cfg.StartAt != "" {
+		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)
+	}
+	store, err = state.Open(cfg.StatePath, initial)
+	if errors.Is(err, state.ErrLocked) && *oneshot {
+		logger.Printf("another run is active; skipping this cron pass")
+		return 0
+	}
+	if err != nil {
+		logger.Printf("state: %v", err)
+		return 1
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			logger.Printf("close state: %v", err)
+		}
+	}()
+	if setupIncomplete && !terminalRecoveryPendingAt(store, now()) {
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
+	logCommandSkills(cfg, logger)
+	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+		logger.Print(claudeUnixSocketWarning)
+	}
+	if !*check {
+		defer func() {
+			if ctx.Err() != nil {
+				return
+			}
+			pruner := &action.Orchestrator{WorkRoot: cfg.WorkRoot, Logger: logger}
+			if err := pruner.PrunePrivateRecords(ctx, store, now().UTC()); err != nil {
+				logger.Printf("private record retention: %s", monitor.InertLogText(err.Error()))
+			}
+		}()
+	}
+	recoverySetup := func() int {
+		if cfg.Admin == nil || *check || *oneshot || ctx.Err() != nil {
+			return 1
+		}
+		return startRecoverySetup()
+	}
+	terminalRecovery := !*check && terminalRecoveryPendingAt(store, now())
+	failedPreflight := !terminalRecovery && !freshPreflightPassed && !preflight()
 	if failedPreflight && !*check {
 		for _, write := range store.Data.PublicationWrites {
 			if write.Status != state.PublicationWritePending {
 				continue
 			}
 			if !authenticateGitHub() {
-				return 1
+				return recoverySetup()
 			}
 			watcher := &monitor.Monitor{Config: cfg, ConfigPath: loadedPath, GitHub: client, BotID: user.ID, Logger: logger}
 			if err := watcher.ReconcilePublicationWrites(ctx, store); err != nil {
@@ -255,16 +399,22 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	if failedPreflight {
 		if *check || !terminalRecoveryPendingAt(store, now()) {
-			return 1
+			return recoverySetup()
 		}
 		terminalRecovery = true
 	}
 	if !authenticateGitHub() {
-		return 1
+		return recoverySetup()
 	}
 	if *check {
-		if err := checkRepositories(ctx, client, cfg, logger); err != nil {
-			logger.Printf("preflight failed: %v", err)
+		if !freshState {
+			if err := checkRepositories(ctx, client, cfg, logger); err != nil {
+				logger.Printf("preflight failed: %v", err)
+				return 1
+			}
+		}
+		if cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true) {
+			logger.Print("remote executor has no enabled commands supported on this host")
 			return 1
 		}
 		logger.Printf("preflight passed as @%s", user.Login)
@@ -277,16 +427,22 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		recovery.BotID = user.ID
 		bindPublicationValidation(recovery, watcher)
 		watcher.Handler = recovery
-		code := recoverAcceptedService(ctx, watcher, store, !*oneshot && !failedPreflight, nil, logger)
+		code := recoverAcceptedService(ctx, watcher, store, !*oneshot && !failedPreflight && !canOfferSetup, nil, logger)
 		if failedPreflight {
 			return 1
+		}
+		if canOfferSetup && store.Data.Accepted != nil && ctx.Err() == nil {
+			return recoverySetup()
 		}
 		if code != 0 || *oneshot || ctx.Err() != nil {
 			return code
 		}
+		if setupIncomplete {
+			return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+		}
 		cfg = watcher.Config
 		if !preflight() {
-			return 1
+			return recoverySetup()
 		}
 	}
 	orchestrator := newOrchestrator(cfg, client, store, logger, checkWorkRoot)
@@ -456,7 +612,11 @@ func waitForConfigRetry(ctx context.Context, updates, workerExited <-chan struct
 
 func newOrchestrator(cfg config.Config, client *github.Client, store *state.Store, logger *log.Logger, checkWorkRoot func() error) *action.Orchestrator {
 	codexAuth := config.CodexConfig{APIKey: cfg.Codex.APIKey}
-	if codexAuth.APIKey == "" {
+	claudeKey := cfg.Claude.APIKey
+	if cfg.RemoteExecutor == nil && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+		claudeKey = claudeRunnerKey(claudeKey)
+	}
+	if codexAuth.APIKey == "" && cfg.RemoteExecutor == nil {
 		codexAuth.NativeAPIKey = cfg.Codex.NativeAPIKey
 		codexAuth.NativeAccessToken = cfg.Codex.NativeAccessToken
 		if cfg.Main == "codex" || cfg.Adversarial == "codex" {
@@ -493,7 +653,7 @@ func newOrchestrator(cfg config.Config, client *github.Client, store *state.Stor
 		// Jobs override model, effort and skills; the runner keeps host credentials.
 		Runner: action.Runner{
 			Codex:  codexAuth,
-			Claude: config.ClaudeConfig{APIKey: cfg.Claude.APIKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
+			Claude: config.ClaudeConfig{APIKey: claudeKey, AllowAllUnixSockets: cfg.Claude.AllowAllUnixSockets},
 			Logger: logger,
 		},
 	}
@@ -515,8 +675,15 @@ func checkWorkRootPath(path string) (resultErr error) {
 
 func logCommandSkills(cfg config.Config, logger *log.Logger) {
 	for _, command := range cfg.CommandNames() {
-		if !cfg.Commands[command].SupportsProvider(cfg.Main) {
+		providerSupported := cfg.Commands[command].SupportsProvider(cfg.Main)
+		hostSupported := cfg.Commands[command].SupportedOnHost()
+		if !providerSupported {
 			logger.Printf("command %s disabled: action %s is unsupported with %s as main", command, cfg.Commands[command].Action, cfg.Main)
+		}
+		if !hostSupported {
+			logger.Printf("command %s disabled: action %s is unsupported on %s", command, cfg.Commands[command].Action, runtime.GOOS)
+		}
+		if !providerSupported || !hostSupported {
 			continue
 		}
 		if cfg.RemoteExecutor != nil {
@@ -545,6 +712,23 @@ func logCommandSkills(cfg config.Config, logger *log.Logger) {
 }
 
 func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (err error) {
+	if cfg.RemoteExecutor == nil {
+		var credentials action.WorkerCredentials
+		if cfg.Main == "codex" || cfg.Adversarial == "codex" {
+			codex := codexcli.CaptureAmbientNativeCredentials(cfg.Codex)
+			credentials.CodexAPIKey = codex.APIKey
+			if codex.APIKey == "" {
+				credentials.CodexNativeAPIKey = codex.NativeAPIKey
+				credentials.CodexAccessToken = codex.NativeAccessToken
+			}
+		}
+		if cfg.Main == "claude" || cfg.Adversarial == "claude" {
+			credentials.ClaudeAPIKey = claudeRunnerKey(cfg.Claude.APIKey)
+		}
+		if err := credentials.Validate(); err != nil {
+			return fmt.Errorf("AI worker credentials: %w", err)
+		}
+	}
 	requested := [2]config.RoleModelConfig{cfg.MainSettings, cfg.CriticSettings}
 	base := *cfg
 	for i, provider := range []string{cfg.Main, cfg.Adversarial} {
@@ -632,6 +816,9 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 }
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {
+	if len(cfg.Repositories) == 0 {
+		return errors.New("no repositories configured")
+	}
 	var problems []error
 	for _, repo := range cfg.Repositories {
 		if _, _, err := client.ListRepositoryNotifications(ctx, repo.Name, time.Now().UTC()); err != nil {
@@ -648,6 +835,10 @@ func checkRepositories(ctx context.Context, client *github.Client, cfg config.Co
 		}
 		if details.Archived {
 			problems = append(problems, fmt.Errorf("%s is archived", repo.Name))
+			continue
+		}
+		if details.DefaultBranch == "" {
+			problems = append(problems, fmt.Errorf("%s has no default branch", repo.Name))
 			continue
 		}
 		logger.Printf("repository %s: default branch %s", repo.Name, details.DefaultBranch)

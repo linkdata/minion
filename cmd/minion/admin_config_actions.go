@@ -327,7 +327,7 @@ func validateAdminRequester(ctx context.Context, live *adminLiveConfig, owner *a
 }
 
 func validateAdminRequesterInRepository(ctx context.Context, owner *action.Orchestrator, repo config.Repository, login string) (int64, error) {
-	if !validAdminGitHubLogin(login) {
+	if !config.ValidGitHubLogin(login) {
 		return 0, errors.New("Enter a configured repository and valid GitHub login")
 	}
 	if owner == nil || owner.GitHub == nil {
@@ -378,19 +378,6 @@ func adminConfigPost(back string, fields []string, repeated string, action func(
 	})
 }
 
-func validAdminGitHubLogin(login string) bool {
-	if len(login) == 0 || len(login) > 39 || login[0] == '-' || login[len(login)-1] == '-' {
-		return false
-	}
-	for _, ch := range login {
-		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
 func adminCanWrite(permission string) bool {
 	return permission == "write" || permission == "maintain" || permission == "admin"
 }
@@ -402,8 +389,8 @@ func validateAdminActions(cfg config.Config, actions, existing []string) error {
 	selected := make(map[string]bool, len(actions))
 	for _, name := range actions {
 		mapping, exists := cfg.Commands[name]
-		if !exists || selected[name] || !mapping.SupportsProvider(cfg.Main) && !slices.Contains(existing, name) {
-			return errors.New("Select distinct commands supported by the configured main AI, or keep commands already enabled here")
+		if !exists || selected[name] || (!mapping.SupportsProvider(cfg.Main) || !mapping.SupportedOnHost()) && !slices.Contains(existing, name) {
+			return errors.New("Select distinct commands supported by the main AI and selected executor, or keep already enabled commands")
 		}
 		selected[name] = true
 	}

@@ -34,8 +34,9 @@ func httpBindingDigest(binding httpBinding) string {
 }
 
 type httpPull struct {
-	Version    int    `json:"version"`
-	ExecutorID string `json:"executor_id"`
+	Version            int    `json:"version"`
+	ExecutorID         string `json:"executor_id"`
+	AuditHostSupported bool   `json:"audit_host_supported,omitempty"`
 }
 
 type remoteChoicePreflight struct {
@@ -56,14 +57,28 @@ type WorkerCredentials struct {
 	ClaudeAPIKey      string `json:"claude_api_key,omitempty"`
 }
 
-const maxWorkerCredentialBytes = 8 << 10
+func (e *Orchestrator) workerCredentials(main, critic string) WorkerCredentials {
+	var credentials WorkerCredentials
+	if main == "codex" || critic == "codex" {
+		credentials.CodexAPIKey = e.Runner.Codex.APIKey
+		if credentials.CodexAPIKey == "" {
+			credentials.CodexNativeAPIKey = e.Runner.Codex.NativeAPIKey
+			credentials.CodexAccessToken = e.Runner.Codex.NativeAccessToken
+		}
+	}
+	if main == "claude" || critic == "claude" {
+		credentials.ClaudeAPIKey = e.Runner.Claude.APIKey
+	}
+	return credentials
+}
 
-func (credentials WorkerCredentials) validate() error {
-	// Bound each field before summing so the aggregate cannot overflow int.
-	if len(credentials.CodexAPIKey) > maxWorkerCredentialBytes || len(credentials.CodexNativeAPIKey) > maxWorkerCredentialBytes ||
-		len(credentials.CodexAccessToken) > maxWorkerCredentialBytes ||
-		len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes ||
-		len(credentials.CodexAPIKey)+len(credentials.CodexNativeAPIKey)+len(credentials.CodexAccessToken)+len(credentials.ClaudeAPIKey) > maxWorkerCredentialBytes {
+const maxWorkerAccessTokenBytes = 4 << 10
+
+// Validate checks credentials before they cross the worker boundary.
+func (credentials WorkerCredentials) Validate() error {
+	if len(credentials.CodexAPIKey) > config.MaxProviderAPIKeyBytes || len(credentials.CodexNativeAPIKey) > config.MaxProviderAPIKeyBytes ||
+		len(credentials.CodexAccessToken) > maxWorkerAccessTokenBytes ||
+		len(credentials.ClaudeAPIKey) > config.MaxProviderAPIKeyBytes {
 		return errors.New("worker credentials exceed limit")
 	}
 	for _, value := range []string{credentials.CodexAPIKey, credentials.CodexNativeAPIKey, credentials.CodexAccessToken, credentials.ClaudeAPIKey} {
@@ -78,7 +93,7 @@ func (credentials WorkerCredentials) validate() error {
 }
 
 func (credentials WorkerCredentials) validateJob(job Job) error {
-	if err := credentials.validate(); err != nil {
+	if err := credentials.Validate(); err != nil {
 		return err
 	}
 	selected := func(provider string) bool {

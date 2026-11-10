@@ -132,7 +132,7 @@ func TestSecurityAuditIssueAndPullRequest(t *testing.T) {
 						if writable || outputDir == "" || strings.HasPrefix(outputDir, dir+string(os.PathSeparator)) {
 							t.Fatalf("audit source writable or reports not separate: writable=%v output=%q source=%q", writable, outputDir, dir)
 						}
-						for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Check authorization."} {
+						for _, want := range []string{skill, expected, outputDir, "full-audit mode", "standard profile", "needs_validation", "Source-derived: ", "Check authorization."} {
 							if !strings.Contains(prompt, want) {
 								t.Fatalf("audit prompt missing %q", want)
 							}
@@ -330,7 +330,7 @@ JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 				byPath[file.Path] = file.Data
 			}
 			// The Result contract runs this with source; exercise ledger semantics here separately from Node.
-			err = validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil)
+			err = validateAuditCoverage(byPath["coverage-ledger.json"], byPath["findings.json"], byPath["REPORT.md"], nil, nil)
 		}
 		if wantError == "" {
 			if err != nil {
@@ -470,7 +470,7 @@ func TestValidateAuditMetadataRejectsIncompleteReason(t *testing.T) {
 
 func TestValidateAuditCoverageCapsFindings(t *testing.T) {
 	findings := "[" + strings.Repeat("{},", 1000) + "{}]"
-	if err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte(findings), []byte("Report"), nil); err == nil || !strings.Contains(err.Error(), "exceeds 1000 findings") {
+	if err := validateAuditCoverage([]byte(auditCoveredLedgerFixture), []byte(findings), []byte("Report"), nil, nil); err == nil || !strings.Contains(err.Error(), "exceeds 1000 findings") {
 		t.Fatalf("oversized findings: %v", err)
 	}
 }

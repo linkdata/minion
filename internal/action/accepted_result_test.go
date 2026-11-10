@@ -641,7 +641,7 @@ func TestSelectedAuditValidatesAfterSavingResultAndOutcomeACK(t *testing.T) {
 
 func TestSelectedAuditInvalidValidatorResultIsRejectedAfterACK(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
-	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*) exit 0;; esac\nexit 9\n")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*) exit 0;; esac\nprintf 'FAIL: 1 validation error(s)\\n' >&2\nexit 9\n")
 	job := testJob(command.SecurityAudit)
 	job.Identity.Repository = "o/r"
 	f, store, _ := selectedHTTPResultFixtureForJob(t, job, nil)

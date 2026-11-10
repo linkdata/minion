@@ -39,7 +39,7 @@ func TestAdminConflictReasonIsBoundedAndPrivate(t *testing.T) {
 	handler, jw, _ := testAdminHandler(t, []config.AdminAccount{account})
 	admin := dashboardTestCookie(t, handler)
 	guest := adminGuestCookie(t, handler)
-	failure := (&adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account}}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	failure := (&adminAccess{jaws: jw, account: account, passwordSet: true}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, strings.Repeat("x", 1024), http.StatusConflict)
 	}))
 	for _, test := range []struct {
@@ -69,7 +69,7 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 		origin             string
 		status             int
 	}{
-		{"bad login", http.MethodPost, "/admin/login", url.Values{"username": {"operator"}, "password": {"wrong-password"}}, guest, "", http.StatusUnauthorized},
+		{"bad login", http.MethodPost, "/admin/login", url.Values{"password": {"wrong-password"}}, guest, "", http.StatusUnauthorized},
 		{"guest usage", http.MethodGet, "/admin/usage", nil, guest, "", http.StatusForbidden},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -92,7 +92,7 @@ func TestAdminBrowserErrorsUseJaWS(t *testing.T) {
 	}
 
 	login := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "")
+		url.Values{"password": {"correct-password"}}, guest, "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
@@ -138,7 +138,7 @@ func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
 		t.Fatalf("guest login page: status=%d", login.Code)
 	}
 	failed := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"wrong-password"}}, guest, "")
+		url.Values{"password": {"wrong-password"}}, guest, "")
 	if failed.Code != http.StatusUnauthorized || !strings.Contains(failed.Body.String(), `href="/admin/login"`) {
 		t.Fatalf("failed login has no direct retry: status=%d body=%q", failed.Code, failed.Body.String())
 	}
@@ -148,18 +148,22 @@ func TestFailedAdminLoginReservesDirectRetry(t *testing.T) {
 	}
 }
 
-func TestOAuthOnlyAdminErrorOmitsAdminLogin(t *testing.T) {
-	cfg := config.AdminConfig{GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
+func TestOAuthOnlyAdminLoginShowsPasswordSetup(t *testing.T) {
+	cfg := config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin"}}, GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 		RedirectURL: "https://admin.example/auth/github/callback"}}
 	handler, _, _ := testOAuthAdminHandler(t, cfg, nil)
 	page := adminResponse(handler, http.MethodGet, "/auth/login", nil, nil, "")
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 {
 		t.Fatalf("user login: status=%d cookies=%v", page.Code, page.Result().Cookies())
 	}
-	denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, page.Result().Cookies()[0], "")
-	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `href="/"`) ||
-		strings.Contains(denied.Body.String(), `href="/admin/login"`) {
-		t.Fatalf("OAuth-only error links to unavailable admin login: status=%d body=%q", denied.Code, denied.Body.String())
+	setup := adminResponse(handler, http.MethodGet, "/admin/login", nil, page.Result().Cookies()[0], "")
+	if setup.Code != http.StatusOK || !strings.Contains(setup.Body.String(), "The admin password is not set") ||
+		strings.Contains(setup.Body.String(), `name="password"`) {
+		t.Fatalf("OAuth-only admin setup page: status=%d body=%q", setup.Code, setup.Body.String())
+	}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/login",
+		url.Values{"password": {"guess"}}, page.Result().Cookies()[0], ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("OAuth-only admin sign-in: status=%d, want 403", denied.Code)
 	}
 }
 
@@ -171,7 +175,7 @@ func TestAdminErrorWithoutSessionIsStatusOnly(t *testing.T) {
 		t.Fatalf("sessionless error: status=%d type=%q body=%q", response.Code, response.Header().Get("Content-Type"), response.Body.String())
 	}
 	post := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, nil, "")
+		url.Values{"password": {"correct-password"}}, nil, "")
 	if post.Code != http.StatusConflict || post.Body.Len() != 0 || post.Header().Get("Content-Type") != "" ||
 		len(post.Result().Cookies()) != 0 {
 		t.Fatalf("sessionless login: status=%d type=%q body=%q", post.Code, post.Header().Get("Content-Type"), post.Body.String())
@@ -196,7 +200,7 @@ func TestUnknownAdminBrowserRoutes(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
 	guest := adminGuestCookie(t, handler)
 	login := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, guest, "")
+		url.Values{"password": {"correct-password"}}, guest, "")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
 		t.Fatalf("admin login: status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
@@ -245,7 +249,7 @@ func TestConcurrentAdminGuestErrorNoticesReserveSignInSlot(t *testing.T) {
 	ready.Add(concurrent)
 	done.Add(concurrent)
 	release := make(chan struct{})
-	failure := (&adminAccess{jaws: jw, accounts: map[string]config.AdminAccount{account.Username: account}}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	failure := (&adminAccess{jaws: jw, account: account, passwordSet: true}).browserErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		ready.Done()
 		<-release
 		w.WriteHeader(http.StatusForbidden)
@@ -305,7 +309,7 @@ func TestSignedInOAuthAdminErrorIsNotGuestLimited(t *testing.T) {
 
 func TestAdminLoginRateLimitUsesJaWSWhenGuestHasRoom(t *testing.T) {
 	handler, _, _ := testAdminHandler(t, []config.AdminAccount{testAdminAccount()})
-	form := url.Values{"username": {"operator"}, "password": {"wrong-password"}}
+	form := url.Values{"password": {"wrong-password"}}
 	for range 5 {
 		if failed := adminResponse(handler, http.MethodPost, "/admin/login", form, nil, ""); failed.Code != http.StatusUnauthorized {
 			t.Fatalf("failed login: status=%d", failed.Code)

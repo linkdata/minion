@@ -127,6 +127,14 @@ func (i *installer) install(ctx context.Context, urls []string, providers ...str
 			bundle.files = []skillFile{{name: "SKILL.md", data: content, mode: 0o600}}
 			continue
 		}
+		files, commit, err := bundledFiles(src)
+		if err != nil {
+			return err
+		}
+		if commit != "" {
+			bundle.files, bundle.commit = files, commit
+			continue
+		}
 		key := src.owner + "/" + src.repo + "/" + src.ref
 		groups[key] = append(groups[key], bundle)
 	}

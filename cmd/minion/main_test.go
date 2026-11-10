@@ -89,6 +89,23 @@ func runStartupFixtureWithRun(t *testing.T, cfg config.Config, start func() int,
 	return code, string(data)
 }
 
+func TestWebservUserSwitchPrecedesInitialConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	oldFlags, oldArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() { flag.CommandLine, os.Args = oldFlags, oldArgs })
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", path, "-user", "minion-no-such-user-!"}
+	if code := runWithGitCheck(func(context.Context, string) error {
+		t.Fatal("checked Git before switching user")
+		return nil
+	}); code != 2 {
+		t.Fatalf("user switch exit = %d, want 2", code)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created config before switching user: %v", err)
+	}
+}
+
 func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	t.Setenv("GH_TOKEN", "wrong-ambient-token")
@@ -125,14 +142,86 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 			ExecutorID: "remote", Listen: "127.0.0.1:8443", TLSCertFile: certFile, TLSKeyFile: keyFile,
 			Token: strings.Repeat("A", 43),
 		},
-		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
 	}
 	code, output := runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error { return nil })
 	}, "-check")
 	if code != 0 || !strings.Contains(output, "preflight passed as @bot") {
 		t.Fatalf("configured GitHub account failed preflight: code=%d output=%q", code, output)
+	}
+	cfg.Commands = map[string]config.CommandMapping{}
+	cfg.Repositories[0].Actions = nil
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "remote executor has no enabled commands supported on this host") {
+		t.Fatalf("remote check accepted no commands: code=%d output=%q", code, output)
+	}
+	if runtime.GOOS == "windows" {
+		cfg.Commands = map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}}}
+		cfg.Repositories[0].Actions = []string{"audit"}
+		code, output = runStartupFixtureWithRun(t, cfg, func() int {
+			return runWithGitCheck(func(context.Context, string) error { return nil })
+		}, "-check")
+		if code != 1 || !strings.Contains(output, "remote executor has no enabled commands supported on this host") {
+			t.Fatalf("remote check accepted audit-only commands on Windows: code=%d output=%q", code, output)
+		}
+	}
+	cfg.Admin = &config.AdminConfig{Listen: "127.0.0.1:8080", Administrators: []config.AdminAccount{testAdminAccount()}}
+	cfg.Repositories = nil
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "no repositories configured") {
+		t.Fatalf("empty setup passed repository preflight: code=%d output=%q", code, output)
+	}
+}
+
+func TestCheckValidAdminTLSWithoutBinding(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	address := occupiedAdminAddress(t)
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/user":
+			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		case "/repos/owner/repo/notifications":
+			_, _ = recorder.WriteString(`[]`)
+		case "/repos/owner/repo":
+			_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","default_branch":"main","owner":{"id":2}}`)
+		case "/repos/owner/repo/collaborators/bot/permission":
+			_, _ = recorder.WriteString(`{"permission":"write","user":{"id":8,"login":"bot"}}`)
+		default:
+			t.Errorf("unexpected GitHub request: %s %s", request.Method, request.URL)
+			recorder.WriteHeader(http.StatusNotFound)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	cfg := config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"}, Main: "codex",
+		Codex: config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		Admin: &config.AdminConfig{Listen: address, TLSCertFile: certFile, TLSKeyFile: keyFile,
+			Administrators: []config.AdminAccount{testAdminAccount()}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
+			TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+	}
+	start := func() int { return runWithGitCheck(func(context.Context, string) error { return nil }) }
+	code, output := runStartupFixtureWithRun(t, cfg, start, "-check")
+	if code != 0 || !strings.Contains(output, "preflight passed as @bot") {
+		t.Fatalf("-check rejected valid TLS on occupied port: code=%d output=%q", code, output)
+	}
+	code, output = runStartupFixtureWithRun(t, cfg, start)
+	if code != 1 || !strings.Contains(output, "admin dashboard: prepare listener:") || !strings.Contains(output, address) {
+		t.Fatalf("service did not report occupied admin port: code=%d output=%q", code, output)
 	}
 }
 
@@ -167,6 +256,13 @@ func TestLocalClaudeSocketOptInLogsWarning(t *testing.T) {
 				t.Fatalf("locked startup warned before admission: exit=%d log=%q", code, output)
 			}
 			cfg.StatePath = filepath.Join(t.TempDir(), "active-state.json")
+			activeState, err := state.Open(cfg.StatePath, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := activeState.Close(); err != nil {
+				t.Fatal(err)
+			}
 			code, output = runStartupFixtureWithRun(t, cfg, func() int {
 				return runWithGitCheck(func(context.Context, string) error { return errors.New("fixture Git stop") })
 			})
@@ -307,13 +403,15 @@ func TestPreflightFailurePrunesExpiredPrivateRecords(t *testing.T) {
 
 func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 	for _, mode := range []struct {
-		name          string
-		args          []string
-		wantCode      int
-		wantRecovered bool
+		name            string
+		args            []string
+		wantCode        int
+		wantRecovered   bool
+		incompleteSetup bool
 	}{
 		{name: "oneshot", args: []string{"-mode=orchestrate", "-oneshot"}, wantRecovered: true},
 		{name: "service", args: []string{"-mode=orchestrate"}, wantCode: 1, wantRecovered: true},
+		{name: "service with missing sole skill", args: []string{"-mode=orchestrate"}, wantCode: 1, wantRecovered: true, incompleteSetup: true},
 		{name: "check", args: []string{"-mode=orchestrate", "-check"}, wantCode: 1},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
@@ -347,27 +445,52 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
+			postedReplies := 0
 			previousTransport := http.DefaultTransport
 			http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
-				if request.Method != http.MethodGet || request.URL.Path != "/user" {
+				key := request.Method + " " + request.URL.Path
+				if !mode.incompleteSetup && key != "GET /user" {
 					t.Errorf("terminal discard made unexpected GitHub request: %s %s", request.Method, request.URL)
 				}
 				recorder := httptest.NewRecorder()
 				recorder.Header().Set("Content-Type", "application/json")
-				_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+				switch key {
+				case "GET /user":
+					_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+				case "GET /repos/owner/repo/issues/7/comments":
+					_, _ = recorder.WriteString(`[]`)
+				case "POST /graphql":
+					_, _ = recorder.WriteString(`{"data":{"node":{"body":"@bot comment","author":{"id":7,"login":"writer"}}}}`)
+				case "GET /repos/owner/repo":
+					_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","default_branch":"main","owner":{"id":2}}`)
+				case "GET /repos/owner/repo/collaborators/writer/permission":
+					_, _ = recorder.WriteString(`{"permission":"write","user":{"id":7,"login":"writer"}}`)
+				case "POST /repos/owner/repo/issues/7/comments":
+					postedReplies++
+					recorder.WriteHeader(http.StatusCreated)
+					_, _ = recorder.WriteString(`{"id":42}`)
+				default:
+					t.Errorf("unexpected GitHub request: %s", key)
+				}
 				return recorder.Result(), nil
 			})
 			t.Cleanup(func() { http.DefaultTransport = previousTransport })
 			cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "offline-token"}, StatePath: statePath, WorkRoot: badWorkRoot,
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+			if mode.incompleteSetup {
+				cfg.Admin = &config.AdminConfig{Listen: occupiedAdminAddress(t), Administrators: []config.AdminAccount{testAdminAccount()}}
+				cfg.Commands["comment"] = config.CommandMapping{Action: "comment", Skills: []string{"https://github.com/example/skills/tree/main/skills/not-installed"}}
+				cfg.Repositories[0].Actions = []string{"comment"}
+			}
 			code, output := runStartupFixtureWithRun(t, cfg, func() int {
 				return runWithGitCheck(func(context.Context, string) error {
 					t.Error("terminal recovery reached Git preflight")
 					return errors.New("unexpected Git preflight")
 				})
 			}, mode.args...)
-			if code != mode.wantCode || strings.Contains(output, "work root:") != (mode.name != "oneshot") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "Git preflight:") {
+			if code != mode.wantCode || strings.Contains(output, "work root:") != (mode.name != "oneshot" && !mode.incompleteSetup) || strings.Contains(output, "AI preflight:") || strings.Contains(output, "Git preflight:") ||
+				mode.incompleteSetup && !strings.Contains(output, "setup UI:") {
 				t.Fatalf("terminal discard was blocked by new-work preflight: exit=%d log=%q", code, output)
 			}
 			assertNoStartupCommands(t, markers)
@@ -378,6 +501,9 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 			defer store.Close()
 			if recovered := store.Data.Accepted == nil && !store.Data.Processed[accepted.JobID].IsZero() && len(store.Data.JobFailures) == 0; recovered != mode.wantRecovered {
 				t.Fatalf("terminal acceptance recovery = %t, want %t: %+v", recovered, mode.wantRecovered, store.Data)
+			}
+			if mode.incompleteSetup && postedReplies != 1 {
+				t.Fatalf("missing-skill recovery posted %d failure replies, want 1", postedReplies)
 			}
 			if mode.name == "check" && (store.Data.Accepted == nil || store.Data.Accepted.AttemptID != accepted.AttemptID || store.Data.JobFailures[accepted.JobID].Attempts != 1) {
 				t.Fatalf("-check changed accepted action: %+v", store.Data)
@@ -626,5 +752,59 @@ func TestInstallSkillsBypassesGitAndProviderPreflight(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestInstallSkillsBeforeFirstStartLeavesConfigUncreated(t *testing.T) {
+	home := t.TempDir()
+	isolateHostPaths(t, home)
+	configPath := filepath.Join(t.TempDir(), "config.local.json")
+	oldFlags, oldArgs := flag.CommandLine, os.Args
+	t.Cleanup(func() { flag.CommandLine, os.Args = oldFlags, oldArgs })
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", configPath, "-install-skills"}
+	if code := runWithGitCheck(func(context.Context, string) error {
+		t.Fatal("install-only reached Git preflight")
+		return nil
+	}); code != 0 {
+		t.Fatalf("install default skills: exit=%d", code)
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("install-only consumed first-start config creation: %v", err)
+	}
+	for _, provider := range []string{".agents", ".claude"} {
+		path := filepath.Join(home, provider, "skills", "security-audit", "SKILL.md")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("default skill was not installed at %s: %v", path, err)
+		}
+	}
+}
+
+func TestCheckMissingConfigDoesNotBootstrap(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.local.json")
+	logFile, err := os.CreateTemp(t.TempDir(), "stderr-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFlags, oldArgs, oldStderr := flag.CommandLine, os.Args, os.Stderr
+	t.Cleanup(func() {
+		flag.CommandLine, os.Args, os.Stderr = oldFlags, oldArgs, oldStderr
+		_ = logFile.Close()
+	})
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", configPath, "-check"}
+	os.Stderr = logFile
+	if code := runWithGitCheck(func(context.Context, string) error {
+		t.Fatal("check with missing config reached Git preflight")
+		return nil
+	}); code != 2 {
+		t.Fatalf("check with missing config: exit=%d", code)
+	}
+	if _, err := os.Lstat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("check created config: %v", err)
+	}
+	output, err := os.ReadFile(logFile.Name())
+	if err != nil || !strings.Contains(string(output), "config:") || !strings.Contains(string(output), "config.local.json") {
+		t.Fatalf("check did not report missing config: log=%q error=%v", output, err)
 	}
 }

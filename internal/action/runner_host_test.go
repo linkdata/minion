@@ -130,10 +130,11 @@ func TestRunnerEnforcesSuppliedRuntimeBudget(t *testing.T) {
 			parent, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 			job := testJob(action)
+			job.RuntimeBudget = 2 * time.Second
 			if action == command.SecurityAudit {
 				job = auditRunnerJob(t)
+				job.RuntimeBudget = 10 * time.Second
 			}
-			job.RuntimeBudget = 2 * time.Second
 			calls := 0
 			var reports string
 			root := t.TempDir()

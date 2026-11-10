@@ -16,6 +16,7 @@ import (
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
@@ -35,8 +36,10 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 		{"mixed Codex auth", WorkerCredentials{CodexAPIKey: secret, CodexNativeAPIKey: "native-secret"}, false},
 		{"invalid UTF-8", WorkerCredentials{CodexAPIKey: string([]byte{0xff})}, false},
 		{"newline", WorkerCredentials{CodexAPIKey: secret + "\n"}, false},
-		{"oversized", WorkerCredentials{CodexAPIKey: strings.Repeat("x", maxWorkerCredentialBytes+1)}, false},
-		{"aggregate oversized", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", 4096), CodexAccessToken: strings.Repeat("y", 4097)}, false},
+		{"oversized Codex key", WorkerCredentials{CodexAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}, false},
+		{"oversized native Codex key", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}, false},
+		{"oversized access token", WorkerCredentials{CodexAccessToken: strings.Repeat("x", maxWorkerAccessTokenBytes+1)}, false},
+		{"native key and access token", WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes), CodexAccessToken: strings.Repeat("y", maxWorkerAccessTokenBytes)}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			err := test.credentials.validateJob(job)
@@ -49,6 +52,12 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 				t.Fatalf("credential validity=%t got_error=%t", test.valid, err != nil)
 			}
 		})
+	}
+	if err := (WorkerCredentials{ClaudeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)}).Validate(); err == nil {
+		t.Fatal("oversized Claude key accepted")
+	}
+	if err := (WorkerCredentials{CodexNativeAPIKey: "x", ClaudeAPIKey: strings.Repeat("y", config.MaxProviderAPIKeyBytes)}).Validate(); err != nil {
+		t.Fatalf("ambient Codex key with maximum saved Claude key: %v", err)
 	}
 	credentials := WorkerCredentials{CodexAPIKey: secret}
 	f := newHTTPServerTest(t, t.Context(), job, runnerExecutionCheckpoints{}, nil, credentials)
@@ -86,18 +95,65 @@ func TestWorkerCredentialsValidateAndAssign(t *testing.T) {
 	}
 }
 
+func TestRemoteCredentialsChangeReachesNextAssignment(t *testing.T) {
+	job := testJob(command.Comment)
+	executor, err := NewHTTPExecutor(job.Identity.ExecutorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.SetWorkerCredentials(WorkerCredentials{CodexAPIKey: "old-key"}); err != nil {
+		t.Fatal(err)
+	}
+	executor.remoteChoices = &remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: job.Identity.ExecutorID,
+		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
+	executor.choicesFetched = true
+	server := httptest.NewServer(executor)
+	t.Cleanup(func() {
+		_ = executor.Close()
+		server.Close()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	newCredentials := WorkerCredentials{CodexAPIKey: "new-key"}
+	if err := executor.updateIdleWorkerCredentials(newCredentials); err != nil {
+		t.Fatalf("change credentials while worker is absent: %v", err)
+	}
+	fixture := &httpServerTest{executor: executor, server: server, job: job, done: make(chan httpServerTestResult, 1)}
+	go func() {
+		result, err := executor.Execute(ctx, job, runnerExecutionCheckpoints{})
+		fixture.done <- httpServerTestResult{result: result, err: err}
+	}()
+	assignment := fixture.pull(t)
+	if assignment.Credentials != newCredentials {
+		t.Fatalf("next assignment credentials=%+v", assignment.Credentials)
+	}
+	if err := executor.updateIdleWorkerCredentials(WorkerCredentials{}); err == nil {
+		t.Fatal("credentials changed during an active assignment")
+	}
+	fixture.ack(t, "/outcome", fixture.outcome(1, nil), http.StatusOK, 1)
+	if got := fixture.result(t); got.err != nil {
+		t.Fatalf("known outcome failed: %v", got.err)
+	}
+	executor.mu.Lock()
+	executor.unavailable = true
+	executor.mu.Unlock()
+	if err := executor.updateIdleWorkerCredentials(WorkerCredentials{CodexAPIKey: "unused-key"}); err == nil {
+		t.Fatal("quarantined worker accepted credentials it cannot use")
+	}
+}
+
 func TestHTTPAssignmentBoundIncludesCredentialEscaping(t *testing.T) {
 	job := testJob(command.Comment)
-	credentials := WorkerCredentials{CodexAPIKey: strings.Repeat("\x01", 1024)}
+	credentials := WorkerCredentials{CodexAPIKey: strings.Repeat("\x01", config.MaxProviderAPIKeyBytes)}
 	bound := httpAssignmentBound(job, credentials)
 	encoded, err := httpEncode(httpAssignment{Job: job, Credentials: credentials, HeldFor: math.MaxInt64}, httpJobBytes)
 	if err != nil || bound < int64(len(encoded)) {
 		t.Fatalf("assignment bound=%d encoded=%d error=%v", bound, len(encoded), err)
 	}
 	job.Description = ""
-	room := (int64(httpJobBytes) - httpJobBound(job) - 3*maxWorkerCredentialBytes) / 6
+	room := (int64(httpJobBytes) - httpJobBound(job) - 3*maxWorkerAccessTokenBytes) / 6
 	job.Description = strings.Repeat("d", int(room))
-	credentials.CodexAPIKey = strings.Repeat("x", maxWorkerCredentialBytes)
+	credentials = WorkerCredentials{CodexNativeAPIKey: strings.Repeat("x", config.MaxProviderAPIKeyBytes), CodexAccessToken: strings.Repeat("y", maxWorkerAccessTokenBytes)}
 	if err := job.Validate(); err != nil || credentials.validateJob(job) != nil || httpJobBound(job) > httpJobBytes || httpAssignmentBound(job, credentials) <= httpJobBytes {
 		t.Fatalf("credential growth bypassed pre-encoding limit: job=%d assignment=%d error=%v", httpJobBound(job), httpAssignmentBound(job, credentials), err)
 	}

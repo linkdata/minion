@@ -52,6 +52,34 @@ func TestAdminPolicyPageRendersInheritedSettingsAndEscapesText(t *testing.T) {
 	}
 }
 
+func TestAdminPolicyShowsRestartRequired(t *testing.T) {
+	live, _ := liveConfigFixture(t, false)
+	live.mu.Lock()
+	live.restartRequired = true
+	live.mu.Unlock()
+	view := policyView(live.snapshot())
+	if !view.RestartRequired {
+		t.Fatal("policy view lost restart state")
+	}
+	var body bytes.Buffer
+	page := struct {
+		Dot                adminPolicyView
+		HeadHTML, TailHTML template.HTML
+	}{Dot: view}
+	if err := adminPolicyHTML.ExecuteTemplate(&body, "admin policy", page); err != nil {
+		t.Fatal(err)
+	}
+	text := body.String()
+	start := strings.Index(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`)
+	end := strings.Index(text, `</fieldset>`)
+	lastForm := strings.Index(text, `action="/admin/policy/instructions/reset"`)
+	if !strings.Contains(text, "Saved configuration requires a Minion restart") ||
+		!strings.Contains(text, `<a href="/admin/config">Configuration</a>`) ||
+		start < 0 || end <= start || lastForm < start || lastForm >= end {
+		t.Fatalf("policy offered unusable controls without restart guidance: %s", text)
+	}
+}
+
 func TestAdminPolicyNoCriticDefaultSurvivesSave(t *testing.T) {
 	_, path := liveConfigFixture(t, false)
 	cfg, err := config.Update(path, func(cfg *config.Config) error {
@@ -144,7 +172,7 @@ func TestAdminRequesterRoutesRequireVerifiedWriteAccess(t *testing.T) {
 		for _, tc := range []struct {
 			name, repository, login, permission, identity, want string
 		}{
-			{name: "invalid login", repository: "owner/repo", login: "old_user", want: "valid GitHub login"},
+			{name: "invalid login", repository: "owner/repo", login: "old__user", want: "valid GitHub login"},
 			{name: "unconfigured repository", repository: "owner/other", login: "writer", want: "Repository is not configured"},
 			{name: "wrong identity", repository: "owner/repo", login: "writer", permission: "write", identity: "different", want: "Requester must have write"},
 			{name: "read only", repository: "owner/repo", login: "writer", permission: "read", identity: "writer", want: "Requester must have write"},
@@ -258,5 +286,82 @@ func TestAdminPolicyRoutesRequireAdminAndSaveSettings(t *testing.T) {
 	}
 	if saved := configForAdminTest(t, path); saved.AIInstructions != "" || policyView(live.snapshot()).Custom {
 		t.Fatalf("built-in instructions became a custom override: %+v", saved)
+	}
+}
+
+func TestAdminPolicyAPIKeysAreEditableWithoutRenderingSecrets(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, &action.Orchestrator{}, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	cookie := dashboardTestCookie(t, handler)
+	post := func(route string, form url.Values) *httptest.ResponseRecorder {
+		t.Helper()
+		return adminResponse(handler, http.MethodPost, route, form, cookie, "https://admin.example")
+	}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/policy/codex/key", url.Values{"api_key": {"secret"}}, nil, ""); denied.Code != http.StatusForbidden {
+		t.Fatalf("anonymous API key change = %d", denied.Code)
+	}
+	if denied := adminResponse(handler, http.MethodPost, "/admin/policy/codex/key", url.Values{"api_key": {"secret"}}, cookie, "https://other.example"); denied.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin API key change = %d", denied.Code)
+	}
+	for _, step := range []struct{ provider, key string }{{"codex", "secret-codex-key"}, {"claude", "secret-claude-key"}} {
+		if response := post("/admin/policy/"+step.provider+"/key", url.Values{"api_key": {step.key}}); response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/policy" {
+			t.Fatalf("set %s key: status=%d body=%q", step.provider, response.Code, response.Body.String())
+		}
+	}
+	saved := configForAdminTest(t, path)
+	if saved.Codex.APIKey != "secret-codex-key" || saved.Claude.APIKey != "secret-claude-key" ||
+		live.current().Codex.APIKey != "" || live.current().Claude.APIKey != "" || !live.snapshot().Pending {
+		t.Fatal("saved API keys became active before the monitor boundary or were lost")
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("API key update did not wake the monitor")
+	}
+	page := adminResponse(handler, http.MethodGet, "/admin/policy", nil, cookie, "")
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `type="password" name="api_key"`) ||
+		strings.Count(page.Body.String(), `maxlength="`+strconv.Itoa(config.MaxProviderAPIKeyBytes)+`"`) != 2 ||
+		!strings.Contains(page.Body.String(), "8–256 UTF-8 bytes per key") ||
+		!strings.Contains(page.Body.String(), "/admin/policy/codex/key/clear") || !strings.Contains(page.Body.String(), "/admin/policy/claude/key/clear") {
+		t.Fatalf("API key controls missing: status=%d body=%q", page.Code, page.Body.String())
+	}
+	for _, secret := range []string{saved.Codex.APIKey, saved.Claude.APIKey} {
+		if strings.Contains(page.Body.String(), secret) {
+			t.Fatalf("policy page exposed API key %q", secret)
+		}
+	}
+	for _, invalid := range []string{"", "x", "rejected-key with-space", strings.Repeat("x", config.MaxProviderAPIKeyBytes+1)} {
+		response := post("/admin/policy/codex/key", url.Values{"api_key": {invalid}})
+		if response.Code != http.StatusConflict || len(invalid) > 1 && strings.Contains(response.Body.String(), invalid) {
+			t.Fatalf("invalid API key: status=%d body=%q", response.Code, response.Body.String())
+		}
+	}
+	if got := configForAdminTest(t, path); got.Codex.APIKey != saved.Codex.APIKey || got.Claude.APIKey != saved.Claude.APIKey {
+		t.Fatal("rejected key replaced a configured key")
+	}
+	selected, generation := live.next()
+	live.applied(selected, generation, nil)
+	if live.current().Codex.APIKey != saved.Codex.APIKey || live.current().Claude.APIKey != saved.Claude.APIKey {
+		t.Fatal("monitor boundary did not activate API keys")
+	}
+	for _, provider := range []string{"codex", "claude"} {
+		if response := post("/admin/policy/"+provider+"/key/clear", nil); response.Code != http.StatusSeeOther {
+			t.Fatalf("clear %s key: status=%d body=%q", provider, response.Code, response.Body.String())
+		}
+	}
+	if cleared := configForAdminTest(t, path); cleared.Codex.APIKey != "" || cleared.Claude.APIKey != "" ||
+		live.current().Codex.APIKey == "" || live.current().Claude.APIKey == "" || !live.snapshot().Pending {
+		t.Fatal("API key clear was lost or activated before the monitor boundary")
 	}
 }

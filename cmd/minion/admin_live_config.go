@@ -5,34 +5,42 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
 
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 )
 
-var errAdminRestartRequired = errors.New("configuration changed outside the admin UI; restart Minion before editing here")
+var errAdminRestartRequired = errors.New("configuration requires a restart before further live edits")
 
 // adminLiveConfig keeps disk writes and the running worker's configuration distinct.
 // The monitor applies saved edits only between iterations, after an accepted action ends.
 type adminLiveConfig struct {
-	path           string
-	mu             sync.RWMutex
-	active         config.Config
-	desired        config.Config
-	disk           config.Config
-	remoteSelected map[string]bool
-	generation     uint64
-	pending        bool
-	lastError      string
-	updates        chan struct{}
+	path                     string
+	mu                       sync.RWMutex
+	active                   config.Config
+	desired                  config.Config
+	disk                     config.Config
+	remoteSelected           map[string]bool
+	remoteAuditHostSupported bool
+	generation               uint64
+	pending                  bool
+	restartRequired          bool
+	lastError                string
+	updates                  chan struct{}
 }
 
 func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error) {
-	disk, err := config.Load(path)
+	var runtime config.AdminConfig
+	if cfg.Admin != nil {
+		runtime = *cfg.Admin
+	}
+	disk, err := config.LoadWithAdminRuntime(path, runtime)
 	if err != nil {
 		return nil, err
 	}
@@ -46,13 +54,14 @@ func newAdminLiveConfig(path string, cfg config.Config) (*adminLiveConfig, error
 		for _, repo := range cfg.Repositories {
 			for _, name := range repo.Actions {
 				mapping := cfg.Commands[name]
-				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) {
+				if len(mapping.Skills) != 0 && mapping.SupportsProvider(cfg.Main) && mapping.Action != string(command.SecurityAudit) {
 					selected[name] = true
 				}
 			}
 		}
 	}
-	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, remoteSelected: selected, updates: make(chan struct{}, 1)}, nil
+	return &adminLiveConfig{path: path, active: cfg, desired: cfg, disk: disk, remoteSelected: selected,
+		updates: make(chan struct{}, 1)}, nil
 }
 
 func (a *adminLiveConfig) current() config.Config {
@@ -65,7 +74,7 @@ func (a *adminLiveConfig) admit(accept func() error) error {
 	// A completed save must not be followed by a durable decision under the old policy.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.pending {
+	if a.pending || a.lastError != "" {
 		return monitor.ErrConfigUpdatePending
 	}
 	return accept()
@@ -74,7 +83,14 @@ func (a *adminLiveConfig) admit(accept func() error) error {
 func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
+	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, RestartRequired: a.restartRequired, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
+}
+
+func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostSupported bool) {
+	a.mu.Lock()
+	a.remoteSelected = maps.Clone(selected)
+	a.remoteAuditHostSupported = auditHostSupported
+	a.mu.Unlock()
 }
 
 func sameFixedConfig(a, b config.Config) bool {
@@ -98,6 +114,12 @@ func cloneConfig(cfg config.Config) (config.Config, error) {
 	var cloned config.Config
 	if err := json.Unmarshal(data, &cloned); err != nil {
 		return config.Config{}, err
+	}
+	if cfg.Admin != nil && cloned.Admin != nil {
+		cloned.Admin.WebservAddress = cfg.Admin.WebservAddress
+		cloned.Admin.WebservCertDir = cfg.Admin.WebservCertDir
+		cloned.Admin.WebservDataDir = cfg.Admin.WebservDataDir
+		cloned.Admin.WebservListenURL = cfg.Admin.WebservListenURL
 	}
 	return cloned, nil
 }
@@ -152,8 +174,15 @@ func hasRunnableLocalCommand(cfg config.Config) bool {
 func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.restartRequired {
+		return errors.New("restart Minion before further live edits")
+	}
 	var activate config.Config
-	updated, err := config.Update(a.path, func(raw *config.Config) error {
+	var runtime config.AdminConfig
+	if a.active.Admin != nil {
+		runtime = *a.active.Admin
+	}
+	updated, err := config.UpdateWithAdminRuntime(a.path, runtime, func(raw *config.Config) error {
 		before, err := cloneConfig(*raw)
 		if err != nil {
 			return err
@@ -174,7 +203,9 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		if err := after.Validate(filepath.Dir(a.path)); err != nil {
 			return err
 		}
-		if !sameFixedConfig(before, after) {
+		fixedBefore := before
+		fixedBefore.Codex.APIKey, fixedBefore.Claude.APIKey = after.Codex.APIKey, after.Claude.APIKey
+		if !sameFixedConfig(fixedBefore, after) {
 			return errors.New("this setting requires a restart")
 		}
 		added := make(map[string]bool)
@@ -189,7 +220,18 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 			return errAdminRestartRequired
 		}
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
-		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate)) {
+		if activate.RemoteExecutor != nil {
+			for _, repo := range activate.Repositories {
+				previous, _ := a.desired.Repository(repo.Name)
+				for _, name := range repo.Actions {
+					mapping := activate.Commands[name]
+					if mapping.Action == string(command.SecurityAudit) && (!a.remoteAuditHostSupported || !mapping.SupportedOnHost()) && !slices.Contains(previous.Actions, name) {
+						return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
+					}
+				}
+			}
+		}
+		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
 			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}
 		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
@@ -209,6 +251,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		raw.CriticStopping.RequiredCleanRounds = after.CriticStopping.RequiredCleanRounds
 		raw.AIInstructions = after.AIInstructions
+		raw.Codex.APIKey, raw.Claude.APIKey = after.Codex.APIKey, after.Claude.APIKey
 		return nil
 	})
 	if err != nil {
@@ -254,6 +297,38 @@ func (a *adminLiveConfig) applied(cfg config.Config, generation uint64, err erro
 	a.pending = false
 	if err != nil {
 		a.lastError = fmt.Sprintf("Saved configuration could not be activated: %v", err)
+		attempted := a.desired
+		if attempted.Codex.APIKey != cfg.Codex.APIKey || attempted.Claude.APIKey != cfg.Claude.APIKey {
+			var runtime config.AdminConfig
+			if cfg.Admin != nil {
+				runtime = *cfg.Admin
+			}
+			var restoredCodex, restoredClaude bool
+			_, restoreErr := config.UpdateWithAdminRuntime(a.path, runtime, func(saved *config.Config) error {
+				if attempted.Codex.APIKey != cfg.Codex.APIKey && saved.Codex.APIKey == attempted.Codex.APIKey {
+					saved.Codex.APIKey = cfg.Codex.APIKey
+					restoredCodex = true
+				}
+				if attempted.Claude.APIKey != cfg.Claude.APIKey && saved.Claude.APIKey == attempted.Claude.APIKey {
+					saved.Claude.APIKey = cfg.Claude.APIKey
+					restoredClaude = true
+				}
+				return nil
+			})
+			if restoreErr != nil {
+				a.lastError += fmt.Sprintf("; restore previous AI keys: %v", restoreErr)
+			} else {
+				if restoredCodex {
+					a.disk.Codex.APIKey, a.desired.Codex.APIKey = cfg.Codex.APIKey, cfg.Codex.APIKey
+				}
+				if restoredClaude {
+					a.disk.Claude.APIKey, a.desired.Claude.APIKey = cfg.Claude.APIKey, cfg.Claude.APIKey
+				}
+				if restoredCodex || restoredClaude {
+					a.lastError += "; previous AI credentials restored"
+				}
+			}
+		}
 	} else {
 		a.lastError = ""
 	}

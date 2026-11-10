@@ -27,6 +27,28 @@ func policyRounds(raw string, required bool) (*int, error) {
 }
 
 func registerAdminPolicyActions(mux *http.ServeMux, live *adminLiveConfig, owner *action.Orchestrator) {
+	for _, provider := range []string{"codex", "claude"} {
+		saveKey := func(key string) error {
+			return live.save(func(cfg *config.Config) error {
+				if provider == "codex" {
+					cfg.Codex.APIKey = key
+				} else {
+					cfg.Claude.APIKey = key
+				}
+				return nil
+			})
+		}
+		mux.Handle("POST /admin/policy/"+provider+"/key", adminConfigPost("/admin/policy", []string{"api_key"}, "", func(_ context.Context, values url.Values) error {
+			key := values.Get("api_key")
+			if len(key) < config.MinProviderAPIKeyBytes || len(key) > config.MaxProviderAPIKeyBytes {
+				return fmt.Errorf("API key must contain %d to %d bytes; clear it to use a saved CLI login or host API-key environment", config.MinProviderAPIKeyBytes, config.MaxProviderAPIKeyBytes)
+			}
+			return saveKey(key)
+		}))
+		mux.Handle("POST /admin/policy/"+provider+"/key/clear", adminConfigPost("/admin/policy", nil, "", func(_ context.Context, _ url.Values) error {
+			return saveKey("")
+		}))
+	}
 	mux.Handle("POST /admin/policy/global", adminConfigPost("/admin/policy", []string{"rounds"}, "", func(_ context.Context, values url.Values) error {
 		rounds, err := policyRounds(values.Get("rounds"), true)
 		if err != nil {

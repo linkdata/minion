@@ -22,7 +22,7 @@ var adminStatusHTML = template.Must(template.New("admin status").Parse(headHTML 
   <div class="row row-cols-1 row-cols-lg-2 g-3 mb-4">
     <section class="col"><div class="h-100 border rounded p-3"><h2 class="h5">GitHub account</h2>
       <p>Configured bot: <strong>@{{.BotLogin}}</strong> (ID {{.BotID}})</p>
-      <form method="get" action="/admin/status/check"><button class="btn btn-primary" type="submit">Test GitHub auth</button></form>
+      <form method="post" action="/admin/status/check"><button class="btn btn-primary" type="submit">Test GitHub auth</button></form>
       {{if .Check.Checked}}<p role="status" class="alert {{if .Check.OK}}alert-success{{else}}alert-danger{{end}} mt-3 mb-0">{{.Check.Message}}</p>{{end}}
     </div></section>
     <section class="col"><div class="h-100 border rounded p-3"><h2 class="h5">Configured AI</h2>
@@ -109,8 +109,8 @@ func checkGitHubAuth(ctx context.Context, owner *action.Orchestrator) adminGitHu
 		}
 		return result
 	}
-	if user.ID <= 0 || user.ID != owner.BotID || !strings.EqualFold(user.Login, owner.BotLogin) {
-		result.Message = "GitHub account does not match the active bot identity."
+	if user.ID <= 0 || owner.BotID != 0 && user.ID != owner.BotID || !strings.EqualFold(user.Login, owner.BotLogin) {
+		result.Message = "GitHub account does not match the configured bot identity."
 		return result
 	}
 	result.OK = true

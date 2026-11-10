@@ -3,13 +3,19 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 )
 
 func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error {
+	var entryURL *url.URL
+	if a.WebservListenURL != "" {
+		entryURL, _ = url.Parse(a.WebservListenURL) // ValidateWebservOptions checked it.
+	}
 	var cookieHost string
 	for _, entry := range []struct {
 		name, callbackPath string
@@ -31,21 +37,43 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 			strings.ContainsAny(client.RedirectURL, "?#") || redirect.RawPath != "" {
 			return fmt.Errorf("admin.%s redirect_url must be an HTTPS or literal loopback IP HTTP %s URL with an ASCII host and no IPv6 zone", entry.name, entry.callbackPath)
 		}
-		if (redirect.Scheme == "https") != (a.TLSCertFile != "") {
-			return fmt.Errorf("admin.%s redirect_url scheme must match admin TLS", entry.name)
+		if redirect.Scheme == "http" && (a.TLSCertFile != "" || a.WebservCertDir != "") {
+			return fmt.Errorf("admin.%s redirect_url must use HTTPS when the admin listener uses TLS", entry.name)
 		}
-		if redirect.Scheme == "http" {
+		if redirect.Scheme == "https" && a.TLSCertFile == "" && a.WebservCertDir == "" &&
+			(entryURL == nil || entryURL.Scheme != "https") {
+			return fmt.Errorf("admin.%s redirect_url requires TLS on the admin listener or an HTTPS -listenurl behind a proxy", entry.name)
+		}
+		if entryURL != nil && !sameOrigin(redirect, entryURL) {
+			return fmt.Errorf("admin.%s redirect_url origin must match -listenurl", entry.name)
+		}
+		if redirect.Scheme == "http" && entryURL == nil {
+			if a.WebservAddress != "" {
+				if host, port, splitErr := net.SplitHostPort(a.WebservAddress); splitErr == nil {
+					listenHost = host
+					number, err := net.LookupPort("tcp", port)
+					if err != nil {
+						return fmt.Errorf("admin.%s HTTP redirect_url requires a valid -address port", entry.name)
+					}
+					listenPort = uint64(number)
+				} else {
+					listenPort = 8080
+					if os.Geteuid() == 0 {
+						listenPort = 80
+					}
+				}
+			}
 			redirectPort := uint64(80)
 			if redirect.Port() != "" {
 				redirectPort, _ = strconv.ParseUint(redirect.Port(), 10, 16) // validOAuthOrigin checked the port.
 			}
 			if listenPort != redirectPort {
-				return fmt.Errorf("admin.%s redirect_url HTTP port must match admin.listen", entry.name)
+				return fmt.Errorf("admin.%s redirect_url HTTP port must match the admin listener", entry.name)
 			}
 			callbackIP, _ := netip.ParseAddr(redirect.Hostname())
 			listenIP, _ := netip.ParseAddr(listenHost)
 			if callbackIP.Unmap() != listenIP.Unmap() {
-				return fmt.Errorf("admin.%s redirect_url HTTP host must match admin.listen", entry.name)
+				return fmt.Errorf("admin.%s redirect_url HTTP host must match the admin listener", entry.name)
 			}
 		}
 		redirectHost := redirect.Hostname()
@@ -83,12 +111,79 @@ func (a *AdminConfig) validateOAuth(listenHost string, listenPort uint64) error 
 	return nil
 }
 
+// ValidateWebservOptions checks the runtime address and URL against the listener.
+func (a *AdminConfig) ValidateWebservOptions() error {
+	if strings.ContainsAny(a.WebservAddress, "/\\?# \t\r\n") {
+		return errors.New("-address contains invalid host characters")
+	}
+	if _, port, err := net.SplitHostPort(a.WebservAddress); err == nil {
+		if strings.HasPrefix(a.WebservAddress, "[]") {
+			return errors.New("-address empty bracketed host is invalid; use :port")
+		}
+		if _, err := net.LookupPort("tcp", port); err != nil {
+			return fmt.Errorf("-address port: %w", err)
+		}
+	} else if strings.HasPrefix(a.WebservAddress, "[") {
+		host, closed := strings.CutSuffix(a.WebservAddress[1:], "]")
+		_, err := netip.ParseAddr(host)
+		if !closed || err != nil {
+			return errors.New("-address requires a valid bracketed IP literal")
+		}
+	} else if strings.Contains(a.WebservAddress, ":") {
+		if _, err := netip.ParseAddr(a.WebservAddress); err != nil {
+			return errors.New("-address requires a valid bare IPv6 literal")
+		}
+	}
+	if a.WebservListenURL == "" {
+		return nil
+	}
+	entry, err := url.Parse(a.WebservListenURL)
+	if err != nil || entry == nil || (entry.Path != "" && entry.Path != "/") || entry.RawPath != "" ||
+		strings.ContainsAny(a.WebservListenURL, "?#") || !validOAuthOrigin(&url.URL{Scheme: "https", Host: entry.Host, User: entry.User, Opaque: entry.Opaque}, false) {
+		return errors.New("-listenurl must be an HTTP or HTTPS origin without a path, query, or fragment")
+	}
+	listenerTLS := a.TLSCertFile != "" || a.WebservCertDir != ""
+	if entry.Scheme != "http" && entry.Scheme != "https" {
+		return errors.New("-listenurl must use HTTP or HTTPS")
+	}
+	if listenerTLS && entry.Scheme != "https" {
+		return errors.New("-listenurl must use HTTPS when the admin listener uses TLS")
+	}
+	if entry.Scheme == "http" {
+		addr, err := netip.ParseAddr(entry.Hostname())
+		if !strings.EqualFold(entry.Hostname(), "localhost") && (err != nil || !addr.Unmap().IsLoopback()) {
+			return errors.New("HTTP -listenurl requires localhost or a literal loopback IP")
+		}
+	}
+	return nil
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	hostA, errA := netip.ParseAddr(a.Hostname())
+	hostB, errB := netip.ParseAddr(b.Hostname())
+	sameHost := strings.EqualFold(a.Hostname(), b.Hostname())
+	if errA == nil && errB == nil {
+		sameHost = hostA == hostB
+	}
+	port := func(u *url.URL) int {
+		if u.Port() != "" {
+			number, _ := strconv.Atoi(u.Port()) // Both URLs were validated.
+			return number
+		}
+		if u.Scheme == "https" {
+			return 443
+		}
+		return 80
+	}
+	return a.Scheme == b.Scheme && sameHost && port(a) == port(b)
+}
+
 func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	if u == nil || u.Host == "" || strings.HasSuffix(u.Host, ":") || u.User != nil || u.Opaque != "" {
 		return false
 	}
 	host := u.Hostname()
-	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
+	if !validURLHost(host) {
 		return false
 	}
 	if port := u.Port(); port != "" {
@@ -105,4 +200,32 @@ func validOAuthOrigin(u *url.URL, allowLoopbackHTTP bool) bool {
 	}
 	addr, err := netip.ParseAddr(host)
 	return err == nil && addr.Unmap().IsLoopback()
+}
+
+func validURLHost(host string) bool {
+	if host == "" || strings.Contains(host, "%") || strings.IndexFunc(host, func(r rune) bool { return r > 127 }) != -1 {
+		return false
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		return !ip.Unmap().IsUnspecified()
+	}
+	if len(host) > 254 || len(host) == 254 && !strings.HasSuffix(host, ".") {
+		return false
+	}
+	name := strings.TrimSuffix(host, ".")
+	nonNumeric := false
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c == '-' {
+				nonNumeric = true
+			} else if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return nonNumeric
 }

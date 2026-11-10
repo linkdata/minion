@@ -159,6 +159,45 @@ func selectedServiceTestConfig(t *testing.T) config.Config {
 	}
 }
 
+func TestModelKeysChangedIncludesCriticProvider(t *testing.T) {
+	before := selectedServiceTestConfig(t)
+	before.Adversarial = "claude"
+	after := before
+	after.Claude.APIKey = "next-critic-key"
+	if !modelKeysChanged(before, after) {
+		t.Fatal("critic key change did not refresh worker credentials")
+	}
+	before.Main, before.Adversarial = "claude", "codex"
+	after = before
+	after.Codex.APIKey = "next-critic-key"
+	if !modelKeysChanged(before, after) {
+		t.Fatal("Codex critic key change did not refresh worker credentials")
+	}
+}
+
+type keyRedactionCapacityExecutor struct{ err error }
+
+func (e keyRedactionCapacityExecutor) Execute(context.Context, action.Job, action.Checkpoints) (action.Result, error) {
+	return action.Result{}, e.err
+}
+
+func (e keyRedactionCapacityExecutor) WaitCapacity(context.Context) error { return e.err }
+
+func TestUnselectedModelKeyEditUpdatesParentRedaction(t *testing.T) {
+	cfg := selectedServiceTestConfig(t)
+	owner := newOrchestrator(cfg, github.New("bot-token"), nil, nil, nil)
+	const key = "updated-unused-key"
+	cfg.Claude.APIKey = key
+	owner.Executor = keyRedactionCapacityExecutor{err: errors.New("unavailable: " + key)}
+	syncUnselectedModelKeys(owner, cfg)
+	if owner.Runner.Codex.APIKey != "selected-config-key" || owner.Runner.Claude.APIKey != key {
+		t.Fatal("unselected key update changed selected credentials or left parent redaction stale")
+	}
+	if err := owner.WaitCapacity(t.Context()); err == nil || strings.Contains(err.Error(), key) {
+		t.Fatalf("unselected key escaped readiness redaction: %v", err)
+	}
+}
+
 func TestPublicationValidationUsesBoundRepositorySnapshot(t *testing.T) {
 	cfg := selectedServiceTestConfig(t)
 	repo := &cfg.Repositories[0]
@@ -452,6 +491,54 @@ func TestSelectedLocalServiceAppliesLiveWorkerSelection(t *testing.T) {
 		startup.Selection.Commands["available"].Skills[0] != availableSkill {
 		t.Fatalf("new child did not receive installed skill: commands=%v", startup.Selection.Commands)
 	}
+	beforeUnusedKeyChange := owner.Executor
+	if err := live.save(func(next *config.Config) error {
+		next.Claude.APIKey = "updated-unused-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	if owner.Executor != beforeUnusedKeyChange || watcher.Config.Claude.APIKey != "updated-unused-key" || owner.Runner.Claude.APIKey != "updated-unused-key" {
+		t.Fatal("unused provider key restarted the worker or did not update parent redaction")
+	}
+	beforeKeyChange := owner.Executor
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = "configured-next-job-key"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if owner.Executor == beforeKeyChange || startup.CodexAPIKey != "configured-next-job-key" || owner.Runner.Codex.APIKey != startup.CodexAPIKey {
+		t.Fatal("new model key did not reach replacement worker")
+	}
+	t.Setenv("CODEX_API_KEY", "ambient-next-job-key")
+	if err := live.save(func(next *config.Config) error {
+		next.Codex.APIKey = ""
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitApplied()
+	data, err = os.ReadFile(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startup = action.WorkerStartup{}
+	if err := json.Unmarshal(data, &startup); err != nil {
+		t.Fatal(err)
+	}
+	if startup.CodexAPIKey != "" || startup.CodexNativeAPIKey != "ambient-next-job-key" || owner.Runner.Codex.APIKey != "" {
+		t.Fatal("clearing model key did not restore ambient CLI authentication")
+	}
 	cancel()
 	<-finished
 	if code != 0 {
@@ -538,6 +625,62 @@ func TestSelectedLocalServiceFailedActivationBlocksOldPolicy(t *testing.T) {
 			t.Fatalf("canceling failed activation returned %d", code)
 		}
 	})
+}
+
+func TestSelectedLocalServiceShutdownKeepsSavedAIKey(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	initial := selectedServiceTestConfig(t)
+	initial.Repositories[0].ID, initial.Repositories[0].OwnerID = 1, 2
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const savedKey = "saved-after-shutdown"
+	if err := live.save(func(cfg *config.Config) error { cfg.Codex.APIKey = savedKey; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	store := serviceStore(t, state.Data{NextInviteCheckAt: now.Add(time.Hour), NextPollAt: now.Add(time.Hour)})
+	logger := log.New(io.Discard, "", 0)
+	owner := newOrchestrator(initial, nil, store, logger, nil)
+	watcher := &monitor.Monitor{Config: initial, SelectedCommands: map[string]bool{"comment": true}, BeforeAccept: live.admit}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	closed := 0
+	finished := make(chan int, 1)
+	go func() {
+		finished <- runSelectedLocalServiceLive(ctx, owner, watcher, store, true, make(chan struct{}), logger, func() error {
+			closed++
+			cancel() // Shutdown immediately before the replacement worker starts.
+			return nil
+		}, os.Args[0], []string{"-test.run=^TestSelectedLocalServiceChild$"}, 5*time.Second, live)
+	}()
+	select {
+	case code := <-finished:
+		if code != 0 || closed != 1 {
+			t.Fatalf("shutdown during activation: code=%d closes=%d", code, closed)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-finished
+		t.Fatal("selected service did not stop during activation")
+	}
+	saved, err := config.Load(path)
+	if err != nil || saved.Codex.APIKey != savedKey {
+		t.Fatalf("shutdown lost saved API key: key=%q error=%v", saved.Codex.APIKey, err)
+	}
 }
 
 func TestOrchestrateModeRecoversAssignedActionWithMissingSoleSkill(t *testing.T) {

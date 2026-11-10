@@ -70,7 +70,7 @@ func TestRunnerAuditValidationCleanupRestoresRestrictedDirectory(t *testing.T) {
 	}
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "restricted")
-	fakeOnPath(t, "node", "#!/bin/sh\nset -eu\ncase \"$*\" in *validate-coverage-ledger.cjs*) /bin/chmod 000 .; printf changed > "+shellQuote(marker)+";; esac\nexit 0\n")
+	fakeOnPath(t, "node", "#!/bin/sh\nset -eu\ncase \"$*\" in *coverage-ledger.json*) /bin/chmod 000 .; printf changed > "+shellQuote(marker)+";; esac\nexit 0\n")
 	job := testJob(command.SecurityAudit)
 	root := t.TempDir()
 	runner := Runner{WorkRoot: root, runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
@@ -208,7 +208,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			if scenario == "mutated during validation" {
 				markers := t.TempDir()
 				armedReports, changed = filepath.Join(markers, "reports"), filepath.Join(markers, "changed")
-				script := fmt.Sprintf("#!/bin/sh\nset -eu\ncase \"$*\" in *validate-*.cjs*) reports=$(cat %s); [ -n \"$reports\" ]; printf 'late report edit' > \"$reports/REPORT.md\"; printf changed > %s;; esac\n", shellQuote(armedReports), shellQuote(changed))
+				script := fmt.Sprintf("#!/bin/sh\nset -eu\ncase \" $* \" in *' --check '*) exit 0;; esac\ncase \"$*\" in *validator-probe.json*) printf 'FAIL: 1 validation error(s)\\n' >&2; exit 1;; esac\ncase \"$*\" in *validate-*.cjs*) reports=$(cat %s); [ -n \"$reports\" ]; printf 'late report edit' > \"$reports/REPORT.md\"; printf changed > %s;; esac\n", shellQuote(armedReports), shellQuote(changed))
 				fakeOnPath(t, "node", script)
 			}
 			root := t.TempDir()

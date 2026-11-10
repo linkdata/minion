@@ -9,8 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/linkdata/jaws"
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
@@ -22,7 +24,7 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 		GitHub:         config.GitHubConfig{Token: "secret-github-token"},
 		Codex:          config.CodexConfig{Model: "gpt-test", ReasoningEffort: "medium", APIKey: "secret-codex-key"},
 		Claude:         config.ClaudeConfig{Model: "sonnet-test", Effort: "high", APIKey: "secret-claude-key"},
-		Admin:          &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
+		Admin:          &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
 		Repositories:   []config.Repository{{Name: "owner/repo", AllowedActors: []string{"alice"}, AllowedActorIDs: map[string]int64{"alice": 7}}},
 		AlwaysOnSkills: []string{"builtin://anti-prompt-injection", "https://github.com/a/b/tree/main/skills/caveman"},
 		Commands:       map[string]config.CommandMapping{"review": {Skills: []string{"https://github.com/a/b/tree/main/skills/caveman", "https://github.com/a/b/tree/main/skills/review"}}},
@@ -40,7 +42,7 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 	if err := adminStatusHTML.ExecuteTemplate(&body, "admin status", page); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"@fixture-bot", "gpt-test", "sonnet-test", "Named requesters: 1", "Monitored: 1", "Configured: 3", "Test GitHub auth"} {
+	for _, want := range []string{"@fixture-bot", "gpt-test", "sonnet-test", "Named requesters: 1", "Monitored: 1", "Configured: 3", `method="post" action="/admin/status/check"`, "Test GitHub auth"} {
 		if !strings.Contains(body.String(), want) {
 			t.Fatalf("status page missing %q: %s", want, body.String())
 		}
@@ -49,6 +51,48 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 		if strings.Contains(body.String(), secret) {
 			t.Fatalf("status page exposed %q", secret)
 		}
+	}
+}
+
+func TestAdminStatusCheckRequiresPost(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprint(w, `{"id":42,"login":"fixture-bot"}`)
+	}))
+	t.Cleanup(server.Close)
+	client := github.New("fixture-token")
+	client.BaseURL = server.URL
+	owner := &action.Orchestrator{GitHub: client, BotLogin: "fixture-bot", BotID: 42}
+	live, _ := liveConfigFixture(t, false)
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}, owner, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	cookie := dashboardTestCookie(t, handler)
+	if page := adminResponse(handler, http.MethodGet, "/admin/status", nil, cookie, ""); page.Code != http.StatusOK {
+		t.Fatalf("status page: %d", page.Code)
+	}
+	if check := adminResponse(handler, http.MethodGet, "/admin/status/check", nil, cookie, ""); check.Code != http.StatusNotFound {
+		t.Fatalf("GET check: %d, want 404", check.Code)
+	}
+	if check := adminResponse(handler, http.MethodPost, "/admin/status/check", nil, cookie, "https://other.example"); check.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin POST check: %d", check.Code)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("unrequested check contacted GitHub %d times", got)
+	}
+	check := adminResponse(handler, http.MethodPost, "/admin/status/check", nil, cookie, "")
+	if check.Code != http.StatusOK || !strings.Contains(check.Body.String(), "Authenticated as @fixture-bot") || calls.Load() != 1 {
+		t.Fatalf("POST check: status=%d calls=%d body=%q", check.Code, calls.Load(), check.Body.String())
 	}
 }
 

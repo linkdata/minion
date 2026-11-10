@@ -12,7 +12,7 @@ import (
 func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 	cfg := config.Config{
 		Main: "codex", Codex: config.CodexConfig{APIKey: "secret-model-key"},
-		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "operator", PasswordHash: "secret-password-hash"}}},
+		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
 		Repositories: []config.Repository{
 			{Name: "owner/open", ID: 1, OwnerID: 10, Actions: []string{"review"}},
 			{Name: "owner/closed", ID: 2, OwnerID: 10, DenyAllActors: true, Actions: []string{"review"}},
@@ -63,6 +63,26 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 				t.Fatalf("%s did not escape error text", tc.name)
 			}
 		})
+	}
+	page.Dot = configurationView(adminConfigSnapshot{Config: cfg, RestartRequired: true})
+	for _, tc := range []struct{ page, action string }{
+		{"admin users", `action="/admin/users/add"`},
+		{"admin repositories", `action="/admin/repositories/add"`},
+		{"admin skills", `action="/admin/skills/add"`},
+	} {
+		var body bytes.Buffer
+		if err := adminConfigurationHTML.ExecuteTemplate(&body, tc.page, page); err != nil {
+			t.Fatal(err)
+		}
+		text := body.String()
+		start := strings.Index(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`)
+		end := strings.LastIndex(text, `</fieldset>`)
+		action := strings.Index(text, tc.action)
+		if !strings.Contains(text, "Saved configuration requires a Minion restart") ||
+			!strings.Contains(text, `<a href="/admin/config">Configuration</a>`) ||
+			start < 0 || end <= start || action < start || action >= end {
+			t.Fatalf("%s offered unusable controls without restart guidance: %s", tc.page, text)
+		}
 	}
 	page.Dot = configurationView(adminConfigSnapshot{Config: cfg, Remote: true})
 	var remote bytes.Buffer

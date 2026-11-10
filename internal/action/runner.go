@@ -63,7 +63,11 @@ func NewRemoteRunner(workRoot string) *Runner {
 
 func (r Runner) secretValues() []string {
 	codex := codexcli.CaptureAmbientNativeCredentials(r.Codex)
-	secrets := []string{codex.APIKey, codex.NativeAPIKey, codex.NativeAccessToken, r.Claude.APIKey}
+	claudeKey := r.Claude.APIKey
+	if claudeKey == "" {
+		claudeKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	secrets := []string{codex.APIKey, codex.NativeAPIKey, codex.NativeAccessToken, claudeKey}
 	slices.SortFunc(secrets, func(a, b string) int { return len(b) - len(a) })
 	return secrets
 }
@@ -248,6 +252,9 @@ func (r *Runner) run(ctx context.Context, job Job, checkpoints Checkpoints) (res
 		if err := r.selection.matches(job); err != nil {
 			return result, fmt.Errorf("%w: %w", monitor.ErrTerminalJob, err)
 		}
+	}
+	if (r.remote || r.selection != nil) && !(config.CommandMapping{Action: string(job.Action)}).SupportedOnHost() {
+		return result, fmt.Errorf("%w: action is unsupported on this host", monitor.ErrTerminalJob)
 	}
 	if r.runModel == nil && job.Critic != nil {
 		if err := CheckNativeRolePair(job.Main.Provider, job.Critic.Provider); err != nil {
@@ -932,7 +939,7 @@ Description: %s`, job.Command, id.SubjectType, id.Number, job.Source.Head, id.Re
 
 Set run-metadata.json repo=%q, target=%q, source_ref=%q, profile="standard", scope_paths=["."], budget=null, prior_run_paths=[], execution_policy="sandboxed-source-and-local-only", and shared_file_owners to "parent" for every shared artifact. Set selected_companion_files to selected security-audit domain companion files whose "When to use" conditions apply, within that installed security-audit directory. Exclude its main SKILL.md and independently configured skills, including Caveman, Ponytail and anti-prompt-injection. Use [] when no domain companion applies. Mark complete only when the skill's workflow and installed validators pass. The bot publishes a summary rendered by the parent from validated findings.json and coverage-ledger.json; REPORT.md and detail Markdown are retained privately as executor narrative. Keep those Markdown files accurate and useful to an operator; REPORT.md must contain non-ignorable text and fit within %d UTF-8 bytes. Every reported finding must have its complete structured record and linked candidate/verifier coverage evidence.
 
-Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. Copy this source-only execution prohibition verbatim into every delegated agent prompt; it overrides the skill's local-execution allowance. This runner lacks the skill's required per-agent execution isolation for target code; record claims requiring runtime evidence as needs_validation. Disclose missing tools or time limits as incomplete coverage. Do not include secrets in report artifacts. Use repository-relative file paths and source identity %q in report prose.%s%s
+Source is read-only. Do not execute repository code, builds, tests, or fixtures, probe live services, publish, or run network commands. Copy this source-only execution prohibition verbatim into every delegated agent prompt; it overrides the skill's local-execution allowance. This runner lacks the skill's required per-agent execution isolation for target code. Confirm only a boundary failure and result deterministically established by source; prefix its observed_result with "Source-derived: " and never claim a test ran. Record claims requiring runtime evidence as needs_validation. Disclose missing tools or time limits as incomplete coverage. Do not include secrets in report artifacts. Use repository-relative file paths and source identity %q in report prose.%s%s
 
 Untrusted GitHub thread text:
 Thread title: %s

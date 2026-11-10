@@ -50,6 +50,30 @@ func TestCheckModelsRequiresOnlySelectedProvider(t *testing.T) {
 	}
 }
 
+func TestCheckModelsRejectsOversizedAmbientWorkerCredentials(t *testing.T) {
+	for _, tc := range []struct {
+		name, provider, variable string
+		size                     int
+	}{
+		{"Codex API key", "codex", "CODEX_API_KEY", config.MaxProviderAPIKeyBytes + 1},
+		{"Codex access token", "codex", "CODEX_ACCESS_TOKEN", 4<<10 + 1},
+		{"Claude API key", "claude", "ANTHROPIC_API_KEY", config.MaxProviderAPIKeyBytes + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, variable := range []string{"CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "ANTHROPIC_API_KEY"} {
+				t.Setenv(variable, "")
+			}
+			t.Setenv(tc.variable, strings.Repeat("x", tc.size))
+			cfg := config.Config{Main: tc.provider}
+			var output bytes.Buffer
+			err := checkModels(t.Context(), &cfg, log.New(&output, "", 0))
+			if err == nil || !strings.Contains(err.Error(), "worker credentials exceed limit") || strings.Contains(err.Error(), strings.Repeat("x", tc.size)) {
+				t.Fatalf("oversized ambient credential was not rejected safely: %v", err)
+			}
+		})
+	}
+}
+
 func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 	cfg := config.Config{Main: "claude", Commands: map[string]config.CommandMapping{
 		"security": {Action: "security-audit", Skills: []string{"unused"}},
@@ -63,6 +87,17 @@ func TestLogCommandSkillsReportsUnsupportedWorkflow(t *testing.T) {
 		if !strings.Contains(output.String(), "command security disabled: action security-audit is unsupported with claude as main") {
 			t.Fatalf("remote=%t missing disabled action diagnostic: %s", remote, output.String())
 		}
+	}
+}
+
+func TestLogCommandSkillsRequiresPublishingHost(t *testing.T) {
+	cfg := config.Config{Main: "codex", RemoteExecutor: &config.RemoteExecutorConfig{}, Commands: map[string]config.CommandMapping{
+		"security": {Action: "security-audit", Skills: []string{"unused"}},
+	}}
+	var output bytes.Buffer
+	logCommandSkills(cfg, log.New(&output, "", 0))
+	if disabled := strings.Contains(output.String(), "command security disabled: action security-audit is unsupported on windows"); disabled != (runtime.GOOS == "windows") {
+		t.Fatalf("publishing host audit diagnostic: %s", output.String())
 	}
 }
 

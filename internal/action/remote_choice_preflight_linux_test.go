@@ -47,6 +47,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 					`"supportedReasoningEfforts":[{"reasoningEffort":"high"},{"reasoningEffort":"medium"}]`, 1)
 			}
 			fakeOnPath(t, "codex", script)
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 			certificate, leaf := testRemoteCertificate(t)
 			token := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
 			commands := map[string]config.CommandMapping{"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}
@@ -79,7 +80,7 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			t.Cleanup(client.CloseIdleConnections)
 			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
-			pullBody := fmt.Sprintf(`{"version":%d,"executor_id":"remote"}`, ProtocolVersion)
+			pullBody := fmt.Sprintf(`{"version":%d,"executor_id":"remote","audit_host_supported":true}`, ProtocolVersion)
 			post := func(path string, tokenClient *http.Client) *http.Response {
 				t.Helper()
 				request, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+path, strings.NewReader(pullBody))
@@ -100,15 +101,15 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			}
 			t.Cleanup(unauthorized.CloseIdleConnections)
 			response := post("/preflight", unauthorized)
-			if response.StatusCode != http.StatusUnauthorized {
-				t.Fatalf("unauthorized preflight status=%d", response.StatusCode)
+			status, closeErr := response.StatusCode, response.Body.Close()
+			if status != http.StatusUnauthorized || closeErr != nil {
+				t.Fatalf("unauthorized preflight status=%d close=%v", status, closeErr)
 			}
-			_ = response.Body.Close()
 			response = post("/next", client)
-			if response.StatusCode != http.StatusConflict {
-				t.Fatalf("pull skipped required preflight: status=%d", response.StatusCode)
+			status, closeErr = response.StatusCode, response.Body.Close()
+			if status != http.StatusConflict || closeErr != nil {
+				t.Fatalf("pull skipped required preflight: status=%d close=%v", status, closeErr)
 			}
-			_ = response.Body.Close()
 			if !tc.wantError {
 				// A Codex-only offer does not need Claude's host prerequisites.
 				root := filepath.Join(t.TempDir(), strings.Repeat("x", 60))
@@ -135,7 +136,12 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 			pullCtx, stopPull := context.WithCancel(ctx)
 			defer stopPull()
 			pullDone := make(chan error, 1)
+			t.Cleanup(func() {
+				for range pullDone {
+				}
+			})
 			go func() {
+				defer close(pullDone)
 				request, err := http.NewRequestWithContext(pullCtx, http.MethodPost, origin+"/next", strings.NewReader(pullBody))
 				if err == nil {
 					request.Header.Set("Content-Type", "application/json")
@@ -157,6 +163,65 @@ func TestRemoteRolePreflightBeforePull(t *testing.T) {
 	}
 }
 
+func TestRemoteAuditCapabilityRequiresNodeToolchain(t *testing.T) {
+	for _, tc := range []struct {
+		name, nodeScript string
+		want             bool
+	}{
+		{name: "missing node"},
+		{name: "missing permission model", nodeScript: "#!/bin/sh\nexit 1\n"},
+		{name: "supported", nodeScript: "#!/bin/sh\nexit 0\n", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", t.TempDir())
+			scratch := t.TempDir()
+			t.Setenv("TMPDIR", scratch)
+			if tc.nodeScript != "" {
+				fakeOnPath(t, "node", tc.nodeScript)
+			}
+			seen := false
+			client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
+				var pull httpPull
+				if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil {
+					t.Fatal(err)
+				}
+				seen = true
+				if pull.AuditHostSupported != tc.want {
+					t.Fatalf("advertised audit support = %t, want %t", pull.AuditHostSupported, tc.want)
+				}
+				return nil, errors.New("stop after capability check")
+			})}
+			_ = preflightRemoteChoices(t.Context(), client, "https://worker.invalid", "remote", false, time.Second)
+			if !seen {
+				t.Fatal("remote preflight did not advertise capability")
+			}
+			if entries, err := os.ReadDir(scratch); err != nil || len(entries) != 0 {
+				t.Fatalf("audit capability probe left scratch files: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestRemoteAuditCapabilityProbeHasOwnDeadline(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "node-started")
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	fakeOnPath(t, "node", "#!/bin/sh\nprintf started > "+shellQuote(marker)+"\nexec /bin/sleep 5\n")
+	start := time.Now()
+	if auditSupportedOnHost(t.Context(), 500*time.Millisecond) {
+		t.Fatal("hanging Node advertised audit support")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("optional Node probe blocked remote preflight for %s", elapsed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("hanging Node fixture was not reached: %v", err)
+	}
+	if entries, err := os.ReadDir(scratch); err != nil || len(entries) != 0 {
+		t.Fatalf("audit capability probe left scratch files: %v, %v", entries, err)
+	}
+}
+
 func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
@@ -170,6 +235,7 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 		t.Fatal("Codex login probe fixture did not change")
 	}
 	fakeOnPath(t, "codex", script)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
 	selection := remoteChoicePreflight{Version: ProtocolVersion, ExecutorID: "remote",
 		Main: RoleSettings{Provider: "codex", Model: "main-1", Effort: "high"}}
 	data, err := httpEncode(selection, httpControlBytes)
@@ -179,6 +245,10 @@ func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 	client := &http.Client{Transport: httpClientTestTransport(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Path != "/preflight" {
 			t.Fatalf("remote worker pulled before CLI preflight: %s", request.URL.Path)
+		}
+		var pull httpPull
+		if err := httpDecode(request.Body, httpControlBytes, &pull); err != nil || !pull.AuditHostSupported {
+			t.Fatalf("Linux worker omitted audit capability: pull=%+v error=%v", pull, err)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
 			Body: io.NopCloser(bytes.NewReader(data)), Request: request}, nil

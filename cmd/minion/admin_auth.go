@@ -4,8 +4,11 @@ import (
 	_ "embed"
 	"errors"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/state"
 	"github.com/linkdata/minion/internal/workspace"
+	"github.com/linkdata/secureheaders"
 )
 
 const adminSessionKey = "minion.admin.username"
@@ -26,15 +30,17 @@ var headHTML string
 
 var adminLoginHTML = template.Must(template.New("admin login").Parse(headHTML + `{{template "head.html" $}}<title>Minion admin</title></head>
 <body><main class="container py-5">
-{{if .Dot}}
-<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Open dashboard</a></p>
+{{if .Dot.SignedIn}}
+<h1 class="h3 mb-3">Signed in</h1><p><a class="btn btn-primary" href="/">Continue to Minion</a></p>
 <form method="post" action="/admin/logout"><button class="btn btn-outline-light">Sign out</button></form>
-{{else}}
+{{else if .Dot.PasswordSet}}
 <h1 class="h3 mb-3">Minion admin</h1>
 <form method="post" action="/admin/login" class="vstack gap-3 col-md-6 col-lg-4">
-<label class="form-label">Username <input class="form-control" name="username" autocomplete="username" required></label>
 <label class="form-label">Password <input class="form-control" name="password" type="password" autocomplete="current-password" required></label>
 <button class="btn btn-primary">Sign in</button></form><script defer src="/admin/login.js"></script>
+{{else}}
+<h1 class="h3 mb-3">Minion admin</h1>
+<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>admin</code> account's <code>password_hash</code> to the generated hash, then restart Minion.</p>
 {{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
@@ -43,18 +49,39 @@ var adminLoginJS []byte
 
 var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{template "head.html" $}}<title>Minion</title></head>
 <body><main class="container py-5"><h1>Minion</h1>
-{{if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
+{{if .Dot.SignedAdmin}}<div class="d-flex gap-2 mb-3"><a class="btn btn-outline-light" href="/admin/config">Advanced config</a><form method="post" action="/admin/logout"><button class="btn btn-outline-light">Admin sign out</button></form></div>
+{{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
-{{if not (or .Dot.Admin .Dot.User)}}<p>Sign-in is not configured.</p><button class="btn btn-primary" disabled>Sign in</button>{{end}}
+{{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>admin</code> account's <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
+{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion. No jobs run during setup or recovery.</p>
+{{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the bot account and first repository below, or add a command in Advanced config.{{else}}Sign in as admin to finish setup.{{end}} No jobs run during setup.</p>
+{{if .Dot.SignedAdmin}}
+<form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
+<input type="hidden" name="version" value="{{.Dot.Version}}">
+<label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>
+<label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" {{if not .Dot.TokenSet}}required{{end}}></label>
+{{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
+<label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" maxlength="201" required></label>
+<label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" step="1" value="{{if .Dot.RepositoryID}}{{.Dot.RepositoryID}}{{end}}" required></label>
+<label class="form-label">Owner ID<input class="form-control" name="owner_id" type="number" min="1" step="1" value="{{if .Dot.OwnerID}}{{.Dot.OwnerID}}{{end}}" required></label>
+{{if not .Dot.Repository}}<p class="text-body-secondary">The first repository starts with one configured command, if any, and no allowed requesters. Add requesters in the admin UI after restarting.</p>{{end}}
+<button class="btn btn-primary" type="submit">Save setup</button></form>
+{{end}}{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
-type adminHomeView struct{ Admin, User, SignedUser bool }
+type adminHomeView struct {
+	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete, TokenSet bool
+	BotLogin, Repository, Version                                        string
+	RepositoryID, OwnerID                                                int64
+}
+type adminLoginView struct{ SignedIn, PasswordSet bool }
 
 const (
-	maxAdminSessions          = 512
-	maxGuestPageRequests      = 4
-	adminSignInReserve        = 32
-	maxGuestAdmissionSessions = maxAdminSessions - adminSignInReserve // OAuth starts stop here; home and OAuth login pages stop one slot earlier.
+	maxAdminSessions     = 512
+	maxGuestPageRequests = 4
+	// Spare slots support OAuth callback rotation; existing admin login sessions can still sign in.
+	authCompletionReserve     = 32
+	maxGuestAdmissionSessions = maxAdminSessions - authCompletionReserve // OAuth starts stop here; home and OAuth login pages stop one slot earlier.
 	maxGuestPageSessions      = maxGuestAdmissionSessions - 1
 )
 
@@ -85,15 +112,22 @@ type adminAccess struct {
 	jaws         *jaws.Jaws
 	oauth        *oauthAccess
 	actionAccess *userActionAccess
-	accounts     map[string]config.AdminAccount
-	dummy        config.AdminAccount
+	setup        bool
+	setupPath    string
+	setupAdmin   config.AdminConfig
+	account      config.AdminAccount
+	passwordSet  bool
 	mu           sync.Mutex
 	noticeMu     sync.Mutex
-	attempts     map[string]loginWindow
+	attempts     loginWindow
 	hashSlots    chan struct{}
 }
 
 func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
+	return newAdminHandlerWithSetupPath(jw, cfg, owner, oauth, false, "", liveConfigs...)
+}
+
+func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orchestrator, oauth *oauthAccess, setup bool, setupPath string, liveConfigs ...*adminLiveConfig) (http.Handler, error) {
 	jw.MaxSessions = maxAdminSessions
 	if err := jw.AddTemplateLookuper(adminDashboardTemplate); err != nil {
 		return nil, err
@@ -122,17 +156,21 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if err := jw.AddTemplateLookuper(adminPolicyHTML); err != nil {
 		return nil, err
 	}
-	access := &adminAccess{jaws: jw, oauth: oauth, accounts: make(map[string]config.AdminAccount, len(cfg.Administrators)), attempts: make(map[string]loginWindow), hashSlots: make(chan struct{}, 2)}
-	for _, account := range cfg.Administrators {
-		if account.PasswordHash == config.AdminPasswordHashPlaceholder {
-			continue
-		}
-		access.accounts[account.Username] = account
-		if access.dummy.Username == "" {
-			access.dummy = account
+	if err := jw.AddTemplateLookuper(adminAdvancedHTML); err != nil {
+		return nil, err
+	}
+	access := &adminAccess{jaws: jw, oauth: oauth, setup: setup, setupPath: setupPath, setupAdmin: cfg, hashSlots: make(chan struct{}, 2)}
+	if len(cfg.Administrators) == 1 {
+		account := cfg.Administrators[0]
+		if account.Username == "admin" && account.PasswordHash != "" && account.PasswordHash != config.AdminPasswordHashPlaceholder {
+			access.account, access.passwordSet = account, true
 		}
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
+	guestMu := new(sync.Mutex)
+	if oauth != nil {
+		guestMu = &oauth.admissionMu
+	}
 	mux := http.NewServeMux()
 	if err := jw.Setup(func(pattern string, handler http.Handler) {
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +183,12 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
+		guestMu.Lock()
+		defer guestMu.Unlock()
+		if oauth != nil && jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions {
+			guestAdmissionUnavailable(w)
+			return
+		}
 		loginPage.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("HEAD /admin/login", headPublicPage)
@@ -158,18 +202,18 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	})
 	mux.HandleFunc("POST /admin/login", access.login)
 	mux.HandleFunc("POST /admin/logout", access.logout)
+	if setup && setupPath != "" {
+		mux.Handle("POST /admin/setup", access.setupPost())
+		registerAdminAdvancedRoutes(mux, jw, setupPath, nil, cfg)
+	}
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
 		access.stop(w, r, owner)
 	})
 	dashboard := adminDashboardHandler(jw, owner)
 	home := jw.SessionMiddleware(http.HandlerFunc(access.homePage))
-	guestMu := new(sync.Mutex)
-	if oauth != nil {
-		guestMu = &oauth.admissionMu
-	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		sess := jw.GetSession(r)
-		if access.sessionUsername(sess) != "" {
+		if !setup && access.sessionUsername(sess) != "" {
 			dashboard.ServeHTTP(w, r)
 			return
 		}
@@ -177,6 +221,10 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
+			if access.passwordSet && oauth == nil {
+				http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+				return
+			}
 			guestAdmissionUnavailable(w)
 			return
 		}
@@ -189,13 +237,14 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	if len(liveConfigs) != 0 && liveConfigs[0] != nil {
 		live := liveConfigs[0]
 		mux.Handle("GET /admin/status", adminStatusHandler(jw, owner, live.current, false))
-		mux.Handle("GET /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
+		mux.Handle("POST /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
 		for _, page := range []string{"users", "repositories", "skills"} {
 			mux.Handle("GET /admin/"+page, adminConfigurationHandler(jw, live.snapshot, page))
 		}
 		mux.Handle("GET /admin/policy", adminPolicyHandler(jw, live.snapshot))
 		registerAdminConfigActions(mux, live, owner)
 		registerAdminPolicyActions(mux, live, owner)
+		registerAdminAdvancedRoutes(mux, jw, live.path, live, cfg)
 	}
 	if oauth != nil && owner != nil {
 		access.actionAccess = &userActionAccess{oauth: oauth, owner: owner}
@@ -216,7 +265,7 @@ func newAdminHandler(jw *jaws.Jaws, cfg config.AdminConfig, owner *action.Orches
 	})
 	crossOrigin := http.NewCrossOriginProtection()
 	return jw.SecureHeadersMiddleware(access.browserErrors(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if crossSchemeAdminOrigin(r) || crossOrigin.Check(r) != nil {
+		if crossSchemeAdminOrigin(r, jw.TrustForwardedHeaders) || crossOrigin.Check(r) != nil {
 			closeUnreadAdminBody(w, r)
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -265,12 +314,12 @@ func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action
 }
 
 // CrossOriginProtection's legacy Origin fallback compares hosts but not schemes.
-func crossSchemeAdminOrigin(r *http.Request) bool {
+func crossSchemeAdminOrigin(r *http.Request, trustForwardedHeaders bool) bool {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return false
 	}
 	scheme := "http"
-	if r.TLS != nil {
+	if secureheaders.RequestIsSecure(r, trustForwardedHeaders) {
 		scheme = "https"
 	}
 	if raw := r.Header.Get("Origin"); raw != "" {
@@ -282,7 +331,7 @@ func crossSchemeAdminOrigin(r *http.Request) bool {
 
 func (a *adminAccess) sessionUsername(sess *jaws.Session) string {
 	username, _ := sess.Get(adminSessionKey).(string)
-	if _, ok := a.accounts[username]; ok {
+	if username == "admin" && a.passwordSet {
 		return username
 	}
 	return ""
@@ -292,11 +341,11 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/" {
 		return true
 	}
-	if len(a.accounts) != 0 && r.URL.Path == "/admin/login" &&
-		(r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodPost) {
+	if r.URL.Path == "/admin/login" && (r.Method == http.MethodGet || r.Method == http.MethodHead ||
+		a.passwordSet && r.Method == http.MethodPost) {
 		return true
 	}
-	if len(a.accounts) != 0 && r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
+	if a.passwordSet && r.URL.Path == "/admin/logout" && r.Method == http.MethodPost {
 		return true
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
@@ -309,6 +358,14 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 	}
 	if strings.HasPrefix(r.URL.Path, "/jaws/") {
 		return a.ownsJaWSRequest(r)
+	}
+	if a.setup {
+		if a.setupPath == "" || a.sessionUsername(a.jaws.GetSession(r)) == "" {
+			return false
+		}
+		return r.Method == http.MethodPost && r.URL.Path == "/admin/setup" ||
+			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost) ||
+			r.URL.Path == "/admin/config/check" && r.Method == http.MethodPost
 	}
 	return a.sessionUsername(a.jaws.GetSession(r)) != ""
 }
@@ -343,12 +400,63 @@ func (a *adminAccess) ownsJaWSRequest(r *http.Request) bool {
 func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 	sess := a.jaws.GetSession(r)
 	signedIn := a.sessionUsername(sess) != ""
-	a.publicPage(w, r, "admin login", signedIn)
+	a.publicPage(w, r, "admin login", adminLoginView{SignedIn: signedIn, PasswordSet: a.passwordSet})
 }
 
 func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
-	account, _ := a.oauth.currentUser(a.jaws.GetSession(r))
-	a.publicPage(w, r, "home", adminHomeView{Admin: len(a.accounts) != 0, User: a.oauth != nil, SignedUser: account != ""})
+	sess := a.jaws.GetSession(r)
+	account, _ := a.oauth.currentUser(sess)
+	if a.setup && a.sessionUsername(sess) == "" && account == "" && len(sess.Requests()) >= maxGuestPageRequests {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	view := adminHomeView{Admin: a.passwordSet, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(sess) != "", Setup: a.setup}
+	if a.setup && a.setupPath != "" {
+		if cfg, version, err := loadSetupConfig(a.setupPath, a.setupAdmin); err == nil {
+			view.BotLogin = cfg.BotLogin
+			view.TokenSet = cfg.GitHub.Token != ""
+			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true)
+			view.Version = version
+			if len(cfg.Repositories) != 0 {
+				view.Repository = cfg.Repositories[0].Name
+				view.RepositoryID = cfg.Repositories[0].ID
+				view.OwnerID = cfg.Repositories[0].OwnerID
+			}
+		}
+	}
+	a.publicPage(w, r, "home", view)
+}
+
+func loadSetupConfig(path string, runtime config.AdminConfig) (config.Config, string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxAdvancedConfig+1))
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	if len(data) > maxAdvancedConfig {
+		return config.Config{}, "", errors.New("configuration exceeds the editor limit")
+	}
+	cfg, err := decodeAdvancedConfig(data)
+	if err != nil {
+		return cfg, "", err
+	}
+	applyAdvancedRuntime(&cfg, runtime)
+	version, err := advancedVersion(cfg)
+	if err != nil {
+		return cfg, "", err
+	}
+	if err := cfg.Validate(filepath.Dir(path)); err != nil {
+		return cfg, "", err
+	}
+	return cfg, version, nil
 }
 
 func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name string, view any) {
@@ -361,13 +469,10 @@ func (a *adminAccess) publicPage(w http.ResponseWriter, r *http.Request, name st
 	ui.Handler(a.jaws, name, view).ServeHTTP(w, r)
 }
 
-func (a *adminAccess) reserveAttempt(username string) bool {
-	if _, ok := a.accounts[username]; !ok {
-		username = ""
-	}
+func (a *adminAccess) reserveAttempt() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	window := a.attempts[username]
+	window := a.attempts
 	now := time.Now()
 	if window.start.IsZero() || now.Sub(window.start) >= time.Minute {
 		window = loginWindow{start: now}
@@ -376,7 +481,7 @@ func (a *adminAccess) reserveAttempt(username string) bool {
 		return false
 	}
 	window.count++
-	a.attempts[username] = window
+	a.attempts = window
 	return true
 }
 
@@ -389,9 +494,8 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
-	username, password := r.PostForm.Get("username"), r.PostForm.Get("password")
-	if username == "" || !config.ValidAdminPassword(password) || len(username) > 100 ||
-		len(r.PostForm["username"]) != 1 || len(r.PostForm["password"]) != 1 {
+	password := r.PostForm.Get("password")
+	if len(r.PostForm) != 1 || len(r.PostForm["password"]) != 1 || !config.ValidAdminPassword(password) {
 		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
@@ -403,16 +507,11 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Login busy", http.StatusServiceUnavailable)
 		return
 	}
-	if !a.reserveAttempt(username) {
+	if !a.reserveAttempt() {
 		http.Error(w, "Too many login attempts", http.StatusTooManyRequests)
 		return
 	}
-	account, exists := a.accounts[username]
-	if !exists {
-		account = a.dummy
-	}
-	valid := account.VerifyPassword(password)
-	if !exists || !valid {
+	if !a.account.VerifyPassword(password) {
 		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -432,9 +531,9 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Session unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	sess.Set(adminSessionKey, username)
+	sess.Set(adminSessionKey, "admin")
 	a.mu.Lock()
-	delete(a.attempts, username)
+	a.attempts = loginWindow{}
 	a.mu.Unlock()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

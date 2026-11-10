@@ -7,14 +7,260 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
+
+func TestAuditPublisherChecksBundledDependencies(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	for _, name := range []string{"report-schema.json", "ATTACK-CLASSES.md", "WEB-PROTOCOL-AND-AUTH.md"} {
+		t.Run(name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+			root := t.TempDir()
+			cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+				"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+			}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); err != nil {
+				t.Fatalf("installed publisher rejected: %v", err)
+			}
+			path := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", name)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); !errors.Is(err, os.ErrNotExist) || !strings.Contains(err.Error(), name) {
+				t.Fatalf("missing validator dependency accepted: %v", err)
+			}
+			if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+				t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+			}
+		})
+	}
+}
+
+func TestAuditPublisherCancelsHungNode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "node-started")
+	fakeOnPath(t, "node", "#!/bin/sh\nprintf started > "+shellQuote(marker)+"\nexec /bin/sleep 30\n")
+	root := t.TempDir()
+	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	started := time.Now()
+	if err := CheckAuditPublisher(ctx, root, cfg); err == nil {
+		t.Fatal("hung node passed publisher preflight")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("hung node ignored cancellation for %s", elapsed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("node was not started: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+	}
+}
+
+func TestAuditPublisherChecksFindingsSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, test := range []struct{ name, schema string }{
+		{"malformed", "{"},
+		{"unsupported", `{"unknownKeyword": true}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+				"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+			}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); err != nil {
+				t.Fatalf("valid findings schema rejected: %v", err)
+			}
+			path := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "report-schema.json")
+			if err := os.WriteFile(path, []byte(test.schema), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := CheckAuditPublisher(t.Context(), root, cfg); err == nil || !strings.Contains(err.Error(), "check audit findings schema") {
+				t.Fatalf("invalid findings schema passed publisher preflight: %v", err)
+			}
+			if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+				t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+			}
+		})
+	}
+}
+
+func TestAuditPublisherChecksCoverageExecution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	skill, installed, err := skills.InstalledPathFor(testAuditSkillURL, "codex")
+	if err != nil || !installed {
+		t.Fatalf("installed audit skill: installed=%t error=%v", installed, err)
+	}
+	script := filepath.Join(filepath.Dir(skill), auditValidators[1].script)
+	original, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modified := strings.Replace(string(original), "#!/usr/bin/env node\n", "#!/usr/bin/env node\nrequire('./extra.cjs');\n", 1)
+	if err := os.WriteFile(script, []byte(modified), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+	if err := CheckAuditPublisher(t.Context(), root, cfg); err == nil || !strings.Contains(err.Error(), "validate-coverage-ledger.cjs dependencies") {
+		t.Fatalf("missing local module passed publisher preflight: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+	}
+	modified = strings.Replace(string(original), "#!/usr/bin/env node\n", "#!/usr/bin/env node\nthrow new Error('boom');\n", 1)
+	if err := os.WriteFile(script, []byte(modified), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAuditPublisher(t.Context(), root, cfg); err == nil || !strings.Contains(err.Error(), "coverage-ledger.cjs runtime") {
+		t.Fatalf("crashed coverage validator passed publisher preflight: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch after validator crash: dirs=%v error=%v", dirs, err)
+	}
+}
+
+func TestAuditModulePreflightBeforeLocalModelAndRemotePull(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	for _, validator := range auditValidators {
+		t.Run(validator.script, func(t *testing.T) {
+			installActionTestSkills(t, testAuditSkillURL)
+			script := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", validator.script)
+			original, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(script, append([]byte("require('./extra.cjs');\n"), original...), 0600); err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			job := testJob(command.SecurityAudit)
+			runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+				calls++
+				return aicli.Result{}, nil
+			}}
+			if _, err := runner.Run(t.Context(), job); err == nil || !strings.Contains(err.Error(), validator.script+" dependencies") || calls != 0 {
+				t.Fatalf("missing module reached local model: calls=%d error=%v", calls, err)
+			}
+			remote := selectedPreflightRunner(t, map[string]config.CommandMapping{
+				"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+			})
+			err = remote.PreflightSelection(t.Context())
+			requirePreflightMessage(t, err, preflightAuditToolchainUnavailable)
+			if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), validator.script+" dependencies") {
+				t.Fatalf("remote preflight missed module failure: %v", cause)
+			}
+			assertEmptyDir(t, remote.WorkRoot)
+		})
+	}
+}
+
+func TestAuditPublisherNeedsOnlyValidatorSkill(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("audit validators cannot run on Windows")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	fakeOnPath(t, "node", "#!/bin/sh\nexit 0\n")
+	const workerOnly = "https://github.com/example/skills/tree/main/skills/worker-only"
+	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"audit-with-extra": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL, workerOnly}},
+		"audit":            {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+	}, Repositories: []config.Repository{{Actions: []string{"audit-with-extra", "audit"}}}}
+	if err := CheckAuditPublisher(t.Context(), t.TempDir(), cfg); err != nil {
+		t.Fatalf("worker-only skill disabled publishing host: %v", err)
+	}
+	job := testJob(command.SecurityAudit)
+	job.Main.Skills = append(job.Main.Skills, workerOnly)
+	job.Identity.Repository = "o/r"
+	store, _, request := savedRecoveryFixture(t, job, completeAuditResult(job))
+	var posts atomic.Int32
+	server := auditRecoveryServer(t, &posts)
+	orchestrator := &Orchestrator{Store: store, GitHub: testGitHub(server, "token"), BotLogin: "bot", BotID: 8, WorkRoot: t.TempDir(),
+		Runner: Runner{runModel: forbidModel(t)}, ValidatePublication: permitSelectedPublication}
+	if err := orchestrator.PublishRecovered(t.Context(), request); err != nil || posts.Load() != 1 {
+		t.Fatalf("worker-only skill blocked saved audit: posts=%d error=%v", posts.Load(), err)
+	}
+}
+
+func TestSelfContainedAuditValidatorsNeedNoBundledSchema(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	dir := t.TempDir()
+	for _, validator := range auditValidators {
+		if err := os.WriteFile(filepath.Join(dir, validator.script), []byte("// report-schema.json ATTACK-CLASSES.md safe-input.cjs strict-json-keys.cjs\nprocess.exit(0)\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := filepath.Join(fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' --check '*) exit 0;; esac\nprintf 'FAIL: 1 validation error(s)\\n' >&2\nexit 1\n"), "node")
+	if err := checkAuditValidatorPrerequisites(t.Context(), t.TempDir(), filepath.Join(dir, "SKILL.md"), auditTools{binary: node, permissionFlag: "--permission"}); err != nil {
+		t.Fatalf("self-contained validators were probed for a bundled schema: %v", err)
+	}
+}
 
 func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 	for _, scenario := range []struct{ name, script, node, want string }{
@@ -91,6 +337,9 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				if strings.Count(string(data), " -e ") != 1 {
 					t.Fatalf("audit repeated the permission probe: %q", data)
 				}
+				if strings.Count(string(data), " --source-only") != 2 {
+					t.Fatalf("audit did not pass source-only mode to findings validator: %q", data)
+				}
 			} else if err == nil || !strings.Contains(err.Error(), scenario.want) || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
 				t.Fatalf("invalid tools reached models or were misclassified: calls=%d recorded=%d error=%v", calls, len(result.Calls), err)
 			}
@@ -100,6 +349,36 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunnerChecksAuditSchemaBeforeModel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "report-schema.json")
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		calls++
+		return aicli.Result{}, nil
+	}}
+	result, err := runner.Run(t.Context(), testJob(command.SecurityAudit))
+	if err == nil || !strings.Contains(err.Error(), "check audit findings schema") || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
+		t.Fatalf("invalid schema reached model: calls=%d recorded=%d error=%v", calls, len(result.Calls), err)
 	}
 }
 
@@ -164,7 +443,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 func TestRunnerMissingAuditArtifactSkipsValidator(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "validator-called")
-	fakeOnPath(t, "node", "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*|*validator-probe.json*) exit 0;; esac\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
 	job := testJob(command.SecurityAudit)
 	runner := Runner{
 		WorkRoot: t.TempDir(),

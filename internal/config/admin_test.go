@@ -13,8 +13,8 @@ func TestLoadAdminConfig(t *testing.T) {
 	}{
 		{name: "omitted"},
 		{name: "null", adminJSON: `,"admin":null`},
-		{name: "defaults", adminJSON: `,"admin":{}`, wantListen: "127.0.0.1:8377"},
-		{name: "relative TLS paths", adminJSON: `,"admin":{"listen":"localhost:8443","tls_cert_file":"certs/cert.pem","tls_key_file":"certs/key.pem"}`,
+		{name: "defaults", adminJSON: `,"admin":{"administrators":[{"username":"admin"}]}`, wantListen: "127.0.0.1:8377"},
+		{name: "relative TLS paths", adminJSON: `,"admin":{"listen":"localhost:8443","tls_cert_file":"certs/cert.pem","tls_key_file":"certs/key.pem","administrators":[{"username":"admin"}]}`,
 			wantListen: "localhost:8443", wantCert: "certs/cert.pem", wantKey: "certs/key.pem"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -65,7 +65,7 @@ func TestLoadAdminConfigPreservesRelativeSymlinkTLSPath(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	path := filepath.Join(root, "config.json")
-	data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}],"admin":{"listen":"localhost:8377","tls_cert_file":"link/../cert.pem","tls_key_file":"key.pem"}}`
+	data := `{"bot_login":"bot","repositories":[{"name":"owner/repo","id":1,"owner_id":2,"actions":["review"]}],"admin":{"listen":"localhost:8377","tls_cert_file":"link/../cert.pem","tls_key_file":"key.pem","administrators":[{"username":"admin"}]}}`
 	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestLoadAdminConfigPreservesRelativeSymlinkTLSPath(t *testing.T) {
 
 func TestAdminConfigValidation(t *testing.T) {
 	for _, test := range []struct {
-		name, listen, cert, key, wantError string
+		name, listen, address, cert, key, wantError string
 	}{
 		{name: "IPv4 loopback alias", listen: "127.0.0.2:8377"},
 		{name: "IPv6 loopback", listen: "[::1]:8377"},
@@ -105,11 +105,14 @@ func TestAdminConfigValidation(t *testing.T) {
 		{name: "zero port", listen: "127.0.0.1:0", wantError: "numeric port"},
 		{name: "port too large", listen: "127.0.0.1:65536", wantError: "numeric port"},
 		{name: "signed port", listen: "127.0.0.1:+1", wantError: "numeric port"},
+		{name: "runtime address overrides invalid saved port", listen: "127.0.0.1:http", address: "127.0.0.1:9000"},
+		{name: "runtime address overrides invalid saved host port", listen: "127.0.0.1", address: "127.0.0.1:9000"},
+		{name: "runtime address safely overrides public saved host", listen: "0.0.0.0:8377", address: "127.0.0.1:9000"},
 		{name: "certificate only", listen: "127.0.0.1:8377", cert: "cert.pem", wantError: "must both be set"},
 		{name: "key only", listen: "127.0.0.1:8377", key: "key.pem", wantError: "must both be set"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{Listen: test.listen, TLSCertFile: test.cert, TLSKeyFile: test.key},
+			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{Listen: test.listen, WebservAddress: test.address, TLSCertFile: test.cert, TLSKeyFile: test.key, Administrators: []AdminAccount{{Username: "admin"}}},
 				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 			err := cfg.Validate(t.TempDir())
 			if test.wantError == "" {

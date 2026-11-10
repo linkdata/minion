@@ -53,7 +53,7 @@ func dashboardTestAccepted(at time.Time) *state.AcceptedAction {
 func dashboardTestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodPost, "/admin/login",
-		url.Values{"username": {"operator"}, "password": {"correct-password"}}, adminGuestCookie(t, handler), "")
+		url.Values{"password": {"correct-password"}}, adminGuestCookie(t, handler), "")
 	if response.Code != http.StatusSeeOther || len(response.Result().Cookies()) != 1 {
 		t.Fatalf("admin login: status=%d cookies=%d", response.Code, len(response.Result().Cookies()))
 	}
@@ -417,7 +417,7 @@ func TestAdminForceStopUsesSessionAndSelectedAttempt(t *testing.T) {
 		t.Fatal("admin stop did not cancel selected run")
 	}
 	saved, err := store.ReadSaved()
-	if err != nil || saved.Accepted == nil || !saved.Accepted.Terminal || saved.Accepted.StopRequest.RequestedBy != "operator" ||
+	if err != nil || saved.Accepted == nil || !saved.Accepted.Terminal || saved.Accepted.StopRequest.RequestedBy != "admin" ||
 		saved.Accepted.StopRequest.Status != "requested" {
 		t.Fatalf("stop did not save session requester/fence: state=%+v error=%v", saved, err)
 	}
@@ -441,7 +441,7 @@ func TestAdminForceStopUsesSessionAndSelectedAttempt(t *testing.T) {
 	unregister()
 	if got := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); got.Code != http.StatusOK ||
 		!strings.Contains(got.Body.String(), "The attempt stopped cleanly.") ||
-		!strings.Contains(got.Body.String(), "operator") {
+		!strings.Contains(got.Body.String(), "admin") {
 		t.Fatalf("confirmed stop disappeared after accepted cleanup: status=%d body=%s", got.Code, got.Body.String())
 	}
 	if got := adminResponse(handler, http.MethodPost, "/admin/stop", form, cookie, "https://admin.example"); got.Code != http.StatusSeeOther {
@@ -565,7 +565,7 @@ func TestAdminDashboardTickerPublishesSavedChanges(t *testing.T) {
 	t.Cleanup(func() { _ = admin.Close() })
 	baseURL := "http://" + admin.listener.Addr().String()
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	login, _ := adminNetworkLogin(t, client, baseURL, url.Values{"username": {"operator"}, "password": {"correct-password"}})
+	login, _ := adminNetworkLogin(t, client, baseURL, url.Values{"password": {"correct-password"}})
 	login.Body.Close()
 	if login.StatusCode != http.StatusSeeOther || len(login.Cookies()) != 1 {
 		t.Fatalf("network login: status=%d cookies=%d", login.StatusCode, len(login.Cookies()))

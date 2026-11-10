@@ -123,6 +123,7 @@ func newLateOutcomeFixtureForJob(t *testing.T, job Job, pending bool) *lateOutco
 		t.Fatal(err)
 	}
 	f.owner.Store, f.owner.ExecutorID, f.owner.remoteSelected, f.owner.assignmentRequired = store, "remote", true, true
+	f.owner.remotePriorAttempts = make(map[string]string) // This fixture's remote owner predates the terminal decision.
 	f.owner.Usage = &usage.Store{Dir: filepath.Join(t.TempDir(), "usage")}
 	f.owner.ValidateAssignment = func(context.Context, monitor.Job) error { return nil }
 	f.sink.assignmentContext = t.Context()
@@ -229,6 +230,61 @@ func waitLateError(t *testing.T, done <-chan error) error {
 	}
 }
 
+func TestLateRemoteOutcomeRejectsRotatedProviderKeys(t *testing.T) {
+	const oldCodex, currentCodex, candidateCodex = "fixture-old-codex-key", "fixture-current-codex-key", "fixture-candidate-codex-key"
+	const oldClaude, currentClaude, candidateClaude = "fixture-old-claude-key", "fixture-current-claude-key", "fixture-candidate-claude-key"
+	for _, key := range []string{oldCodex, currentCodex, candidateCodex, oldClaude, currentClaude, candidateClaude} {
+		t.Run(key, func(t *testing.T) {
+			f := newLateOutcomeFixture(t, false)
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: oldCodex}, config.ClaudeConfig{APIKey: oldClaude})
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: currentCodex}, config.ClaudeConfig{APIKey: currentClaude})
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: candidateCodex}, config.ClaudeConfig{APIKey: candidateClaude})
+			f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: currentCodex}, config.ClaudeConfig{APIKey: currentClaude}) // Failed preflight rolls back.
+			if got := redactActionText("late "+key, f.owner.trustedSecrets()...); got != "late [redacted]" {
+				t.Fatalf("rotated credential was not trusted: %q", got)
+			}
+			f.outcome.Result.Diagnostics[0].Message = "late " + key
+			if err := f.owner.receiveLateOutcome("remote", f.outcome); !errors.Is(err, monitor.ErrTerminalJob) || strings.Contains(err.Error(), key) {
+				t.Fatalf("late diagnostic with a provider credential was accepted: %v", err)
+			}
+			path := filepath.Join(f.owner.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("late diagnostic with a provider credential was retained: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunnerCredentialRotationConcurrentWithTrustedSecrets(t *testing.T) {
+	owner := &Orchestrator{}
+	old := config.CodexConfig{APIKey: "fixture-old-provider-key"}
+	current := config.CodexConfig{APIKey: "fixture-current-provider-key"}
+	owner.SetRunnerCredentials(old, config.ClaudeConfig{})
+	owner.SetRunnerCredentials(current, config.ClaudeConfig{})
+	owner.SetRunnerCredentials(old, config.ClaudeConfig{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 100 {
+			owner.SetRunnerCredentials(current, config.ClaudeConfig{})
+			owner.SetRunnerCredentials(old, config.ClaudeConfig{})
+		}
+	}()
+	defer func() { <-done }()
+	for range 100 {
+		secrets := owner.trustedSecrets()
+		for _, key := range []string{old.APIKey, current.APIKey} {
+			if got := redactActionText(key, secrets...); got != "[redacted]" {
+				t.Fatalf("concurrent rotation lost provider credential: %q", got)
+			}
+		}
+	}
+	<-done
+	if got := len(owner.retiredProviderKeys); got != 2 {
+		t.Fatalf("repeated key rotation retained %d duplicate redaction entries", got)
+	}
+}
+
 func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) {
 	job := testJob(command.Comment)
 	job.Main.Provider = "claude"
@@ -290,7 +346,7 @@ func TestLateRemoteOutcomeAuthenticatedAfterTransactionAndRestart(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store = nil, reopened
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts = nil, reopened, nil
 	f.owner = &restarted
 	_, client, origin = lateOutcomeEndpoint(t, f.owner)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
@@ -506,14 +562,13 @@ func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = reopened.Close() })
 	restarted := *f.owner
-	restarted.Executor, restarted.Store = nil, reopened
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts = nil, reopened, nil
 	_, client, origin := lateOutcomeEndpoint(t, &restarted)
 	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
 		t.Fatalf("first late receipt after restart status=%d", status)
 	}
-	data, err := os.ReadFile(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json"))
-	if err != nil || !bytes.Contains(data, []byte("private late detail")) {
-		t.Fatalf("post-restart diagnostic missing: %q error=%v", data, err)
+	if _, err := os.Stat(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pre-restart worker text was retained: %v", err)
 	}
 	record, found, err := restarted.Usage.Load(f.job.Identity.AttemptID)
 	if err != nil || !found || record.Status != "failed" || record.Tokens != f.outcome.Result.Calls[0].Tokens ||
@@ -522,6 +577,104 @@ func TestLateRemoteOutcomeFirstReceiptAfterRestart(t *testing.T) {
 	}
 	if saved, err := reopened.HasAcceptedResult(); err != nil || saved || reopened.Data.Accepted != nil {
 		t.Fatalf("post-restart late answer became publishable: saved=%t accepted=%+v error=%v", saved, reopened.Data.Accepted, err)
+	}
+}
+
+func TestLateRemoteOutcomeAfterRestartCannotRetainRotatedKey(t *testing.T) {
+	const oldKey = "fixture-retired-provider-key"
+	f := newLateOutcomeFixture(t, true)
+	f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: oldKey}, config.ClaudeConfig{})
+	f.owner.SetRunnerCredentials(config.CodexConfig{APIKey: "fixture-current-provider-key"}, config.ClaudeConfig{})
+	if err := f.finish(errors.New("lost outcome")); err == nil {
+		t.Fatal("final usage status lost action error")
+	}
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(f.statePath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted := *f.owner
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts, restarted.retiredProviderKeys = nil, reopened, nil, nil
+	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
+		t.Fatalf("restart retained the old key: %q", got)
+	}
+	f.outcome.Result.Diagnostics[0].Message = "late " + oldKey
+	f.outcome.Failure.Message = "failed " + oldKey
+	_, client, origin := lateOutcomeEndpoint(t, &restarted)
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("first late receipt after restart status=%d", status)
+	}
+	if _, err := os.Stat(filepath.Join(restarted.WorkRoot, "worker-diagnostics", f.job.Identity.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rotated key reached worker diagnostics: %v", err)
+	}
+	record, found, err := restarted.Usage.Load(f.job.Identity.AttemptID)
+	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+		t.Fatalf("safe late usage was lost: record=%+v found=%t error=%v", record, found, err)
+	}
+	summary := reopened.Data.TerminalDecisions[f.job.Identity.JobID].Summary
+	detail, found, err := restarted.UserActionDetail(f.job.Identity.AttemptID, time.Now(), summary)
+	if err != nil || !found || strings.Contains(detail.WorkerFailure+detail.WorkerObservedFailure+detail.WorkerNotice, oldKey) {
+		t.Fatalf("rotated key reached requester detail: detail=%+v found=%t error=%v", detail, found, err)
+	}
+	for _, diagnostic := range detail.Diagnostics {
+		if strings.Contains(diagnostic.Text, oldKey) {
+			t.Fatalf("rotated key reached requester diagnostic: %+v", diagnostic)
+		}
+	}
+}
+
+func TestLateRemoteOutcomeAfterAssignedRestartCannotRetainRotatedKey(t *testing.T) {
+	const oldKey = "fixture-prior-process-key"
+	f := newLateOutcomeFixture(t, true)
+	accepted := acceptedForJob(f.job)
+	accepted.Assigned = true
+	accepted.OutcomeBinding = httpBindingDigest(httpJobBinding(f.job))
+	f.store.Data.Accepted = accepted
+	delete(f.store.Data.TerminalDecisions, f.job.Identity.JobID)
+	if err := f.store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := state.Open(f.statePath, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	restarted := *f.owner
+	restarted.Executor, restarted.Store, restarted.remotePriorAttempts, restarted.retiredProviderKeys = nil, reopened, nil, nil
+	restarted.Runner.Codex.APIKey = "fixture-current-process-key"
+	if got := redactActionText(oldKey, restarted.trustedSecrets()...); got != oldKey {
+		t.Fatalf("prior key unexpectedly available for redaction: %q", got)
+	}
+	f.outcome.Result.Diagnostics[0].Message = "late " + oldKey
+	_, client, origin := lateOutcomeEndpoint(t, &restarted)
+	if got := restarted.remotePriorAttempts[accepted.JobID]; got != accepted.AttemptID {
+		t.Fatalf("assigned attempt missing from prior snapshot: %q", got)
+	}
+	if err := reopened.WithLock(func() error {
+		_, err := reopened.DecideTerminalLocked(accepted.JobID, accepted.AttemptID, "lost", time.Now())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened.Data.Accepted = nil
+	if err := reopened.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := postLateOutcome(t, client, origin, f.outcome); status != http.StatusOK {
+		t.Fatalf("late receipt status=%d", status)
+	}
+	if _, err := os.Stat(filepath.Join(restarted.WorkRoot, "worker-diagnostics", accepted.AttemptID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prior key reached worker diagnostics: %v", err)
+	}
+	record, found, err := restarted.Usage.Load(accepted.AttemptID)
+	if err != nil || !found || record.Tokens != f.outcome.Result.Calls[0].Tokens || len(record.Calls) != 1 || record.Calls[0].FinishedAt == nil {
+		t.Fatalf("safe late usage was lost: record=%+v found=%t error=%v", record, found, err)
 	}
 }
 

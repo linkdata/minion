@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -36,9 +40,41 @@ func adminTLSClient(t *testing.T, leaf *x509.Certificate) *http.Client {
 	return &http.Client{Transport: transport, Timeout: 5 * time.Second}
 }
 
-func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
+func adminTestCertificateDir(t *testing.T, dnsNames []string, ipAddresses []net.IP) (string, *x509.Certificate) {
+	t.Helper()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: now.Add(-time.Minute), NotAfter: now.Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames: dnsNames, IPAddresses: ipAddresses}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, publicKey, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "fullchain.pem"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "privkey.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir, leaf
+}
+
+func TestAdminServerWithoutSignInServesHomeAndSetupPage(t *testing.T) {
 	t.Parallel()
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0"}, nil, "", nil)
+	admin, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{{Username: "admin"}}}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,11 +84,11 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		}
 	})
 	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
-	if err != nil || admin.entryURL != "http://127.0.0.1:"+port {
+	if err != nil || admin.entryURL != "http://localhost:"+port {
 		t.Fatalf("HTTP listener URL = %q, port=%q: %v", admin.entryURL, port, err)
 	}
 	if admin.signInEnabled {
-		t.Fatal("admin sign-in enabled without a configured account or OAuth provider")
+		t.Fatal("admin sign-in enabled without a password or OAuth provider")
 	}
 	transport := &http.Transport{}
 	t.Cleanup(transport.CloseIdleConnections)
@@ -68,9 +104,21 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	if home.StatusCode != http.StatusOK || len(home.Cookies()) != 1 ||
-		!strings.Contains(string(homeBody), `disabled>Sign in</button>`) ||
+		!strings.Contains(string(homeBody), "The admin password is not set") ||
 		strings.Contains(string(homeBody), `href="/admin/login"`) || strings.Contains(string(homeBody), `href="/auth/login"`) {
 		t.Fatalf("unconfigured home: status=%d cookies=%v body=%q", home.StatusCode, home.Cookies(), homeBody)
+	}
+	setup, err := client.Get("http://" + admin.listener.Addr().String() + "/admin/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = setup.Body.Close() })
+	setupBody, err := io.ReadAll(setup.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.StatusCode != http.StatusOK || !strings.Contains(string(setupBody), "The admin password is not set") {
+		t.Fatalf("unconfigured setup page: status=%d body=%q", setup.StatusCode, setupBody)
 	}
 	for _, path := range []string{"/jaws/.ping", bootstrapAssetPath(t, string(homeBody), ".css")} {
 		response, err := client.Get("http://" + admin.listener.Addr().String() + path)
@@ -92,7 +140,6 @@ func TestAdminServerWithoutSignInExposesHomeOnly(t *testing.T) {
 		name, path string
 		upgrade    bool
 	}{
-		{name: "admin login", path: "/admin/login"},
 		{name: "websocket callback", path: "/jaws/test-key", upgrade: true},
 		{name: "OAuth callback", path: "/auth/callback"},
 		{name: "download", path: "/download/report"},
@@ -340,7 +387,7 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = store.Close() })
-				admin := &config.AdminConfig{Listen: freeAdminListen(t),
+				admin := &config.AdminConfig{Listen: freeAdminListen(t), Administrators: []config.AdminAccount{{Username: "admin"}},
 					GitHubOAuth: &config.OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"}}
 				admin.GitHubOAuth.RedirectURL = "http://" + admin.Listen + "/auth/github/callback"
 				choice := config.RoleModelConfig{Model: "approved", Effort: "low"}
@@ -376,77 +423,52 @@ func TestOrchestrationWiresPreferencesOnlyWhenConfigured(t *testing.T) {
 	}
 }
 
-func TestCertifiedListenURL(t *testing.T) {
+func TestAdminCertificateValidity(t *testing.T) {
+	now := time.Now()
 	for _, test := range []struct {
-		address, listen, want string
-		certificateNames      []string
-		certificateIPs        []net.IP
+		name                string
+		notBefore, notAfter time.Time
+		wantError           bool
 	}{
-		{address: "127.0.0.1:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
-		{address: "192.0.2.8:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
-		{address: "127.0.0.1:8080", listen: "minion.example:8080", want: "https://minion.example:8080", certificateNames: []string{"admin.example", "minion.example"}},
-		{address: "192.0.2.8:8080", listen: "minion.example.com:8080", want: "https://minion.example.com:8080", certificateNames: []string{"*.example.com"}},
-		{address: "0.0.0.0:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
-		{address: "[::1]:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example"}},
-		{address: "127.0.0.1:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
-		{address: "127.0.0.1:8080", want: "https://127.0.0.1:8080", certificateNames: []string{"admin.example"}, certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
-		{address: "[::1]:8080", want: "https://localhost:8080", certificateNames: []string{"admin.example", "localhost"}},
-		{address: "127.0.0.1:8080", want: "https://localhost:8080", certificateNames: []string{"admin.example", "localhost"}},
-		{address: "127.0.0.2:8080", want: "https://admin.example:8080", certificateNames: []string{"admin.example", "localhost"}},
-		{address: "127.0.0.2:8080", certificateNames: []string{"localhost"}},
-		{address: "127.0.0.2:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
-		{address: "[::]:8080", listen: ":8080", want: "https://localhost:8080", certificateNames: []string{"localhost"}},
-		{address: "[fe80::1%eth0]:8443", listen: "[fe80::1%eth0]:8443", certificateNames: []string{"localhost"}},
-		{address: "0.0.0.0:8080", want: "https://127.0.0.1:8080", certificateIPs: []net.IP{net.ParseIP("127.0.0.1")}},
-		{address: "192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
-		{address: "192.0.2.8:8080", want: "https://192.0.2.8:8080", certificateNames: []string{"other.example"}, certificateIPs: []net.IP{net.ParseIP("192.0.2.8")}},
-		{address: "127.0.0.1:8080"},
-		{address: "127.0.0.1:8080", certificateNames: []string{"*.example"}},
+		{"current", now.Add(-time.Hour), now.Add(time.Hour), false},
+		{"expired", now.Add(-2 * time.Hour), now.Add(-time.Hour), true},
+		{"not yet valid", now.Add(time.Hour), now.Add(2 * time.Hour), true},
 	} {
-		certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: test.certificateNames, IPAddresses: test.certificateIPs}}
-		if got := certifiedListenURL(test.address, certificate, config.AdminConfig{Listen: test.listen}); got != test.want {
-			t.Errorf("TLS URL for %s = %q, want %q", test.address, got, test.want)
-		}
-	}
-	if got := certifiedListenURL("127.0.0.1:8080", &tls.Certificate{}, config.AdminConfig{}); got != "" {
-		t.Errorf("URL without parsed certificate = %q, want none", got)
-	}
-	callback := config.AdminConfig{GitHubOAuth: &config.OAuthClient{RedirectURL: "https://login.example:8443/auth/github/callback"}}
-	certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"first.example", "login.example"}}}
-	if got := certifiedListenURL("127.0.0.1:8080", certificate, callback); got != "https://login.example:8443" {
-		t.Errorf("OAuth URL = %q, want callback origin", got)
-	}
-	gitlab := config.AdminConfig{GitLabOAuth: &config.OAuthClient{RedirectURL: "https://login.example:8443/auth/gitlab/callback"}}
-	if got := certifiedListenURL("127.0.0.1:8080", certificate, gitlab); got != "https://login.example:8443" {
-		t.Errorf("GitLab OAuth URL = %q, want callback origin", got)
-	}
-	certificate.Leaf.DNSNames = []string{"first.example"}
-	if got := certifiedListenURL("127.0.0.1:8080", certificate, callback); got != "" {
-		t.Errorf("uncovered OAuth URL = %q, want none", got)
+		t.Run(test.name, func(t *testing.T) {
+			certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"admin.example"}, NotBefore: test.notBefore, NotAfter: test.notAfter}}
+			err := checkAdminCertificate(certificate)
+			if (err != nil) != test.wantError {
+				t.Fatalf("certificate validity error = %v, want error %t", err, test.wantError)
+			}
+			if err != nil && !strings.Contains(err.Error(), "not currently valid") {
+				t.Fatalf("unexpected certificate validity error: %v", err)
+			}
+		})
 	}
 }
 
-func TestPlainAdminListenURL(t *testing.T) {
-	for _, tc := range []struct {
-		address, callback, want string
+func TestAdminCertificateServerUsage(t *testing.T) {
+	now := time.Now()
+	for _, test := range []struct {
+		name     string
+		usages   []x509.ExtKeyUsage
+		keyUsage x509.KeyUsage
+		want     string
 	}{
-		{address: "127.0.0.1:8080", want: "http://127.0.0.1:8080"},
-		{address: "127.0.0.2:8080", want: "http://127.0.0.2:8080"},
-		{address: "[::1]:8080", want: "http://[::1]:8080"},
-		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:8080/auth/github/callback", want: "http://127.0.0.1:8080"},
-		{address: "127.0.0.1:8080", callback: "http://127.0.0.1:08080/auth/github/callback", want: "http://127.0.0.1:08080"},
+		{name: "no usage restrictions"},
+		{name: "server authentication", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}},
+		{name: "any extended usage", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}},
+		{name: "client authentication only", usages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, want: "server authentication"},
+		{name: "cannot sign", keyUsage: x509.KeyUsageKeyEncipherment, want: "sign TLS handshakes"},
 	} {
-		cfg := config.AdminConfig{}
-		if tc.callback != "" {
-			cfg.GitHubOAuth = &config.OAuthClient{RedirectURL: tc.callback}
-		}
-		if got := plainAdminListenURL(tc.address, cfg); got != tc.want {
-			t.Errorf("plain URL for %s and %s = %q, want %q", tc.address, tc.callback, got, tc.want)
-		}
-	}
-	gitlab := config.AdminConfig{GitLabOAuth: &config.OAuthClient{RedirectURL: "http://127.0.0.1:8080/auth/gitlab/callback"}}
-	if got := plainAdminListenURL("127.0.0.1:8080", gitlab); got != "http://127.0.0.1:8080" {
-		t.Errorf("GitLab plain URL = %q, want callback origin", got)
+		t.Run(test.name, func(t *testing.T) {
+			certificate := &tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"admin.example"},
+				NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), ExtKeyUsage: test.usages, KeyUsage: test.keyUsage}}
+			err := checkAdminCertificate(certificate)
+			if test.want == "" && err != nil || test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("certificate usage error = %v, want %q", err, test.want)
+			}
+		})
 	}
 }
 
@@ -462,7 +484,11 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://" + net.JoinHostPort(leaf.DNSNames[0], port); admin.entryURL != want {
 		t.Fatalf("HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)
@@ -513,6 +539,85 @@ func TestAdminServerServesConfiguredTLS(t *testing.T) {
 	}
 }
 
+func TestAdminServerAdvertisesIPOnlyTLSCertificate(t *testing.T) {
+	t.Parallel()
+	dir, leaf := adminTestCertificateDir(t, nil, []net.IP{net.IPv4(127, 0, 0, 1)})
+	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{Listen: "127.0.0.1:0", WebservCertDir: dir}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+		t.Fatalf("IP-only certificate URL = %q, want %q", admin.entryURL, want)
+	}
+	response, err := adminTLSClient(t, leaf).Get(admin.entryURL + "/jaws/.ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("advertised HTTPS URL returned %s", response.Status)
+	}
+}
+
+func TestAdminServerAdvertisesDNSCertificateOnSpecificIP(t *testing.T) {
+	t.Parallel()
+	probe, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile, leaf := remoteTestTLSFiles(t)
+	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{
+		Listen: "127.0.0.2:0", TLSCertFile: certFile, TLSKeyFile: keyFile,
+	}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://" + net.JoinHostPort(leaf.DNSNames[0], port); admin.entryURL != want {
+		t.Fatalf("DNS certificate URL = %q, want %q", admin.entryURL, want)
+	}
+	client := adminTLSClient(t, leaf)
+	client.Transport.(*http.Transport).DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "tcp", admin.listener.Addr().String())
+	}
+	response, err := client.Get(admin.entryURL + "/jaws/.ping")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("advertised HTTPS URL returned %s", response.Status)
+	}
+}
+
+func TestAdminServerOmitsUnreachableInferredLocalhost(t *testing.T) {
+	t.Parallel()
+	probe, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is unavailable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := adminTestCertificateDir(t, []string{"localhost"}, nil)
+	admin, err := startAdminServerWithSetup(t.Context(), config.AdminConfig{Listen: "127.0.0.2:0", WebservCertDir: dir}, nil, "", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if admin.entryURL != "" {
+		t.Fatalf("unreachable inferred URL = %q, want no URL", admin.entryURL)
+	}
+}
+
 func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	t.Parallel()
 	certFile, keyFile, leaf := remoteTestTLSFiles(t)
@@ -537,7 +642,11 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 			t.Errorf("close admin server: %v", err)
 		}
 	})
-	if want := "https://" + admin.listener.Addr().String(); admin.entryURL != want {
+	_, port, err := net.SplitHostPort(admin.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://" + net.JoinHostPort(leaf.IPAddresses[0].String(), port); admin.entryURL != want {
 		t.Fatalf("fallback HTTPS listener URL = %q, want %q", admin.entryURL, want)
 	}
 	client := adminTLSClient(t, leaf)
@@ -555,6 +664,18 @@ func TestAdminServerServesLiteralDollarTLSPath(t *testing.T) {
 	}
 	if resp.Header.Get("Strict-Transport-Security") != "" {
 		t.Fatal("fallback admin response sets host-wide HSTS")
+	}
+	wildcard, err := startAdminServer(t.Context(), config.AdminConfig{Listen: "0.0.0.0:0", TLSCertFile: certFile, TLSKeyFile: keyFile}, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = wildcard.Close() })
+	_, port, err = net.SplitHostPort(wildcard.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "https://" + net.JoinHostPort(leaf.IPAddresses[0].String(), port); wildcard.entryURL != want {
+		t.Fatalf("wildcard TLS listener URL = %q, want %q", wildcard.entryURL, want)
 	}
 }
 
@@ -725,7 +846,7 @@ func TestCheckRejectsInvalidAdminTLS(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{
 				BotLogin: "bot", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
-				Admin:    &config.AdminConfig{TLSCertFile: tc.cert, TLSKeyFile: tc.key},
+				Admin:    &config.AdminConfig{TLSCertFile: tc.cert, TLSKeyFile: tc.key, Administrators: []config.AdminAccount{{Username: "admin"}}},
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
 			}
@@ -747,7 +868,7 @@ func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {
 	cfg := config.Config{
 		Main: "codex", BotLogin: "bot", StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 		Codex: config.CodexConfig{Model: "test-model", ReasoningEffort: "medium"},
-		Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem"},
+		Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem", Administrators: []config.AdminAccount{{Username: "admin"}}},
 		RemoteExecutor: &config.RemoteExecutorConfig{
 			ExecutorID: "remote", Listen: "127.0.0.1:8443",
 			TLSCertFile: certFile, TLSKeyFile: keyFile,

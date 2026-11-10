@@ -247,7 +247,7 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 	page = adminResponse(handler, http.MethodGet, "/admin/usage?repository_id=17", nil, cookie, "")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `name="repository_id" value="17"`) ||
 		strings.Contains(page.Body.String(), "<td>18</td>") || !strings.Contains(page.Body.String(), "renamed-repo") ||
-		!strings.Contains(page.Body.String(), "Repository and requester ID filters exclude older usage records") {
+		!strings.Contains(page.Body.String(), "Repository and requester ID filters exclude usage records") {
 		t.Fatalf("repository ID page filter: status=%d body=%s", page.Code, page.Body.String())
 	}
 	page = adminResponse(handler, http.MethodGet, "/admin/usage?requester_id=8", nil, cookie, "")
@@ -271,7 +271,7 @@ func TestAdminUsageSeparatesReusedNamesByStableIDs(t *testing.T) {
 			t.Fatalf("usage filter %q: status=%d report=%+v body=%s", test.query, export.Code, selected, export.Body.String())
 		}
 		if test.query == "repository_id=17" &&
-			(selected.Filters.RepositoryID != 17 || !strings.Contains(selected.TokenNote, "Repository and requester ID filters exclude older records")) {
+			(selected.Filters.RepositoryID != 17 || !strings.Contains(selected.TokenNote, "Repository and requester ID filters exclude records")) {
 			t.Fatalf("repository ID omitted from export: %+v", selected.Filters)
 		}
 	}

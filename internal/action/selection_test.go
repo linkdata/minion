@@ -1,6 +1,7 @@
 package action
 
 import (
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -51,6 +52,22 @@ func TestOrchestratorWorkerSelectionEnabledInstalledSubset(t *testing.T) {
 	if !slices.Equal(selected.Commands["inspect"].Skills, []string{skills.BuiltinAntiPromptInjection}) ||
 		!slices.Equal(selected.Main.AlwaysOnSkills, []string{skills.BuiltinAntiPromptInjection}) {
 		t.Fatalf("caller mutation changed selection: %+v", selected)
+	}
+}
+
+func TestOrchestratorWorkerSelectionRequiresHostSupport(t *testing.T) {
+	commands := map[string]config.CommandMapping{
+		"inspect": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		"audit":   {Action: "security-audit", Skills: []string{skills.BuiltinAntiPromptInjection}},
+	}
+	cfg := config.Config{Main: "codex", Commands: commands, Repositories: []config.Repository{{Actions: []string{"inspect", "audit"}}}}
+	e := Orchestrator{Commands: commands, Main: "codex", CodexModel: "main", CodexEffort: "high"}
+	selected, err := e.WorkerSelection(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, offered := selected.Commands["audit"]; offered != (runtime.GOOS != "windows") || selected.Commands["inspect"].Action != "comment" {
+		t.Fatalf("host=%s selected commands = %v", runtime.GOOS, selected.Commands)
 	}
 }
 

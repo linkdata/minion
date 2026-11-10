@@ -16,6 +16,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/monitor"
+	"github.com/linkdata/minion/internal/workspace"
 )
 
 func TestNativeProposalRedactsEncodedProviderCredential(t *testing.T) {
@@ -96,6 +97,19 @@ func TestActionRedactsOverlappingNativeCredentials(t *testing.T) {
 	}
 	if err := redactActionError(errors.New("prefix-shared-secret-suffix"), runner.secretValues()...); err == nil || err.Error() != "[redacted]" {
 		t.Fatalf("overlapping native credential escaped error: %v", err)
+	}
+}
+
+func TestRemoteRunnerRejectsAmbientClaudeKeyInFixChange(t *testing.T) {
+	const key = "fixture-remote-claude-secret"
+	t.Setenv("ANTHROPIC_API_KEY", key)
+	runner := NewRemoteRunner(t.TempDir())
+	change := workspace.Change{Path: "source.txt", Data: []byte("changed " + key)}
+	if err := rejectConfiguredKeyChanges([]workspace.Change{change}, runner.secretValues()...); err == nil {
+		t.Fatal("fix change containing the ambient Claude key was accepted")
+	}
+	if got := redactActionText("answer "+key, runner.secretValues()...); got != "answer [redacted]" {
+		t.Fatalf("ambient Claude key survived answer redaction: %q", got)
 	}
 }
 

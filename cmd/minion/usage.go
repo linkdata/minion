@@ -18,7 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/usage"
 )
 
-const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. With a service filter, JSON detail records retain the whole attempt and add selected_usage; table tokens show the selected service. Status counts describe each matching attempt's overall outcome. Unknown service means tokens lack call attribution, including legacy records; legacy call counters retain their provider labels. Repository and requester ID filters exclude older records without the corresponding numeric IDs. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts. Actions without usage files are not counted."
+const usageTokenNote = "Token counts and completion are executor-reported claims, not verified billing. Cache creation and cache read are disjoint and included in input; total tokens = input + output. Attempt totals can include both main and critic providers. With a service filter, JSON detail records retain the whole attempt and add selected_usage; table tokens show the selected service. Status counts describe each matching attempt's overall outcome. Unknown service means token totals lack call attribution; call counters may still have provider labels. Repository and requester ID filters exclude records without the corresponding numeric IDs. Call counts include pending pre-call checkpoints, which may precede acknowledgment and do not prove a CLI invocation. Billed credits are unknown. Incomplete usage may omit unknown token counts. Actions without usage files are not counted."
 
 type usageAttempt struct {
 	usage.Record
@@ -112,11 +112,11 @@ func runUsageWithOutput(args []string, stdout, stderr io.Writer) int {
 		return fail(2, err)
 	}
 	if !dirSet {
-		cfg, err := config.Load(*configPath)
+		statePath, err := config.LoadStatePath(*configPath)
 		if err != nil {
 			return fail(2, fmt.Errorf("config: %w", err))
 		}
-		*dir = filepath.Join(filepath.Dir(cfg.StatePath), "usage")
+		*dir = filepath.Join(filepath.Dir(statePath), "usage")
 	}
 	query, err := (usage.Store{Dir: *dir}).Query(filter, groups, details)
 	if err != nil {

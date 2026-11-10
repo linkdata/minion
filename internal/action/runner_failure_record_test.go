@@ -559,7 +559,7 @@ func TestGuardAttemptRecordTextStopsAfterHistoryOrScanExhaustion(t *testing.T) {
 func TestGuardAttemptRecordTextKeepsOrdinaryEventsOutsideScanBudget(t *testing.T) {
 	var saved []attemptRecord
 	guard := guardAttemptRecordTextWithLimits(func(event attemptRecord) { saved = append(saved, event) },
-		[]string{strings.Repeat("x", maxWorkerCredentialBytes)}, int(maxAttemptRecordBytes), 1)
+		[]string{strings.Repeat("x", maxWorkerAccessTokenBytes)}, int(maxAttemptRecordBytes), 1)
 	for _, value := range []string{"ordinary first", "ordinary second"} {
 		guard(attemptRecord{Kind: attemptRecordDiscussion, Provider: "codex", Agent: "native", EventSource: "codex.assistant", Text: value})
 	}

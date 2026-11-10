@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/linkdata/minion/internal/aicli"
+	"github.com/linkdata/minion/internal/bounded"
 	"github.com/linkdata/minion/internal/executil"
 	"github.com/linkdata/minion/internal/workspace"
 )
@@ -25,15 +26,16 @@ var auditValidators = []struct{ script, artifact string }{
 	{"validate-findings.cjs", "findings.json"},
 	{"validate-coverage-ledger.cjs", "coverage-ledger.json"},
 }
-
+var auditCompanionFileLink = regexp.MustCompile(`\]\(([A-Z][A-Z0-9-]*\.md)\)`)
 var auditWindowsReservedComponent = regexp.MustCompile(`(?i)^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)`)
+var errAuditValidatorRuntime = errors.New("audit validator runtime failed")
 
 type auditTools struct {
 	binary, permissionFlag string
 }
 
 func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error) {
-	if err := checkAuditValidatorScripts(skill); err != nil {
+	if _, _, err := checkAuditValidatorScripts(skill); err != nil {
 		return auditTools{}, err
 	}
 	binary, err := aicli.AbsoluteExecutable("node")
@@ -41,28 +43,72 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 		return auditTools{}, fmt.Errorf("audit requires node: %w", err)
 	}
 	flag, err := auditNodePermissionFlag(ctx, dir, binary)
-	return auditTools{binary: binary, permissionFlag: flag}, err
+	if err != nil {
+		return auditTools{}, err
+	}
+	tools := auditTools{binary: binary, permissionFlag: flag}
+	return tools, checkAuditValidatorPrerequisites(ctx, dir, skill, tools)
 }
 
-func checkAuditValidatorScripts(skill string) error {
+func checkAuditValidatorScripts(skill string) ([]string, bool, error) {
+	dependencies := []string{"report-schema.json", "ATTACK-CLASSES.md", "safe-input.cjs", "strict-json-keys.cjs"}
+	needed := make(map[string]bool)
+	var scripts []string
+	var findingsSchema bool
 	for _, validator := range auditValidators {
-		script := filepath.Join(filepath.Dir(skill), validator.script)
-		info, err := os.Stat(script)
+		path := filepath.Join(filepath.Dir(skill), validator.script)
+		data, err := readAuditValidator(path)
 		if err != nil {
-			return fmt.Errorf("audit validator %q: %w", script, err)
+			return nil, false, err
 		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("audit validator %q is not a regular file", script)
-		}
-		file, err := os.Open(script)
-		if err != nil {
-			return fmt.Errorf("read audit validator %q: %w", script, err)
-		}
-		if err := file.Close(); err != nil {
-			return fmt.Errorf("close audit validator %q: %w", script, err)
+		scripts = append(scripts, path)
+		for _, name := range dependencies {
+			for _, quote := range []string{`"`, `'`} {
+				if bytes.Contains(data, []byte("require("+quote+"./"+name+quote+")")) ||
+					bytes.Contains(data, []byte("path.join(__dirname, "+quote+name+quote+")")) {
+					needed[name] = true
+					if validator.artifact == "findings.json" && name == "report-schema.json" {
+						findingsSchema = true
+					}
+				}
+			}
 		}
 	}
-	return nil
+	for _, name := range dependencies {
+		if needed[name] {
+			path := filepath.Join(filepath.Dir(skill), name)
+			data, err := readAuditValidator(path)
+			if err != nil {
+				return nil, false, err
+			}
+			if name == "ATTACK-CLASSES.md" {
+				for _, match := range auditCompanionFileLink.FindAllSubmatch(data, -1) {
+					if _, err := readAuditValidator(filepath.Join(filepath.Dir(skill), string(match[1]))); err != nil {
+						return nil, false, err
+					}
+				}
+			}
+			if strings.HasSuffix(name, ".cjs") {
+				scripts = append(scripts, path)
+			}
+		}
+	}
+	return scripts, findingsSchema, nil
+}
+
+func readAuditValidator(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("audit validator %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("audit validator %q is not a regular file", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read audit validator %q: %w", path, err)
+	}
+	return data, nil
 }
 
 func readAuditArtifacts(outputDir string, partial bool, secrets ...string) ([]workspace.File, []Diagnostic, error) {
@@ -153,7 +199,7 @@ func rejectDuplicateAuditJSONKeys(data []byte, canonicalKeys ...string) error {
 	}
 	canonical := make(map[string]string, len(canonicalKeys))
 	for _, key := range canonicalKeys {
-		canonical[workspace.FoldPath(key)] = key
+		canonical[strings.ToLower(key)] = key
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var visit func() error
@@ -174,7 +220,12 @@ func rejectDuplicateAuditJSONKeys(data []byte, canonicalKeys ...string) error {
 				if !ok {
 					return errors.New("audit JSON object key is invalid")
 				}
-				folded := workspace.FoldPath(key)
+				for _, r := range key {
+					if r > unicode.MaxASCII {
+						return errors.New("audit JSON has non-ASCII object key")
+					}
+				}
+				folded := strings.ToLower(key)
 				if want := canonical[folded]; want != "" && key != want {
 					return fmt.Errorf("audit JSON uses noncanonical key %q", key)
 				}
@@ -295,6 +346,11 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 		cmd := auditNodeCommand(ctx, validationDir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+validationDir,
 			script, filepath.Join(validationDir, validator.artifact))
+		var diagnostic bounded.Tail
+		cmd.Stderr = &diagnostic
+		if validator.artifact == "findings.json" {
+			cmd.Args = append(cmd.Args, "--source-only")
+		}
 		executil.Prepare(cmd)
 		err := cmd.Start()
 		if err == nil {
@@ -310,10 +366,19 @@ func runAuditValidators(ctx context.Context, byPath map[string][]byte, validatio
 			err = errors.Join(cause, err)
 		}
 		if err != nil {
-			return fmt.Errorf("audit %s failed: %w", validator.script, err)
+			failure := fmt.Errorf("audit %s failed: %w", validator.script, err)
+			if !auditValidatorRejected(diagnostic.String()) {
+				return fmt.Errorf("%w: %w", errAuditValidatorRuntime, failure)
+			}
+			return failure
 		}
 	}
 	return nil
+}
+
+func auditValidatorRejected(diagnostic string) bool {
+	return strings.HasPrefix(diagnostic, "FAIL: ") || strings.Contains(diagnostic, "\nFAIL: ") ||
+		strings.HasPrefix(diagnostic, "Failed to parse findings JSON:") || strings.HasPrefix(diagnostic, "Failed to parse coverage ledger:")
 }
 
 type auditCoverageCheck struct {
@@ -337,7 +402,7 @@ type auditCoverageEvidence struct {
 }
 
 // This checks structured audit claims against coverage and assigned source; it cannot prove a reviewer ran.
-func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, source *workspace.Snapshot) error {
+func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, source *workspace.Snapshot, companions []string) error {
 	if err := rejectDuplicateAuditJSONKeys(ledgerBytes,
 		"coverage_id", "canonical_refs", "surface", "boundary", "subsystem", "attack_class", "lifecycle", "starting_paths",
 		"ordinary_attack_class_block", "selected_companion_blocks", "excluded_blocks", "prior_status", "attempts", "wave", "status",
@@ -496,7 +561,8 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		case "confirmed":
 			invalid := !auditVisibleText(finding.RootCause) || !auditVisibleText(finding.IntendedBehavior) ||
 				finding.Conditions == nil || !auditVisibleText(finding.Execution.AttackerPerspective) || len(finding.Execution.Payloads) == 0 ||
-				len(finding.Execution.Instructions) == 0 || !auditVisibleText(finding.Execution.ObservedResult) ||
+				len(finding.Execution.Instructions) == 0 || !strings.HasPrefix(finding.Execution.ObservedResult, "Source-derived: ") ||
+				!auditVisibleText(strings.TrimPrefix(finding.Execution.ObservedResult, "Source-derived: ")) ||
 				!auditVisibleText(finding.Remediation.Strategy) ||
 				!auditVisibleText(finding.Severity.Likelihood.Reason) || !auditVisibleText(finding.Severity.Impact.Reason) ||
 				!auditVisibleText(finding.Confidence.Reason) ||
@@ -604,6 +670,10 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		return nil
 	}
 	seenIDs := make(map[string]bool, len(units))
+	selectedCompanions := make(map[string]bool, len(companions))
+	for _, companion := range companions {
+		selectedCompanions[companion] = true
+	}
 	reviewedCoverage := false
 	for _, unit := range units {
 		switch unit.Status {
@@ -686,19 +756,34 @@ func validateAuditCoverage(ledgerBytes, findingsBytes, reportBytes []byte, sourc
 		if unit.PriorStatus != "none" {
 			return errors.New("audit coverage-ledger.json claims a prior run absent from metadata")
 		}
+		var ordinaryBlock string
 		if !bytes.Equal(bytes.TrimSpace(unit.OrdinaryAttackClassBlock), []byte("null")) {
-			var block string
-			if json.Unmarshal(unit.OrdinaryAttackClassBlock, &block) != nil || !auditVisibleText(block) {
+			if json.Unmarshal(unit.OrdinaryAttackClassBlock, &ordinaryBlock) != nil || !auditVisibleText(ordinaryBlock) {
 				return errors.New("audit coverage-ledger.json has invalid ordinary attack class block")
 			}
 		}
+		assignedClass := ordinaryBlock == unit.CanonicalRefs["attack_class"]
+		selectedBlocks := make(map[string]bool, len(unit.SelectedCompanionBlocks))
 		for _, block := range unit.SelectedCompanionBlocks {
 			if !auditVisibleText(block) {
 				return errors.New("audit coverage-ledger.json has invalid selected companion block")
 			}
+			file, _, _ := strings.Cut(block, "#")
+			if !selectedCompanions[file] {
+				return errors.New("audit coverage-ledger.json selects a companion file absent from metadata")
+			}
+			selectedBlocks[block] = true
+			assignedClass = assignedClass || block == unit.CanonicalRefs["attack_class"]
 		}
+		if !assignedClass {
+			return errors.New("audit coverage-ledger.json has attack class without an assigned block")
+		}
+		// shortcut: custom skill files are unavailable here; check exact block names when trusted skill contents are available.
 		for _, block := range unit.ExcludedBlocks {
-			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) {
+			file, section, hasSection := strings.Cut(block.Block, "#")
+			if !auditVisibleText(block.Block) || !auditVisibleText(block.Reason) ||
+				!hasSection || !workspace.ValidPath(file) || !auditVisibleText(section) || strings.TrimSpace(section) != section ||
+				block.Block == ordinaryBlock || selectedBlocks[block.Block] {
 				return errors.New("audit coverage-ledger.json has invalid excluded block")
 			}
 		}

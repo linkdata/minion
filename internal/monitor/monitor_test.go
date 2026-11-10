@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -390,6 +391,33 @@ func TestRemoteCommandsUseWorkerSkills(t *testing.T) {
 	m := &Monitor{Config: cfg, SelectedCommands: map[string]bool{"fix": true}}
 	if got := m.availableCommands(cfg.Repositories[0]); len(got) != 1 || got["fix"] != "fix" {
 		t.Fatalf("remote worker command depends on orchestrator-local skill: %v", got)
+	}
+}
+
+func TestAvailableCommandsRequireHostSupport(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repositories[0].Actions = append(cfg.Repositories[0].Actions, "security-audit")
+	for _, remote := range []bool{false, true} {
+		selected := map[string]bool(nil)
+		if remote {
+			cfg.RemoteExecutor = &config.RemoteExecutorConfig{}
+			selected = map[string]bool{"review": true, "security-audit": true}
+		}
+		m := &Monitor{Config: cfg, SelectedCommands: selected}
+		got := m.availableCommands(cfg.Repositories[0])
+		if audit, offered := got["security-audit"]; offered != (runtime.GOOS != "windows") ||
+			(offered && audit != command.SecurityAudit) || got["review"] != command.Review {
+			t.Errorf("remote=%t host=%s available commands = %v", remote, runtime.GOOS, got)
+		}
+		if remote {
+			delete(selected, "security-audit")
+			if _, offered := m.availableCommands(cfg.Repositories[0])["security-audit"]; offered {
+				t.Fatal("remote host without audit capability offered audit")
+			}
+		}
+		if m.controlCommands(cfg.Repositories[0])["security-audit"] != command.SecurityAudit {
+			t.Fatal("saved audit command disappeared from recovery parser")
+		}
 	}
 }
 

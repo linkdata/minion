@@ -18,8 +18,8 @@ github.com/linkdata/secureheaders v1.5.0 h1:4kI290hrVUYqluxF8pQfRYpbZuorSd9+8GlM
 github.com/linkdata/secureheaders v1.5.0/go.mod h1:50TiKmPaWki8gIZXmBxrLUinyJst12YuN3EbsXZMO+4=
 github.com/linkdata/staticserve v1.1.8 h1:qpm0dAaAsik1YrETSiMoS7ciBL9qPVNUFcfdio/ol84=
 github.com/linkdata/staticserve v1.1.8/go.mod h1:uOUrHkbNEkVXWvuw7gk0ydm39r9Y1ReZA9o4aWF+hgc=
-github.com/linkdata/webserv v1.5.0 h1:Z85MFYibkgyoxknha5l4eqR9UCKRtQEOeKFCuijFnqE=
-github.com/linkdata/webserv v1.5.0/go.mod h1:vQRp9+KHE6ClK9PdDkdp+9MJf0/x1ZvGdHhENxk2Y6g=
+github.com/linkdata/webserv v1.5.1 h1:DVesAy6cLqdqesL+C0aAiADrmJ7s9lsaxjtLWp2O3bw=
+github.com/linkdata/webserv v1.5.1/go.mod h1:bUydirE8+990DdjXNwb7qsrLhdIBibYJcm/NF+zslvg=
 github.com/petermattis/goid v0.0.0-20250813065127-a731cc31b4fe/go.mod h1:pxMtw7cyUw6B2bRH0ZBANSPg+AoSud1I1iyJHI69jH4=
 github.com/petermattis/goid v0.0.0-20260820044319-269ab09b5261 h1:lcWAnrqr2nNfDiArwFNHCE4787Mw2tCdVSOXCru0/0E=
 github.com/petermattis/goid v0.0.0-20260820044319-269ab09b5261/go.mod h1:pxMtw7cyUw6B2bRH0ZBANSPg+AoSud1I1iyJHI69jH4=

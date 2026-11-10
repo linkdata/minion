@@ -425,6 +425,50 @@ func TestPublishRecoveredRejectsTamperedResultSidecarBeforeGitHub(t *testing.T) 
 	}
 }
 
+func TestPublishRecoveredKeepsVersion22AuditSidecar(t *testing.T) {
+	job := testJob(command.SecurityAudit)
+	store, path, request := savedRecoveryFixture(t, job, completeAuditResult(job))
+	data, err := store.ReadAcceptedResult(AcceptedResultMaxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record AcceptedResultRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	record.Job.Version, record.Result.Version = 22, 22
+	data, err = json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WriteAcceptedResult(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = state.Open(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		t.Errorf("version 22 audit reached GitHub: %s %s", r.Method, r.URL.Path)
+	}))
+	t.Cleanup(server.Close)
+	orchestrator := Orchestrator{Store: store, GitHub: testGitHub(server, "token")}
+	if err := orchestrator.PublishRecovered(t.Context(), request); !errors.Is(err, monitor.ErrAcceptanceState) ||
+		errors.Is(err, monitor.ErrTerminalJob) || !strings.Contains(err.Error(), "operator resolution") || requests.Load() != 0 {
+		t.Fatalf("version 22 audit was published or discarded: requests=%d error=%v", requests.Load(), err)
+	}
+	retained, err := store.ReadAcceptedResult(AcceptedResultMaxBytes)
+	if err != nil || string(retained) != string(data) {
+		t.Fatalf("version 22 audit sidecar changed: error=%v", err)
+	}
+}
+
 func TestPublishRecoveredNoChangeFixRepliesWithoutFork(t *testing.T) {
 	job := testJob(command.Fix)
 	job.Identity.JobID = strings.Repeat("a", 64)

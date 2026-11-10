@@ -1,13 +1,82 @@
 package config
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
 
+func TestWebservAddressBracketValidation(t *testing.T) {
+	for _, test := range []struct {
+		address string
+		tls     bool
+		valid   bool
+	}{
+		{"[::1", false, false},
+		{"127.0.0.1:bad:port", true, false},
+		{"[]", true, false},
+		{"[]:9000", true, false},
+		{"[localhost]", true, false},
+		{"bad/address", true, false},
+		{"bad/address:9000", true, false},
+		{"[::1]", false, true},
+		{"::1", false, true},
+		{"[::1]:9000", false, true},
+		{"[localhost]:9000", true, true},
+	} {
+		t.Run(test.address, func(t *testing.T) {
+			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: test.address, Administrators: []AdminAccount{{Username: "admin"}}}}
+			if test.tls {
+				cfg.Admin.WebservCertDir = "/certs"
+			}
+			err := cfg.Validate(t.TempDir())
+			if (err == nil) != test.valid {
+				t.Fatalf("-address %q validity=%t: %v", test.address, test.valid, err)
+			}
+		})
+	}
+	malformed := Config{BotLogin: "bot", Admin: &AdminConfig{WebservAddress: "[]:9000", Administrators: []AdminAccount{{Username: "admin"}}}}
+	if err := malformed.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "-address empty bracketed host") {
+		t.Fatalf("malformed -address without TLS: %v", err)
+	}
+}
+
+func TestWebservListenURLRejectsUnspecifiedIP(t *testing.T) {
+	for _, entryURL := range []string{"https://0.0.0.0", "https://[::]", "https://[::ffff:0.0.0.0]"} {
+		t.Run(entryURL, func(t *testing.T) {
+			admin := AdminConfig{WebservCertDir: "/certs", WebservListenURL: entryURL}
+			if err := admin.ValidateWebservOptions(); err == nil || !strings.Contains(err.Error(), "-listenurl") {
+				t.Fatalf("unspecified -listenurl %q accepted: %v", entryURL, err)
+			}
+		})
+	}
+}
+
+func TestWebservListenURLRejectsMalformedDNS(t *testing.T) {
+	for _, host := range []string{
+		"bad..example", ".example", "-bad.example", "bad-.example", "bad!.example",
+		strings.Repeat("a", 64) + ".example", strings.Repeat("a.", 126) + "aa",
+	} {
+		t.Run(host, func(t *testing.T) {
+			admin := AdminConfig{WebservCertDir: "/certs", WebservListenURL: "https://" + host}
+			if err := admin.ValidateWebservOptions(); err == nil {
+				t.Fatalf("malformed -listenurl host %q accepted", host)
+			}
+		})
+	}
+}
+
+func TestWebservListenURLRejectsUnsupportedScheme(t *testing.T) {
+	admin := AdminConfig{WebservListenURL: "ftp://minion.example"}
+	if err := admin.ValidateWebservOptions(); err == nil || !strings.Contains(err.Error(), "HTTP or HTTPS") {
+		t.Fatalf("unsupported -listenurl scheme: %v", err)
+	}
+}
+
 func TestOAuthClientConfigValidation(t *testing.T) {
 	valid := func() Config {
-		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", GitHubOAuth: &OAuthClient{
+		return Config{BotLogin: "bot", Admin: &AdminConfig{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem", Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{
 			ClientID: "github-client", ClientSecret: "github-secret", RedirectURL: "https://minion.example/auth/github/callback"},
 			GitLabOAuth: &OAuthClient{ClientID: "gitlab-client", ClientSecret: "gitlab-secret",
 				RedirectURL: "https://minion.example/auth/gitlab/callback"}},
@@ -16,6 +85,11 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	good := valid()
 	if err := good.Validate(t.TempDir()); err != nil {
 		t.Fatal(err)
+	}
+	malformedRedirect := valid()
+	malformedRedirect.Admin.GitHubOAuth.RedirectURL = "https://bad..example/auth/github/callback"
+	if err := malformedRedirect.Validate(t.TempDir()); err == nil {
+		t.Fatal("malformed OAuth callback host accepted")
 	}
 	if good.Admin.GitLabOAuth.BaseURL != "https://gitlab.com" {
 		t.Fatalf("default GitLab origin = %q", good.Admin.GitLabOAuth.BaseURL)
@@ -55,6 +129,17 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	if err := equivalentIPv6.Validate(t.TempDir()); err != nil {
 		t.Fatalf("equivalent IPv6 callback hosts: %v", err)
 	}
+	equivalentIPv6Origin := valid()
+	equivalentIPv6Origin.Admin.WebservListenURL = "https://[0:0::1]"
+	equivalentIPv6Origin.Admin.GitHubOAuth.RedirectURL = "https://[::1]/auth/github/callback"
+	equivalentIPv6Origin.Admin.GitLabOAuth.RedirectURL = "https://[::1]/auth/gitlab/callback"
+	if err := equivalentIPv6Origin.Validate(t.TempDir()); err != nil {
+		t.Fatalf("equivalent IPv6 entry and callback origins: %v", err)
+	}
+	equivalentIPv6Origin.Admin.WebservListenURL = "https://[::2]"
+	if err := equivalentIPv6Origin.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "origin must match") {
+		t.Fatalf("different IPv6 entry and callback origins: %v", err)
+	}
 	for _, tc := range []struct{ listen, host string }{
 		{"127.0.0.1:8377", "127.0.0.2"},
 		{"127.0.0.1:8377", "[::1]"},
@@ -65,7 +150,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		unbound.Admin.TLSCertFile, unbound.Admin.TLSKeyFile = "", ""
 		unbound.Admin.GitHubOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/github/callback"
 		unbound.Admin.GitLabOAuth.RedirectURL = "http://" + tc.host + ":8377/auth/gitlab/callback"
-		if err := unbound.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP host must match admin.listen") {
+		if err := unbound.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP host must match the admin listener") {
 			t.Errorf("unbound HTTP callback %s for %s: %v", tc.host, tc.listen, err)
 		}
 	}
@@ -76,6 +161,68 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 	defaultHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
 	if err := defaultHTTPPort.Validate(t.TempDir()); err != nil {
 		t.Fatalf("implicit HTTP port 80: %v", err)
+	}
+	namedHTTPPort := valid()
+	namedHTTPPort.Admin.Listen = "invalid saved listen"
+	namedHTTPPort.Admin.TLSCertFile, namedHTTPPort.Admin.TLSKeyFile = "", ""
+	namedHTTPPort.Admin.WebservAddress = "127.0.0.1:http"
+	namedHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1/auth/github/callback"
+	namedHTTPPort.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1/auth/gitlab/callback"
+	if err := namedHTTPPort.Validate(t.TempDir()); err != nil {
+		t.Fatalf("named Webserv port with matching callback: %v", err)
+	}
+	namedHTTPPort.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:81/auth/github/callback"
+	if err := namedHTTPPort.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP port must match") {
+		t.Fatalf("named Webserv port with wrong callback: %v", err)
+	}
+	webservPort := 8080
+	if os.Geteuid() == 0 {
+		webservPort = 80
+	}
+	for _, test := range []struct{ address, host string }{
+		{"127.0.0.1", "127.0.0.1"},
+		{"[::1]", "[::1]"},
+		{"::1", "[::1]"},
+	} {
+		bareHost := valid()
+		bareHost.Admin.TLSCertFile, bareHost.Admin.TLSKeyFile = "", ""
+		bareHost.Admin.WebservAddress = test.address
+		bareHost.Admin.GitHubOAuth.RedirectURL = "http://" + test.host + ":" + strconv.Itoa(webservPort) + "/auth/github/callback"
+		bareHost.Admin.GitLabOAuth.RedirectURL = "http://" + test.host + ":" + strconv.Itoa(webservPort) + "/auth/gitlab/callback"
+		if err := bareHost.Validate(t.TempDir()); err != nil {
+			t.Errorf("bare Webserv address %q with matching callback: %v", test.address, err)
+		}
+		bareHost.Admin.GitHubOAuth.RedirectURL = "http://" + test.host + ":" + strconv.Itoa(webservPort+1) + "/auth/github/callback"
+		if err := bareHost.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "HTTP port must match") {
+			t.Errorf("bare Webserv address %q with wrong callback port: %v", test.address, err)
+		}
+	}
+	proxiedHTTPS := valid()
+	proxiedHTTPS.Admin.TLSCertFile, proxiedHTTPS.Admin.TLSKeyFile = "", ""
+	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "requires TLS") {
+		t.Fatalf("HTTPS callback without listener TLS: %v", err)
+	}
+	proxiedHTTPS.Admin.Listen = "0.0.0.0:8377"
+	proxiedHTTPS.Admin.WebservListenURL = "https://minion.example"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("HTTPS callback through an explicit proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.WebservListenURL = "HTTPS://minion.example"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("uppercase HTTPS proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.Listen = "127.0.0.1:8377"
+	proxiedHTTPS.Admin.WebservAddress = "0.0.0.0:9000"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err != nil {
+		t.Fatalf("public HTTP -address with an explicit proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.WebservListenURL = ""
+	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "outside literal loopback") {
+		t.Fatalf("public HTTP -address without a proxy origin: %v", err)
+	}
+	proxiedHTTPS.Admin.WebservListenURL = "https://other.example"
+	if err := proxiedHTTPS.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "origin must match") {
+		t.Fatalf("HTTPS callback with mismatched proxy origin: %v", err)
 	}
 	defaultPort := valid()
 	defaultPort.Admin.GitLabOAuth.BaseURL = "https://GITLAB.example:443"
@@ -117,9 +264,19 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 		{"scoped IPv6 callback host", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://[fe80::1%25Eth0]/auth/github/callback" }, "redirect_url"},
 		{"empty callback port", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://minion.example:/auth/github/callback" }, "redirect_url"},
 		{"public HTTP callback", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "http://minion.example/auth/github/callback" }, "redirect_url"},
+		{"unspecified HTTPS callback", func(c *Config) { c.Admin.GitHubOAuth.RedirectURL = "https://0.0.0.0/auth/github/callback" }, "redirect_url"},
 		{"mixed HTTPS callback hosts", func(c *Config) {
 			c.Admin.GitLabOAuth.RedirectURL = "https://other.example/auth/gitlab/callback"
 		}, "hosts must match"},
+		{"callback differs from entry URL", func(c *Config) {
+			c.Admin.WebservListenURL = "https://other.example"
+		}, "origin must match"},
+		{"HTTP callback differs from effective address", func(c *Config) {
+			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
+			c.Admin.WebservAddress = "127.0.0.1:9000"
+			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
+			c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback"
+		}, "port must match"},
 		{"mixed HTTP callback hosts", func(c *Config) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://127.0.0.1:8377/auth/github/callback"
@@ -138,8 +295,7 @@ func TestOAuthClientConfigValidation(t *testing.T) {
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""
 			c.Admin.GitHubOAuth.RedirectURL = "http://localhost.example/auth/github/callback"
 		}, "redirect_url"},
-		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback" }, "admin TLS"},
-		{"plain listener with HTTPS callback", func(c *Config) { c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", "" }, "admin TLS"},
+		{"TLS listener with HTTP callback", func(c *Config) { c.Admin.GitLabOAuth.RedirectURL = "http://127.0.0.1:8377/auth/gitlab/callback" }, "must use HTTPS"},
 		{"public listener without TLS", func(c *Config) {
 			c.Admin.Listen = "0.0.0.0:8377"
 			c.Admin.TLSCertFile, c.Admin.TLSKeyFile = "", ""

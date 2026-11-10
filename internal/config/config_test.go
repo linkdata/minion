@@ -1,23 +1,26 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-func TestCheckedInConfigIsSample(t *testing.T) {
+func TestCheckedInConfigIsMinimalDefault(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.BotLogin != "example-bot" || cfg.GitHub.Token != "" || len(cfg.InvitationOwners) != 0 ||
-		len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "example-owner/example-repo" ||
+	if cfg.BotLogin != "" || cfg.GitHub.Token != "" || len(cfg.InvitationOwners) != 0 ||
+		len(cfg.Repositories) != 0 || cfg.Codex.APIKey != "" || cfg.Claude.APIKey != "" ||
 		cfg.Codex.Model != "" || cfg.Codex.ReasoningEffort != "" ||
 		cfg.Claude.Model != "" || cfg.Claude.Effort != "" || cfg.Claude.AllowAllUnixSockets ||
 		cfg.Main != "codex" || cfg.Adversarial != "" || cfg.CriticStopping.MaxRounds != 5 ||
@@ -28,7 +31,137 @@ func TestCheckedInConfigIsSample(t *testing.T) {
 		len(cfg.Commands) != 4 || len(cfg.AlwaysOnSkills) != 2 ||
 		cfg.MaxGitHubContextBytes != DefaultMaxGitHubContextBytes ||
 		cfg.AlwaysOnSkills[0] != defaultAntiInjectionSkill || cfg.AlwaysOnSkills[1] != defaultCavemanSkill {
-		t.Fatal("checked-in configuration differs from expected sample")
+		t.Fatal("checked-in configuration differs from expected default")
+	}
+}
+
+func TestDefaultSkillsInstallOffline(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("HOMEDRIVE", "")
+		t.Setenv("HOMEPATH", "")
+	}
+	var urls []string
+	for _, command := range cfg.Commands {
+		urls = append(urls, command.Skills...)
+	}
+	urls = append(urls, cfg.AlwaysOnSkills...)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // Any default that needs a download must fail without network access.
+	if err := skills.Install(ctx, urls); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadWithAdminRuntimeValidatesEffectiveTLS(t *testing.T) {
+	cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
+		Listen: "0.0.0.0:8443", Administrators: []AdminAccount{{Username: "admin"}},
+		GitHubOAuth: &OAuthClient{ClientID: "client", ClientSecret: "secret", RedirectURL: "https://minion.example/auth/github/callback"},
+	}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("public listener without TLS was accepted without overrides")
+	}
+	runtime := AdminConfig{WebservCertDir: "/certs", WebservListenURL: "https://minion.example"}
+	loaded, err := LoadWithAdminRuntime(path, runtime)
+	if err != nil || loaded.Admin == nil || loaded.Admin.WebservCertDir != "/certs" {
+		t.Fatalf("effective webserv TLS settings rejected: admin=%+v error=%v", loaded.Admin, err)
+	}
+	if _, err := UpdateWithAdminRuntime(path, runtime, func(cfg *Config) error {
+		cfg.Codex.APIKey = "new-key1"
+		return nil
+	}); err != nil {
+		t.Fatalf("save with effective webserv TLS settings: %v", err)
+	}
+	cfg.Admin.Listen = "127.0.0.1:8377"
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080", WebservListenURL: "https://minion.example"}); err != nil {
+		t.Fatalf("HTTPS OAuth through an explicit proxy origin was rejected: %v", err)
+	}
+	if _, err = LoadWithAdminRuntime(path, AdminConfig{WebservAddress: "127.0.0.1:8080"}); err == nil {
+		t.Fatal("HTTPS OAuth through a plaintext listener without a proxy origin was accepted")
+	}
+}
+
+func TestAdminPartialTLSUsesRuntimeCertDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, cert, key string
+	}{
+		{"cert only", "cert.pem", ""},
+		{"key only", "", "key.pem"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			cfg := Config{BotLogin: "bot", Admin: &AdminConfig{
+				Listen: "0.0.0.0:8443", TLSCertFile: tc.cert, TLSKeyFile: tc.key,
+				Administrators: []AdminAccount{{Username: "admin"}},
+			}}
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "tls_cert_file and tls_key_file must both be set") {
+				t.Fatalf("incomplete pair accepted without -certdir: %v", err)
+			}
+			runtime := AdminConfig{WebservCertDir: "/certs"}
+			loaded, err := LoadWithAdminRuntime(path, runtime)
+			if err != nil {
+				t.Fatalf("runtime -certdir rejected: %v", err)
+			}
+			wantCert, wantKey := tc.cert, tc.key
+			if wantCert != "" {
+				wantCert = filepath.Join(filepath.Dir(path), wantCert)
+			}
+			if wantKey != "" {
+				wantKey = filepath.Join(filepath.Dir(path), wantKey)
+			}
+			if loaded.Admin.TLSCertFile != wantCert || loaded.Admin.TLSKeyFile != wantKey {
+				t.Fatalf("loaded paths: cert=%q key=%q, want cert=%q key=%q", loaded.Admin.TLSCertFile, loaded.Admin.TLSKeyFile, wantCert, wantKey)
+			}
+			updated, err := UpdateWithAdminRuntime(path, runtime, func(cfg *Config) error {
+				cfg.BotLogin = "updated-bot"
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("runtime -certdir update rejected: %v", err)
+			}
+			if updated.Admin.TLSCertFile != wantCert || updated.Admin.TLSKeyFile != wantKey {
+				t.Fatalf("updated paths: cert=%q key=%q, want cert=%q key=%q", updated.Admin.TLSCertFile, updated.Admin.TLSKeyFile, wantCert, wantKey)
+			}
+			data, err = os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved Config
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.BotLogin != "updated-bot" || saved.Admin.TLSCertFile != tc.cert || saved.Admin.TLSKeyFile != tc.key || saved.Admin.WebservCertDir != "" {
+				t.Fatalf("saved config changed runtime or raw TLS paths: %+v", saved.Admin)
+			}
+		})
 	}
 }
 
@@ -55,6 +188,36 @@ func TestGitHubTokenValidation(t *testing.T) {
 	}
 }
 
+func TestBotLoginValidation(t *testing.T) {
+	for _, login := range []string{"Bot-1", "mona-cat_octo", "2abvd19d_admin", strings.Repeat("a", 39)} {
+		cfg := Config{BotLogin: login, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+		if err := cfg.Validate(t.TempDir()); err != nil {
+			t.Fatalf("valid bot login %q: %v", login, err)
+		}
+	}
+	for _, login := range []string{"bad_u", "bad__octo", "bad_octo12345", "bad!", "-bad", "bad-", "bad--name", "bad\nname", strings.Repeat("a", 40)} {
+		cfg := Config{BotLogin: login, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+		if err := cfg.Validate(t.TempDir()); err == nil || !strings.Contains(err.Error(), "bot_login") {
+			t.Fatalf("invalid bot login %q accepted: %v", login, err)
+		}
+	}
+}
+
+func TestManagedGitHubLoginsLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	data := []byte(`{"bot_login":"mona-cat_octo","invitation_owners":["Mona-Cat_Octo"],"invitation_owner_ids":{"mona-cat_octo":2},"requester_policies":[{"login":"Mona-Cat_Octo","id":3}],"repositories":[{"name":"mona-cat_octo/repo","id":1,"owner_id":2,"actions":["review"]}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil || cfg.BotLogin != "mona-cat_octo" ||
+		len(cfg.InvitationOwners) != 1 || len(cfg.RequesterPolicies) != 1 || len(cfg.Repositories) != 1 ||
+		cfg.InvitationOwners[0] != "mona-cat_octo" ||
+		cfg.RequesterPolicies[0].Login != "mona-cat_octo" || cfg.Repositories[0].Name != "mona-cat_octo/repo" {
+		t.Fatalf("managed GitHub logins did not load: %+v, %v", cfg, err)
+	}
+}
+
 func TestUserModelChoicesBoundPreferencesAndTrustedDefaults(t *testing.T) {
 	low := RoleModelConfig{Model: "approved-main", Effort: "low"}
 	medium := RoleModelConfig{Model: "approved-critic", Effort: "medium"}
@@ -63,7 +226,7 @@ func TestUserModelChoicesBoundPreferencesAndTrustedDefaults(t *testing.T) {
 		Codex:        CodexConfig{Model: "default-main", ReasoningEffort: "medium"},
 		Claude:       ClaudeConfig{Model: "default-critic", Effort: "low"},
 		MainSettings: RoleModelConfig{Model: "operator-main"},
-		Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+		Admin: &AdminConfig{Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
 			UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{low}, Critic: []RoleModelConfig{medium}}},
 		Commands: map[string]CommandMapping{}, Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
 	if err := cfg.Validate(t.TempDir()); err != nil {
@@ -99,7 +262,7 @@ func TestUserModelChoicesValidateExactPairs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{BotLogin: "bot", Commands: map[string]CommandMapping{},
 				Repositories: []Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
-				Admin: &AdminConfig{GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
+				Admin: &AdminConfig{Administrators: []AdminAccount{{Username: "admin"}}, GitHubOAuth: &OAuthClient{ClientID: "id", ClientSecret: "secret", RedirectURL: "http://127.0.0.1:8377/auth/github/callback"},
 					UserModelChoices: &UserModelChoices{Main: []RoleModelConfig{valid}}}}
 			tc.edit(&cfg)
 			if err := cfg.Validate(t.TempDir()); err == nil {

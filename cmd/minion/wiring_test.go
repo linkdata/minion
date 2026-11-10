@@ -88,3 +88,33 @@ func TestServiceWiringSnapshotsNativeCodexCredentials(t *testing.T) {
 		t.Fatalf("configured Codex key did not exclude native credentials: %+v", got)
 	}
 }
+
+func TestServiceWiringSnapshotsAmbientClaudeAPIKey(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "ambient-key")
+	if got := newOrchestrator(config.Config{Main: "codex"}, nil, nil, nil, nil).Runner.Claude.APIKey; got != "" {
+		t.Fatalf("unselected ambient Claude key was retained: %q", got)
+	}
+	for _, cfg := range []config.Config{{Main: "claude"}, {Main: "codex", Adversarial: "claude"}} {
+		if got := newOrchestrator(cfg, nil, nil, nil, nil).Runner.Claude.APIKey; got != "ambient-key" {
+			t.Fatalf("selected Claude role lost ambient key: %q", got)
+		}
+	}
+	if got := newOrchestrator(config.Config{Main: "claude", Claude: config.ClaudeConfig{APIKey: "configured-key"}}, nil, nil, nil, nil).Runner.Claude.APIKey; got != "configured-key" {
+		t.Fatalf("configured Claude key lost precedence: %q", got)
+	}
+}
+
+func TestRemoteWorkerUsesItsOwnAmbientAuthentication(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "parent-codex-key")
+	t.Setenv("CODEX_ACCESS_TOKEN", "parent-codex-token")
+	t.Setenv("ANTHROPIC_API_KEY", "parent-claude-key")
+	cfg := config.Config{Main: "claude", Adversarial: "codex", RemoteExecutor: &config.RemoteExecutorConfig{}}
+	owner := newOrchestrator(cfg, nil, nil, nil, nil)
+	if owner.Runner.Codex.NativeAPIKey != "" || owner.Runner.Codex.NativeAccessToken != "" || owner.Runner.Claude.APIKey != "" {
+		t.Fatal("orchestrator ambient credentials would override the remote worker's authentication")
+	}
+	applyModelKeys(owner, cfg)
+	if owner.Runner.Codex.NativeAPIKey != "" || owner.Runner.Codex.NativeAccessToken != "" || owner.Runner.Claude.APIKey != "" {
+		t.Fatal("clearing configured keys would send orchestrator ambient credentials to the remote worker")
+	}
+}

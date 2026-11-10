@@ -18,8 +18,8 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
-// ProtocolVersion identifies the versioned Job, Result, and Status contracts.
-const ProtocolVersion = 22
+// ProtocolVersion identifies the action and executor wire contracts.
+const ProtocolVersion = 24
 
 const (
 	maxDiagnostics            = 100
@@ -535,7 +535,7 @@ func validateResultArtifacts(j Job, files []workspace.File, complete bool) error
 	if err != nil {
 		return err
 	}
-	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"], seen["REPORT.md"], &j.Source); err != nil {
+	if err := validateAuditCoverage(seen["coverage-ledger.json"], seen["findings.json"], seen["REPORT.md"], &j.Source, companions); err != nil {
 		return err
 	}
 	for _, companion := range companions {

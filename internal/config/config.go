@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,7 +24,7 @@ import (
 )
 
 var (
-	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$`)
+	ownerNamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:_[A-Za-z0-9]{3,8})?$`)
 	commandPattern   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,99}$`)
 )
 
@@ -32,6 +33,7 @@ const (
 	DefaultMaxGitHubContextBytes = 32 << 10
 	// DefaultAdminListen binds the optional admin server to IPv4 loopback.
 	DefaultAdminListen = "127.0.0.1:8377"
+	defaultStatePath   = "var/state.json"
 	// DefaultInactivityTimeout is the default gap allowed without executor progress.
 	DefaultInactivityTimeout = 10 * time.Minute
 	// MaxInactivityTimeout is the largest configurable inactivity timeout.
@@ -60,6 +62,8 @@ const (
 	MaxModelSettingBytes       = 128
 	MaxUserModelChoicesPerRole = 16
 	MaxAIInstructionsBytes     = 16 << 10
+	MinProviderAPIKeyBytes     = 8
+	MaxProviderAPIKeyBytes     = 256
 
 	defaultReviewSkill        = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"
 	defaultFixSkill           = "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"
@@ -77,10 +81,15 @@ type CommandMapping struct {
 
 // SupportsProvider reports whether a CLI can execute the action's workflow.
 //
-// An empty provider selects Codex. Claude's Bash-only tool set cannot run the
-// independent subagents required by the security-audit action.
+// An empty provider selects Codex. Security audits need independent subagents.
 func (m CommandMapping) SupportsProvider(provider string) bool {
 	return provider == "" || provider == "codex" || provider == "claude" && m.Action != "security-audit"
+}
+
+// SupportedOnHost reports whether the action's native tools can run here.
+// Native Windows Node cannot enforce the audit validators' POSIX file-open flags.
+func (m CommandMapping) SupportedOnHost() bool {
+	return m.Action != "security-audit" || runtime.GOOS != "windows"
 }
 
 func defaultCommands() map[string]CommandMapping {
@@ -125,6 +134,10 @@ type AdminConfig struct {
 	Listen           string            `json:"listen,omitempty"`
 	TLSCertFile      string            `json:"tls_cert_file,omitempty"`
 	TLSKeyFile       string            `json:"tls_key_file,omitempty"`
+	WebservAddress   string            `json:"-"`
+	WebservCertDir   string            `json:"-"`
+	WebservDataDir   string            `json:"-"`
+	WebservListenURL string            `json:"-"`
 	Administrators   []AdminAccount    `json:"administrators,omitempty"`
 	GitHubOAuth      *OAuthClient      `json:"github_oauth,omitempty"`
 	GitLabOAuth      *OAuthClient      `json:"gitlab_oauth,omitempty"`
@@ -354,6 +367,49 @@ func (c Config) ResolveUserPreferences(preferred UserModelPreferences) (main, cr
 //
 // Relative paths are resolved against the configuration file's directory.
 func Load(path string) (Config, error) {
+	return load(path, nil)
+}
+
+// LoadWithAdminRuntime applies command-line listener settings before validation.
+func LoadWithAdminRuntime(path string, runtime AdminConfig) (Config, error) {
+	return load(path, &runtime)
+}
+
+// ParseWithAdminRuntime validates embedded config without creating a file.
+func ParseWithAdminRuntime(r io.Reader, configDir string, runtime AdminConfig) (Config, error) {
+	cfg, err := decode(r)
+	if err != nil {
+		return cfg, err
+	}
+	return validateLoadedConfig(cfg, configDir, &runtime)
+}
+
+// LoadStatePath reads only the setting needed by the usage report.
+// Listener validation depends on runtime flags that are unavailable to `minion usage`.
+func LoadStatePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return "", err
+	}
+	cfg, err := decode(f)
+	err = errors.Join(err, f.Close())
+	if err != nil {
+		return "", err
+	}
+	if cfg.StatePath == "" {
+		cfg.StatePath = defaultStatePath
+	}
+	if !filepath.IsAbs(cfg.StatePath) {
+		cfg.StatePath = filepath.Join(filepath.Dir(abs), cfg.StatePath)
+	}
+	return cfg.StatePath, nil
+}
+
+func load(path string, runtime *AdminConfig) (Config, error) {
 	var cfg Config
 	var err error
 	path, err = filepath.Abs(path)
@@ -369,10 +425,25 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	if err := cfg.Validate(filepath.Dir(path)); err != nil {
+	return validateLoadedConfig(cfg, filepath.Dir(path), runtime)
+}
+
+func validateLoadedConfig(cfg Config, configDir string, runtime *AdminConfig) (Config, error) {
+	applyAdminRuntime(&cfg, runtime)
+	if err := cfg.Validate(configDir); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func applyAdminRuntime(cfg *Config, runtime *AdminConfig) {
+	if runtime == nil || cfg.Admin == nil {
+		return
+	}
+	cfg.Admin.WebservAddress = runtime.WebservAddress
+	cfg.Admin.WebservCertDir = runtime.WebservCertDir
+	cfg.Admin.WebservDataDir = runtime.WebservDataDir
+	cfg.Admin.WebservListenURL = runtime.WebservListenURL
 }
 
 func resolveAdminTLSPath(configDir, path string) string {
@@ -406,6 +477,11 @@ func validModelSetting(value string) bool {
 	return len(value) <= MaxModelSettingBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && strings.IndexFunc(value, unicode.IsSpace) < 0
 }
 
+// ValidGitHubLogin checks the GitHub account name syntax used in configuration.
+func ValidGitHubLogin(login string) bool {
+	return len(login) <= 39 && ownerNamePattern.MatchString(login) && !strings.Contains(login, "--")
+}
+
 // RequireGitHubToken checks the credential needed by the orchestrator.
 // Install-only and remote worker configurations do not need one.
 func (c Config) RequireGitHubToken() error {
@@ -419,10 +495,10 @@ func (c Config) RequireGitHubToken() error {
 //
 // It normalizes repository names, account logins, identity pin keys, and skill URLs.
 func (c *Config) Validate(configDir string) error {
-	if c.BotLogin == "" {
+	if c.BotLogin == "" && c.Admin == nil {
 		return fmt.Errorf("bot_login is required")
 	}
-	if strings.ContainsAny(c.BotLogin, " /\\@") {
+	if c.BotLogin != "" && !ValidGitHubLogin(c.BotLogin) {
 		return fmt.Errorf("invalid bot_login %q", c.BotLogin)
 	}
 	if strings.IndexFunc(c.GitHub.Token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
@@ -472,8 +548,13 @@ func (c *Config) Validate(configDir string) error {
 	if len(c.AIInstructions) > MaxAIInstructionsBytes || !utf8.ValidString(c.AIInstructions) || strings.ContainsRune(c.AIInstructions, 0) {
 		return fmt.Errorf("ai_instructions must be at most %d UTF-8 bytes without NUL", MaxAIInstructionsBytes)
 	}
-	if strings.ContainsAny(c.Codex.APIKey, " \t\r\n\x00") || strings.ContainsAny(c.Claude.APIKey, " \t\r\n\x00") {
-		return fmt.Errorf("provider api_key must not contain whitespace or NUL")
+	if c.Codex.APIKey != "" && len(c.Codex.APIKey) < MinProviderAPIKeyBytes ||
+		c.Claude.APIKey != "" && len(c.Claude.APIKey) < MinProviderAPIKeyBytes ||
+		len(c.Codex.APIKey) > MaxProviderAPIKeyBytes || len(c.Claude.APIKey) > MaxProviderAPIKeyBytes ||
+		!utf8.ValidString(c.Codex.APIKey) || !utf8.ValidString(c.Claude.APIKey) ||
+		strings.IndexFunc(c.Codex.APIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 ||
+		strings.IndexFunc(c.Claude.APIKey, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		return fmt.Errorf("provider api_key must be valid UTF-8, %d-%d bytes per nonempty key, and contain no whitespace or control characters", MinProviderAPIKeyBytes, MaxProviderAPIKeyBytes)
 	}
 	c.Codex.Model = strings.TrimSpace(c.Codex.Model)
 	c.Codex.ReasoningEffort = strings.TrimSpace(c.Codex.ReasoningEffort)
@@ -517,44 +598,62 @@ func (c *Config) Validate(configDir string) error {
 				}
 			}
 		}
-		seen := make(map[string]bool, len(admin.Administrators))
-		for _, account := range admin.Administrators {
-			if !workspace.ValidIdentitySegment(account.Username) || seen[strings.ToLower(account.Username)] {
-				return errors.New("admin.administrators username is invalid or duplicated")
-			}
-			seen[strings.ToLower(account.Username)] = true
-			if account.PasswordHash != AdminPasswordHashPlaceholder {
-				if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
-					return errors.New("admin.administrators password_hash is invalid")
-				}
+		if len(admin.Administrators) != 1 || admin.Administrators[0].Username != "admin" {
+			return errors.New("admin.administrators must contain exactly one admin account")
+		}
+		account := admin.Administrators[0]
+		if account.PasswordHash != "" && account.PasswordHash != AdminPasswordHashPlaceholder {
+			if _, ok := parseAdminPasswordHash(account.PasswordHash); !ok {
+				return errors.New("admin.administrators password_hash is invalid")
 			}
 		}
 		if admin.Listen == "" {
 			admin.Listen = DefaultAdminListen
 		}
-		host, port, err := net.SplitHostPort(admin.Listen)
-		if err != nil {
-			return fmt.Errorf("admin.listen: %w", err)
-		}
-		if strings.HasPrefix(admin.Listen, "[]") {
-			return errors.New("admin.listen empty bracketed host is invalid; use :port")
-		}
-		number, err := strconv.ParseUint(port, 10, 16)
-		if err != nil || number == 0 {
-			return errors.New("admin.listen requires a numeric port from 1 to 65535")
-		}
-		if (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
+		if admin.WebservCertDir == "" && (admin.TLSCertFile == "") != (admin.TLSKeyFile == "") {
 			return errors.New("admin.tls_cert_file and tls_key_file must both be set")
 		}
+		var host string
+		var number uint64
+		if admin.WebservAddress != "" {
+			host = admin.WebservAddress
+			if overrideHost, _, err := net.SplitHostPort(host); err == nil {
+				host = overrideHost
+			}
+			host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+		} else {
+			var port string
+			var err error
+			host, port, err = net.SplitHostPort(admin.Listen)
+			if err != nil {
+				return fmt.Errorf("admin.listen: %w", err)
+			}
+			if strings.HasPrefix(admin.Listen, "[]") {
+				return errors.New("admin.listen empty bracketed host is invalid; use :port")
+			}
+			number, err = strconv.ParseUint(port, 10, 16)
+			if err != nil || number == 0 {
+				return errors.New("admin.listen requires a numeric port from 1 to 65535")
+			}
+		}
+		if err := admin.ValidateWebservOptions(); err != nil {
+			return err
+		}
 		addr, err := netip.ParseAddr(host)
-		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" {
-			return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file")
+		if (err != nil || !addr.Unmap().IsLoopback()) && admin.TLSCertFile == "" && admin.WebservCertDir == "" &&
+			!strings.HasPrefix(strings.ToLower(admin.WebservListenURL), "https://") {
+			if admin.WebservAddress == "" {
+				return errors.New("admin.listen outside literal loopback requires tls_cert_file and tls_key_file, or HTTPS -listenurl behind a proxy")
+			}
+			return errors.New("webserv -address outside literal loopback requires -certdir or admin TLS files, or HTTPS -listenurl behind a proxy")
 		}
 		if err := admin.validateOAuth(host, number); err != nil {
 			return err
 		}
 		if admin.TLSCertFile != "" {
 			admin.TLSCertFile = resolveAdminTLSPath(configDir, admin.TLSCertFile)
+		}
+		if admin.TLSKeyFile != "" {
 			admin.TLSKeyFile = resolveAdminTLSPath(configDir, admin.TLSKeyFile)
 		}
 	}
@@ -695,7 +794,7 @@ func (c *Config) Validate(configDir string) error {
 		return fmt.Errorf("max_github_context_bytes must be between 1 and %d", workspace.MaxBytes)
 	}
 	if c.StatePath == "" {
-		c.StatePath = "var/state.json"
+		c.StatePath = defaultStatePath
 	}
 	if c.WorkRoot == "" {
 		c.WorkRoot = "var/work"
@@ -711,7 +810,7 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("start_at must be RFC3339: %w", err)
 		}
 	}
-	if len(c.Repositories) == 0 {
+	if len(c.Repositories) == 0 && c.Admin == nil {
 		return fmt.Errorf("repositories must contain at least one repository")
 	}
 	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)
@@ -741,7 +840,7 @@ func (c *Config) Validate(configDir string) error {
 	seenRequesterIDs := map[int64]bool{}
 	for i := range c.RequesterPolicies {
 		requester := &c.RequesterPolicies[i]
-		if len(requester.Login) > 39 || !ownerNamePattern.MatchString(requester.Login) || requester.ID <= 0 {
+		if !ValidGitHubLogin(requester.Login) || requester.ID <= 0 {
 			return fmt.Errorf("requester_policies requires a valid GitHub login and positive ID")
 		}
 		requester.Login = strings.ToLower(requester.Login)
@@ -851,10 +950,10 @@ func (c Config) CommandNames() []string {
 
 // CommandInstalled reports whether a command is available.
 //
-// The main provider must support its action and have all required skills installed.
+// The main provider and host must support its action, and required skills must be installed.
 func (c Config) CommandInstalled(name string) (bool, error) {
 	mapping, ok := c.Commands[name]
-	if !ok || len(mapping.Skills) == 0 || !mapping.SupportsProvider(c.Main) {
+	if !ok || len(mapping.Skills) == 0 || !mapping.SupportsProvider(c.Main) || !mapping.SupportedOnHost() {
 		return false, nil
 	}
 	provider := c.Main

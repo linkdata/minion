@@ -1,0 +1,50 @@
+package skills
+
+import (
+	"embed"
+	"io/fs"
+	"strings"
+)
+
+//go:embed bundled
+var bundledSkills embed.FS
+
+// Commits identify the upstream base; embedded copies include Minion-specific edits.
+// The copies are reviewed and updated with Minion, not at install time.
+var bundledCommits = map[string]string{
+	"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail":               "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+	"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review":        "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+	"https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-audit":         "96608e078b2d5ea607c5c3b8b5a54d1c1fba6846",
+	"https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman":                  "1e91f1306d602d4ca23618701b1185575ae1869b",
+	"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit": "c1c8a8c1471069fb0e188eeaff69b8e8db6564a8",
+}
+
+func bundledFiles(src source) (files []skillFile, commit string, err error) {
+	commit = bundledCommits[src.url]
+	if commit == "" {
+		return nil, "", nil
+	}
+	root := "bundled/" + src.name
+	err = fs.WalkDir(bundledSkills, root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := bundledSkills.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var mode fs.FileMode
+		if path == "bundled/security-audit/validate-findings.cjs" || path == "bundled/security-audit/validate-coverage-ledger.cjs" {
+			mode = 0o100 // embed.FS drops the execute bit from these scripts.
+		}
+		files = append(files, skillFile{name: strings.TrimPrefix(path, root+"/"), data: data, mode: mode})
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return files, commit, nil
+}

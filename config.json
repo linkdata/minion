@@ -1,64 +1,12 @@
 {
-  "bot_login": "example-bot",
-  "github": {
-    "token": ""
-  },
+  "bot_login": "",
+  "github": {"token": ""},
   "admin": {
     "listen": "127.0.0.1:8377",
     "administrators": [{"username": "admin", "password_hash": "PASTE_GENERATED_HASH_HERE"}]
   },
   "main": "codex",
-  "adversarial": "",
-  "critic_stopping": {
-    "max_rounds": 5,
-    "nonblocking_after_round": null,
-    "consecutive_no_blocker_rounds": null,
-    "required_clean_rounds": 1
-  },
-  "ai_instructions": "",
-  "codex": {
-    "api_key": ""
-  },
-  "claude": {
-    "api_key": "",
-    "allow_all_unix_sockets": false
-  },
-  "commands": {
-    "review": {
-      "action": "review",
-      "skills": ["https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-review"]
-    },
-    "fix": {
-      "action": "fix",
-      "skills": ["https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"]
-    },
-    "audit": {
-      "action": "comment",
-      "skills": ["https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail-audit"]
-    },
-    "security-audit": {
-      "action": "security-audit",
-      "skills": ["https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"]
-    }
-  },
-  "always_on_skills": [
-    "builtin://anti-prompt-injection",
-    "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman"
-  ],
-  "poll_interval_seconds": 60,
-  "inactivity_timeout_minutes": 10,
-  "max_runtime_minutes": 240,
-  "publication_grace_seconds": 120,
-  "max_github_context_bytes": 32768,
-  "state_path": "var/state.json",
-  "work_root": "var/work",
-  "invitation_owners": [],
-  "repositories": [
-    {
-      "name": "example-owner/example-repo",
-      "id": 123456,
-      "owner_id": 78910,
-      "actions": ["review", "fix", "audit", "security-audit"]
-    }
-  ]
+  "codex": {"api_key": ""},
+  "claude": {"api_key": ""},
+  "repositories": []
 }
