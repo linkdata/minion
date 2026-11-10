@@ -188,33 +188,6 @@ func TestAdminServerWithoutSignInServesHomeAndSetupPage(t *testing.T) {
 			t.Fatalf("OPTIONS * status = %d, want 403", resp.StatusCode)
 		}
 	})
-	t.Run("incomplete POST body", func(t *testing.T) {
-		conn, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(t.Context(), "tcp", admin.listener.Addr().String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer conn.Close()
-		if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := io.WriteString(conn, "POST /jaws/invalid-key HTTP/1.1\r\nHost: localhost\r\nContent-Length: 100\r\n\r\n"); err != nil {
-			t.Fatal(err)
-		}
-		resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodPost})
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusForbidden || !resp.Close {
-			t.Fatalf("incomplete POST status = %d close=%t, want 403 and close", resp.StatusCode, resp.Close)
-		}
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := conn.Read(make([]byte, 1)); err != io.EOF {
-			t.Fatalf("server kept incomplete POST connection open: %v", err)
-		}
-	})
 }
 
 func TestAdminServerServesSignedInUserPreferences(t *testing.T) {

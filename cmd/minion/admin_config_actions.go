@@ -338,13 +338,15 @@ func adminConfigPost(back string, fields []string, repeated string, action func(
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		parseErr := r.ParseForm()
-		closeUnreadAdminBody(w, r)
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "Invalid configuration form", http.StatusBadRequest)
+			return
+		}
 		want := len(fields)
 		if repeated != "" && len(r.PostForm[repeated]) != 0 {
 			want++
 		}
-		if parseErr != nil || len(r.PostForm) != want {
+		if len(r.PostForm) != want {
 			http.Error(w, "Invalid configuration form", http.StatusBadRequest)
 			return
 		}

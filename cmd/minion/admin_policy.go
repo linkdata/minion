@@ -123,7 +123,6 @@ var adminPolicyHTML = template.Must(template.New("admin policy").Parse(headHTML 
 
 func adminPolicyHandler(jw *jaws.Jaws, snapshot func() adminConfigSnapshot) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		ui.Handler(jw, "admin policy", policyView(snapshot())).ServeHTTP(w, r)
 	})

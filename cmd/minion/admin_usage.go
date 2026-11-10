@@ -135,7 +135,6 @@ var errAdminUsageFilter = errors.New("invalid admin usage filter")
 
 func adminUsageHandler(jw *jaws.Jaws, owner *action.Orchestrator, export bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		query, filter, err := parseAdminUsageQuery(r.URL.RawQuery)
 		if err != nil {

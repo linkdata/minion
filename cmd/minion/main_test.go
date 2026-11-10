@@ -112,7 +112,9 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "wrong-ambient-token")
 	certFile, keyFile, _ := remoteTestTLSFiles(t)
 	previousTransport := http.DefaultTransport
+	var requests []string
 	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.Path)
 		if got := request.Header.Get("Authorization"); got != "Bearer configured-bot-token" {
 			t.Errorf("GitHub request used %q", got)
 		}
@@ -171,11 +173,48 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	}
 	cfg.Admin = &config.AdminConfig{Listen: "127.0.0.1:8080", Administrators: []config.AdminAccount{testAdminAccount()}}
 	cfg.Repositories = nil
+	requests = nil
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error { return nil })
 	}, "-check")
-	if code != 1 || !strings.Contains(output, "no repositories configured") {
-		t.Fatalf("empty setup passed repository preflight: code=%d output=%q", code, output)
+	if code != 0 || !strings.Contains(output, "setup incomplete: no repositories configured") || strings.Join(requests, ",") != "/user" {
+		t.Fatalf("empty setup check: code=%d GitHub requests=%v output=%q", code, requests, output)
+	}
+}
+
+func TestCheckWithoutRepositoriesSkipsUnavailableGitHubAndState(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	t.Setenv("GH_TOKEN", "ambient-token")
+	t.Setenv("GITHUB_TOKEN", "ambient-token")
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		t.Errorf("setup check called GitHub without configured credentials: %s", request.URL)
+		return nil, errors.New("unexpected GitHub request")
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	cfg := config.Config{
+		StatePath: statePath, WorkRoot: t.TempDir(),
+		Admin:    &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		Codex:    config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
+			TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
+	}
+	gitChecks := 0
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			gitChecks++
+			return nil
+		})
+	}, "-check")
+	if code != 0 || gitChecks != 1 || !strings.Contains(output, "setup incomplete: no repositories configured") ||
+		strings.Contains(output, "GitHub authentication:") || strings.Contains(output, "audit publishing preflight:") {
+		t.Fatalf("setup check: code=%d gitChecks=%d output=%q", code, gitChecks, output)
+	}
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("setup check created state: %v", err)
 	}
 }
 

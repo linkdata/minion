@@ -120,7 +120,6 @@ func checkGitHubAuth(ctx context.Context, owner *action.Orchestrator) adminGitHu
 
 func adminStatusHandler(jw *jaws.Jaws, owner *action.Orchestrator, current func() config.Config, check bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		view := statusView(owner, current())
 		if check {

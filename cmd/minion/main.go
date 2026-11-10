@@ -297,7 +297,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 					!accepted.ResultReady && !terminalRecoveryPendingAt(store, now())
 			}
 			// An audit-only service has no other command if publishing tools are missing.
-			if *check || pendingAudit || !hasUnselectedCommand(nil, cfg, false) {
+			if pendingAudit || (len(cfg.Repositories) > 0 && (*check || !hasUnselectedCommand(nil, cfg, false))) {
 				if err := action.CheckAuditPublisher(ctx, cfg.WorkRoot, cfg); err != nil {
 					logger.Printf("audit publishing preflight: %v", err)
 					return false
@@ -310,6 +310,16 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			}
 		}
 		return true
+	}
+	if *check && len(cfg.Repositories) == 0 {
+		if !preflight() {
+			return 1
+		}
+		if cfg.BotLogin != "" && cfg.GitHub.Token != "" && !authenticateGitHub() {
+			return 1
+		}
+		logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
+		return 0
 	}
 	startRecoverySetup := func() int {
 		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")

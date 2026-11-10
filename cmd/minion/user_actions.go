@@ -266,7 +266,6 @@ func (a *oauthAccess) actionRoutes(access *userActionAccess) error {
 		}
 	}
 	a.mux.HandleFunc("GET /auth/actions", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		id, err := access.requesterID(a.jaws.GetSession(r))
 		if err != nil {
@@ -328,7 +327,6 @@ func (a *oauthAccess) actionRoutes(access *userActionAccess) error {
 		ui.Handler(a.jaws, "user actions", view).ServeHTTP(w, r)
 	})
 	a.mux.HandleFunc("GET /auth/actions/{attempt}", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		attempt := r.PathValue("attempt")
 		if !workspace.ValidIdentitySegment(attempt) {
@@ -403,7 +401,6 @@ func (a *userActionAccess) projectDetail(ctx context.Context, attempt string, no
 }
 
 func (a *userActionAccess) abort(w http.ResponseWriter, r *http.Request) {
-	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	attempt := r.PathValue("attempt")
 	if !workspace.ValidIdentitySegment(attempt) {
