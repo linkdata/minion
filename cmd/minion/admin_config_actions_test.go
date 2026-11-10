@@ -105,7 +105,19 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 	if repo.DenyAllActors || len(repo.AllowedActors) != 0 || !repo.AllowsActor("another", 88) {
 		t.Fatalf("allow-any did not restore omitted allowlist: %+v", repo)
 	}
-	post("/admin/repositories/add", url.Values{"name": {"owner/new"}, "actions": {"review"}}, http.StatusSeeOther)
+	for _, invalidURL := range []string{
+		"http://github.com/owner/new",
+		"https://github.com.evil/owner/new",
+		"https://someone@github.com/owner/new",
+		"https://github.com:443/owner/new",
+		"https://github.com/owner/new/tree/main",
+		"https://github.com/owner/new?tab=readme",
+		"https://github.com/owner/new#readme",
+		"https://github.com/owner/%6eew",
+	} {
+		post("/admin/repositories/add", url.Values{"url": {invalidURL}, "actions": {"review"}}, http.StatusConflict)
+	}
+	post("/admin/repositories/add", url.Values{"url": {"https://github.com/owner/new/"}, "actions": {"review"}}, http.StatusSeeOther)
 	repo, ok := live.snapshot().Config.Repository("owner/new")
 	if !ok || repo.ID != 11 || repo.OwnerID != 2 || !repo.DenyAllActors || len(repo.AllowedActors) != 0 || repo.AllowsActor("another", 88) || len(repo.Actions) != 1 || repo.Actions[0] != "review" {
 		t.Fatalf("repository not pinned: %+v, found=%t", repo, ok)

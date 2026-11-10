@@ -38,7 +38,7 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 		wants []string
 	}{
 		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any", "/admin/users/deny-all", "Allow nobody", `aria-label="Remove @alice from owner/limited"`, `aria-label="Add requester to owner/open"`}},
-		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`}},
+		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", `type="url" name="url" placeholder="https://github.com/owner/repo"`, "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`}},
 		{"admin skills", []string{"anti-prompt-injection", "review command", `value="command:review"`, "/admin/skills/add", "/admin/skills/remove", `aria-label="Remove anti-prompt-injection skill from always"`, "To replace a required skill", "-install-skills"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

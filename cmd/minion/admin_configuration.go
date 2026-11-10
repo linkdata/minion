@@ -154,7 +154,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
   </section>{{else}}<p>No repositories are configured.</p>{{end}}
   <section class="border rounded p-3"><h2 class="h5">Add repository</h2><p class="text-body-secondary small">Minion will verify its GitHub identity and repository access before saving. The new repository starts with no allowed requesters; add requesters on the Users page.</p>
     <form method="post" action="/admin/repositories/add" class="vstack gap-3">
-      <label class="d-grid gap-1">Repository <input class="form-control" name="name" placeholder="owner/repo" maxlength="201" required></label>
+      <label class="d-grid gap-1">GitHub repository URL <input class="form-control" type="url" name="url" placeholder="https://github.com/owner/repo" maxlength="221" required></label>
       <fieldset><legend class="fs-6">Allowed commands</legend>{{range .Commands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}"><span class="form-check-label">{{.}}</span></label>{{else}}<p>No commands are configured.</p>{{end}}</fieldset>
       <div><button class="btn btn-primary" type="submit" {{if not .Commands}}disabled{{end}}>Add repository</button></div>
     </form>

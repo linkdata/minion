@@ -75,6 +75,11 @@ func TestSetupAdminCannotOpenOperationalPages(t *testing.T) {
 			t.Errorf("setup %s: status=%d, want 403", path, response.Code)
 		}
 	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", url.Values{
+		"version": {"missing"}, "url": {"https://github.com/owner/repo"},
+	}, cookie, ""); response.Code != http.StatusForbidden {
+		t.Errorf("setup repository add without config path: status=%d, want 403", response.Code)
+	}
 	if home := adminResponse(handler, http.MethodGet, "/", nil, cookie, ""); home.Code != http.StatusOK ||
 		!strings.Contains(home.Body.String(), "Setup is incomplete") {
 		t.Fatalf("signed-in setup home: status=%d body=%q", home.Code, home.Body.String())

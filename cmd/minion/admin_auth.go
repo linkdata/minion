@@ -54,25 +54,32 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>admin</code> account's <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
 {{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion. No jobs run during setup or recovery.</p>
-{{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the bot account and first repository below, or add a command in Advanced config.{{else}}Sign in as admin to finish setup.{{end}} No jobs run during setup.</p>
+{{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the GitHub bot credentials, then add a repository. Add a command in Advanced config if none is available.{{else}}Sign in as admin to finish setup.{{end}} No jobs run during setup.</p>{{end}}
 {{if .Dot.SignedAdmin}}
+<h2 class="h5">GitHub bot</h2>
 <form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
 <input type="hidden" name="version" value="{{.Dot.Version}}">
 <label class="form-label">GitHub bot login<input class="form-control" name="bot_login" value="{{.Dot.BotLogin}}" maxlength="39" required></label>
 <label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" {{if not .Dot.TokenSet}}required{{end}}></label>
 {{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
-<label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" maxlength="201" required></label>
-<label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" step="1" value="{{if .Dot.RepositoryID}}{{.Dot.RepositoryID}}{{end}}" required></label>
-<label class="form-label">Owner ID<input class="form-control" name="owner_id" type="number" min="1" step="1" value="{{if .Dot.OwnerID}}{{.Dot.OwnerID}}{{end}}" required></label>
-{{if not .Dot.Repository}}<p class="text-body-secondary">The first repository starts with one configured command, if any, and no allowed requesters. Add requesters in the admin UI after restarting.</p>{{end}}
-<button class="btn btn-primary" type="submit">Save setup</button></form>
-{{end}}{{end}}{{end}}
+<button class="btn btn-primary" type="submit">Save bot credentials</button></form>
+<p class="mt-3"><a href="/admin/config">Advanced config and GitHub auth test</a></p>
+{{if and .Dot.BotLogin .Dot.TokenSet}}
+<h2 class="h5 mt-4">Add repository</h2>
+{{if .Dot.Repositories}}<p>Configured repositories: {{range $i, $name := .Dot.Repositories}}{{if $i}}, {{end}}<code>{{$name}}</code>{{end}}</p>{{end}}
+<form method="post" action="/admin/repositories/add" class="vstack gap-3 col-lg-6">
+<input type="hidden" name="version" value="{{.Dot.Version}}">
+<label class="form-label">GitHub repository URL<input class="form-control" name="url" type="url" placeholder="https://github.com/owner/repo" maxlength="221" required></label>
+<p class="text-body-secondary">The repository starts with one available command, if any, and no allowed requesters. Add requesters after restarting.</p>
+<button class="btn btn-primary" type="submit">Add repository</button></form>
+{{end}}
+{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminHomeView struct {
 	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete, TokenSet bool
-	BotLogin, Repository, Version                                        string
-	RepositoryID, OwnerID                                                int64
+	BotLogin, Version                                                    string
+	Repositories                                                         []string
 }
 type adminLoginView struct{ SignedIn, PasswordSet bool }
 
@@ -204,6 +211,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	mux.HandleFunc("POST /admin/logout", access.logout)
 	if setup && setupPath != "" {
 		mux.Handle("POST /admin/setup", access.setupPost())
+		mux.Handle("POST /admin/repositories/add", access.setupRepositoryPost())
 		registerAdminAdvancedRoutes(mux, jw, setupPath, nil, cfg)
 	}
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
@@ -363,7 +371,7 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		if a.setupPath == "" || a.sessionUsername(a.jaws.GetSession(r)) == "" {
 			return false
 		}
-		return r.Method == http.MethodPost && r.URL.Path == "/admin/setup" ||
+		return r.Method == http.MethodPost && (r.URL.Path == "/admin/setup" || r.URL.Path == "/admin/repositories/add") ||
 			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost) ||
 			r.URL.Path == "/admin/config/check" && r.Method == http.MethodPost
 	}
@@ -417,10 +425,8 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 			view.TokenSet = cfg.GitHub.Token != ""
 			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true)
 			view.Version = version
-			if len(cfg.Repositories) != 0 {
-				view.Repository = cfg.Repositories[0].Name
-				view.RepositoryID = cfg.Repositories[0].ID
-				view.OwnerID = cfg.Repositories[0].OwnerID
+			for _, repo := range cfg.Repositories {
+				view.Repositories = append(view.Repositories, repo.Name)
 			}
 		}
 	}
