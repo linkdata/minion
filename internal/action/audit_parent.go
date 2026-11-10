@@ -54,11 +54,8 @@ func checkAuditPublisherSkill(ctx context.Context, workRoot, skill string) (resu
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
-	tools, err := checkAuditTools(ctx, dir, skill)
-	if err != nil {
-		return err
-	}
-	return checkAuditValidatorPrerequisites(ctx, dir, skill, tools)
+	_, err = checkAuditTools(ctx, dir, skill)
+	return err
 }
 
 func auditValidationTempPattern(attemptID string) string {
@@ -134,8 +131,13 @@ func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, to
 		cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
 			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+dir,
 			scripts[0], probe, "--source-only")
-		if err := executil.Run(cmd); err != nil {
-			return fmt.Errorf("check audit findings schema: %w", err)
+		checkErr := executil.Run(cmd)
+		removeErr := os.Remove(probe)
+		if checkErr != nil {
+			return errors.Join(fmt.Errorf("check audit findings schema: %w", checkErr), removeErr)
+		}
+		if removeErr != nil {
+			return fmt.Errorf("remove audit schema probe: %w", removeErr)
 		}
 	}
 	return nil

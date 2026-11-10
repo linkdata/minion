@@ -41,7 +41,11 @@ func checkAuditTools(ctx context.Context, dir, skill string) (auditTools, error)
 		return auditTools{}, fmt.Errorf("audit requires node: %w", err)
 	}
 	flag, err := auditNodePermissionFlag(ctx, dir, binary)
-	return auditTools{binary: binary, permissionFlag: flag}, err
+	if err != nil {
+		return auditTools{}, err
+	}
+	tools := auditTools{binary: binary, permissionFlag: flag}
+	return tools, checkAuditValidatorPrerequisites(ctx, dir, skill, tools)
 }
 
 func checkAuditValidatorScripts(skill string) ([]string, bool, error) {

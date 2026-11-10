@@ -400,6 +400,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 				return 1
 			}
 		}
+		if cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true) {
+			logger.Print("remote executor has no enabled commands supported on this host")
+			return 1
+		}
 		logger.Printf("preflight passed as @%s", user.Login)
 		return 0
 	}

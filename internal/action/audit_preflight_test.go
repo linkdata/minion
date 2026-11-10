@@ -198,6 +198,36 @@ func TestRunnerChecksAuditPrerequisitesBeforeModel(t *testing.T) {
 	}
 }
 
+func TestRunnerChecksAuditSchemaBeforeModel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	node, err := aicli.AbsoluteExecutable("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	if _, err := auditNodePermissionFlag(t.Context(), t.TempDir(), node); err != nil {
+		t.Skipf("node permission model is unavailable: %v", err)
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(os.Getenv("HOME"), ".agents", "skills", "security-audit", "report-schema.json")
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	runner := Runner{WorkRoot: t.TempDir(), runModel: func(context.Context, modelRun) (aicli.Result, error) {
+		calls++
+		return aicli.Result{}, nil
+	}}
+	result, err := runner.Run(t.Context(), testJob(command.SecurityAudit))
+	if err == nil || !strings.Contains(err.Error(), "check audit findings schema") || errors.Is(err, monitor.ErrTerminalJob) || calls != 0 || len(result.Calls) != 0 {
+		t.Fatalf("invalid schema reached model: calls=%d recorded=%d error=%v", calls, len(result.Calls), err)
+	}
+}
+
 func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 	for _, name := range auditArtifacts {
 		for _, empty := range []bool{false, true} {
@@ -259,7 +289,7 @@ func TestAuditMissingInputsFailBeforeValidatorExecution(t *testing.T) {
 func TestRunnerMissingAuditArtifactSkipsValidator(t *testing.T) {
 	installActionTestSkills(t, testAuditSkillURL)
 	marker := filepath.Join(t.TempDir(), "validator-called")
-	fakeOnPath(t, "node", "#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*) exit 0;; esac\nprintf called > "+shellQuote(marker)+"\nexit 99\n")
 	job := testJob(command.SecurityAudit)
 	runner := Runner{
 		WorkRoot: t.TempDir(),

@@ -142,14 +142,32 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 			ExecutorID: "remote", Listen: "127.0.0.1:8443", TLSCertFile: certFile, TLSKeyFile: keyFile,
 			Token: strings.Repeat("A", 43),
 		},
-		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
 	}
 	code, output := runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error { return nil })
 	}, "-check")
 	if code != 0 || !strings.Contains(output, "preflight passed as @bot") {
 		t.Fatalf("configured GitHub account failed preflight: code=%d output=%q", code, output)
+	}
+	cfg.Commands = map[string]config.CommandMapping{}
+	cfg.Repositories[0].Actions = nil
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "remote executor has no enabled commands supported on this host") {
+		t.Fatalf("remote check accepted no commands: code=%d output=%q", code, output)
+	}
+	if runtime.GOOS == "windows" {
+		cfg.Commands = map[string]config.CommandMapping{"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}}}
+		cfg.Repositories[0].Actions = []string{"audit"}
+		code, output = runStartupFixtureWithRun(t, cfg, func() int {
+			return runWithGitCheck(func(context.Context, string) error { return nil })
+		}, "-check")
+		if code != 1 || !strings.Contains(output, "remote executor has no enabled commands supported on this host") {
+			t.Fatalf("remote check accepted audit-only commands on Windows: code=%d output=%q", code, output)
+		}
 	}
 	cfg.Admin = &config.AdminConfig{Listen: "127.0.0.1:8080", Administrators: []config.AdminAccount{testAdminAccount()}}
 	cfg.Repositories = nil
@@ -192,8 +210,8 @@ func TestCheckValidAdminTLSWithoutBinding(t *testing.T) {
 			Administrators: []config.AdminAccount{testAdminAccount()}},
 		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
 			TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
-		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
 		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 	}
 	start := func() int { return runWithGitCheck(func(context.Context, string) error { return nil }) }

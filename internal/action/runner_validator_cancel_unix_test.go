@@ -37,7 +37,7 @@ func TestRunnerCancellationDuringInstalledAuditValidatorPreservesCause(t *testin
 			t.Error(err)
 		}
 	}()
-	script := fmt.Sprintf("#!/bin/sh\nif [ \"$2\" = -e ]; then exit 0; fi\nprintf started > %s\nexec /bin/cat < %s\n", shellQuote(startedPath), shellQuote(holdPath))
+	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *' -e '*|*' --check '*) exit 0;; esac\nprintf started > %s\nexec /bin/cat < %s\n", shellQuote(startedPath), shellQuote(holdPath))
 	fakeOnPath(t, "node", script)
 	job := testJob(command.SecurityAudit)
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {

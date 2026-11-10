@@ -318,7 +318,7 @@ func TestPrivateReviewRecordsActualCapAfterVerdictCheckpoint(t *testing.T) {
 func TestCappedAuditStillRequiresInstalledReportValidation(t *testing.T) {
 	job := withClaudeCritic(auditRunnerJob(t))
 	job.CriticMaxRounds = 1
-	fakeOnPath(t, "node", "#!/bin/sh\ncase \"$*\" in *validate-findings.cjs*) exit 9;; esac\nexit 0\n")
+	fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' --check '*) exit 0;; esac\ncase \"$*\" in *validate-findings.cjs*) exit 9;; esac\nexit 0\n")
 	calls := 0
 	runner := Runner{WorkRoot: t.TempDir(), runModel: func(_ context.Context, request modelRun) (aicli.Result, error) {
 		calls++
