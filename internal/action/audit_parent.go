@@ -14,6 +14,7 @@ import (
 	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/executil"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/workspace"
 )
 
@@ -35,14 +36,9 @@ func CheckAuditPublisher(ctx context.Context, workRoot string, cfg config.Config
 				continue
 			}
 			checked[name] = true
-			configured := Runner{}
-			role := RoleSettings{Provider: "codex", Skills: mapping.Skills, AlwaysOnSkills: cfg.AlwaysOnSkills}
-			if err := configured.ConfigureRole(role); err != nil {
+			skill, err := auditPublishingSkill(mapping.Skills)
+			if err != nil {
 				return fmt.Errorf("audit publishing skill for %q: %w", name, err)
-			}
-			skill := configured.Codex.SecurityAuditSkill()
-			if skill == "" {
-				return fmt.Errorf("audit publishing skill for %q is not installed", name)
 			}
 			if err := checkAuditPublisherSkill(ctx, workRoot, skill); err != nil {
 				return fmt.Errorf("audit publishing prerequisites for %q: %w", name, err)
@@ -52,17 +48,32 @@ func CheckAuditPublisher(ctx context.Context, workRoot string, cfg config.Config
 	return ctx.Err()
 }
 
+func auditPublishingSkill(sources []string) (string, error) {
+	for _, source := range sources {
+		name, _ := skills.Name(source) // Config validation checks skill URLs.
+		if name != "security-audit" {
+			continue
+		}
+		path, installed, err := skills.InstalledPathFor(source, "codex")
+		if err != nil {
+			return "", err
+		}
+		if !installed {
+			return "", errors.New("security-audit skill is not installed")
+		}
+		return path, nil
+	}
+	return "", errors.New("security-audit skill is not configured")
+}
+
 func checkAuditPublisherSkill(ctx context.Context, workRoot, skill string) (resultErr error) {
 	dir, err := os.MkdirTemp(workRoot, ".minion-audit-preflight-")
 	if err != nil {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(dir)) }()
-	tools, err := checkAuditTools(ctx, dir, skill)
-	if err != nil {
-		return err
-	}
-	return checkAuditCoverageModule(ctx, dir, skill, tools)
+	_, err = checkAuditTools(ctx, dir, skill)
+	return err
 }
 
 func auditValidationTempPattern(attemptID string) string {
@@ -78,13 +89,9 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	if runtime.GOOS == "windows" {
 		return fmt.Errorf("%w: audit validators require POSIX file-open protections", errAuditPublicationUnavailable)
 	}
-	configured := e.Runner
-	if err := configured.ConfigureRole(job.Main); err != nil {
+	skill, err := auditPublishingSkill(job.Main.Skills)
+	if err != nil {
 		return fmt.Errorf("%w: resolve audit skill: %w", errAuditPublicationUnavailable, err)
-	}
-	skill := configured.Codex.SecurityAuditSkill()
-	if skill == "" {
-		return fmt.Errorf("%w: publishing host has no installed security-audit skill", errAuditPublicationUnavailable)
 	}
 	root, err := workspace.CanonicalPath(e.WorkRoot)
 	if err != nil {
@@ -118,7 +125,7 @@ func (e *Orchestrator) validateAuditForPublication(ctx context.Context, job Job,
 	return nil
 }
 
-func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, tools auditTools) error {
+func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, tools auditTools) (resultErr error) {
 	scripts, findingsSchema, err := checkAuditValidatorScripts(skill)
 	if err != nil {
 		return err
@@ -130,45 +137,32 @@ func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, to
 			return fmt.Errorf("check audit validator %q syntax: %w", script, err)
 		}
 	}
-	if findingsSchema {
-		probe := filepath.Join(dir, "schema-probe.json")
-		if err := os.WriteFile(probe, []byte("[]"), 0600); err != nil {
-			return err
-		}
-		cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
-			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+dir,
-			scripts[0], probe, "--source-only")
-		checkErr := executil.Run(cmd)
-		removeErr := os.Remove(probe)
-		if checkErr != nil {
-			return errors.Join(fmt.Errorf("check audit findings schema: %w", checkErr), removeErr)
-		}
-		if removeErr != nil {
-			return fmt.Errorf("remove audit schema probe: %w", removeErr)
-		}
-	}
-	return nil
-}
-
-func checkAuditCoverageModule(ctx context.Context, dir, skill string, tools auditTools) error {
-	probe := filepath.Join(dir, "coverage-probe.json")
+	probe := filepath.Join(dir, "validator-probe.json")
 	if err := os.WriteFile(probe, []byte("[]"), 0600); err != nil {
 		return err
 	}
-	cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
-		"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+dir,
-		filepath.Join(filepath.Dir(skill), auditValidators[1].script), probe)
-	var diagnostic bounded.Tail
-	cmd.Stderr = &diagnostic
-	checkErr := executil.Run(cmd)
-	removeErr := os.Remove(probe)
-	if cause := ctx.Err(); cause != nil {
-		return errors.Join(cause, removeErr)
+	defer func() { resultErr = errors.Join(resultErr, os.Remove(probe)) }()
+	for _, validator := range auditValidators {
+		cmd := auditNodeCommand(ctx, dir, tools.binary, tools.permissionFlag,
+			"--allow-fs-read="+filepath.Dir(skill), "--allow-fs-read="+dir,
+			filepath.Join(filepath.Dir(skill), validator.script), probe)
+		if validator.artifact == "findings.json" {
+			cmd.Args = append(cmd.Args, "--source-only")
+		}
+		var diagnostic bounded.Tail
+		cmd.Stderr = &diagnostic
+		checkErr := executil.Run(cmd)
+		if cause := ctx.Err(); cause != nil {
+			return cause
+		}
+		if checkErr != nil && (strings.Contains(diagnostic.String(), "MODULE_NOT_FOUND") || strings.Contains(diagnostic.String(), "code: 'ENOENT'")) {
+			return fmt.Errorf("check audit %s dependencies: %w", validator.script, checkErr)
+		}
+		if checkErr != nil && validator.artifact == "findings.json" && findingsSchema {
+			return fmt.Errorf("check audit findings schema: %w", checkErr)
+		}
 	}
-	if checkErr != nil && (strings.Contains(diagnostic.String(), "MODULE_NOT_FOUND") || strings.Contains(diagnostic.String(), "code: 'ENOENT'")) {
-		return errors.Join(fmt.Errorf("check audit coverage validator dependencies: %w", checkErr), removeErr)
-	}
-	return removeErr
+	return nil
 }
 
 func auditValidationUnavailable(err error) bool {
