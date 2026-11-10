@@ -320,6 +320,10 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		} else if !authenticateGitHub() {
 			return 1
 		}
+		logCommandSkills(cfg, logger)
+		if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+			logger.Print(claudeUnixSocketWarning)
+		}
 		logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
 		return 0
 	}

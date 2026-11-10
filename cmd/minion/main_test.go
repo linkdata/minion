@@ -204,7 +204,7 @@ func TestCheckWithoutRepositoriesSkipsUnavailableGitHubAndState(t *testing.T) {
 	})
 	t.Cleanup(func() { http.DefaultTransport = previousTransport })
 	cfg := config.Config{
-		StatePath: statePath, WorkRoot: t.TempDir(),
+		BotLogin: "bot", StatePath: statePath, WorkRoot: t.TempDir(),
 		Admin:    &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
 		Codex:    config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
