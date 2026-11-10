@@ -114,6 +114,8 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 		"https://github.com/owner/new?tab=readme",
 		"https://github.com/owner/new#readme",
 		"https://github.com/owner/%6eew",
+		"https://github.com/K/new",
+		"https://githuK.com/owner/new",
 	} {
 		post("/admin/repositories/add", url.Values{"url": {invalidURL}, "actions": {"review"}}, http.StatusConflict)
 	}

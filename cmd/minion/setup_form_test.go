@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -130,6 +131,15 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		!strings.Contains(response.Body.String(), "Enter a GitHub bot token") {
 		t.Fatalf("missing setup token status=%d body=%q", response.Code, response.Body.String())
 	}
+	invalidToken := credentials.Clone()
+	invalidToken.Set("github_token", "bad secret token")
+	if response := adminResponse(handler, http.MethodPost, "/admin/setup", invalidToken, cookie, ""); response.Code != http.StatusConflict ||
+		strings.Contains(response.Body.String(), "bad secret token") {
+		t.Fatalf("invalid setup token status=%d echoed=%t", response.Code, strings.Contains(response.Body.String(), "bad secret token"))
+	}
+	if unchanged, err := config.Load(path); err != nil || unchanged.BotLogin != "" || unchanged.GitHub.Token != "" {
+		t.Fatalf("invalid setup token changed credentials: bot=%q tokenSet=%t error=%v", unchanged.BotLogin, unchanged.GitHub.Token != "", err)
+	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/setup", credentials, cookie, ""); response.Code != http.StatusSeeOther || calls != 0 {
 		t.Fatalf("offline credential save status=%d GitHub calls=%d", response.Code, calls)
 	}
@@ -143,6 +153,16 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		strings.Contains(home.Body.String(), "secret-token") || strings.Contains(home.Body.String(), `name="repository_id"`) {
 		t.Fatalf("repository setup form status=%d body=%q", home.Code, home.Body.String())
 	}
+	blankToken := credentials.Clone()
+	blankToken.Set("version", setupFormVersion(t, home.Body.String()))
+	blankToken.Set("github_token", "")
+	if response := adminResponse(handler, http.MethodPost, "/admin/setup", blankToken, cookie, ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("blank token update status=%d body=%q", response.Code, response.Body.String())
+	}
+	if saved, err := config.Load(path); err != nil || saved.GitHub.Token != "secret-token" {
+		t.Fatalf("blank token update changed saved token: set=%t error=%v", saved.GitHub.Token != "", err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	add := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://github.com/Example/Repo"}}
 	if denied := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, nil, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("anonymous repository add status=%d", denied.Code)
@@ -157,6 +177,16 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatal(err)
+	}
+	staleCredentials := credentials.Clone()
+	staleCredentials.Set("version", add.Get("version"))
+	staleCredentials.Set("github_token", "replacement-token")
+	if response := adminResponse(handler, http.MethodPost, "/admin/setup", staleCredentials, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "configuration changed; reload") {
+		t.Fatalf("stale credentials status=%d body=%q", response.Code, response.Body.String())
+	}
+	if saved, err := config.Load(path); err != nil || saved.GitHub.Token != "secret-token" {
+		t.Fatalf("stale credentials replaced saved token: set=%t error=%v", saved.GitHub.Token != "", err)
 	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusConflict ||
 		!strings.Contains(response.Body.String(), "configuration changed; reload") || calls != 0 {
@@ -174,15 +204,17 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		len(cfg.Repositories[0].Actions) != 1 || cfg.Repositories[0].Actions[0] != "review" {
 		t.Fatalf("added repository: repositories=%+v error=%v", cfg.Repositories, err)
 	}
-	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusConflict {
-		t.Fatalf("duplicate repository status=%d", response.Code)
-	}
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "example/repo") ||
 		!strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) {
 		t.Fatalf("completed setup no longer supports adding repositories: %s", home.Body.String())
 	}
 	add.Set("version", setupFormVersion(t, home.Body.String()))
+	beforeDuplicate := calls
+	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "Repository is already configured") || calls != beforeDuplicate {
+		t.Fatalf("duplicate repository status=%d body=%q GitHub calls=%d", response.Code, response.Body.String(), calls-beforeDuplicate)
+	}
 	add.Set("url", "https://github.com/Example/Other")
 	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusSeeOther {
 		t.Fatalf("second repository add status=%d body=%q", response.Code, response.Body.String())
@@ -197,27 +229,30 @@ func TestSetupRepositoryActions(t *testing.T) {
 	for _, tc := range []struct {
 		name, main string
 		commands   map[string]config.CommandMapping
-		want       string
+		want       []string
 		wantError  bool
 	}{
-		{name: "defaults", want: "review"},
-		{name: "no commands", commands: map[string]config.CommandMapping{}},
+		{name: "no commands", commands: map[string]config.CommandMapping{}, wantError: true},
+		{name: "review preferred", commands: map[string]config.CommandMapping{
+			"review": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
+			"alpha":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
+		}, want: []string{"review"}},
 		{name: "custom commands", commands: map[string]config.CommandMapping{
 			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
 			"alpha": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
-		}, want: "alpha"},
+		}, want: []string{"alpha"}},
 		{name: "unsupported command", main: "claude", commands: map[string]config.CommandMapping{
 			"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 			"zeta":  {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}},
-		}, want: "zeta"},
+		}, want: []string{"zeta"}},
 		{name: "only unsupported command", main: "claude", commands: map[string]config.CommandMapping{
 			"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},
 		}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			actions, err := setupRepositoryActions(config.Config{Main: tc.main, Commands: tc.commands})
-			if (err != nil) != tc.wantError || strings.Join(actions, ",") != tc.want {
-				t.Fatalf("actions=%v error=%v, want %q error=%t", actions, err, tc.want, tc.wantError)
+			if (err != nil) != tc.wantError || !slices.Equal(actions, tc.want) {
+				t.Fatalf("actions=%v error=%v, want %v error=%t", actions, err, tc.want, tc.wantError)
 			}
 		})
 	}

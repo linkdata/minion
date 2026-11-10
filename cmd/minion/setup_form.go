@@ -51,9 +51,6 @@ func (a *adminAccess) setupPost() http.Handler {
 }
 
 func setupRepositoryActions(cfg config.Config) ([]string, error) {
-	if cfg.Commands == nil {
-		return []string{"review"}, nil
-	}
 	if mapping, ok := cfg.Commands["review"]; ok && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() {
 		return []string{"review"}, nil
 	}
@@ -63,10 +60,7 @@ func setupRepositoryActions(cfg config.Config) ([]string, error) {
 			return []string{name}, nil
 		}
 	}
-	if len(cfg.Commands) > 0 {
-		return nil, errors.New("No configured command can run with the selected main AI on this host")
-	}
-	return nil, nil
+	return nil, errors.New("Add an available command in Advanced config before adding a repository")
 }
 
 func (a *adminAccess) setupRepositoryPost() http.Handler {

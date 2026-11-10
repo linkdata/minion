@@ -64,7 +64,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
 <button class="btn btn-primary" type="submit">Save bot credentials</button></form>
 <p class="mt-3"><a href="/admin/config">Advanced config and GitHub auth test</a></p>
-{{if and .Dot.BotLogin .Dot.TokenSet}}
+{{if and .Dot.BotLogin .Dot.TokenSet .Dot.CanAddRepository}}
 <h2 class="h5 mt-4">Add repository</h2>
 {{if .Dot.Repositories}}<p>Configured repositories: {{range $i, $name := .Dot.Repositories}}{{if $i}}, {{end}}<code>{{$name}}</code>{{end}}</p>{{end}}
 <form method="post" action="/admin/repositories/add" class="vstack gap-3 col-lg-6">
@@ -77,9 +77,9 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 </main>{{$.TailHTML}}</body></html>`))
 
 type adminHomeView struct {
-	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete, TokenSet bool
-	BotLogin, Version                                                    string
-	Repositories                                                         []string
+	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete, TokenSet, CanAddRepository bool
+	BotLogin, Version                                                                      string
+	Repositories                                                                           []string
 }
 type adminLoginView struct{ SignedIn, PasswordSet bool }
 
@@ -424,6 +424,8 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 			view.BotLogin = cfg.BotLogin
 			view.TokenSet = cfg.GitHub.Token != ""
 			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true)
+			_, addErr := setupRepositoryActions(cfg)
+			view.CanAddRepository = addErr == nil
 			view.Version = version
 			for _, repo := range cfg.Repositories {
 				view.Repositories = append(view.Repositories, repo.Name)
