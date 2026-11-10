@@ -230,11 +230,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0 ||
 			cfg.RemoteExecutor == nil && !hasRunnableLocalCommand(cfg) ||
 			cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true))
-	if setupIncomplete {
-		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
-	}
 	_, stateErr := os.Stat(cfg.StatePath)
 	freshState := errors.Is(stateErr, os.ErrNotExist)
+	if setupIncomplete && (stateErr != nil || cfg.BotLogin == "" || cfg.GitHub.Token == "") {
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
 	checkWorkRoot := func() error {
 		return checkWorkRootPath(cfg.WorkRoot)
 	}
@@ -354,6 +354,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Printf("close state: %v", err)
 		}
 	}()
+	if setupIncomplete && !terminalRecoveryPendingAt(store, now()) {
+		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
+	}
 	logCommandSkills(cfg, logger)
 	if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
 		logger.Print(claudeUnixSocketWarning)
@@ -432,6 +435,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		}
 		if code != 0 || *oneshot || ctx.Err() != nil {
 			return code
+		}
+		if setupIncomplete {
+			return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 		}
 		cfg = watcher.Config
 		if !preflight() {

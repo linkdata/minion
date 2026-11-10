@@ -25,6 +25,7 @@ const SUPPORTED_KEYWORDS = new Set([
   "minimum",
   "minItems",
   "minLength",
+  "maxLength",
   "oneOf",
   "pattern",
   "properties",
@@ -298,7 +299,7 @@ function collectSchemaErrors(schema, location = "schema") {
       }
     }
     if (hasOwn(node, "items")) check(node.items, `${p}.items`);
-    for (const keyword of ["minItems", "minLength"]) {
+    for (const keyword of ["minItems", "minLength", "maxLength"]) {
       if (hasOwn(node, keyword) && (!Number.isInteger(node[keyword]) || node[keyword] < 0)) {
         errors.push(`${p}.${keyword}: expected a non-negative integer`);
       }
@@ -433,6 +434,9 @@ function validate(value, schema, p, errors) {
   if (typeof value === "string") {
     if (hasOwn(schema, "minLength") && codePointLength(value) < schema.minLength) {
       errors.push(`${p}: must have at least ${schema.minLength} character(s)`);
+    }
+    if (hasOwn(schema, "maxLength") && codePointLength(value) > schema.maxLength) {
+      errors.push(`${p}: must have at most ${schema.maxLength} character(s)`);
     }
     if (schema.visibleContent === true) {
       if (!hasValidUnicodeScalarValues(value)) {

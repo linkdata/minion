@@ -590,7 +590,7 @@ func TestAdminGuestSessionLimit(t *testing.T) {
 	}
 }
 
-func TestHomeReservesSessionsForSignIn(t *testing.T) {
+func TestHomeReservesSessionsForAdminSignIn(t *testing.T) {
 	handler, jw, _ := testOAuthAdminHandler(t, config.AdminConfig{
 		Administrators: []config.AdminAccount{testAdminAccount()},
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
@@ -605,19 +605,21 @@ func TestHomeReservesSessionsForSignIn(t *testing.T) {
 	if home.Code != http.StatusOK || len(home.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestPageSessions {
 		t.Fatalf("home admission: status=%d sessions=%d cookies=%v", home.Code, jw.SessionCount(), home.Result().Cookies())
 	}
-	if login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); login.Code != http.StatusServiceUnavailable || login.Header().Get("Retry-After") != "60" ||
-		len(login.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestPageSessions {
-		t.Fatalf("admin page exhausted OAuth sign-in reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
+	page := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
+	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("fresh admin sign-in page at OAuth guest cap: status=%d sessions=%d cookies=%v", page.Code, jw.SessionCount(), page.Result().Cookies())
 	}
-	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, home.Result().Cookies()[0], ""); start.Code != http.StatusFound {
-		t.Fatalf("last home page cannot start OAuth: status=%d", start.Code)
+	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{"password": {"correct-password"}},
+		page.Result().Cookies()[0], "https://admin.example")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("admin sign-in at OAuth guest cap: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
 	}
-	if start := adminResponse(handler, http.MethodGet, "/auth/github/login", nil, nil, ""); start.Code != http.StatusFound || jw.SessionCount() != maxGuestAdmissionSessions {
-		t.Fatalf("new OAuth sign-in after denied admin page: status=%d sessions=%d", start.Code, jw.SessionCount())
+	if dashboard := adminResponse(handler, http.MethodGet, "/", nil, login.Result().Cookies()[0], ""); dashboard.Code != http.StatusOK {
+		t.Fatalf("new admin cookie cannot open dashboard: status=%d", dashboard.Code)
 	}
 	response := adminResponse(handler, http.MethodGet, "/", nil, nil, "")
 	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "60" || len(response.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
-		t.Fatalf("home exhausted sign-in reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
+		t.Fatalf("home exhausted guest reserve: status=%d sessions=%d cookies=%v", response.Code, jw.SessionCount(), response.Result().Cookies())
 	}
 }
 

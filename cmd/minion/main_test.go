@@ -403,13 +403,15 @@ func TestPreflightFailurePrunesExpiredPrivateRecords(t *testing.T) {
 
 func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 	for _, mode := range []struct {
-		name          string
-		args          []string
-		wantCode      int
-		wantRecovered bool
+		name            string
+		args            []string
+		wantCode        int
+		wantRecovered   bool
+		incompleteSetup bool
 	}{
 		{name: "oneshot", args: []string{"-mode=orchestrate", "-oneshot"}, wantRecovered: true},
 		{name: "service", args: []string{"-mode=orchestrate"}, wantCode: 1, wantRecovered: true},
+		{name: "service with missing sole skill", args: []string{"-mode=orchestrate"}, wantCode: 1, wantRecovered: true, incompleteSetup: true},
 		{name: "check", args: []string{"-mode=orchestrate", "-check"}, wantCode: 1},
 	} {
 		t.Run(mode.name, func(t *testing.T) {
@@ -445,25 +447,48 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 			}
 			previousTransport := http.DefaultTransport
 			http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
-				if request.Method != http.MethodGet || request.URL.Path != "/user" {
+				key := request.Method + " " + request.URL.Path
+				if !mode.incompleteSetup && key != "GET /user" {
 					t.Errorf("terminal discard made unexpected GitHub request: %s %s", request.Method, request.URL)
 				}
 				recorder := httptest.NewRecorder()
 				recorder.Header().Set("Content-Type", "application/json")
-				_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+				switch key {
+				case "GET /user":
+					_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+				case "GET /repos/owner/repo/issues/7/comments":
+					_, _ = recorder.WriteString(`[]`)
+				case "POST /graphql":
+					_, _ = recorder.WriteString(`{"data":{"node":{"body":"@bot comment","author":{"id":7,"login":"writer"}}}}`)
+				case "GET /repos/owner/repo":
+					_, _ = recorder.WriteString(`{"id":1,"full_name":"owner/repo","default_branch":"main","owner":{"id":2}}`)
+				case "GET /repos/owner/repo/collaborators/writer/permission":
+					_, _ = recorder.WriteString(`{"permission":"write","user":{"id":7,"login":"writer"}}`)
+				case "POST /repos/owner/repo/issues/7/comments":
+					recorder.WriteHeader(http.StatusCreated)
+					_, _ = recorder.WriteString(`{"id":42}`)
+				default:
+					t.Errorf("unexpected GitHub request: %s", key)
+				}
 				return recorder.Result(), nil
 			})
 			t.Cleanup(func() { http.DefaultTransport = previousTransport })
 			cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "offline-token"}, StatePath: statePath, WorkRoot: badWorkRoot,
 				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+			if mode.incompleteSetup {
+				cfg.Admin = &config.AdminConfig{Listen: occupiedAdminAddress(t), Administrators: []config.AdminAccount{testAdminAccount()}}
+				cfg.Commands["comment"] = config.CommandMapping{Action: "comment", Skills: []string{"https://github.com/example/skills/tree/main/skills/not-installed"}}
+				cfg.Repositories[0].Actions = []string{"comment"}
+			}
 			code, output := runStartupFixtureWithRun(t, cfg, func() int {
 				return runWithGitCheck(func(context.Context, string) error {
 					t.Error("terminal recovery reached Git preflight")
 					return errors.New("unexpected Git preflight")
 				})
 			}, mode.args...)
-			if code != mode.wantCode || strings.Contains(output, "work root:") != (mode.name != "oneshot") || strings.Contains(output, "AI preflight:") || strings.Contains(output, "Git preflight:") {
+			if code != mode.wantCode || strings.Contains(output, "work root:") != (mode.name != "oneshot" && !mode.incompleteSetup) || strings.Contains(output, "AI preflight:") || strings.Contains(output, "Git preflight:") ||
+				mode.incompleteSetup && !strings.Contains(output, "setup UI:") {
 				t.Fatalf("terminal discard was blocked by new-work preflight: exit=%d log=%q", code, output)
 			}
 			assertNoStartupCommands(t, markers)

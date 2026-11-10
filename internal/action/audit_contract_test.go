@@ -110,6 +110,28 @@ func TestBundledAuditValidatorRejectsUnsafeLineNumbers(t *testing.T) {
 	}
 }
 
+func TestBundledAuditValidatorFingerprintLength(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("audit validator requires node")
+	}
+	script := filepath.Join("..", "skills", "bundled", "security-audit", "validate-findings.cjs")
+	for _, size := range []int{4096, 4097} {
+		findings := strings.Replace(auditConfirmedFindingFixture, `"fingerprint":"F"`, `"fingerprint":"`+strings.Repeat("F", size)+`"`, 1)
+		file := filepath.Join(t.TempDir(), "findings.json")
+		if err := os.WriteFile(file, []byte(findings), 0600); err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.CommandContext(t.Context(), node, script, file).CombinedOutput()
+		if size == 4096 && err != nil || size == 4097 && (err == nil || !strings.Contains(string(output), "at most 4096")) {
+			t.Fatalf("fingerprint length %d: validator error = %v; output = %s", size, err, output)
+		}
+	}
+}
+
 func TestBundledAuditValidatorSourceOnlyMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("bundled audit validators require OS no-follow and nonblocking file flags")

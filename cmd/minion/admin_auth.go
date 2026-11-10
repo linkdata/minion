@@ -63,7 +63,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 <label class="form-label">First repository (owner/name)<input class="form-control" name="repository" value="{{.Dot.Repository}}" maxlength="201" required></label>
 <label class="form-label">Repository ID<input class="form-control" name="repository_id" type="number" min="1" step="1" value="{{if .Dot.RepositoryID}}{{.Dot.RepositoryID}}{{end}}" required></label>
 <label class="form-label">Owner ID<input class="form-control" name="owner_id" type="number" min="1" step="1" value="{{if .Dot.OwnerID}}{{.Dot.OwnerID}}{{end}}" required></label>
-<p class="text-body-secondary">The first repository starts with one configured command, if any, and no allowed requesters. Add requesters in the admin UI after restarting.</p>
+{{if not .Dot.Repository}}<p class="text-body-secondary">The first repository starts with one configured command, if any, and no allowed requesters. Add requesters in the admin UI after restarting.</p>{{end}}
 <button class="btn btn-primary" type="submit">Save setup</button></form>
 {{end}}{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
@@ -167,10 +167,6 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	}
 	jw.MakeAuth = func(rq *jaws.Request) jaws.Auth { return adminIdentity(access.sessionUsername(rq.Session())) }
 	guestMu := new(sync.Mutex)
-	guestLoginLimit := maxGuestPageSessions
-	if access.passwordSet && oauth == nil {
-		guestLoginLimit = maxAdminSessions
-	}
 	if oauth != nil {
 		guestMu = &oauth.admissionMu
 	}
@@ -186,12 +182,6 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
-		guestMu.Lock()
-		defer guestMu.Unlock()
-		if jw.GetSession(r) == nil && jw.SessionCount() >= guestLoginLimit {
-			guestAdmissionUnavailable(w)
-			return
-		}
 		loginPage.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("HEAD /admin/login", headPublicPage)

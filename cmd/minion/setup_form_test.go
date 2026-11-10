@@ -185,6 +185,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Leave blank to keep the saved token") ||
 		!strings.Contains(home.Body.String(), `name="repository_id" type="number" min="1" step="1" value="42"`) ||
 		!strings.Contains(home.Body.String(), `name="owner_id" type="number" min="1" step="1" value="7"`) ||
+		strings.Contains(home.Body.String(), "The first repository starts") ||
 		strings.Contains(home.Body.String(), "new-token") {
 		t.Fatalf("partial setup form status=%d body=%q", home.Code, home.Body.String())
 	}
