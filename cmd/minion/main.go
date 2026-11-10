@@ -319,6 +319,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			logger.Print("GitHub identity not checked: bot_login and github.token are not both set")
 		} else if !authenticateGitHub() {
 			return 1
+		} else {
+			logger.Printf("GitHub identity verified as @%s", user.Login)
 		}
 		logCommandSkills(cfg, logger)
 		if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
