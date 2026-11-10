@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -223,6 +228,81 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestServiceRecoveryServesAdminLogin(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Main: "claude", Adversarial: "claude", BotLogin: "bot",
+		GitHub: config.GitHubConfig{Token: "configured-token"}, Claude: config.ClaudeConfig{Effort: "medium"},
+		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+		Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	var output bytes.Buffer
+	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestServiceRecoveryUIChild$")
+	child.Env = append(os.Environ(), "MINION_RECOVERY_UI_HELPER=1", "MINION_RECOVERY_UI_CONFIG="+path)
+	child.Stdout, child.Stderr = &output, &output
+	if err := child.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	served := false
+	t.Cleanup(func() {
+		cancel()
+		_ = child.Wait()
+		if served && (!strings.Contains(output.String(), "AI preflight:") ||
+			!strings.Contains(output.String(), "starting admin recovery UI") ||
+			strings.Contains(output.String(), "GitHub authentication:")) {
+			t.Errorf("recovery served without AI preflight failure: %s", output.String())
+		}
+		if t.Failed() {
+			t.Logf("recovery child output: %s", output.String())
+		}
+	})
+	transport := &http.Transport{}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+	for ctx.Err() == nil {
+		response, err := client.Get("http://" + address + "/admin/login")
+		if err == nil {
+			body, readErr := io.ReadAll(response.Body)
+			closeErr := response.Body.Close()
+			if readErr != nil || closeErr != nil || response.StatusCode != http.StatusOK ||
+				!strings.Contains(string(body), "Minion admin") || !strings.Contains(string(body), "Sign in") {
+				t.Fatalf("recovery admin login: status=%d body=%q read=%v close=%v", response.StatusCode, body, readErr, closeErr)
+			}
+			served = true
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("recovery UI did not serve the admin login before the deadline")
+}
+
+func TestServiceRecoveryUIChild(t *testing.T) {
+	if os.Getenv("MINION_RECOVERY_UI_HELPER") != "1" {
+		return
+	}
+	flag.CommandLine = flag.NewFlagSet("minion", flag.ContinueOnError)
+	os.Args = []string{"minion", "-config", os.Getenv("MINION_RECOVERY_UI_CONFIG")}
+	os.Exit(runWithGitCheck(func(context.Context, string) error { return errors.New("unexpected Git preflight") }))
 }
 
 func TestRemoteAcceptedAuditWithoutPublisherOpensRecoveryUI(t *testing.T) {
