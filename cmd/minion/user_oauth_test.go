@@ -432,7 +432,17 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret",
 			RedirectURL: "https://admin.example/auth/github/callback"},
 	}
-	handler, jw, _ := testOAuthAdminHandler(t, cfg, nil)
+	client := &http.Client{Transport: oauthRoundTrip(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.String() {
+		case "https://github.com/login/oauth/access_token":
+			return oauthJSON(http.StatusOK, `{"access_token":"proof","token_type":"Bearer","expires_in":3600}`), nil
+		case "https://api.github.com/user":
+			return oauthJSON(http.StatusOK, `{"id":42}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected provider request %s", r.URL)
+		}
+	})}
+	handler, jw, _ := testOAuthAdminHandler(t, cfg, client)
 	admin := adminGuestCookie(t, handler)
 	if home := adminResponse(handler, http.MethodGet, "/", nil, nil, ""); home.Code != http.StatusOK ||
 		!strings.Contains(home.Body.String(), `href="/admin/login"`) ||
@@ -462,6 +472,20 @@ func TestOAuthStartsReserveAdminSessionCapacity(t *testing.T) {
 			(cookie != nil && response.Body.Len() != 0 && !strings.Contains(response.Body.String(), `name="jawsKey"`)) {
 			t.Fatalf("OAuth start at reserve: status=%d cookies=%v body=%q retry=%q", response.Code, response.Result().Cookies(), response.Body.String(), response.Header().Get("Retry-After"))
 		}
+	}
+	if denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); denied.Code != http.StatusServiceUnavailable ||
+		len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("admin guest admission consumed callback reserve: status=%d sessions=%d", denied.Code, jw.SessionCount())
+	}
+	authorizationURL, err := url.Parse(start.Header().Get("Location"))
+	if err != nil || authorizationURL.Query().Get("state") == "" {
+		t.Fatalf("last OAuth authorization URL: %q, %v", start.Header().Get("Location"), err)
+	}
+	callback := adminResponse(handler, http.MethodGet, "/auth/github/callback?code=proof&state="+url.QueryEscape(authorizationURL.Query().Get("state")), nil,
+		start.Result().Cookies()[0], "")
+	if callback.Code != http.StatusFound || len(callback.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("pending OAuth callback at admission cap: status=%d cookies=%v sessions=%d body=%q",
+			callback.Code, callback.Result().Cookies(), jw.SessionCount(), callback.Body.String())
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
 		"password": {"correct-password"},
@@ -529,14 +553,9 @@ func TestConcurrentGuestPagesReserveAdminSessions(t *testing.T) {
 		t.Fatalf("home after guest burst: status=%d location=%q sessions=%d", home.Code, home.Header().Get("Location"), jw.SessionCount())
 	}
 	page := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
-	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions+1 {
-		t.Fatalf("fresh admin page after guest burst: status=%d sessions=%d cookies=%v", page.Code, jw.SessionCount(), page.Result().Cookies())
-	}
-	freshLogin := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
-		"password": {"correct-password"},
-	}, page.Result().Cookies()[0], "")
-	if freshLogin.Code != http.StatusSeeOther || len(freshLogin.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions+1 {
-		t.Fatalf("fresh admin guest cannot sign in after burst: status=%d sessions=%d", freshLogin.Code, jw.SessionCount())
+	if page.Code != http.StatusServiceUnavailable || page.Header().Get("Retry-After") != "60" ||
+		len(page.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("fresh admin page used OAuth callback reserve after guest burst: status=%d sessions=%d cookies=%v", page.Code, jw.SessionCount(), page.Result().Cookies())
 	}
 	if login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
 		"password": {"correct-password"},
@@ -581,6 +600,10 @@ func TestOAuthLoginPageReservesAdminSessionCapacity(t *testing.T) {
 	}
 	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("new admin page at guest limit: status=%d cookies=%v sessions=%d", page.Code, page.Result().Cookies(), jw.SessionCount())
+	}
+	if denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); denied.Code != http.StatusServiceUnavailable ||
+		denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("new admin page at callback reserve: status=%d cookies=%v sessions=%d", denied.Code, denied.Result().Cookies(), jw.SessionCount())
 	}
 	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, guest, ""); page.Code != http.StatusOK || len(page.Result().Cookies()) != 0 {
 		t.Fatalf("existing guest admin page at guest limit: status=%d cookies=%v", page.Code, page.Result().Cookies())

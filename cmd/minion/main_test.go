@@ -445,6 +445,7 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
 			}
+			postedReplies := 0
 			previousTransport := http.DefaultTransport
 			http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
 				key := request.Method + " " + request.URL.Path
@@ -465,6 +466,7 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 				case "GET /repos/owner/repo/collaborators/writer/permission":
 					_, _ = recorder.WriteString(`{"permission":"write","user":{"id":7,"login":"writer"}}`)
 				case "POST /repos/owner/repo/issues/7/comments":
+					postedReplies++
 					recorder.WriteHeader(http.StatusCreated)
 					_, _ = recorder.WriteString(`{"id":42}`)
 				default:
@@ -499,6 +501,9 @@ func TestTerminalRecoveryBypassesNewWorkPreflight(t *testing.T) {
 			defer store.Close()
 			if recovered := store.Data.Accepted == nil && !store.Data.Processed[accepted.JobID].IsZero() && len(store.Data.JobFailures) == 0; recovered != mode.wantRecovered {
 				t.Fatalf("terminal acceptance recovery = %t, want %t: %+v", recovered, mode.wantRecovered, store.Data)
+			}
+			if mode.incompleteSetup && postedReplies != 1 {
+				t.Fatalf("missing-skill recovery posted %d failure replies, want 1", postedReplies)
 			}
 			if mode.name == "check" && (store.Data.Accepted == nil || store.Data.Accepted.AttemptID != accepted.AttemptID || store.Data.JobFailures[accepted.JobID].Attempts != 1) {
 				t.Fatalf("-check changed accepted action: %+v", store.Data)

@@ -609,6 +609,10 @@ func TestHomeReservesSessionsForAdminSignIn(t *testing.T) {
 	if page.Code != http.StatusOK || len(page.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("fresh admin sign-in page at OAuth guest cap: status=%d sessions=%d cookies=%v", page.Code, jw.SessionCount(), page.Result().Cookies())
 	}
+	if denied := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); denied.Code != http.StatusServiceUnavailable ||
+		denied.Header().Get("Retry-After") != "60" || len(denied.Result().Cookies()) != 0 || jw.SessionCount() != maxGuestAdmissionSessions {
+		t.Fatalf("new admin page at OAuth callback reserve: status=%d sessions=%d cookies=%v", denied.Code, jw.SessionCount(), denied.Result().Cookies())
+	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{"password": {"correct-password"}},
 		page.Result().Cookies()[0], "https://admin.example")
 	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
@@ -697,6 +701,10 @@ func TestHomeWithoutOAuthReservesSessionsForAdminSignIn(t *testing.T) {
 	login := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, "")
 	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions {
 		t.Fatalf("admin sign-in at home reserve: status=%d sessions=%d cookies=%v", login.Code, jw.SessionCount(), login.Result().Cookies())
+	}
+	if next := adminResponse(handler, http.MethodGet, "/admin/login", nil, nil, ""); next.Code != http.StatusOK ||
+		len(next.Result().Cookies()) != 1 || jw.SessionCount() != maxGuestAdmissionSessions+1 {
+		t.Fatalf("admin sign-in without OAuth above callback reserve: status=%d sessions=%d cookies=%v", next.Code, jw.SessionCount(), next.Result().Cookies())
 	}
 }
 

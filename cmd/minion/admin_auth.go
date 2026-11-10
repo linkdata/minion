@@ -182,6 +182,12 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
 		closeUnreadAdminBody(w, r)
+		guestMu.Lock()
+		defer guestMu.Unlock()
+		if oauth != nil && jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions {
+			guestAdmissionUnavailable(w)
+			return
+		}
 		loginPage.ServeHTTP(w, r)
 	})
 	mux.HandleFunc("HEAD /admin/login", headPublicPage)
