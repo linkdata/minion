@@ -114,6 +114,10 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	if loginPage.Code != http.StatusOK || len(loginPage.Result().Cookies()) != 1 {
 		t.Fatalf("setup login page status=%d cookies=%v", loginPage.Code, loginPage.Result().Cookies())
 	}
+	if page := adminResponse(handler, http.MethodGet, "/", nil, loginPage.Result().Cookies()[0], ""); page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), "Sign in as admin to finish setup") {
+		t.Fatalf("signed-out setup home status=%d body=%q", page.Code, page.Body.String())
+	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
 		"password": {"correct-password"},
 	}, loginPage.Result().Cookies()[0], "")
@@ -121,6 +125,10 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		t.Fatalf("setup login status=%d cookies=%v", login.Code, login.Result().Cookies())
 	}
 	cookie := login.Result().Cookies()[0]
+	if page := adminResponse(handler, http.MethodGet, "/admin/login", nil, cookie, ""); page.Code != http.StatusOK ||
+		!strings.Contains(page.Body.String(), "Continue to Minion") {
+		t.Fatalf("signed-in setup login page status=%d body=%q", page.Code, page.Body.String())
+	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Save bot credentials") ||
 		!strings.Contains(home.Body.String(), "Advanced config and GitHub auth test") ||
@@ -164,7 +172,8 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
-	if home.Code != http.StatusOK || strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) {
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Add a command in Advanced config") ||
+		strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) {
 		t.Fatalf("setup offered Add repository with no command: status=%d body=%q", home.Code, home.Body.String())
 	}
 	withoutCommand := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://github.com/Example/Repo"}}
@@ -250,6 +259,9 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	}
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "example/repo") ||
+		!strings.Contains(home.Body.String(), "For each selected AI, set its API key") ||
+		!strings.Contains(home.Body.String(), "sign in to its CLI on the executor host") ||
+		!strings.Contains(home.Body.String(), "install skills as its service account") ||
 		!strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) {
 		t.Fatalf("completed setup no longer supports adding repositories: %s", home.Body.String())
 	}
