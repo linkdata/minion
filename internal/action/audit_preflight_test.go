@@ -69,8 +69,12 @@ func TestAuditPublisherCancelsHungNode(t *testing.T) {
 	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
+	started := time.Now()
 	if err := CheckAuditPublisher(ctx, root, cfg); err == nil {
 		t.Fatal("hung node passed publisher preflight")
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("hung node ignored cancellation for %s", elapsed)
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("node was not started: %v", err)
