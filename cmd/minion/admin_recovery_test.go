@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 )
 
@@ -65,8 +66,8 @@ func TestServiceRecoversTerminalDecisionBeforeAdminTLSFailure(t *testing.T) {
 		Admin: &config.AdminConfig{Listen: "127.0.0.1:8377",
 			TLSCertFile: filepath.Join(root, "missing-cert.pem"), TLSKeyFile: filepath.Join(root, "missing-key.pem"),
 			Administrators: []config.AdminAccount{{Username: "admin"}}},
-		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}},
 	}
 	gitChecks := 0
 	code, output := runStartupFixtureWithRun(t, cfg, func() int {

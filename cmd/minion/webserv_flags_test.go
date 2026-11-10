@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
 )
 
 func TestAdminWebservConfigUsesCLIOverrides(t *testing.T) {
@@ -255,8 +256,8 @@ func TestWebservCertificateAllowsProxyOrigin(t *testing.T) {
 
 func TestWebservFlagsAcceptedForServiceAndCheck(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"}, Main: "codex", Admin: &config.AdminConfig{Listen: "0.0.0.0:8443", Administrators: []config.AdminAccount{{Username: "admin"}}},
-		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
 		StatePath:    filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir()}
 	certDir := t.TempDir() // Git preflight stops before certificate file checks.
 	for _, args := range [][]string{

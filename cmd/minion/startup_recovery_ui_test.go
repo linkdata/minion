@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/config"
+	"github.com/linkdata/minion/internal/skills"
 	"github.com/linkdata/minion/internal/state"
 )
 
@@ -95,6 +96,51 @@ func TestSetupPreservesPendingDurableWork(t *testing.T) {
 	}
 }
 
+func TestConfiguredSetupWithoutRunnableCommandStaysAvailable(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	address := occupiedAdminAddress(t)
+	for _, test := range []struct {
+		name, skill string
+		remote      bool
+	}{
+		{name: "local no commands"},
+		{name: "local skill not installed", skill: "https://github.com/DietrichGebert/ponytail/tree/main/skills/ponytail"},
+		{name: "remote no commands", remote: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			statePath := filepath.Join(t.TempDir(), "state.json")
+			cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+				StatePath: statePath, WorkRoot: t.TempDir(),
+				Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
+				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+			if test.skill != "" {
+				cfg.Commands["review"] = config.CommandMapping{Action: "review", Skills: []string{test.skill}}
+				cfg.Repositories[0].Actions = []string{"review"}
+			}
+			if test.remote {
+				certFile, keyFile, _ := remoteTestTLSFiles(t)
+				cfg.Codex = config.CodexConfig{Model: "fixture-model", ReasoningEffort: "medium"}
+				cfg.RemoteExecutor = &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
+					TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)}
+			}
+			code, output := runStartupFixtureWithRun(t, cfg, func() int {
+				return runWithGitCheck(func(context.Context, string) error {
+					t.Fatal("incomplete setup reached Git preflight")
+					return nil
+				})
+			})
+			if code != 1 || !strings.Contains(output, "setup UI:") ||
+				strings.Contains(output, "AI preflight:") || strings.Contains(output, "starting admin recovery UI") {
+				t.Fatalf("setup without runnable command: code=%d log=%q", code, output)
+			}
+			if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("setup started state or worker: %v", err)
+			}
+		})
+	}
+}
+
 func TestOneShotRejectsEmptyRepositoriesBeforePreflight(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	statePath := filepath.Join(t.TempDir(), "state.json")
@@ -132,8 +178,8 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 				GitHub: config.GitHubConfig{Token: "configured-token"}, Claude: config.ClaudeConfig{Effort: "medium"},
 				StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
 				Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
-				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+				Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 			if tc.pendingAccepted {
 				store, err := state.Open(cfg.StatePath, time.Now().UTC())
 				if err != nil {
@@ -219,8 +265,8 @@ func TestServiceOffersRecoveryUIAfterLocalPreflightFailure(t *testing.T) {
 					cfg := config.Config{Main: "codex", BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
 						StatePath: statePath, WorkRoot: workRoot,
 						Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{account}},
-						Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-						Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+						Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+						Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}}
 					gitChecks := 0
 					code, output := runStartupFixtureWithRun(t, cfg, func() int {
 						return runWithGitCheck(func(context.Context, string) error {
@@ -303,8 +349,8 @@ func TestServiceOffersRecoveryUIAfterGitHubAuthenticationFailure(t *testing.T) {
 				Admin: &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
 				RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
 					TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
-				Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
-				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+				Commands: map[string]config.CommandMapping{"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}}}, AlwaysOnSkills: []string{},
+				Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"comment"}}}}
 			if tc.pendingWrite {
 				store, err := state.Open(cfg.StatePath, time.Now().UTC())
 				if err != nil {

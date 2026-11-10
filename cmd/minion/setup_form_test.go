@@ -68,7 +68,7 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 		t.Fatalf("setup login page status=%d cookies=%v", loginPage.Code, loginPage.Result().Cookies())
 	}
 	if home := adminResponse(handler, http.MethodGet, "/", nil, loginPage.Result().Cookies()[0], ""); home.Code != http.StatusOK ||
-		!strings.Contains(home.Body.String(), "Sign in as admin to save the bot account and first repository") {
+		!strings.Contains(home.Body.String(), "Sign in as admin to finish setup") {
 		t.Fatalf("signed-out setup home status=%d body=%q", home.Code, home.Body.String())
 	}
 	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{
@@ -271,6 +271,13 @@ func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 			}
 			if got := strings.Join(cfg.Repositories[0].Actions, ","); got != tc.want {
 				t.Fatalf("saved commands=%q want=%q", got, tc.want)
+			}
+			if tc.name == "no commands" {
+				home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+				if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Setup is incomplete") ||
+					!strings.Contains(home.Body.String(), "add a command in Advanced config") || strings.Contains(home.Body.String(), "Setup saved") {
+					t.Fatalf("no-command setup home status=%d body=%q", home.Code, home.Body.String())
+				}
 			}
 		})
 	}

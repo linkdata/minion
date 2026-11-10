@@ -226,7 +226,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	canOfferSetup := cfg.Admin != nil && !*check && !*oneshot
 	setupIncomplete := canOfferSetup &&
-		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0)
+		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0 ||
+			cfg.RemoteExecutor == nil && !hasRunnableLocalCommand(cfg) ||
+			cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true))
 	if setupIncomplete {
 		return runSetupMode(ctx, *cfg.Admin, loadedPath, logger)
 	}
