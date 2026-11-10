@@ -28,6 +28,24 @@ func setupFormVersion(t *testing.T, body string) string {
 	return version
 }
 
+func TestLoadSetupConfigRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxAdvancedConfig + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := loadSetupConfig(path, config.AdminConfig{}); err == nil || !strings.Contains(err.Error(), "editor limit") {
+		t.Fatalf("oversized setup config: %v", err)
+	}
+}
+
 func TestSetupFormSavesBotAndFirstRepository(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	initial := config.Config{Admin: &config.AdminConfig{

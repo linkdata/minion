@@ -44,7 +44,7 @@ func TestAcceptedRecoveryGitHubFailureOpensAdminUI(t *testing.T) {
 		SourceKey: "issue-comment:42", SourceNodeID: "source-node",
 		SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-42", SourceUpdatedAt: at,
 		Requester: "writer", RequesterID: 7, CommandName: "comment", Action: "comment",
-		AcceptedAt: at, Deadline: at.Add(3 * time.Second), Assigned: true,
+		AcceptedAt: at, Deadline: at.Add(time.Hour), Assigned: true,
 	}
 	job := action.Job{Version: action.ProtocolVersion,
 		Identity: action.Identity{JobID: accepted.JobID, AttemptID: accepted.AttemptID, ExecutorID: accepted.ExecutorID,

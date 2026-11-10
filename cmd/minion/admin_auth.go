@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"errors"
 	"html/template"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -403,8 +404,13 @@ func (a *adminAccess) loginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
-	account, _ := a.oauth.currentUser(a.jaws.GetSession(r))
-	view := adminHomeView{Admin: a.passwordSet, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(a.jaws.GetSession(r)) != "", Setup: a.setup}
+	sess := a.jaws.GetSession(r)
+	account, _ := a.oauth.currentUser(sess)
+	if a.setup && a.sessionUsername(sess) == "" && account == "" && len(sess.Requests()) >= maxGuestPageRequests {
+		w.WriteHeader(http.StatusTooManyRequests)
+		return
+	}
+	view := adminHomeView{Admin: a.passwordSet, User: a.oauth != nil, SignedUser: account != "", SignedAdmin: a.sessionUsername(sess) != "", Setup: a.setup}
 	if a.setup && a.setupPath != "" {
 		if cfg, version, err := loadSetupConfig(a.setupPath, a.setupAdmin); err == nil {
 			view.BotLogin = cfg.BotLogin
@@ -426,9 +432,17 @@ func loadSetupConfig(path string, runtime config.AdminConfig) (config.Config, st
 	if err != nil {
 		return config.Config{}, "", err
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return config.Config{}, "", err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxAdvancedConfig+1))
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	if len(data) > maxAdvancedConfig {
+		return config.Config{}, "", errors.New("configuration exceeds the editor limit")
 	}
 	cfg, err := decodeAdvancedConfig(data)
 	if err != nil {
