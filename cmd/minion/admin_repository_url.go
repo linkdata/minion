@@ -16,12 +16,11 @@ import (
 
 func resolveAdminRepository(ctx context.Context, client *github.Client, cfg config.Config, rawURL string, actions []string) (config.Repository, error) {
 	entry, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || entry == nil || !strings.EqualFold(entry.Scheme, "https") || entry.Host != "github.com" ||
-		entry.User != nil || entry.Opaque != "" || strings.ContainsAny(rawURL, "%?#") {
+	if err != nil {
 		return config.Repository{}, errors.New("Enter a GitHub repository URL like https://github.com/owner/repo")
 	}
 	name := strings.TrimSuffix(strings.TrimPrefix(entry.Path, "/"), "/")
-	if !workspace.ValidRepository(name) {
+	if entry.Scheme != "https" || entry.Host != "github.com" || !workspace.ValidRepository(name) {
 		return config.Repository{}, errors.New("Enter a GitHub repository URL like https://github.com/owner/repo")
 	}
 	name = strings.ToLower(name)

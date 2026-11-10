@@ -8,7 +8,7 @@ import (
 	"github.com/linkdata/minion/internal/config"
 )
 
-func TestWindowsSetupDoesNotSelectRemoteAudit(t *testing.T) {
+func TestWindowsSetupSkipsSecurityAudit(t *testing.T) {
 	cfg := config.Config{
 		Commands: map[string]config.CommandMapping{
 			"audit": {Action: "security-audit", Skills: []string{"https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"}},

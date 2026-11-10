@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -76,10 +77,14 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 			_, _ = response.WriteString(`{"id":42,"full_name":"example/repo","owner":{"id":7},"default_branch":"main"}`)
 		case "/repos/example/other":
 			_, _ = response.WriteString(`{"id":43,"full_name":"example/other","owner":{"id":7},"default_branch":"main"}`)
-		case "/repos/example/repo/notifications", "/repos/example/other/notifications":
+		case "/repos/example/readonly":
+			_, _ = response.WriteString(`{"id":44,"full_name":"example/readonly","owner":{"id":7},"default_branch":"main"}`)
+		case "/repos/example/repo/notifications", "/repos/example/other/notifications", "/repos/example/readonly/notifications":
 			_, _ = response.WriteString(`[]`)
 		case "/repos/example/repo/collaborators/mona-cat_octo/permission", "/repos/example/other/collaborators/mona-cat_octo/permission":
 			_, _ = response.WriteString(`{"permission":"write"}`)
+		case "/repos/example/readonly/collaborators/mona-cat_octo/permission":
+			_, _ = response.WriteString(`{"permission":"read"}`)
 		default:
 			t.Errorf("unexpected GitHub path %s", request.URL.Path)
 			response.WriteHeader(http.StatusNotFound)
@@ -195,6 +200,19 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	add.Set("version", setupFormVersion(t, home.Body.String()))
 	allowGitHub = true
+	beforeReadOnly, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readOnly := add.Clone()
+	readOnly.Set("url", "https://github.com/Example/Readonly")
+	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", readOnly, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "Repository is not ready") {
+		t.Fatalf("read-only repository add status=%d body=%q", response.Code, response.Body.String())
+	}
+	if afterReadOnly, err := os.ReadFile(path); err != nil || !bytes.Equal(afterReadOnly, beforeReadOnly) {
+		t.Fatalf("read-only repository changed config: error=%v", err)
+	}
 	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusSeeOther {
 		t.Fatalf("repository add status=%d body=%q", response.Code, response.Body.String())
 	}

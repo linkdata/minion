@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 
 	"github.com/linkdata/minion/internal/config"
@@ -25,13 +24,6 @@ func (a *adminAccess) setupPost() http.Handler {
 			}
 			version, err := advancedVersion(*cfg)
 			if err != nil {
-				return err
-			}
-			before, err := cloneConfig(*cfg)
-			if err != nil {
-				return err
-			}
-			if err := before.Validate(filepath.Dir(a.setupPath)); err != nil {
 				return err
 			}
 			if version != values.Get("version") {
@@ -93,9 +85,6 @@ func (a *adminAccess) setupRepositoryPost() http.Handler {
 			}
 			if currentVersion != version {
 				return errors.New("configuration changed; reload before saving")
-			}
-			if _, exists := current.Repository(repo.Name); exists {
-				return errors.New("Repository is already configured")
 			}
 			current.Repositories = append(current.Repositories, repo)
 			return nil

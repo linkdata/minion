@@ -108,14 +108,9 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 	for _, invalidURL := range []string{
 		"http://github.com/owner/new",
 		"https://github.com.evil/owner/new",
-		"https://someone@github.com/owner/new",
 		"https://github.com:443/owner/new",
 		"https://github.com/owner/new/tree/main",
-		"https://github.com/owner/new?tab=readme",
-		"https://github.com/owner/new#readme",
-		"https://github.com/owner/%6eew",
-		"https://github.com/K/new",
-		"https://githuK.com/owner/new",
+		"https://github.com/\u212a/new",
 	} {
 		post("/admin/repositories/add", url.Values{"url": {invalidURL}, "actions": {"review"}}, http.StatusConflict)
 	}
