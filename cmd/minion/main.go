@@ -18,6 +18,7 @@ import (
 	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/claudecli"
 	"github.com/linkdata/minion/internal/codexcli"
+	"github.com/linkdata/minion/internal/command"
 	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/gitwork"
@@ -239,6 +240,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	var client *github.Client
 	var user github.User
+	var store *state.Store
 	authenticateGitHub := func() bool {
 		if client != nil {
 			return true
@@ -288,7 +290,13 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 				logger.Printf("remote TLS preflight: %v", err)
 				return false
 			}
-			if *check {
+			pendingAudit := false
+			if store != nil && store.Data.Accepted != nil {
+				accepted := store.Data.Accepted
+				pendingAudit = accepted.Action == string(command.SecurityAudit) &&
+					!accepted.ResultReady && !terminalRecoveryPendingAt(store, now())
+			}
+			if *check || pendingAudit {
 				if err := action.CheckAuditPublisher(ctx, cfg.WorkRoot, cfg); err != nil {
 					logger.Printf("audit publishing preflight: %v", err)
 					return false
@@ -328,7 +336,6 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			}
 		}
 	}
-	var store *state.Store
 	initial := time.Now().UTC()
 	if cfg.StartAt != "" {
 		initial, _ = time.Parse(time.RFC3339, cfg.StartAt)

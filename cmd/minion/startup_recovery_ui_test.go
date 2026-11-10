@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -221,6 +222,82 @@ func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRemoteAcceptedAuditWithoutPublisherOpensRecoveryUI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	isolateHostPaths(t, t.TempDir())
+	markers := startupCommandMarkers(t)
+	auditSkill := "https://github.com/cloudflare/security-audit-skill/tree/main/skills/security-audit"
+	if err := skills.InstallFor(t.Context(), auditSkill, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile, _ := remoteTestTLSFiles(t)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	at := time.Now().UTC()
+	accepted := state.AcceptedAction{MainProvider: "codex", MainSettings: frozenTestCodex,
+		JobID: "job-1", AttemptID: "attempt-1", ExecutorID: "remote",
+		Repository: "owner/repo", RepositoryID: 1, OwnerID: 2,
+		SubjectType: "Issue", SubjectNumber: 7,
+		SourceKey: "issue-comment:42", SourceNodeID: "source-node",
+		SourceURL: "https://github.com/owner/repo/issues/7#issuecomment-42", SourceUpdatedAt: at,
+		Requester: "writer", RequesterID: 7, CommandName: "audit", Action: "security-audit",
+		AcceptedAt: at, Deadline: at.Add(time.Hour),
+	}
+	store, err := state.Open(statePath, at.Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = frozenFailureForTest(accepted)
+	if err := store.Save(); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Main: "codex", BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+		Codex:     config.CodexConfig{Model: frozenTestCodex.Model, ReasoningEffort: frozenTestCodex.Effort},
+		StatePath: statePath, WorkRoot: t.TempDir(),
+		Admin: &config.AdminConfig{Listen: occupiedAdminAddress(t), Administrators: []config.AdminAccount{testAdminAccount()}},
+		RemoteExecutor: &config.RemoteExecutorConfig{ExecutorID: "remote", Listen: "127.0.0.1:8443",
+			TLSCertFile: certFile, TLSKeyFile: keyFile, Token: strings.Repeat("A", 43)},
+		Commands: map[string]config.CommandMapping{
+			"audit":   {Action: "security-audit", Skills: []string{auditSkill}},
+			"comment": {Action: "comment", Skills: []string{skills.BuiltinAntiPromptInjection}},
+		}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"audit", "comment"}}},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	})
+	if code != 1 || !strings.Contains(output, "audit publishing preflight:") || !strings.Contains(output, "audit requires node") ||
+		!strings.Contains(output, "starting admin recovery UI") || !strings.Contains(output, "setup UI:") ||
+		strings.Contains(output, "Minion UI listening") {
+		t.Fatalf("remote audit recovery preflight: code=%d log=%q", code, output)
+	}
+	assertNoStartupCommands(t, markers)
+	after, err := os.ReadFile(statePath)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("remote audit recovery changed accepted state: error=%v", err)
+	}
+	store, err = state.Open(statePath, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Data.Accepted == nil || store.Data.Accepted.JobID != accepted.JobID ||
+		store.Data.Accepted.Assigned || store.Data.Accepted.ResultReady ||
+		store.Data.JobFailures[accepted.JobID].Attempts != 1 {
+		t.Fatalf("remote audit recovery lost reservation: %+v", store.Data)
 	}
 }
 
