@@ -123,37 +123,21 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			return errors.New("Repository is not configured")
 		})
 	}))
-	mux.Handle("POST /admin/repositories/add", adminConfigPost("/admin/repositories", []string{"name"}, "actions", func(ctx context.Context, values url.Values) error {
-		name := strings.ToLower(values.Get("name"))
-		if !workspace.ValidRepository(name) {
-			return errors.New("Repository must use owner/name")
-		}
+	mux.Handle("POST /admin/repositories/add", adminConfigPost("/admin/repositories", []string{"url"}, "actions", func(ctx context.Context, values url.Values) error {
 		actions := values["actions"]
 		current := live.snapshot().Config
-		if _, exists := current.Repository(name); exists {
-			return errors.New("Repository is already configured")
-		}
 		if err := validateAdminActions(current, actions, nil); err != nil {
 			return err
 		}
 		if owner == nil || owner.GitHub == nil {
 			return errors.New("GitHub client is unavailable")
 		}
-		details, err := owner.GitHub.Repository(ctx, name)
+		repo, err := resolveAdminRepository(ctx, owner.GitHub, current, values.Get("url"), actions)
 		if err != nil {
-			return fmt.Errorf("Check GitHub repository: %w", err)
-		}
-		if details.ID <= 0 || details.Owner.ID <= 0 {
-			return errors.New("GitHub repository or owner identity is missing")
-		}
-		repo := config.Repository{Name: name, ID: details.ID, OwnerID: details.Owner.ID, DenyAllActors: true, Actions: actions}
-		probe := current
-		probe.Repositories = []config.Repository{repo}
-		if err := checkRepositories(ctx, owner.GitHub, probe, log.New(io.Discard, "", 0)); err != nil {
-			return fmt.Errorf("Repository is not ready: %w", err)
+			return err
 		}
 		return live.save(func(cfg *config.Config) error {
-			if _, exists := cfg.Repository(name); exists {
+			if _, exists := cfg.Repository(repo.Name); exists {
 				return errors.New("Repository is already configured")
 			}
 			if err := validateAdminActions(*cfg, actions, nil); err != nil {

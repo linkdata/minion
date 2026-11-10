@@ -5,69 +5,22 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/linkdata/minion/internal/config"
-	"github.com/linkdata/minion/internal/workspace"
+	"github.com/linkdata/minion/internal/github"
 )
 
 func (a *adminAccess) setupPost() http.Handler {
-	return adminConfigPost("/", []string{"version", "bot_login", "github_token", "repository", "repository_id", "owner_id"}, "", func(_ context.Context, values url.Values) error {
+	return adminConfigPost("/", []string{"version", "bot_login", "github_token"}, "", func(_ context.Context, values url.Values) error {
 		bot := strings.ToLower(strings.TrimSpace(values.Get("bot_login")))
 		token := values.Get("github_token")
-		name := strings.ToLower(strings.TrimSpace(values.Get("repository")))
-		repositoryID, repositoryErr := strconv.ParseInt(values.Get("repository_id"), 10, 64)
-		ownerID, ownerErr := strconv.ParseInt(values.Get("owner_id"), 10, 64)
-		if !config.ValidGitHubLogin(bot) || len(token) > 4096 || !workspace.ValidRepository(name) ||
-			repositoryErr != nil || repositoryID <= 0 || ownerErr != nil || ownerID <= 0 {
-			return errors.New("Enter a bot login, token, repository name, repository ID, and owner ID")
+		if !config.ValidGitHubLogin(bot) || len(token) > 4096 {
+			return errors.New("Enter a valid GitHub bot login and token")
 		}
-		first := config.Repository{Name: name, ID: repositoryID, OwnerID: ownerID, DenyAllActors: true}
-		_, err := config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(cfg *config.Config) error {
-			if cfg.Admin == nil {
-				return errors.New("admin setup is no longer configured; restart Minion")
-			}
-			version, err := advancedVersion(*cfg)
-			if err != nil {
-				return err
-			}
-			before, err := cloneConfig(*cfg)
-			if err != nil {
-				return err
-			}
-			if err := before.Validate(filepath.Dir(a.setupPath)); err != nil {
-				return err
-			}
-			if version != values.Get("version") {
-				return errors.New("configuration changed; reload before saving")
-			}
+		return a.updateSetup(values.Get("version"), func(cfg *config.Config) error {
 			if token == "" && cfg.GitHub.Token == "" {
 				return errors.New("Enter a GitHub bot token")
-			}
-			if len(cfg.Repositories) == 0 {
-				if cfg.Commands == nil {
-					first.Actions = []string{"review"}
-				} else {
-					if mapping, ok := cfg.Commands["review"]; ok && mapping.SupportsProvider(before.Main) && mapping.SupportedOnHost() {
-						first.Actions = []string{"review"}
-					} else {
-						for _, name := range cfg.CommandNames() {
-							mapping := cfg.Commands[name]
-							if mapping.SupportsProvider(before.Main) && mapping.SupportedOnHost() {
-								first.Actions = []string{name}
-								break
-							}
-						}
-						if len(cfg.Commands) > 0 && len(first.Actions) == 0 {
-							return errors.New("No configured command can run with the selected main AI on this host")
-						}
-					}
-				}
-				cfg.Repositories = []config.Repository{first}
-			} else if !strings.EqualFold(cfg.Repositories[0].Name, name) || !cfg.Repositories[0].MatchesIdentity(repositoryID, ownerID) {
-				return errors.New("the configured first repository differs; reload setup or use Advanced config")
 			}
 			cfg.BotLogin = bot
 			if token != "" {
@@ -75,6 +28,62 @@ func (a *adminAccess) setupPost() http.Handler {
 			}
 			return nil
 		})
-		return err
+	})
+}
+
+func (a *adminAccess) updateSetup(version string, edit func(*config.Config) error) error {
+	_, err := config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(cfg *config.Config) error {
+		if cfg.Admin == nil {
+			return errors.New("admin setup is no longer configured; restart Minion")
+		}
+		currentVersion, err := advancedVersion(*cfg)
+		if err != nil {
+			return err
+		}
+		if currentVersion != version {
+			return errors.New("configuration changed; reload before saving")
+		}
+		return edit(cfg)
+	})
+	return err
+}
+
+func setupRepositoryActions(cfg config.Config) ([]string, error) {
+	if mapping, ok := cfg.Commands["review"]; ok && mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() {
+		return []string{"review"}, nil
+	}
+	for _, name := range cfg.CommandNames() {
+		mapping := cfg.Commands[name]
+		if mapping.SupportsProvider(cfg.Main) && mapping.SupportedOnHost() {
+			return []string{name}, nil
+		}
+	}
+	return nil, errors.New("Add an available command in Advanced config before adding a repository")
+}
+
+func (a *adminAccess) setupRepositoryPost() http.Handler {
+	return adminConfigPost("/", []string{"version", "url"}, "", func(ctx context.Context, values url.Values) error {
+		cfg, version, err := loadSetupConfig(a.setupPath, a.setupAdmin)
+		if err != nil {
+			return err
+		}
+		if version != values.Get("version") {
+			return errors.New("configuration changed; reload before saving")
+		}
+		if cfg.BotLogin == "" || cfg.GitHub.Token == "" {
+			return errors.New("Save the GitHub bot credentials before adding a repository")
+		}
+		actions, err := setupRepositoryActions(cfg)
+		if err != nil {
+			return err
+		}
+		repo, err := resolveAdminRepository(ctx, github.New(cfg.GitHub.Token), cfg, values.Get("url"), actions)
+		if err != nil {
+			return err
+		}
+		return a.updateSetup(version, func(current *config.Config) error {
+			current.Repositories = append(current.Repositories, repo)
+			return nil
+		})
 	})
 }
