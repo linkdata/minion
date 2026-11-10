@@ -128,6 +128,11 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		strings.Contains(home.Body.String(), `name="repository_id"`) {
 		t.Fatalf("initial setup form status=%d body=%q", home.Code, home.Body.String())
 	}
+	beforeCredentials := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://github.com/Example/Repo"}}
+	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", beforeCredentials, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "Save the GitHub bot credentials") || calls != 0 {
+		t.Fatalf("repository add before credentials status=%d body=%q GitHub calls=%d", response.Code, response.Body.String(), calls)
+	}
 	credentials := url.Values{"version": {setupFormVersion(t, home.Body.String())},
 		"bot_login": {"mona-cat_octo"}, "github_token": {"secret-token"}}
 	missingToken := credentials.Clone()
@@ -152,6 +157,27 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	if err != nil || cfg.BotLogin != "mona-cat_octo" || cfg.GitHub.Token != "secret-token" || len(cfg.Repositories) != 0 {
 		t.Fatalf("saved credentials: bot=%q tokenSet=%t repositories=%d error=%v", cfg.BotLogin, cfg.GitHub.Token != "", len(cfg.Repositories), err)
 	}
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Commands = map[string]config.CommandMapping{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if home.Code != http.StatusOK || strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) {
+		t.Fatalf("setup offered Add repository with no command: status=%d body=%q", home.Code, home.Body.String())
+	}
+	withoutCommand := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://github.com/Example/Repo"}}
+	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", withoutCommand, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "Add an available command") || calls != 0 {
+		t.Fatalf("repository add without command status=%d body=%q GitHub calls=%d", response.Code, response.Body.String(), calls)
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.Commands = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) ||
 		!strings.Contains(home.Body.String(), `name="url" type="url"`) ||
@@ -168,7 +194,7 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		t.Fatalf("blank token update changed saved token: set=%t error=%v", saved.GitHub.Token != "", err)
 	}
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
-	add := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://github.com/Example/Repo"}}
+	add := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://GitHub.com/Example/Repo"}}
 	if denied := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, nil, ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("anonymous repository add status=%d", denied.Code)
 	}

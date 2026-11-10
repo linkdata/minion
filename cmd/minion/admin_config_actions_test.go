@@ -114,7 +114,7 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 	} {
 		post("/admin/repositories/add", url.Values{"url": {invalidURL}, "actions": {"review"}}, http.StatusConflict)
 	}
-	post("/admin/repositories/add", url.Values{"url": {"https://github.com/owner/new/"}, "actions": {"review"}}, http.StatusSeeOther)
+	post("/admin/repositories/add", url.Values{"url": {"https://github.com/owner/new.git/"}, "actions": {"review"}}, http.StatusSeeOther)
 	repo, ok := live.snapshot().Config.Repository("owner/new")
 	if !ok || repo.ID != 11 || repo.OwnerID != 2 || !repo.DenyAllActors || len(repo.AllowedActors) != 0 || repo.AllowsActor("another", 88) || len(repo.Actions) != 1 || repo.Actions[0] != "review" {
 		t.Fatalf("repository not pinned: %+v, found=%t", repo, ok)

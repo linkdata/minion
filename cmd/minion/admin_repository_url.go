@@ -14,14 +14,16 @@ import (
 	"github.com/linkdata/minion/internal/workspace"
 )
 
+var errAdminRepositoryURL = errors.New("Enter a GitHub repository URL like https://github.com/owner/repo")
+
 func resolveAdminRepository(ctx context.Context, client *github.Client, cfg config.Config, rawURL string, actions []string) (config.Repository, error) {
 	entry, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
-		return config.Repository{}, errors.New("Enter a GitHub repository URL like https://github.com/owner/repo")
+		return config.Repository{}, errAdminRepositoryURL
 	}
-	name := strings.TrimSuffix(strings.TrimPrefix(entry.Path, "/"), "/")
-	if entry.Scheme != "https" || entry.Host != "github.com" || !workspace.ValidRepository(name) {
-		return config.Repository{}, errors.New("Enter a GitHub repository URL like https://github.com/owner/repo")
+	name := strings.TrimSuffix(strings.TrimSuffix(strings.TrimPrefix(entry.Path, "/"), "/"), ".git")
+	if entry.Scheme != "https" || !strings.EqualFold(entry.Host, "github.com") || !workspace.ValidRepository(name) {
+		return config.Repository{}, errAdminRepositoryURL
 	}
 	name = strings.ToLower(name)
 	if _, exists := cfg.Repository(name); exists {

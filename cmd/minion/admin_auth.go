@@ -69,7 +69,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{if .Dot.Repositories}}<p>Configured repositories: {{range $i, $name := .Dot.Repositories}}{{if $i}}, {{end}}<code>{{$name}}</code>{{end}}</p>{{end}}
 <form method="post" action="/admin/repositories/add" class="vstack gap-3 col-lg-6">
 <input type="hidden" name="version" value="{{.Dot.Version}}">
-<label class="form-label">GitHub repository URL<input class="form-control" name="url" type="url" placeholder="https://github.com/owner/repo" maxlength="221" required></label>
+<label class="form-label">GitHub repository URL<input class="form-control" name="url" type="url" placeholder="https://github.com/owner/repo" maxlength="225" required></label>
 <p class="text-body-secondary">The repository starts with one available command and no allowed requesters. Add requesters after restarting.</p>
 <button class="btn btn-primary" type="submit">Add repository</button></form>
 {{end}}

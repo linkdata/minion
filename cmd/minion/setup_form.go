@@ -18,17 +18,7 @@ func (a *adminAccess) setupPost() http.Handler {
 		if !config.ValidGitHubLogin(bot) || len(token) > 4096 {
 			return errors.New("Enter a valid GitHub bot login and token")
 		}
-		_, err := config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(cfg *config.Config) error {
-			if cfg.Admin == nil {
-				return errors.New("admin setup is no longer configured; restart Minion")
-			}
-			version, err := advancedVersion(*cfg)
-			if err != nil {
-				return err
-			}
-			if version != values.Get("version") {
-				return errors.New("configuration changed; reload before saving")
-			}
+		return a.updateSetup(values.Get("version"), func(cfg *config.Config) error {
 			if token == "" && cfg.GitHub.Token == "" {
 				return errors.New("Enter a GitHub bot token")
 			}
@@ -38,8 +28,24 @@ func (a *adminAccess) setupPost() http.Handler {
 			}
 			return nil
 		})
-		return err
 	})
+}
+
+func (a *adminAccess) updateSetup(version string, edit func(*config.Config) error) error {
+	_, err := config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(cfg *config.Config) error {
+		if cfg.Admin == nil {
+			return errors.New("admin setup is no longer configured; restart Minion")
+		}
+		currentVersion, err := advancedVersion(*cfg)
+		if err != nil {
+			return err
+		}
+		if currentVersion != version {
+			return errors.New("configuration changed; reload before saving")
+		}
+		return edit(cfg)
+	})
+	return err
 }
 
 func setupRepositoryActions(cfg config.Config) ([]string, error) {
@@ -75,20 +81,9 @@ func (a *adminAccess) setupRepositoryPost() http.Handler {
 		if err != nil {
 			return err
 		}
-		_, err = config.UpdateWithAdminRuntime(a.setupPath, a.setupAdmin, func(current *config.Config) error {
-			if current.Admin == nil {
-				return errors.New("admin setup is no longer configured; restart Minion")
-			}
-			currentVersion, err := advancedVersion(*current)
-			if err != nil {
-				return err
-			}
-			if currentVersion != version {
-				return errors.New("configuration changed; reload before saving")
-			}
+		return a.updateSetup(version, func(current *config.Config) error {
 			current.Repositories = append(current.Repositories, repo)
 			return nil
 		})
-		return err
 	})
 }
