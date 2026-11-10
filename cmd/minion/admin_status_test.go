@@ -81,8 +81,8 @@ func TestAdminStatusCheckRequiresPost(t *testing.T) {
 	if page := adminResponse(handler, http.MethodGet, "/admin/status", nil, cookie, ""); page.Code != http.StatusOK {
 		t.Fatalf("status page: %d", page.Code)
 	}
-	if check := adminResponse(handler, http.MethodGet, "/admin/status/check", nil, cookie, ""); check.Code < http.StatusBadRequest {
-		t.Fatalf("GET check: %d, want rejection", check.Code)
+	if check := adminResponse(handler, http.MethodGet, "/admin/status/check", nil, cookie, ""); check.Code != http.StatusNotFound {
+		t.Fatalf("GET check: %d, want 404", check.Code)
 	}
 	if check := adminResponse(handler, http.MethodPost, "/admin/status/check", nil, cookie, "https://other.example"); check.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin POST check: %d", check.Code)

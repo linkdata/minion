@@ -208,7 +208,7 @@ func TestRunnerAuditReviewFreezesAndExportsRawReports(t *testing.T) {
 			if scenario == "mutated during validation" {
 				markers := t.TempDir()
 				armedReports, changed = filepath.Join(markers, "reports"), filepath.Join(markers, "changed")
-				script := fmt.Sprintf("#!/bin/sh\nset -eu\ncase \" $* \" in *' --check '*) exit 0;; esac\ncase \"$*\" in *validate-*.cjs*) reports=$(cat %s); [ -n \"$reports\" ]; printf 'late report edit' > \"$reports/REPORT.md\"; printf changed > %s;; esac\n", shellQuote(armedReports), shellQuote(changed))
+				script := fmt.Sprintf("#!/bin/sh\nset -eu\ncase \" $* \" in *' --check '*) exit 0;; esac\ncase \"$*\" in *validator-probe.json*) printf 'FAIL: 1 validation error(s)\\n' >&2; exit 1;; esac\ncase \"$*\" in *validate-*.cjs*) reports=$(cat %s); [ -n \"$reports\" ]; printf 'late report edit' > \"$reports/REPORT.md\"; printf changed > %s;; esac\n", shellQuote(armedReports), shellQuote(changed))
 				fakeOnPath(t, "node", script)
 			}
 			root := t.TempDir()

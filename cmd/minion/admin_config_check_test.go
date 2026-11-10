@@ -66,8 +66,12 @@ func TestSavedGitHubAuthButtonWorksInSetupAndAdmin(t *testing.T) {
 				!strings.Contains(page.Body.String(), "Test saved GitHub auth") {
 				t.Fatalf("config page lacks test button: status=%d body=%q", page.Code, page.Body.String())
 			}
-			if got := adminResponse(handler, http.MethodGet, "/admin/config/check", nil, cookie, ""); got.Code < http.StatusBadRequest {
-				t.Fatalf("GET check status=%d, want rejection", got.Code)
+			wantGET := http.StatusNotFound
+			if setup {
+				wantGET = http.StatusForbidden
+			}
+			if got := adminResponse(handler, http.MethodGet, "/admin/config/check", nil, cookie, ""); got.Code != wantGET {
+				t.Fatalf("GET check status=%d, want %d", got.Code, wantGET)
 			}
 			check := adminResponse(handler, http.MethodPost, "/admin/config/check", nil, cookie, "")
 			if check.Code != http.StatusOK || check.Header().Get("Cache-Control") != "no-store" ||

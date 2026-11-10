@@ -161,6 +161,9 @@ func checkAuditValidatorPrerequisites(ctx context.Context, dir, skill string, to
 		if checkErr != nil && validator.artifact == "findings.json" && findingsSchema {
 			return fmt.Errorf("check audit findings schema: %w", checkErr)
 		}
+		if checkErr != nil && !auditValidatorRejected(diagnostic.String()) {
+			return fmt.Errorf("check audit %s runtime: %w", validator.script, checkErr)
+		}
 	}
 	return nil
 }

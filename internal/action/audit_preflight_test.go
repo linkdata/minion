@@ -121,7 +121,7 @@ func TestAuditPublisherChecksFindingsSchema(t *testing.T) {
 	}
 }
 
-func TestAuditPublisherChecksCoverageModule(t *testing.T) {
+func TestAuditPublisherChecksCoverageExecution(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("audit validators cannot run on Windows")
 	}
@@ -158,6 +158,16 @@ func TestAuditPublisherChecksCoverageModule(t *testing.T) {
 	}
 	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
 		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
+	}
+	modified = strings.Replace(string(original), "#!/usr/bin/env node\n", "#!/usr/bin/env node\nthrow new Error('boom');\n", 1)
+	if err := os.WriteFile(script, []byte(modified), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAuditPublisher(t.Context(), root, cfg); err == nil || !strings.Contains(err.Error(), "coverage-ledger.cjs runtime") {
+		t.Fatalf("crashed coverage validator passed publisher preflight: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch after validator crash: dirs=%v error=%v", dirs, err)
 	}
 }
 
@@ -242,7 +252,7 @@ func TestSelfContainedAuditValidatorsNeedNoBundledSchema(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	node := filepath.Join(fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' --check '*) exit 0;; esac\nexit 1\n"), "node")
+	node := filepath.Join(fakeOnPath(t, "node", "#!/bin/sh\ncase \" $* \" in *' --check '*) exit 0;; esac\nprintf 'FAIL: 1 validation error(s)\\n' >&2\nexit 1\n"), "node")
 	if err := checkAuditValidatorPrerequisites(t.Context(), t.TempDir(), filepath.Join(dir, "SKILL.md"), auditTools{binary: node, permissionFlag: "--permission"}); err != nil {
 		t.Fatalf("self-contained validators were probed for a bundled schema: %v", err)
 	}
