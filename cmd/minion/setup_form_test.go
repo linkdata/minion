@@ -61,7 +61,7 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	previousTransport := http.DefaultTransport
-	allowGitHub, calls := false, 0
+	allowGitHub, calls, editDuringLookup := false, 0, false
 	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
 		calls++
 		if !allowGitHub {
@@ -74,6 +74,15 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		response := httptest.NewRecorder()
 		switch request.URL.Path {
 		case "/repos/example/repo":
+			if editDuringLookup {
+				editDuringLookup = false
+				if _, err := config.Update(path, func(cfg *config.Config) error {
+					cfg.StatePath = "var/during-lookup.json"
+					return nil
+				}); err != nil {
+					t.Errorf("edit config during GitHub lookup: %v", err)
+				}
+			}
 			_, _ = response.WriteString(`{"id":42,"full_name":"example/repo","owner":{"id":7},"default_branch":"main"}`)
 		case "/repos/example/other":
 			_, _ = response.WriteString(`{"id":43,"full_name":"example/other","owner":{"id":7},"default_branch":"main"}`)
@@ -131,7 +140,7 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	}
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Save bot credentials") ||
-		!strings.Contains(home.Body.String(), "Advanced config and GitHub auth test") ||
+		!strings.Contains(home.Body.String(), `href="/admin/config"`) ||
 		strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) ||
 		strings.Contains(home.Body.String(), `name="repository_id"`) {
 		t.Fatalf("initial setup form status=%d body=%q", home.Code, home.Body.String())
@@ -248,6 +257,16 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	if afterReadOnly, err := os.ReadFile(path); err != nil || !bytes.Equal(afterReadOnly, beforeReadOnly) {
 		t.Fatalf("read-only repository changed config: error=%v", err)
 	}
+	editDuringLookup = true
+	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusConflict ||
+		!strings.Contains(response.Body.String(), "configuration changed; reload") {
+		t.Fatalf("repository add during config edit status=%d body=%q", response.Code, response.Body.String())
+	}
+	if saved, err := config.Load(path); err != nil || saved.StatePath != filepath.Join(filepath.Dir(path), "var/during-lookup.json") || len(saved.Repositories) != 0 {
+		t.Fatalf("repository add overwrote config edit: state=%q repositories=%d error=%v", saved.StatePath, len(saved.Repositories), err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	add.Set("version", setupFormVersion(t, home.Body.String()))
 	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", add, cookie, ""); response.Code != http.StatusSeeOther {
 		t.Fatalf("repository add status=%d body=%q", response.Code, response.Body.String())
 	}

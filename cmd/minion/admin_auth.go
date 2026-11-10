@@ -63,7 +63,6 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 <label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" {{if not .Dot.TokenSet}}required{{end}}></label>
 {{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
 <button class="btn btn-primary" type="submit">Save bot credentials</button></form>
-<p class="mt-3"><a href="/admin/config">Advanced config and GitHub auth test</a></p>
 {{if and .Dot.BotLogin .Dot.TokenSet .Dot.CanAddRepository}}
 <h2 class="h5 mt-4">Add repository</h2>
 {{if .Dot.Repositories}}<p>Configured repositories: {{range $i, $name := .Dot.Repositories}}{{if $i}}, {{end}}<code>{{$name}}</code>{{end}}</p>{{end}}
