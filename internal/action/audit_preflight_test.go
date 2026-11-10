@@ -98,7 +98,7 @@ func TestSelfContainedAuditValidatorsNeedNoBundledSchema(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for _, validator := range auditValidators {
-		if err := os.WriteFile(filepath.Join(dir, validator.script), []byte("process.exit(0)\n"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, validator.script), []byte("// report-schema.json ATTACK-CLASSES.md safe-input.cjs strict-json-keys.cjs\nprocess.exit(0)\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}

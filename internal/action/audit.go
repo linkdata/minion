@@ -56,12 +56,15 @@ func checkAuditValidatorScripts(skill string) ([]string, bool, error) {
 			return nil, false, err
 		}
 		scripts = append(scripts, path)
-		if validator.artifact == "findings.json" && bytes.Contains(data, []byte("report-schema.json")) {
-			findingsSchema = true
-		}
 		for _, name := range dependencies {
-			if bytes.Contains(data, []byte(name)) {
-				needed[name] = true
+			for _, quote := range []string{`"`, `'`} {
+				if bytes.Contains(data, []byte("require("+quote+"./"+name+quote+")")) ||
+					bytes.Contains(data, []byte("path.join(__dirname, "+quote+name+quote+")")) {
+					needed[name] = true
+					if validator.artifact == "findings.json" && name == "report-schema.json" {
+						findingsSchema = true
+					}
+				}
 			}
 		}
 	}

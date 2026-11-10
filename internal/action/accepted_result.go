@@ -105,8 +105,11 @@ func DecodeAcceptedResultRecord(data []byte) (AcceptedResultRecord, error) {
 	if err := httpDecodeBytes(data, int(AcceptedResultMaxBytes), &record); err != nil {
 		return AcceptedResultRecord{}, fmt.Errorf("accepted result: %w", err)
 	}
-	// Version 22 sidecars have the same Job and Result shape as version 24.
+	// Version 22 audits can fail current evidence validation; keep their receipt for operator resolution.
 	if record.Job.Version == 22 && record.Result.Version == 22 {
+		if record.Job.Action == command.SecurityAudit {
+			return AcceptedResultRecord{}, errors.New("version 22 security audit requires operator resolution")
+		}
 		record.Job.Version, record.Result.Version = 24, 24
 	}
 	if err := record.Validate(); err != nil {
