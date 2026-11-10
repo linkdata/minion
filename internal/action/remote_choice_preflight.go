@@ -68,10 +68,12 @@ func validateRemoteChoices(selection remoteChoicePreflight) error {
 // Leave time for the worker to open its first pull before the orchestrator's two-minute wait expires.
 const remoteChoicePreflightTimeout = 90 * time.Second
 
-func auditSupportedOnHost(ctx context.Context) bool {
+func auditSupportedOnHost(ctx context.Context, timeout time.Duration) bool {
 	if !(config.CommandMapping{Action: string(command.SecurityAudit)}).SupportedOnHost() {
 		return false
 	}
+	probeCtx, stop := context.WithTimeout(ctx, timeout)
+	defer stop()
 	binary, err := aicli.AbsoluteExecutable("node")
 	if err != nil {
 		return false
@@ -81,7 +83,7 @@ func auditSupportedOnHost(ctx context.Context) bool {
 		return false
 	}
 	defer os.RemoveAll(dir)
-	_, err = auditNodePermissionFlag(ctx, dir, binary)
+	_, err = auditNodePermissionFlag(probeCtx, dir, binary)
 	return err == nil
 }
 
@@ -108,7 +110,7 @@ func preflightRemoteChoices(ctx context.Context, client *http.Client, origin, ex
 	preflightCtx, stop := context.WithTimeout(ctx, timeout)
 	defer stop()
 	request, err := httpEncode(httpPull{Version: ProtocolVersion, ExecutorID: executorID,
-		AuditHostSupported: auditSupportedOnHost(preflightCtx)}, httpControlBytes)
+		AuditHostSupported: auditSupportedOnHost(preflightCtx, httpControlTimeout)}, httpControlBytes)
 	if err != nil {
 		return err
 	}

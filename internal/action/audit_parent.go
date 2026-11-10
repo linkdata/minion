@@ -22,6 +22,8 @@ const auditValidationDirPrefix = ".minion-audit-validation-"
 
 // CheckAuditPublisher checks tools needed on the publishing host for configured remote audits.
 func CheckAuditPublisher(ctx context.Context, workRoot string, cfg config.Config) error {
+	ctx, cancel := context.WithTimeout(ctx, httpControlTimeout)
+	defer cancel()
 	checked := make(map[string]bool)
 	for _, repo := range cfg.Repositories {
 		for _, name := range repo.Actions {
@@ -45,7 +47,7 @@ func CheckAuditPublisher(ctx context.Context, workRoot string, cfg config.Config
 			}
 		}
 	}
-	return nil
+	return ctx.Err()
 }
 
 func checkAuditPublisherSkill(ctx context.Context, workRoot, skill string) (resultErr error) {

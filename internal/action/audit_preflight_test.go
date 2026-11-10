@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/linkdata/minion/internal/aicli"
 	"github.com/linkdata/minion/internal/command"
@@ -48,6 +49,33 @@ func TestAuditPublisherChecksBundledDependencies(t *testing.T) {
 				t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
 			}
 		})
+	}
+}
+
+func TestAuditPublisherCancelsHungNode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("security audits are unsupported on Windows")
+	}
+	installActionTestSkills(t, testAuditSkillURL)
+	if err := skills.InstallFor(t.Context(), testAuditSkillURL, "codex"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "node-started")
+	fakeOnPath(t, "node", "#!/bin/sh\nprintf started > "+shellQuote(marker)+"\nexec /bin/sleep 30\n")
+	root := t.TempDir()
+	cfg := config.Config{Main: "codex", Commands: map[string]config.CommandMapping{
+		"audit": {Action: string(command.SecurityAudit), Skills: []string{testAuditSkillURL}},
+	}, Repositories: []config.Repository{{Actions: []string{"audit"}}}}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := CheckAuditPublisher(ctx, root, cfg); err == nil {
+		t.Fatal("hung node passed publisher preflight")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("node was not started: %v", err)
+	}
+	if dirs, err := filepath.Glob(filepath.Join(root, ".minion-audit-preflight-*")); err != nil || len(dirs) != 0 {
+		t.Fatalf("publisher preflight left scratch: dirs=%v error=%v", dirs, err)
 	}
 }
 

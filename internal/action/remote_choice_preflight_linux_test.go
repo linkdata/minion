@@ -202,6 +202,26 @@ func TestRemoteAuditCapabilityRequiresNodeToolchain(t *testing.T) {
 	}
 }
 
+func TestRemoteAuditCapabilityProbeHasOwnDeadline(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "node-started")
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
+	fakeOnPath(t, "node", "#!/bin/sh\nprintf started > "+shellQuote(marker)+"\nexec /bin/sleep 5\n")
+	start := time.Now()
+	if auditSupportedOnHost(t.Context(), 500*time.Millisecond) {
+		t.Fatal("hanging Node advertised audit support")
+	}
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("optional Node probe blocked remote preflight for %s", elapsed)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("hanging Node fixture was not reached: %v", err)
+	}
+	if entries, err := os.ReadDir(scratch); err != nil || len(entries) != 0 {
+		t.Fatalf("audit capability probe left scratch files: %v, %v", entries, err)
+	}
+}
+
 func TestRemoteChoicePreflightBoundsSlowCLIProbe(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir())
