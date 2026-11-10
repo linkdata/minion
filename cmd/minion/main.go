@@ -296,7 +296,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 				pendingAudit = accepted.Action == string(command.SecurityAudit) &&
 					!accepted.ResultReady && !terminalRecoveryPendingAt(store, now())
 			}
-			if *check || pendingAudit {
+			// An audit-only service has no other command if publishing tools are missing.
+			if *check || pendingAudit || !hasUnselectedCommand(nil, cfg, false) {
 				if err := action.CheckAuditPublisher(ctx, cfg.WorkRoot, cfg); err != nil {
 					logger.Printf("audit publishing preflight: %v", err)
 					return false

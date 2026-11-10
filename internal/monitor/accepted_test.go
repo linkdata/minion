@@ -204,8 +204,9 @@ func TestSelectedUnassignedRecoveryEndsWhenWorkerLosesCommand(t *testing.T) {
 	gh.reactionErr = nil
 	gh.currentItem = func(github.Item) (github.Item, error) { return item, nil }
 	if _, err := m.RunOnce(t.Context(), store); err != nil || executions != 0 || store.Data.Accepted != nil ||
-		store.Data.Processed[accepted.JobID].IsZero() || store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" {
-		t.Fatalf("unavailable selected command did not terminate without execution: error=%v executions=%d state=%+v", err, executions, store.Data)
+		store.Data.Processed[accepted.JobID].IsZero() || store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" ||
+		len(gh.comments) != 1 || len(store.Data.JobFailures) != 0 {
+		t.Fatalf("unavailable selected command did not terminate with a failure reply: error=%v executions=%d comments=%v state=%+v", err, executions, gh.comments, store.Data)
 	}
 }
 

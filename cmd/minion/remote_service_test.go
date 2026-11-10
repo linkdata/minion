@@ -302,7 +302,7 @@ func TestRemoteCheckWithValidTLSDoesNotRequireLocalAI(t *testing.T) {
 	}
 }
 
-func TestRemoteCheckRequiresAuditPublisher(t *testing.T) {
+func TestRemoteStartupRequiresAuditPublisher(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("security audits are unsupported on Windows")
 	}
@@ -321,5 +321,15 @@ func TestRemoteCheckRequiresAuditPublisher(t *testing.T) {
 	}, "-check")
 	if code != 1 || !strings.Contains(output, "audit publishing preflight:") || !strings.Contains(output, "security-audit") || strings.Contains(output, "GitHub authentication:") {
 		t.Fatalf("remote audit publisher preflight: code=%d output=%q", code, output)
+	}
+	cfg.GitHub.Token = "configured-token"
+	cfg.Admin = &config.AdminConfig{Listen: occupiedAdminAddress(t), Administrators: []config.AdminAccount{testAdminAccount()}}
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	})
+	if code != 1 || !strings.Contains(output, "audit publishing preflight:") ||
+		!strings.Contains(output, "starting admin recovery UI") || !strings.Contains(output, "setup UI:") ||
+		strings.Contains(output, "GitHub authentication:") {
+		t.Fatalf("remote audit-only service did not offer recovery UI: code=%d output=%q", code, output)
 	}
 }
