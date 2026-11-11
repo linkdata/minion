@@ -78,7 +78,7 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		} else {
 			logger.Printf("Minion UI listening on %s%s (bound to %s)", admin.entryURL, suffix, admin.listener.Addr())
 		}
-	} else if watcher.Config.Admin != nil && watcher.Config.Admin.UserModelChoices != nil {
+	} else if watcher.Config.Admin != nil && watcher.Config.Admin.UserModelChoices != nil && len(watcher.Config.Repositories) > 0 {
 		links, err := openUserLinks(watcher.Config.StatePath + ".link")
 		if err != nil {
 			logger.Printf("user preferences: %s", monitor.InertLogText(err.Error()))
@@ -144,6 +144,11 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 			}
 			if len(saved.Repositories) > 0 {
 				live.markRestartRequired()
+				if loop {
+					// Stop invitation decisions until a restart applies the saved repository.
+					<-ctx.Done()
+					return 0
+				}
 			}
 		}
 		if !loop {

@@ -31,6 +31,7 @@ type adminLiveConfig struct {
 	generation               uint64
 	pending                  bool
 	restartRequired          bool
+	firstRepositorySaved     bool
 	lastError                string
 	updates                  chan struct{}
 }
@@ -90,6 +91,7 @@ func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 func (a *adminLiveConfig) markRestartRequired() {
 	a.mu.Lock()
 	a.restartRequired = true
+	a.firstRepositorySaved = true
 	a.mu.Unlock()
 }
 
@@ -270,11 +272,12 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	if err != nil {
 		return err
 	}
-	a.disk = updated
 	if restartForFirstRepository {
 		a.restartRequired = true
+		a.firstRepositorySaved = true
 		return nil
 	}
+	a.disk = updated
 	applyRuntimeModels(&activate, a.active)
 	before, _ := json.Marshal(a.desired)
 	after, _ := json.Marshal(activate)

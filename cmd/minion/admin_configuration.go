@@ -141,7 +141,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
     {{if .AnyWriter}}<form class="mt-3" method="post" action="/admin/users/deny-all"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit" aria-label="Allow nobody in {{.Name}}">Allow nobody</button></form>
     {{else}}<form class="mt-3" method="post" action="/admin/users/allow-any"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit" aria-label="Allow any writer in {{.Name}}">Allow any writer</button><small class="d-block text-body-secondary">Any GitHub account with write, maintain, or admin permission will be able to request actions.</small></form>{{end}}
     {{if eq (len .Users) 1}}<small class="d-block text-body-secondary mt-2">Removing the last named requester allows nobody.</small>{{end}}
-  </section>{{else}}{{if .RestartRequired}}<p>No repositories are active. Restart Minion to activate any saved repositories.</p>{{else}}<p>No repositories are configured.</p>{{end}}{{end}}</fieldset>{{end}}
+  </section>{{else}}{{if .RestartRequired}}<p>No repositories are active. Restart Minion to apply saved configuration.</p>{{else}}<p>No repositories are configured.</p>{{end}}{{end}}</fieldset>{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin repositories"}}{{template "head.html" $}}<title>Repositories · Minion admin</title></head>
 <body>{{template "admin-nav" $}}<main class="container py-4">
@@ -165,7 +165,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
       <button class="btn btn-outline-light mt-2" type="submit" aria-label="Save commands for {{.Name}}">Save commands</button>
     </form></details>
     {{if not .CanRemove}}<small class="text-body-secondary">To remove the last repository, edit Configuration and restart Minion.</small>{{end}}
-  </section>{{else}}{{if .RestartRequired}}<p>No repositories are active. Restart Minion to activate any saved repositories.</p>{{else}}<p>No repositories are configured. {{if .InvitationOwners}}Minion is waiting for invitations from approved owners.{{end}}</p>{{end}}{{end}}
+  </section>{{else}}{{if .RestartRequired}}<p>No repositories are active. Restart Minion to apply saved configuration.</p>{{else}}<p>No repositories are configured. {{if .InvitationOwners}}Minion is waiting for invitations from approved owners.{{end}}</p>{{end}}{{end}}
   <section class="border rounded p-3"><h2 class="h5">Add repository</h2><p class="text-body-secondary small">Minion will verify its GitHub identity and repository access before saving. The new repository starts with no allowed requesters; add requesters on the Users page. If Minion started with no repositories, restart it after adding the first one to start monitoring.</p>
     <form method="post" action="/admin/repositories/add" class="vstack gap-3">
       <label class="d-grid gap-1">GitHub repository URL <input class="form-control" type="url" name="url" placeholder="https://github.com/owner/repo" maxlength="225" required></label>

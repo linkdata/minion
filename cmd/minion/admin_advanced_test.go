@@ -337,18 +337,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, cfg)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -368,7 +357,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	edited.Codex.APIKey = "new-key1"
-	data, err = json.Marshal(edited)
+	data, err := json.Marshal(edited)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,18 +389,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 
 func TestAdvancedConfigUnchangedSaveKeepsFirstRepositoryInactive(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, cfg)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -438,6 +416,76 @@ func TestAdvancedConfigUnchangedSaveKeepsFirstRepositoryInactive(t *testing.T) {
 	saved, err := config.Load(path)
 	if err != nil || len(saved.Repositories) != 1 {
 		t.Fatalf("saved repository was lost: repositories=%v error=%v", saved.Repositories, err)
+	}
+	view, err = advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.Repositories = nil
+	data, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired {
+		t.Fatal("removing the saved repository hid the restart required to resume invitations")
+	}
+}
+
+func TestAdvancedConfigRevertClearsRestartRequired(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.PollIntervalSeconds = loaded.PollIntervalSeconds + 60
+	data, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired {
+		t.Fatal("restart-only edit did not require restart")
+	}
+	view, err = advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.PollIntervalSeconds = loaded.PollIntervalSeconds
+	data, err = json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if live.snapshot().RestartRequired {
+		t.Fatal("reverted edit still requires restart")
+	}
+	if err := live.save(func(next *config.Config) error { next.AIInstructions = "updated"; return nil }); err != nil {
+		t.Fatalf("live edit stayed blocked after revert: %v", err)
 	}
 }
 

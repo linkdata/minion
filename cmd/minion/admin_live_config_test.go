@@ -17,24 +17,13 @@ import (
 
 func liveConfigFixture(t *testing.T, remote bool) (*adminLiveConfig, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.Config{BotLogin: "bot", Adversarial: "codex", Repositories: []config.Repository{{Name: "owner/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}}}}
 	if remote {
 		cfg.RemoteExecutor = &config.RemoteExecutorConfig{ExecutorID: "worker", Listen: "127.0.0.1:9999", TLSCertFile: "cert", TLSKeyFile: "key", Token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
 		cfg.MainSettings = config.RoleModelConfig{Model: "model", Effort: "medium"}
 		cfg.CriticSettings = config.RoleModelConfig{Model: "critic", Effort: "medium"}
 	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, cfg)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -93,20 +82,9 @@ func TestAdminLiveConfigPersistsThenAppliesAtBoundary(t *testing.T) {
 }
 
 func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
 	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
 		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 22}}
-	data, err := json.Marshal(initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, initial)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -194,20 +172,9 @@ func TestAdminLiveConfigRemoteFirstRepositoryNeedsNoWorkerSelection(t *testing.T
 }
 
 func TestAdminLiveConfigAppliesOwnerRemovalAfterInvitationRegistration(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
 	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
 		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 22}}
-	data, err := json.Marshal(initial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, initial)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)

@@ -206,11 +206,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	waitingForInvitation := len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != ""
 	if *oneshot && len(cfg.Repositories) == 0 && !waitingForInvitation {
-		if len(cfg.InvitationOwners) > 0 {
-			logger.Print("bot_login and github.token are required to wait for invitations")
-		} else {
-			logger.Print("no repositories configured or approved for invitations")
-		}
+		logger.Print("no repositories configured; approved owners also need bot_login and github.token")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

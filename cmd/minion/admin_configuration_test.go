@@ -137,7 +137,7 @@ func TestAdminConfigurationExplainsNoActiveRepositoriesDuringRestart(t *testing.
 		if err := adminConfigurationHTML.ExecuteTemplate(&body, name, page); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(body.String(), "No repositories are active. Restart Minion to activate any saved repositories.") ||
+		if !strings.Contains(body.String(), "No repositories are active. Restart Minion to apply saved configuration.") ||
 			strings.Contains(body.String(), "A repository is saved") || strings.Contains(body.String(), "No repositories are configured.") {
 			t.Fatalf("%s misstates repository status during restart: %s", name, body.String())
 		}

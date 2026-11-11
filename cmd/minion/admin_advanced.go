@@ -286,6 +286,7 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		updatedJSON, _ := json.Marshal(updated)
 		if bytes.Equal(beforeJSON, updatedJSON) {
 			live.disk = updated
+			live.restartRequired = live.firstRepositorySaved
 		} else {
 			live.restartRequired = true
 		}

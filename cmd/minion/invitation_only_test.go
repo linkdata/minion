@@ -17,11 +17,12 @@ import (
 
 type firstInvitationGitHub struct {
 	monitor.GitHub
-	accepted int64
-	declined int64
-	onList   func()
-	listErr  error
-	empty    bool
+	accepted  int64
+	declined  int64
+	onList    func()
+	listErr   error
+	empty     bool
+	listCalls int
 }
 
 type invitationCleanupProbe struct{ calls int }
@@ -34,6 +35,7 @@ func (p *invitationCleanupProbe) PrunePrivateRecords(context.Context, *state.Sto
 }
 
 func (g *firstInvitationGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
+	g.listCalls++
 	if g.onList != nil {
 		onList := g.onList
 		g.onList = nil
@@ -71,16 +73,31 @@ func (g *firstInvitationGitHub) DeclineRepositoryInvitation(_ context.Context, i
 	return nil
 }
 
-func TestInvitationOnlyAcceptsFirstRepositoryWithoutWorker(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw := `{"bot_login":"bot","github":{"token":"test-token"},"invitation_owners":["acme"],"invitation_owner_ids":{"acme":42},"repositories":[]}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(path)
+func TestInvitationOnlyOneshotIgnoresUserPreferenceFile(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	store, err := state.Open(statePath, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := os.WriteFile(statePath+".link", []byte("invalid JSON"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gh := &firstInvitationGitHub{empty: true}
+	watcher := &monitor.Monitor{Config: config.Config{
+		StatePath: statePath,
+		Admin:     &config.AdminConfig{UserModelChoices: &config.UserModelChoices{}},
+	}, GitHub: gh}
+	if code := runOrchestrateMode(t.Context(), nil, watcher, store, false, log.New(os.Stderr, "", 0), "", 0); code != 0 || gh.listCalls != 1 {
+		t.Fatalf("owner-only pass used unrelated preferences: code=%d invitation_checks=%d", code, gh.listCalls)
+	}
+}
+
+func TestInvitationOnlyAcceptsFirstRepositoryWithoutWorker(t *testing.T) {
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
 	store, err := state.Open(cfg.StatePath, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
@@ -109,15 +126,10 @@ func TestInvitationOnlyAcceptsFirstRepositoryWithoutWorker(t *testing.T) {
 }
 
 func TestInvitationOnlyAppliesOwnerRemovalBeforeInvitationAction(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw := `{"bot_login":"bot","github":{"token":"test-token"},"invitation_owners":["acme"],"invitation_owner_ids":{"acme":42},"repositories":[]}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
 	live, err := newAdminLiveConfig(path, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -166,15 +178,10 @@ func TestInvitationOnlyRunsMonitorCleanup(t *testing.T) {
 }
 
 func TestInvitationOnlyLoopAppliesOwnerUpdateWithoutWaitingForNextPoll(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	raw := `{"bot_login":"bot","github":{"token":"test-token"},"invitation_owners":["acme"],"invitation_owner_ids":{"acme":42},"repositories":[]}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
 	live, err := newAdminLiveConfig(path, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -229,5 +236,63 @@ func TestInvitationOnlyLoopAppliesOwnerUpdateWithoutWaitingForNextPoll(t *testin
 	joined = true
 	if code != 0 || live.current().InvitationOwners[0] != "other" {
 		t.Fatalf("owner update was not applied: code=%d owners=%v", code, live.current().InvitationOwners)
+	}
+}
+
+func TestInvitationOnlyStopsPollingAfterFirstRepositoryUntilRestart(t *testing.T) {
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(cfg.StatePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gh := &firstInvitationGitHub{}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: live.admit}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	go func() { done <- runInvitationOnly(ctx, watcher, store, true, log.New(os.Stderr, "", 0), live) }()
+	joined := false
+	defer func() {
+		cancel()
+		if !joined {
+			<-done
+		}
+	}()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for !live.snapshot().RestartRequired {
+		select {
+		case <-deadline.C:
+			t.Fatal("first invitation was not saved")
+		case <-ticker.C:
+		}
+	}
+	if err := live.save(func(next *config.Config) error { return removeInvitationOwner(next, "acme") }); err == nil {
+		t.Fatal("owner revocation unexpectedly succeeded without a restart")
+	}
+	if err := store.WithLock(func() error {
+		store.Data.NextInviteCheckAt = time.Time{}
+		return store.Save()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	live.updates <- struct{}{}
+	probe := time.NewTimer(500 * time.Millisecond)
+	defer probe.Stop()
+	<-probe.C
+	cancel()
+	code := <-done
+	joined = true
+	if code != 0 || gh.listCalls != 1 || gh.accepted != 7 {
+		t.Fatalf("invitation checks continued before restart: code=%d lists=%d accepted=%d", code, gh.listCalls, gh.accepted)
 	}
 }
