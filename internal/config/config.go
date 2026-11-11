@@ -820,7 +820,7 @@ func (c *Config) Validate(configDir string) error {
 	c.InvitationOwnerIDs = ownerIDs
 	seenOwners := map[string]bool{}
 	for i, owner := range c.InvitationOwners {
-		if len(owner) > 39 || !ownerNamePattern.MatchString(owner) {
+		if !ValidGitHubLogin(owner) {
 			return fmt.Errorf("invalid invitation owner %q", owner)
 		}
 		owner = strings.ToLower(owner)

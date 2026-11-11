@@ -1006,7 +1006,8 @@ func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, a
 		return nil
 	}
 	deferred, err := m.acceptWhitelistedInvitations(ctx)
-	if err != nil {
+	configUpdatePending := errors.Is(err, ErrConfigUpdatePending)
+	if err != nil && !configUpdatePending {
 		// Invitation failures should be visible, but should not stop scans of
 		// repositories for which this account already has access.
 		m.logf("invitation check: %v", err)
@@ -1017,7 +1018,7 @@ func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, a
 	if m.afterInvitationCheck != nil {
 		m.afterInvitationCheck()
 	}
-	return store.WithLock(func() error {
+	saveErr := store.WithLock(func() error {
 		if len(deferred) != 0 {
 			if store.Data.RepositoryCursors == nil {
 				store.Data.RepositoryCursors = make(map[string]time.Time)
@@ -1028,12 +1029,18 @@ func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, a
 				}
 			}
 		}
-		if checkedAt := m.now().UTC(); checkedAt.After(at) {
-			at = checkedAt
+		if !configUpdatePending {
+			if checkedAt := m.now().UTC(); checkedAt.After(at) {
+				at = checkedAt
+			}
+			store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
 		}
-		store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
 		return store.Save()
 	})
+	if configUpdatePending {
+		return errors.Join(err, saveErr)
+	}
+	return saveErr
 }
 
 // Consume an update only while no action is accepted.
@@ -3552,28 +3559,32 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			failures = append(failures, fmt.Errorf("%s invitation grants %q, but configured actions require write access", fullName, invite.Permissions))
 			continue
 		}
-		if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
-			// Preserve the cursor even if the config write reports an ambiguous failure.
-			deferred = append(deferred, strings.ToLower(fullName))
-			actions := m.Config.CommandNames()
-			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions, DenyAllActors: true}, m.Config.Admin)
-			if err != nil {
-				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
-				continue
+		err := m.invitationAction(func() error {
+			if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
+				// Preserve the cursor even if the config write reports an ambiguous failure.
+				deferred = append(deferred, strings.ToLower(fullName))
+				actions := m.Config.CommandNames()
+				// Persist first: an accepted invitation disappears and cannot recover a failed config write.
+				repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions, DenyAllActors: true}, m.Config.Admin)
+				if err != nil {
+					return fmt.Errorf("register %s invitation: %w", fullName, err)
+				}
+				if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
+					return fmt.Errorf("%s identity changed while registering invitation", fullName)
+				}
+				if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
+					m.Config.Repositories = append(m.Config.Repositories, repo)
+				}
+				m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
 			}
-			if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
-				failures = append(failures, fmt.Errorf("%s identity changed while registering invitation", fullName))
-				continue
+			if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
+				return fmt.Errorf("accept %s invitation: %w", fullName, err)
 			}
-			if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
-				m.Config.Repositories = append(m.Config.Repositories, repo)
-			}
-			m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
-		}
-		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
-			failures = append(failures, fmt.Errorf("accept %s invitation: %w", fullName, err))
-			if invitationActionsBlocked(err) {
+			return nil
+		})
+		if err != nil {
+			failures = append(failures, err)
+			if errors.Is(err, ErrConfigUpdatePending) || invitationActionsBlocked(err) {
 				return deferred, errors.Join(failures...)
 			}
 			continue
@@ -3588,14 +3599,23 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			failures = append(failures, err)
 			break
 		}
-		if err := m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID); err != nil {
+		if err := m.invitationAction(func() error {
+			return m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID)
+		}); err != nil {
 			failures = append(failures, fmt.Errorf("decline %s invitation: %w", invite.Repository.FullName, err))
-			if invitationActionsBlocked(err) {
+			if errors.Is(err, ErrConfigUpdatePending) || invitationActionsBlocked(err) {
 				break
 			}
 		}
 	}
 	return deferred, errors.Join(failures...)
+}
+
+func (m *Monitor) invitationAction(action func() error) error {
+	if m.BeforeAccept != nil {
+		return m.BeforeAccept(action)
+	}
+	return action()
 }
 
 func invitationActionsBlocked(err error) bool {

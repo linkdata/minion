@@ -1218,6 +1218,50 @@ func TestAcceptOnlyWhitelistedInvitations(t *testing.T) {
 	}
 }
 
+func TestInvitationActionWaitsForSavedConfigAfterListing(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		invitation github.Invitation
+	}{
+		{"accept", github.Invitation{ID: 1, Repository: github.Repository{FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "write"}},
+		{"decline", github.Invitation{ID: 2, Repository: github.Repository{ID: 99, FullName: "outside/repo", Owner: github.User{Login: "outside", ID: 99}}, Permissions: "write"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.InvitationOwners = []string{"example-owner"}
+			cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+			path := filepath.Join(t.TempDir(), "config.json")
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			pending := false
+			gh := &fakeGitHub{invitations: []github.Invitation{tc.invitation}, beforeList: func() { pending = true }}
+			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: func(action func() error) error {
+				if pending {
+					return ErrConfigUpdatePending
+				}
+				return action()
+			}}
+			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+			store := openState(t, now)
+			if err := m.CheckDueInvitations(t.Context(), store, now); !errors.Is(err, ErrConfigUpdatePending) {
+				t.Fatalf("saved policy was not applied before invitation action: %v", err)
+			}
+			saved, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(gh.accepted) != 0 || len(gh.declined) != 0 || len(saved.Repositories) != 1 || !store.Data.NextInviteCheckAt.IsZero() {
+				t.Fatalf("stale invitation decision: accepted=%v declined=%v repos=%v next=%v", gh.accepted, gh.declined, saved.Repositories, store.Data.NextInviteCheckAt)
+			}
+		})
+	}
+}
+
 func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	gh := &fakeGitHub{

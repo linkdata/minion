@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
+	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -122,8 +124,25 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 				if ctx.Err() != nil {
 					return 0
 				}
+				if errors.Is(err, monitor.ErrConfigUpdatePending) {
+					continue
+				}
 				logger.Printf("invitation check: %s", monitor.InertLogText(err.Error()))
 				return 1
+			}
+		}
+		if live != nil {
+			var runtime config.AdminConfig
+			if watcher.Config.Admin != nil {
+				runtime = *watcher.Config.Admin
+			}
+			saved, err := config.LoadWithAdminRuntime(watcher.ConfigPath, runtime)
+			if err != nil {
+				logger.Printf("check invited repositories: %s", monitor.InertLogText(err.Error()))
+				return 1
+			}
+			if len(saved.Repositories) > 0 {
+				live.markRestartRequired()
 			}
 		}
 		if !loop {

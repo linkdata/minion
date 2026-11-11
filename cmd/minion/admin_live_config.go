@@ -86,6 +86,12 @@ func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, RestartRequired: a.restartRequired, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
 }
 
+func (a *adminLiveConfig) markRestartRequired() {
+	a.mu.Lock()
+	a.restartRequired = true
+	a.mu.Unlock()
+}
+
 func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostSupported bool) {
 	a.mu.Lock()
 	a.remoteSelected = maps.Clone(selected)
