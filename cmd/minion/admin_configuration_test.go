@@ -115,4 +115,30 @@ func TestAdminRemoteRepositoryFormOnlyOffersSelectedCommands(t *testing.T) {
 		!strings.Contains(body.String(), "edit the Minion configuration file and restart Minion and the remote worker") {
 		t.Fatalf("remote form offered a restart-only command: %s", body.String())
 	}
+	cfg.Repositories = nil
+	page.Dot = configurationView(adminConfigSnapshot{Config: cfg, Remote: true})
+	body.Reset()
+	if err := adminConfigurationHTML.ExecuteTemplate(&body, "admin repositories", page); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(page.Dot.Commands, ",") != "audit,review" || strings.Contains(body.String(), `type="submit" disabled>Add repository`) ||
+		strings.Contains(body.String(), "Only commands selected by the remote worker") {
+		t.Fatalf("remote first-repository form is unavailable: commands=%v body=%s", page.Dot.Commands, body.String())
+	}
+}
+
+func TestAdminConfigurationShowsSavedFirstRepositoryState(t *testing.T) {
+	page := struct {
+		Dot                adminConfigurationView
+		HeadHTML, TailHTML template.HTML
+	}{Dot: configurationView(adminConfigSnapshot{RestartRequired: true})}
+	for _, name := range []string{"admin users", "admin repositories"} {
+		var body bytes.Buffer
+		if err := adminConfigurationHTML.ExecuteTemplate(&body, name, page); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(body.String(), "A repository is saved but inactive until Minion restarts.") || strings.Contains(body.String(), "No repositories are configured.") {
+			t.Fatalf("%s hides the saved repository: %s", name, body.String())
+		}
+	}
 }

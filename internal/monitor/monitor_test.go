@@ -1248,7 +1248,7 @@ func TestInvitationActionWaitsForSavedConfigAfterListing(t *testing.T) {
 			}}
 			now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 			store := openState(t, now)
-			if err := m.CheckDueInvitations(t.Context(), store, now); !errors.Is(err, ErrConfigUpdatePending) {
+			if err := m.checkDueInvitations(t.Context(), store, now); !errors.Is(err, ErrConfigUpdatePending) {
 				t.Fatalf("saved policy was not applied before invitation action: %v", err)
 			}
 			saved, err := config.Load(path)
@@ -1259,10 +1259,31 @@ func TestInvitationActionWaitsForSavedConfigAfterListing(t *testing.T) {
 				t.Fatalf("stale invitation decision: accepted=%v declined=%v repos=%v next=%v", gh.accepted, gh.declined, saved.Repositories, store.Data.NextInviteCheckAt)
 			}
 			store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
-			if err := m.CheckDueInvitations(t.Context(), store, now); err == nil || errors.Is(err, ErrConfigUpdatePending) {
+			if err := m.checkDueInvitations(t.Context(), store, now); err == nil || errors.Is(err, ErrConfigUpdatePending) {
 				t.Fatalf("state save error was hidden by policy update: %v", err)
 			}
 		})
+	}
+}
+
+func TestInvitationListingErrorLoggedWithPendingPolicyUpdate(t *testing.T) {
+	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
+	listErr := errors.New("later invitation page failed")
+	gh := &fakeGitHub{
+		invitations: []github.Invitation{{ID: 1, Repository: github.Repository{
+			FullName: "example-owner/example-repo", Owner: github.User{Login: "example-owner"},
+		}, Permissions: "write"}},
+		inviteErr: listErr,
+	}
+	var logs bytes.Buffer
+	m := &Monitor{Config: testConfig(t), GitHub: gh, Logger: log.New(&logs, "", 0),
+		BeforeAccept: func(func() error) error { return ErrConfigUpdatePending }}
+	store := openState(t, now)
+	if err := m.checkDueInvitations(t.Context(), store, now); !errors.Is(err, ErrConfigUpdatePending) {
+		t.Fatalf("pending policy update was not returned: %v", err)
+	}
+	if !strings.Contains(logs.String(), listErr.Error()) || !store.Data.NextInviteCheckAt.IsZero() {
+		t.Fatalf("listing error or due retry was lost: logs=%q next=%v", logs.String(), store.Data.NextInviteCheckAt)
 	}
 }
 
@@ -1432,6 +1453,32 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndSelectsOnRestart(t *tes
 				t.Fatalf("selected worker missed registered repository: err=%v jobs=%v", err, handler.jobs)
 			}
 		})
+	}
+}
+
+func TestInvitationSavedForRestartIsLoggedAsPending(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{invitations: []github.Invitation{{ID: 1, Repository: github.Repository{
+		FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"},
+	}, Permissions: "write"}}}
+	var logs bytes.Buffer
+	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Logger: log.New(&logs, "", 0), SelectedCommands: map[string]bool{}}
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(gh.accepted) != 1 || len(m.Config.Repositories) != 1 || !strings.Contains(logs.String(), "restart Minion to monitor") ||
+		strings.Contains(logs.String(), "added example-owner/new-repo to monitored repositories") {
+		t.Fatalf("saved invitation appeared live: accepted=%v repos=%v logs=%q", gh.accepted, m.Config.Repositories, logs.String())
 	}
 }
 

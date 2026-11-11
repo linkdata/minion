@@ -277,7 +277,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	var initialTerminalWake time.Time
 	if store.Data.Accepted == nil {
 		at := now().UTC()
-		if err := m.CheckDueInvitations(ctx, store, at); err != nil {
+		if err := m.checkDueInvitations(ctx, store, at); err != nil {
 			return wake(store.Data.NextPollAt, false), err
 		}
 		initialTerminalWake = m.serviceTerminalControls(ctx, store)
@@ -333,7 +333,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
 				return wake(retryAt, false), err
 			}
-			if err := m.CheckDueInvitations(ctx, store, now().UTC()); err != nil {
+			if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
 				return wake(retryAt, false), err
 			}
 			return wake(retryAt, true), nil
@@ -392,7 +392,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		if len(m.Config.Repositories) == 0 {
 			pollAt = time.Time{}
 		}
-		if err := m.CheckDueInvitations(ctx, store, now().UTC()); err != nil {
+		if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
 			return wake(pollAt, false), err
 		}
 		return earlierWake(wake(pollAt, false), initialTerminalWake), nil
@@ -999,8 +999,8 @@ func earlierWake(next, invitation time.Time) time.Time {
 	return next
 }
 
-// CheckDueInvitations processes due repository invitations without running jobs.
-func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
+// checkDueInvitations processes due repository invitations without running jobs.
+func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
 	var due bool
 	_ = store.WithLock(func() error {
 		due = !at.Before(store.Data.NextInviteCheckAt)
@@ -1011,7 +1011,7 @@ func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, a
 	}
 	deferred, err := m.acceptWhitelistedInvitations(ctx)
 	configUpdatePending := errors.Is(err, ErrConfigUpdatePending)
-	if err != nil && !configUpdatePending {
+	if err != nil {
 		// Invitation failures should be visible, but should not stop scans of
 		// repositories for which this account already has access.
 		m.logf("invitation check: %v", err)
@@ -1069,7 +1069,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 	if m.takeConfigUpdate(store) {
 		return ErrConfigUpdatePending
 	}
-	if err := m.CheckDueInvitations(ctx, store, m.now().UTC()); err != nil {
+	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
 		return err
 	}
 	if _, ok := m.Handler.(interface{ WaitCapacity(context.Context) error }); !ok {
@@ -1095,7 +1095,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := m.CheckDueInvitations(ctx, store, m.now().UTC()); err != nil {
+		if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
 			return err
 		}
 		if !nextTerminal.IsZero() && !m.now().UTC().Before(nextTerminal) {
@@ -1144,7 +1144,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 			if err := m.reconcilePublicationWrites(ctx, store, "", ""); err != nil {
 				return err
 			}
-			if err := m.CheckDueInvitations(ctx, store, at); err != nil {
+			if err := m.checkDueInvitations(ctx, store, at); err != nil {
 				return err
 			}
 			nextTerminal = m.serviceTerminalControls(ctx, store)
@@ -1605,7 +1605,7 @@ func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.St
 	}
 	invitationCtx, cancelInvitation := context.WithDeadline(controlCtx, invitationDeadline)
 	defer cancelInvitation()
-	if err := m.CheckDueInvitations(invitationCtx, store, at); err != nil {
+	if err := m.checkDueInvitations(invitationCtx, store, at); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -2599,7 +2599,7 @@ selectedLoop:
 		}
 		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		if !reserveFixDeadline && !selectedPendingPush() {
-			if err := m.CheckDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 				if controlCanceledByWorker(err) {
 					return finish(result)
 				}
@@ -2682,7 +2682,7 @@ selectedLoop:
 				continue selectedLoop
 			}
 			if !selectedPendingPush() {
-				if err := m.CheckDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+				if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 					if controlCanceledByWorker(err) {
 						return finish(result)
 					}
@@ -3582,8 +3582,10 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 				}
 				if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
 					m.Config.Repositories = append(m.Config.Repositories, repo)
+					m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
+				} else {
+					m.logf("saved %s in %s; restart Minion to monitor", repo.Name, m.ConfigPath)
 				}
-				m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
 			}
 			if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
 				return fmt.Errorf("accept %s invitation: %w", fullName, err)

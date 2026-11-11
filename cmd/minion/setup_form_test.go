@@ -217,7 +217,7 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 		t.Fatalf("approve owner after credentials status=%d body=%q", response.Code, response.Body.String())
 	}
 	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
-	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "Restart Minion to check invitations from approved owners") || calls != 0 {
+	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "If a credential was rejected") || !strings.Contains(home.Body.String(), "Restart Minion to check invitations from approved owners") || calls != 0 {
 		t.Fatalf("invitation-only setup status=%d body=%q GitHub calls=%d", home.Code, home.Body.String(), calls)
 	}
 	removeOwner.Set("version", setupFormVersion(t, home.Body.String()))

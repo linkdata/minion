@@ -66,7 +66,7 @@ func configurationView(snapshot adminConfigSnapshot) adminConfigurationView {
 	view := adminConfigurationView{Pending: snapshot.Pending, Error: snapshot.Error, Remote: snapshot.Remote, RestartRequired: snapshot.RestartRequired}
 	view.AllCommands = cfg.CommandNames()
 	for _, name := range view.AllCommands {
-		if cfg.Commands[name].SupportsProvider(cfg.Main) && cfg.Commands[name].SupportedOnHost() && (!snapshot.Remote || snapshot.RemoteCommands[name]) {
+		if cfg.Commands[name].SupportsProvider(cfg.Main) && cfg.Commands[name].SupportedOnHost() && (!snapshot.Remote || len(cfg.Repositories) == 0 || snapshot.RemoteCommands[name]) {
 			view.Commands = append(view.Commands, name)
 		}
 	}
@@ -141,12 +141,12 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
     {{if .AnyWriter}}<form class="mt-3" method="post" action="/admin/users/deny-all"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit" aria-label="Allow nobody in {{.Name}}">Allow nobody</button></form>
     {{else}}<form class="mt-3" method="post" action="/admin/users/allow-any"><input type="hidden" name="repository" value="{{.Name}}"><button class="btn btn-outline-warning" type="submit" aria-label="Allow any writer in {{.Name}}">Allow any writer</button><small class="d-block text-body-secondary">Any GitHub account with write, maintain, or admin permission will be able to request actions.</small></form>{{end}}
     {{if eq (len .Users) 1}}<small class="d-block text-body-secondary mt-2">Removing the last named requester allows nobody.</small>{{end}}
-  </section>{{else}}<p>No repositories are configured.</p>{{end}}</fieldset>{{end}}
+  </section>{{else}}{{if .RestartRequired}}<p>A repository is saved but inactive until Minion restarts.</p>{{else}}<p>No repositories are configured.</p>{{end}}{{end}}</fieldset>{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin repositories"}}{{template "head.html" $}}<title>Repositories · Minion admin</title></head>
 <body>{{template "admin-nav" $}}<main class="container py-4">
   <div class="border-bottom mb-4"><h1>Repositories</h1><p class="text-body-secondary">Monitored GitHub repositories and the commands each accepts.</p></div>
-  {{with .Dot}}{{template "admin-config-notice" .}}{{if .Remote}}<p class="text-body-secondary">Only commands selected by the remote worker can be changed here. To add another command, edit the Minion configuration file and restart Minion and the remote worker.</p>{{end}}<fieldset class="border-0 p-0 m-0 w-100" {{if .RestartRequired}}disabled{{end}}>
+  {{with .Dot}}{{template "admin-config-notice" .}}{{if and .Remote .Repositories}}<p class="text-body-secondary">Only commands selected by the remote worker can be changed here. To add another command, edit the Minion configuration file and restart Minion and the remote worker.</p>{{end}}<fieldset class="border-0 p-0 m-0 w-100" {{if .RestartRequired}}disabled{{end}}>
   <section class="border rounded p-3 mb-3"><h2 class="h5">Repository owners allowed to invite Minion</h2>
     <p class="text-body-secondary small">Approve a GitHub organization or personal account. Minion accepts invitations to repositories owned by approved accounts; GitHub decides who may send them.</p>
     {{if .InvitationOwners}}<ul class="list-group mb-3">{{range .InvitationOwners}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><span class="me-auto">{{.Login}} <small class="text-body-secondary">(ID {{.ID}})</small></span><form method="post" action="/admin/invitation-owners/remove"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove owner {{.Login}}">Remove</button></form></li>{{end}}</ul>
@@ -165,7 +165,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
       <button class="btn btn-outline-light mt-2" type="submit" aria-label="Save commands for {{.Name}}">Save commands</button>
     </form></details>
     {{if not .CanRemove}}<small class="text-body-secondary">To remove the last repository, edit Configuration and restart Minion.</small>{{end}}
-  </section>{{else}}<p>No repositories are configured. {{if .InvitationOwners}}Minion is waiting for invitations from approved owners.{{end}}</p>{{end}}
+  </section>{{else}}{{if .RestartRequired}}<p>A repository is saved but inactive until Minion restarts.</p>{{else}}<p>No repositories are configured. {{if .InvitationOwners}}Minion is waiting for invitations from approved owners.{{end}}</p>{{end}}{{end}}
   <section class="border rounded p-3"><h2 class="h5">Add repository</h2><p class="text-body-secondary small">Minion will verify its GitHub identity and repository access before saving. The new repository starts with no allowed requesters; add requesters on the Users page. If Minion started with no repositories, restart it after adding the first one to start monitoring.</p>
     <form method="post" action="/admin/repositories/add" class="vstack gap-3">
       <label class="d-grid gap-1">GitHub repository URL <input class="form-control" type="url" name="url" placeholder="https://github.com/owner/repo" maxlength="225" required></label>

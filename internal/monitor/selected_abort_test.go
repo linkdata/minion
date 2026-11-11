@@ -38,7 +38,7 @@ func TestAcceptedJobDefersPendingInvitationPolicyUpdate(t *testing.T) {
 	if err := store.Save(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.CheckDueInvitations(t.Context(), store, now); err != nil {
+	if err := m.checkDueInvitations(t.Context(), store, now); err != nil {
 		t.Fatalf("pending invitation policy interrupted active job: %v", err)
 	}
 	if store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID || !store.Data.NextInviteCheckAt.After(now) || len(gh.accepted) != 0 {

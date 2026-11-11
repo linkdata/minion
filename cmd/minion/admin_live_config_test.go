@@ -159,6 +159,46 @@ func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
 	}
 }
 
+func TestAdminLiveConfigAppliesOwnerRemovalAfterInvitationRegistration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 22}}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.AddRepositoryWithAdminRuntime(path, config.Repository{Name: "acme/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}, DenyAllActors: true}, loaded.Admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.InvitationOwners, cfg.InvitationOwnerIDs = nil, nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := live.snapshot()
+	if snapshot.RestartRequired || !snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(snapshot.Config.InvitationOwners) != 0 {
+		t.Fatalf("owner removal was blocked by registered repository: %+v", snapshot)
+	}
+	candidate, generation := live.next()
+	live.applied(candidate, generation, nil)
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 || len(saved.InvitationOwners) != 0 || len(live.current().InvitationOwners) != 0 {
+		t.Fatalf("owner removal did not activate: saved=%+v active=%+v error=%v", saved, live.current(), err)
+	}
+}
+
 func TestAdminLiveConfigRejectsRestartOnlyChanges(t *testing.T) {
 	live, path := liveConfigFixture(t, false)
 	before, err := os.ReadFile(path)

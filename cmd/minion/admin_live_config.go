@@ -225,7 +225,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		activate = after
 		activate.Repositories = visibleRepositories(a.desired.Repositories, after.Repositories, added)
-		restartForFirstRepository = len(a.desired.Repositories) == 0 && len(after.Repositories) > 0
+		restartForFirstRepository = len(a.desired.Repositories) == 0 && len(activate.Repositories) > 0
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
 		if !restartForFirstRepository && activate.RemoteExecutor != nil {
 			for _, repo := range activate.Repositories {
@@ -270,7 +270,6 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	a.disk = updated
 	if restartForFirstRepository {
 		a.restartRequired = true
-		a.lastError = ""
 		return nil
 	}
 	applyRuntimeModels(&activate, a.active)
