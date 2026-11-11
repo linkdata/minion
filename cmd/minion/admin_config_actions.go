@@ -123,6 +123,16 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 			return errors.New("Repository is not configured")
 		})
 	}))
+	mux.Handle("POST /admin/invitation-owners/add", adminConfigPost("/admin/repositories", []string{"login", "id"}, "", func(_ context.Context, values url.Values) error {
+		return live.save(func(cfg *config.Config) error {
+			return addInvitationOwner(cfg, values.Get("login"), values.Get("id"))
+		})
+	}))
+	mux.Handle("POST /admin/invitation-owners/remove", adminConfigPost("/admin/repositories", []string{"login"}, "", func(_ context.Context, values url.Values) error {
+		return live.save(func(cfg *config.Config) error {
+			return removeInvitationOwner(cfg, values.Get("login"))
+		})
+	}))
 	mux.Handle("POST /admin/repositories/add", adminConfigPost("/admin/repositories", []string{"url"}, "actions", func(ctx context.Context, values url.Values) error {
 		actions := values["actions"]
 		current := live.snapshot().Config

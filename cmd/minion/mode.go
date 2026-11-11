@@ -84,6 +84,9 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		}
 		watcher.UserPreferences = links.preferencesForGitHubID
 	}
+	if len(watcher.Config.Repositories) == 0 {
+		return runInvitationOnly(ctx, watcher, store, loop, logger, live)
+	}
 	if watcher.Config.RemoteExecutor != nil {
 		endpoint, err := attachSelectedRemoteWorker(owner, watcher)
 		if err != nil {
@@ -98,6 +101,54 @@ func runOrchestrateMode(ctx context.Context, owner *action.Orchestrator, watcher
 		return 1
 	}
 	return runSelectedLocalServiceLive(ctx, owner, watcher, store, loop, done, logger, closeWorker, path, []string{"-mode=execute"}, readyTimeout, live)
+}
+
+func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *state.Store, loop bool, logger *log.Logger, live *adminLiveConfig) int {
+	// A newly accepted repository waits for a restart and worker selection.
+	watcher.SelectedCommands = map[string]bool{}
+	logger.Print("waiting for repository invitations")
+	var applied uint64
+	for {
+		if live != nil {
+			cfg, generation := live.next()
+			watcher.Config = cfg
+			if generation != applied {
+				live.applied(cfg, generation, nil)
+				applied = generation
+			}
+		}
+		if len(watcher.Config.InvitationOwners) != 0 {
+			if err := watcher.CheckDueInvitations(ctx, store, time.Now().UTC()); err != nil {
+				if ctx.Err() != nil {
+					return 0
+				}
+				logger.Printf("invitation check: %s", monitor.InertLogText(err.Error()))
+				return 1
+			}
+		}
+		if !loop {
+			return 0
+		}
+		wait := time.Until(store.Data.NextInviteCheckAt)
+		if len(watcher.Config.InvitationOwners) == 0 {
+			wait = time.Hour
+		} else if wait < time.Second {
+			wait = time.Second
+		}
+		timer := time.NewTimer(wait)
+		var updates <-chan struct{}
+		if live != nil {
+			updates = live.updates
+		}
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0
+		case <-updates:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
 }
 
 func terminalRecoveryPending(store *state.Store) bool {

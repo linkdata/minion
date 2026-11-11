@@ -65,13 +65,15 @@ func TestAdminLiveConfigPersistsThenAppliesAtBoundary(t *testing.T) {
 	if err := live.save(func(cfg *config.Config) error {
 		cfg.Repositories[0].AllowedActors = []string{"writer"}
 		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+		cfg.InvitationOwners = []string{"acme"}
+		cfg.InvitationOwnerIDs = map[string]int64{"acme": 77}
 		cfg.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
 		cfg.AIInstructions = "Read carefully."
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !live.snapshot().Pending || live.current().Repositories[0].AllowedActors != nil {
+	if !live.snapshot().Pending || live.current().Repositories[0].AllowedActors != nil || len(live.current().InvitationOwners) != 0 {
 		t.Fatal("saved policy became active before the monitor boundary")
 	}
 	select {
@@ -80,13 +82,80 @@ func TestAdminLiveConfigPersistsThenAppliesAtBoundary(t *testing.T) {
 		t.Fatal("monitor was not signaled")
 	}
 	saved, err := config.Load(path)
-	if err != nil || len(saved.Repositories[0].AllowedActors) != 1 || saved.AIInstructions != "Read carefully." || saved.RequiredCleanRounds(11, 7) != 2 {
+	if err != nil || len(saved.Repositories[0].AllowedActors) != 1 || saved.InvitationOwnerIDs["acme"] != 77 || saved.AIInstructions != "Read carefully." || saved.RequiredCleanRounds(11, 7) != 2 {
 		t.Fatalf("saved config = %+v, %v", saved, err)
 	}
 	candidate, generation := live.next()
 	live.applied(candidate, generation, nil)
-	if live.snapshot().Pending || live.current().Repositories[0].AllowedActors[0] != "writer" || live.current().AIInstructions != "Read carefully." {
+	if live.snapshot().Pending || live.current().Repositories[0].AllowedActors[0] != "writer" || live.current().InvitationOwnerIDs["acme"] != 77 || live.current().AIInstructions != "Read carefully." {
 		t.Fatal("monitor boundary did not activate saved settings")
+	}
+}
+
+func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 22}}
+	data, err := json.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.InvitationOwners = append(cfg.InvitationOwners, "other")
+		cfg.InvitationOwnerIDs["other"] = 33
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.InvitationOwners) != 2 || len(live.current().InvitationOwners) != 1 {
+		t.Fatalf("invitation owners were not saved pending activation: saved=%v active=%v error=%v", saved.InvitationOwners, live.current().InvitationOwners, err)
+	}
+	candidate, generation := live.next()
+	live.applied(candidate, generation, nil)
+	if len(live.current().InvitationOwners) != 2 {
+		t.Fatalf("invitation owners were not activated: %v", live.current().InvitationOwners)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.InvitationOwners, cfg.InvitationOwnerIDs = nil, nil
+		return nil
+	}); err != nil {
+		t.Fatalf("removing the last invitation owner: %v", err)
+	}
+	saved, err = config.Load(path)
+	if err != nil || len(saved.InvitationOwners) != 0 || len(live.current().InvitationOwners) != 2 {
+		t.Fatalf("empty policy was not saved pending activation: saved=%v active=%v error=%v", saved.InvitationOwners, live.current().InvitationOwners, err)
+	}
+	candidate, generation = live.next()
+	live.applied(candidate, generation, nil)
+	if len(live.current().InvitationOwners) != 0 {
+		t.Fatalf("empty policy was not activated: %v", live.current().InvitationOwners)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.Repositories = []config.Repository{{Name: "acme/project", ID: 11, OwnerID: 22, Actions: []string{"review"}}}
+		return nil
+	}); err != nil {
+		t.Fatalf("adding the first repository: %v", err)
+	}
+	saved, err = config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("first repository was not saved: repositories=%v error=%v", saved.Repositories, err)
+	}
+	snapshot := live.snapshot()
+	candidate, _ = live.next()
+	if !snapshot.RestartRequired || snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(candidate.Repositories) != 0 || len(live.current().Repositories) != 0 {
+		t.Fatalf("first repository activated without restart: snapshot=%+v next=%v active=%v", snapshot, candidate.Repositories, live.current().Repositories)
 	}
 }
 

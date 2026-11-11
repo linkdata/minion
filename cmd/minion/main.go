@@ -204,7 +204,8 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("webserv flags require an admin block in the config")
 		return 2
 	}
-	if *oneshot && len(cfg.Repositories) == 0 {
+	waitingForInvitation := len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != ""
+	if *oneshot && len(cfg.Repositories) == 0 && !waitingForInvitation {
 		logger.Print("no repositories configured")
 		return 1
 	}
@@ -226,7 +227,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 0
 	}
 	canOfferSetup := cfg.Admin != nil && !*check && !*oneshot
-	setupIncomplete := canOfferSetup &&
+	setupIncomplete := canOfferSetup && !waitingForInvitation &&
 		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0 ||
 			cfg.RemoteExecutor == nil && !hasRunnableLocalCommand(cfg) ||
 			cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true))
@@ -267,6 +268,15 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return true
 	}
 	preflight := func() bool {
+		if waitingForInvitation {
+			if cfg.Admin != nil && !*oneshot {
+				if err := checkAdminServerConfig(*cfg.Admin); err != nil {
+					logger.Printf("admin TLS preflight: %v", err)
+					return false
+				}
+			}
+			return true
+		}
 		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
 			logger.Printf("AI preflight: %v", err)
 			return false
@@ -326,7 +336,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
 			logger.Print(claudeUnixSocketWarning)
 		}
-		logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
+		if waitingForInvitation {
+			logger.Print("waiting for invitations from approved repository owners; preflight passed")
+		} else {
+			logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
+		}
 		return 0
 	}
 	startRecoverySetup := func() int {

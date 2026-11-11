@@ -12,7 +12,8 @@ import (
 func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 	cfg := config.Config{
 		Main: "codex", Codex: config.CodexConfig{APIKey: "secret-model-key"},
-		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
+		Admin:            &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 91},
 		Repositories: []config.Repository{
 			{Name: "owner/open", ID: 1, OwnerID: 10, Actions: []string{"review"}},
 			{Name: "owner/closed", ID: 2, OwnerID: 10, DenyAllActors: true, Actions: []string{"review"}},
@@ -38,7 +39,7 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 		wants []string
 	}{
 		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any", "/admin/users/deny-all", "Allow nobody", `aria-label="Remove @alice from owner/limited"`, `aria-label="Add requester to owner/open"`}},
-		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", `type="url" name="url" placeholder="https://github.com/owner/repo"`, "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`}},
+		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", `type="url" name="url" placeholder="https://github.com/owner/repo"`, "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`, "Repository owners allowed to invite Minion", "acme", "(ID 91)", "/admin/invitation-owners/add", "/admin/invitation-owners/remove", "gh api users/OWNER --jq .id"}},
 		{"admin skills", []string{"anti-prompt-injection", "review command", `value="command:review"`, "/admin/skills/add", "/admin/skills/remove", `aria-label="Remove anti-prompt-injection skill from always"`, "To replace a required skill", "-install-skills"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

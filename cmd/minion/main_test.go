@@ -180,6 +180,20 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	if code != 0 || !strings.Contains(output, "setup incomplete: no repositories configured") || strings.Join(requests, ",") != "/user" {
 		t.Fatalf("empty setup check: code=%d GitHub requests=%v output=%q", code, requests, output)
 	}
+	cfg.InvitationOwners = []string{"approved-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"approved-owner": 99}
+	requests = nil
+	gitChecks := 0
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			gitChecks++
+			return nil
+		})
+	}, "-check")
+	if code != 0 || gitChecks != 0 || !strings.Contains(output, "waiting for invitations from approved repository owners") ||
+		strings.Contains(output, "setup incomplete:") || strings.Join(requests, ",") != "/user" {
+		t.Fatalf("approved-owner check: code=%d git_checks=%d GitHub requests=%v output=%q", code, gitChecks, requests, output)
+	}
 	cfg.BotLogin = "other"
 	requests = nil
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {
@@ -224,6 +238,14 @@ func TestCheckWithoutRepositoriesSkipsUnavailableGitHubAndState(t *testing.T) {
 	}
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("setup check created state: %v", err)
+	}
+	cfg.InvitationOwners = []string{"approved-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"approved-owner": 99}
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 0 || !strings.Contains(output, "setup incomplete: no repositories configured") || strings.Contains(output, "waiting for invitations") {
+		t.Fatalf("approved owner without bot token passed readiness check: code=%d output=%q", code, output)
 	}
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {
 		return runWithGitCheck(func(context.Context, string) error { return errors.New("fixture Git failure") })

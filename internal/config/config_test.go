@@ -473,6 +473,19 @@ func TestInvitationOwnersAreNormalizedAndValidated(t *testing.T) {
 	}
 }
 
+func TestInvitationOwnerAllowsNoRepositories(t *testing.T) {
+	cfg := Config{BotLogin: "bot", InvitationOwners: []string{"Acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42}}
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InvitationOwners[0] != "acme" {
+		t.Fatalf("owner login was not normalized: %v", cfg.InvitationOwners)
+	}
+	if err := (&Config{BotLogin: "bot"}).Validate(t.TempDir()); err == nil {
+		t.Fatal("accepted a headless config with neither repositories nor approved owners")
+	}
+}
+
 func TestValidateRequiresExactIdentityPins(t *testing.T) {
 	base := Config{BotLogin: "bot", InvitationOwners: []string{"owner"}, InvitationOwnerIDs: map[string]int64{"owner": 2}, Repositories: []Repository{{
 		Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"},

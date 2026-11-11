@@ -163,6 +163,18 @@ func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 		t.Fatalf("edited repository commands or access changed: %+v", repo)
 	}
 	owner.GitHub = nil
+	post("/admin/invitation-owners/add", url.Values{"login": {"Acme"}, "id": {"91"}}, http.StatusSeeOther)
+	approved := configForAdminTest(t, path)
+	if len(approved.InvitationOwners) != 1 || approved.InvitationOwners[0] != "acme" || approved.InvitationOwnerIDs["acme"] != 91 {
+		t.Fatalf("offline owner approval was not pinned: %+v", approved.InvitationOwners)
+	}
+	post("/admin/invitation-owners/add", url.Values{"login": {"acme"}, "id": {"91"}}, http.StatusConflict)
+	post("/admin/invitation-owners/add", url.Values{"login": {"other"}, "id": {"0"}}, http.StatusConflict)
+	post("/admin/invitation-owners/remove", url.Values{"login": {"Acme"}}, http.StatusSeeOther)
+	approved = configForAdminTest(t, path)
+	if len(approved.InvitationOwners) != 0 || len(approved.InvitationOwnerIDs) != 0 {
+		t.Fatalf("owner approval was not removed: owners=%v IDs=%v", approved.InvitationOwners, approved.InvitationOwnerIDs)
+	}
 	post("/admin/users/deny-all", url.Values{"repository": {"owner/existing"}}, http.StatusSeeOther)
 	repo, _ = configForAdminTest(t, path).Repository("owner/existing")
 	if !repo.DenyAllActors || len(repo.AllowedActors) != 0 || len(repo.AllowedActorIDs) != 0 || repo.AllowsActor("another", 88) {

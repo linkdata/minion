@@ -1359,7 +1359,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndSelectsOnRestart(t *tes
 						t.Fatal(err)
 					}
 					repo, ok := saved.Repository("example-owner/second-repo")
-					if !ok || !repo.AllowsAction("review") || !repo.AllowsAction("audit") || !repo.AllowsAction("security-audit") || !repo.AllowsAction("fix") {
+					if !ok || !repo.DenyAllActors || !repo.AllowsAction("review") || !repo.AllowsAction("audit") || !repo.AllowsAction("security-audit") || !repo.AllowsAction("fix") {
 						t.Fatalf("repository not persisted before accepting invitation: %+v", saved.Repositories)
 					}
 				},
@@ -1377,6 +1377,7 @@ func TestInvitationRegistersRepositoryBeforeAcceptanceAndSelectsOnRestart(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
+			saved.Repositories[1].DenyAllActors = false
 			gh.invitations = nil
 			m = &Monitor{Config: saved, GitHub: gh, Handler: handler, Now: func() time.Time { return now }, SelectedExecutorID: "local"}
 			if _, err := m.RunOnce(t.Context(), store); err != nil || len(handler.jobs) != 1 {

@@ -53,8 +53,8 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>admin</code> account's <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
-{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion. No jobs run during setup or recovery.</p>
-{{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the GitHub bot credentials, then add a repository. Add a command in Advanced config if none is available.{{else}}Sign in as admin to finish setup.{{end}} No jobs run during setup.</p>{{end}}
+{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. {{if .Dot.Repositories}}If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion.{{else}}Restart Minion to check invitations from approved owners. Set up the AI worker and <code>work_root</code> before restarting to monitor an accepted repository.{{end}} No jobs run during setup or recovery.</p>
+{{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the GitHub bot credentials, then add a repository or approve its owner and invite the bot. Add a command in Advanced config if none is available.{{else}}Sign in as admin to finish setup.{{end}} No jobs run during setup.</p>{{end}}
 {{if .Dot.SignedAdmin}}
 <h2 class="h5">GitHub bot</h2>
 <form method="post" action="/admin/setup" class="vstack gap-3 col-lg-6">
@@ -63,6 +63,15 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 <label class="form-label">GitHub bot token<input class="form-control" name="github_token" type="password" autocomplete="new-password" maxlength="4096" {{if not .Dot.TokenSet}}required{{end}}></label>
 {{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
 <button class="btn btn-primary" type="submit">Save bot credentials</button></form>
+<h2 class="h5 mt-4">Repository owners allowed to invite Minion</h2>
+<p>Approve a GitHub organization or personal account that owns a repository. GitHub decides who may invite collaborators to it. Once bot credentials are saved, invite the bot to a repository owned by an approved account.</p>
+{{if .Dot.InvitationOwners}}<ul class="list-group mb-3 col-lg-6">{{range .Dot.InvitationOwners}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><span class="me-auto">{{.Login}} <small class="text-body-secondary">(ID {{.ID}})</small></span><form method="post" action="/admin/invitation-owners/remove"><input type="hidden" name="version" value="{{$.Dot.Version}}"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove owner {{.Login}}">Remove</button></form></li>{{end}}</ul>
+{{else}}<p>No repository owners are approved for invitations.</p>{{end}}
+<form method="post" action="/admin/invitation-owners/add" class="vstack gap-3 col-lg-6">
+<input type="hidden" name="version" value="{{.Dot.Version}}">
+<label class="form-label">GitHub owner login<input class="form-control" name="login" maxlength="39" required></label>
+<label class="form-label">Numeric GitHub owner ID<input class="form-control" type="number" name="id" min="1" required><small class="text-body-secondary">Find it with <code>gh api users/OWNER --jq .id</code>.</small></label>
+<button class="btn btn-primary" type="submit">Approve owner</button></form>
 {{if and .Dot.BotLogin .Dot.TokenSet .Dot.CanAddRepository}}
 <h2 class="h5 mt-4">Add repository</h2>
 {{if .Dot.Repositories}}<p>Configured repositories: {{range $i, $name := .Dot.Repositories}}{{if $i}}, {{end}}<code>{{$name}}</code>{{end}}</p>{{end}}
@@ -79,6 +88,7 @@ type adminHomeView struct {
 	Admin, User, SignedUser, SignedAdmin, Setup, SetupComplete, TokenSet, CanAddRepository bool
 	BotLogin, Version                                                                      string
 	Repositories                                                                           []string
+	InvitationOwners                                                                       []adminGitHubAccount
 }
 type adminLoginView struct{ SignedIn, PasswordSet bool }
 
@@ -203,6 +213,8 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	if setup && setupPath != "" {
 		mux.Handle("POST /admin/setup", access.setupPost())
 		mux.Handle("POST /admin/repositories/add", access.setupRepositoryPost())
+		mux.Handle("POST /admin/invitation-owners/add", access.setupInvitationOwnerAdd())
+		mux.Handle("POST /admin/invitation-owners/remove", access.setupInvitationOwnerRemove())
 		registerAdminAdvancedRoutes(mux, jw, setupPath, nil, cfg)
 	}
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
@@ -352,7 +364,8 @@ func (a *adminAccess) allowed(r *http.Request) bool {
 		if a.setupPath == "" || a.sessionUsername(a.jaws.GetSession(r)) == "" {
 			return false
 		}
-		return r.Method == http.MethodPost && (r.URL.Path == "/admin/setup" || r.URL.Path == "/admin/repositories/add") ||
+		return r.Method == http.MethodPost && (r.URL.Path == "/admin/setup" || r.URL.Path == "/admin/repositories/add" ||
+			r.URL.Path == "/admin/invitation-owners/add" || r.URL.Path == "/admin/invitation-owners/remove") ||
 			r.URL.Path == "/admin/config" && (r.Method == http.MethodGet || r.Method == http.MethodPost) ||
 			r.URL.Path == "/admin/config/check" && r.Method == http.MethodPost
 	}
@@ -404,12 +417,15 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 		if cfg, version, err := loadSetupConfig(a.setupPath, a.setupAdmin); err == nil {
 			view.BotLogin = cfg.BotLogin
 			view.TokenSet = cfg.GitHub.Token != ""
-			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true)
+			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && (len(cfg.InvitationOwners) > 0 || len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true))
 			_, addErr := setupRepositoryActions(cfg)
 			view.CanAddRepository = addErr == nil
 			view.Version = version
 			for _, repo := range cfg.Repositories {
 				view.Repositories = append(view.Repositories, repo.Name)
+			}
+			for _, login := range cfg.InvitationOwners {
+				view.InvitationOwners = append(view.InvitationOwners, adminGitHubAccount{Login: login, ID: cfg.InvitationOwnerIDs[login]})
 			}
 		}
 	}

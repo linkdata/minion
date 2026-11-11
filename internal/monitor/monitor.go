@@ -277,7 +277,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 	var initialTerminalWake time.Time
 	if store.Data.Accepted == nil {
 		at := now().UTC()
-		if err := m.checkDueInvitations(ctx, store, at); err != nil {
+		if err := m.CheckDueInvitations(ctx, store, at); err != nil {
 			return wake(store.Data.NextPollAt, false), err
 		}
 		initialTerminalWake = m.serviceTerminalControls(ctx, store)
@@ -333,7 +333,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 			if err := m.reconcilePublicationWrites(ctx, store, "", skipChecked); err != nil {
 				return wake(retryAt, false), err
 			}
-			if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
+			if err := m.CheckDueInvitations(ctx, store, now().UTC()); err != nil {
 				return wake(retryAt, false), err
 			}
 			return wake(retryAt, true), nil
@@ -388,7 +388,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return wake(store.Data.NextPollAt, err == nil), err
 	}
 	if m.SelectedExecutorID == "" {
-		if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
+		if err := m.CheckDueInvitations(ctx, store, now().UTC()); err != nil {
 			return wake(store.Data.NextPollAt, false), err
 		}
 		return earlierWake(wake(store.Data.NextPollAt, false), initialTerminalWake), nil
@@ -995,7 +995,8 @@ func earlierWake(next, invitation time.Time) time.Time {
 	return next
 }
 
-func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
+// CheckDueInvitations accepts due repository invitations without running jobs.
+func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
 	var due bool
 	_ = store.WithLock(func() error {
 		due = !at.Before(store.Data.NextInviteCheckAt)
@@ -1053,7 +1054,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 	if m.takeConfigUpdate(store) {
 		return ErrConfigUpdatePending
 	}
-	if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+	if err := m.CheckDueInvitations(ctx, store, m.now().UTC()); err != nil {
 		return err
 	}
 	if _, ok := m.Handler.(interface{ WaitCapacity(context.Context) error }); !ok {
@@ -1079,7 +1080,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := m.checkDueInvitations(ctx, store, m.now().UTC()); err != nil {
+		if err := m.CheckDueInvitations(ctx, store, m.now().UTC()); err != nil {
 			return err
 		}
 		if !nextTerminal.IsZero() && !m.now().UTC().Before(nextTerminal) {
@@ -1128,7 +1129,7 @@ func (m *Monitor) waitCapacityWithInvitations(ctx context.Context, store *state.
 			if err := m.reconcilePublicationWrites(ctx, store, "", ""); err != nil {
 				return err
 			}
-			if err := m.checkDueInvitations(ctx, store, at); err != nil {
+			if err := m.CheckDueInvitations(ctx, store, at); err != nil {
 				return err
 			}
 			nextTerminal = m.serviceTerminalControls(ctx, store)
@@ -1589,7 +1590,7 @@ func (m *Monitor) serviceSavedRetryControls(ctx context.Context, store *state.St
 	}
 	invitationCtx, cancelInvitation := context.WithDeadline(controlCtx, invitationDeadline)
 	defer cancelInvitation()
-	if err := m.checkDueInvitations(invitationCtx, store, at); err != nil {
+	if err := m.CheckDueInvitations(invitationCtx, store, at); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -2583,7 +2584,7 @@ selectedLoop:
 		}
 		reserveFixDeadline := job.Command.Action == command.Fix && !time.Now().Before(controlDeadline)
 		if !reserveFixDeadline && !selectedPendingPush() {
-			if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+			if err := m.CheckDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 				if controlCanceledByWorker(err) {
 					return finish(result)
 				}
@@ -2666,7 +2667,7 @@ selectedLoop:
 				continue selectedLoop
 			}
 			if !selectedPendingPush() {
-				if err := m.checkDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
+				if err := m.CheckDueInvitations(controlCtx, store, m.now().UTC()); err != nil && !deferredControl(err) {
 					if controlCanceledByWorker(err) {
 						return finish(result)
 					}
@@ -3556,7 +3557,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			deferred = append(deferred, strings.ToLower(fullName))
 			actions := m.Config.CommandNames()
 			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions}, m.Config.Admin)
+			repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions, DenyAllActors: true}, m.Config.Admin)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
 				continue

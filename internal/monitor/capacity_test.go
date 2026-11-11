@@ -831,6 +831,10 @@ func TestSelectedWorkerInvitationKeepsCursorUntilRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(reloaded.Repositories) != 2 || !reloaded.Repositories[1].DenyAllActors {
+		t.Fatalf("invited repository did not deny requesters by default: %+v", reloaded.Repositories)
+	}
+	reloaded.Repositories[1].DenyAllActors = false
 	gh.invitations = nil
 	gh.notificationCalls = nil
 	m = &Monitor{Config: reloaded, ConfigPath: configPath, GitHub: gh, Handler: handler,

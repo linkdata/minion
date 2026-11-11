@@ -96,6 +96,7 @@ func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostS
 func sameFixedConfig(a, b config.Config) bool {
 	a.Repositories, a.Commands, a.AlwaysOnSkills = b.Repositories, b.Commands, b.AlwaysOnSkills
 	a.RequesterPolicies, a.AIInstructions = b.RequesterPolicies, b.AIInstructions
+	a.InvitationOwners, a.InvitationOwnerIDs = b.InvitationOwners, b.InvitationOwnerIDs
 	a.CriticStopping.RequiredCleanRounds = b.CriticStopping.RequiredCleanRounds
 	left, _ := json.Marshal(a)
 	right, _ := json.Marshal(b)
@@ -178,6 +179,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		return errors.New("restart Minion before further live edits")
 	}
 	var activate config.Config
+	var restartForFirstRepository bool
 	var runtime config.AdminConfig
 	if a.active.Admin != nil {
 		runtime = *a.active.Admin
@@ -216,11 +218,9 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		activate = after
 		activate.Repositories = visibleRepositories(a.desired.Repositories, after.Repositories, added)
-		if len(activate.Repositories) == 0 {
-			return errAdminRestartRequired
-		}
+		restartForFirstRepository = len(a.desired.Repositories) == 0 && len(after.Repositories) > 0
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
-		if activate.RemoteExecutor != nil {
+		if !restartForFirstRepository && activate.RemoteExecutor != nil {
 			for _, repo := range activate.Repositories {
 				previous, _ := a.desired.Repository(repo.Name)
 				for _, name := range repo.Actions {
@@ -231,10 +231,10 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 				}
 			}
 		}
-		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
+		if !restartForFirstRepository && activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
 			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}
-		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
+		if !restartForFirstRepository && activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
 			return errors.New("at least one enabled command must have its required skills installed")
 		}
 		if !reflect.DeepEqual(before.Repositories, after.Repositories) {
@@ -249,6 +249,9 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		if !reflect.DeepEqual(before.RequesterPolicies, after.RequesterPolicies) {
 			raw.RequesterPolicies = after.RequesterPolicies
 		}
+		if !reflect.DeepEqual(before.InvitationOwners, after.InvitationOwners) || !reflect.DeepEqual(before.InvitationOwnerIDs, after.InvitationOwnerIDs) {
+			raw.InvitationOwners, raw.InvitationOwnerIDs = after.InvitationOwners, after.InvitationOwnerIDs
+		}
 		raw.CriticStopping.RequiredCleanRounds = after.CriticStopping.RequiredCleanRounds
 		raw.AIInstructions = after.AIInstructions
 		raw.Codex.APIKey, raw.Claude.APIKey = after.Codex.APIKey, after.Claude.APIKey
@@ -258,6 +261,11 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		return err
 	}
 	a.disk = updated
+	if restartForFirstRepository {
+		a.restartRequired = true
+		a.lastError = ""
+		return nil
+	}
 	applyRuntimeModels(&activate, a.active)
 	before, _ := json.Marshal(a.desired)
 	after, _ := json.Marshal(activate)
