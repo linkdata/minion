@@ -50,7 +50,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, remote-execute, or hash")
 	oneshot := flag.Bool("oneshot", false, "run one polling pass, then exit; default is a continuous service")
-	check := flag.Bool("check", false, "run available preflight checks, then exit; report incomplete setup if no repositories are configured")
+	check := flag.Bool("check", false, "run available preflight checks, then exit; report setup or invitation status without repositories")
 	installSkills := flag.Bool("install-skills", false, "install configured skills for Codex and Claude, then exit")
 	address := flag.String("address", "", "webserv listen address for the admin UI")
 	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
@@ -482,7 +482,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	bindPublicationValidation(orchestrator, watcher)
 	watcher.Config, watcher.Handler = cfg, orchestrator
 	path := ""
-	if cfg.RemoteExecutor == nil {
+	if cfg.RemoteExecutor == nil && len(cfg.Repositories) > 0 {
 		path, err = os.Executable()
 		if err != nil {
 			logger.Printf("locate executable: %v", err)

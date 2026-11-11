@@ -72,6 +72,7 @@ func (a *adminLiveConfig) current() config.Config {
 
 func (a *adminLiveConfig) admit(accept func() error) error {
 	// A completed save must not be followed by a durable decision under the old policy.
+	// shortcut: invitation actions hold this lock during a 30-second API budget; narrow it if admin saves stall.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if a.pending || a.lastError != "" {
@@ -240,7 +241,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		if !restartForFirstRepository && activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
 			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}
-		if !restartForFirstRepository && activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
+		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
 			return errors.New("at least one enabled command must have its required skills installed")
 		}
 		if !reflect.DeepEqual(before.Repositories, after.Repositories) {

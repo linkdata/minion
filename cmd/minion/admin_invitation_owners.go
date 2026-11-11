@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -32,13 +33,10 @@ func addInvitationOwner(cfg *config.Config, login, rawID string) error {
 }
 
 func removeInvitationOwner(cfg *config.Config, login string) error {
-	if login == "" {
-		return errors.New("Enter an approved owner")
-	}
 	for i, existing := range cfg.InvitationOwners {
 		if strings.EqualFold(existing, login) {
 			cfg.InvitationOwners = slices.Delete(cfg.InvitationOwners, i, i+1)
-			delete(cfg.InvitationOwnerIDs, strings.ToLower(existing))
+			maps.DeleteFunc(cfg.InvitationOwnerIDs, func(key string, _ int64) bool { return strings.EqualFold(key, login) })
 			return nil
 		}
 	}

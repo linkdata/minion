@@ -53,7 +53,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{else if .Dot.Admin}}<a class="btn btn-primary me-2" href="/admin/login">Admin sign in</a>{{end}}
 {{if .Dot.User}}<a class="btn btn-primary" href="/auth/login">{{if .Dot.SignedUser}}Your account{{else}}User sign in{{end}}</a>{{end}}
 {{if not .Dot.Admin}}<p role="status">The admin password is not set. Run <code>minion -mode=hash</code>, set the <code>admin</code> account's <code>password_hash</code> to the generated hash, then restart Minion.</p>{{end}}
-{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. {{if .Dot.Repositories}}If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion.{{else}}Restart Minion to check invitations from approved owners. Set up the AI worker and <code>work_root</code> before restarting to monitor an accepted repository.{{end}} No jobs run during setup or recovery.</p>
+{{if .Dot.Setup}}{{if .Dot.SetupComplete}}<p role="status">Setup saved. {{if .Dot.Repositories}}If a credential was rejected, sign in as admin and correct it in Advanced config. For each selected AI, set its API key in Advanced config or sign in to its CLI on the executor host. Create the <code>work_root</code> directory (default <code>var/work</code> beside the config file). On the executor host, install skills as its service account with <code>minion -config CONFIG_FILE -install-skills</code> (use a worker skills config for a remote worker), then restart Minion.{{else}}Restart Minion to check invitations from approved owners. Set up the AI worker and <code>work_root</code> before restarting to monitor an accepted repository.{{if not .Dot.CanAddRepository}} Add an available command in Advanced config and include it in the accepted repository's actions before monitoring.{{end}}{{end}} No jobs run during setup or recovery.</p>
 {{else}}<p role="status">Setup is incomplete. {{if .Dot.SignedAdmin}}Save the GitHub bot credentials, then add a repository or approve its owner and invite the bot. Add a command in Advanced config if none is available.{{else}}Sign in as admin to finish setup.{{end}} No jobs run during setup.</p>{{end}}
 {{if .Dot.SignedAdmin}}
 <h2 class="h5">GitHub bot</h2>
@@ -417,7 +417,9 @@ func (a *adminAccess) homePage(w http.ResponseWriter, r *http.Request) {
 		if cfg, version, err := loadSetupConfig(a.setupPath, a.setupAdmin); err == nil {
 			view.BotLogin = cfg.BotLogin
 			view.TokenSet = cfg.GitHub.Token != ""
-			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet && (len(cfg.InvitationOwners) > 0 || len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true))
+			view.SetupComplete = cfg.BotLogin != "" && view.TokenSet &&
+				(len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 ||
+					len(cfg.Repositories) != 0 && hasUnselectedCommand(nil, cfg, true))
 			_, addErr := setupRepositoryActions(cfg)
 			view.CanAddRepository = addErr == nil
 			view.Version = version

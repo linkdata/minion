@@ -148,7 +148,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
   <div class="border-bottom mb-4"><h1>Repositories</h1><p class="text-body-secondary">Monitored GitHub repositories and the commands each accepts.</p></div>
   {{with .Dot}}{{template "admin-config-notice" .}}{{if .Remote}}<p class="text-body-secondary">Only commands selected by the remote worker can be changed here. To add another command, edit the Minion configuration file and restart Minion and the remote worker.</p>{{end}}<fieldset class="border-0 p-0 m-0 w-100" {{if .RestartRequired}}disabled{{end}}>
   <section class="border rounded p-3 mb-3"><h2 class="h5">Repository owners allowed to invite Minion</h2>
-    <p class="text-body-secondary small">Approve a GitHub organization or personal account. Minion accepts invitations to repositories it owns; GitHub decides who may send them.</p>
+    <p class="text-body-secondary small">Approve a GitHub organization or personal account. Minion accepts invitations to repositories owned by approved accounts; GitHub decides who may send them.</p>
     {{if .InvitationOwners}}<ul class="list-group mb-3">{{range .InvitationOwners}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><span class="me-auto">{{.Login}} <small class="text-body-secondary">(ID {{.ID}})</small></span><form method="post" action="/admin/invitation-owners/remove"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove owner {{.Login}}">Remove</button></form></li>{{end}}</ul>
     {{else}}<p>No repository owners are approved for invitations.</p>{{end}}
     <form class="d-flex flex-wrap align-items-end gap-2" method="post" action="/admin/invitation-owners/add">

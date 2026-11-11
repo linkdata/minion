@@ -119,15 +119,16 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 				applied = generation
 			}
 		}
-		if len(watcher.Config.InvitationOwners) != 0 {
-			if err := watcher.CheckDueInvitations(ctx, store, time.Now().UTC()); err != nil {
-				if ctx.Err() != nil {
-					return 0
-				}
-				if errors.Is(err, monitor.ErrConfigUpdatePending) {
-					continue
-				}
-				logger.Printf("invitation check: %s", monitor.InertLogText(err.Error()))
+		next, err := watcher.RunOnce(ctx, store)
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0
+			}
+			if errors.Is(err, monitor.ErrConfigUpdatePending) {
+				continue
+			}
+			logger.Printf("monitor pass: %s", monitor.InertLogText(err.Error()))
+			if !loop || errors.Is(err, monitor.ErrAcceptanceState) {
 				return 1
 			}
 		}
@@ -148,10 +149,8 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 		if !loop {
 			return 0
 		}
-		wait := time.Until(store.Data.NextInviteCheckAt)
-		if len(watcher.Config.InvitationOwners) == 0 {
-			wait = time.Hour
-		} else if wait < time.Second {
+		wait := time.Until(next)
+		if wait < time.Second {
 			wait = time.Second
 		}
 		timer := time.NewTimer(wait)

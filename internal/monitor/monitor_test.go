@@ -1258,6 +1258,10 @@ func TestInvitationActionWaitsForSavedConfigAfterListing(t *testing.T) {
 			if len(gh.accepted) != 0 || len(gh.declined) != 0 || len(saved.Repositories) != 1 || !store.Data.NextInviteCheckAt.IsZero() {
 				t.Fatalf("stale invitation decision: accepted=%v declined=%v repos=%v next=%v", gh.accepted, gh.declined, saved.Repositories, store.Data.NextInviteCheckAt)
 			}
+			store.Data.Cursor = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+			if err := m.CheckDueInvitations(t.Context(), store, now); err == nil || errors.Is(err, ErrConfigUpdatePending) {
+				t.Fatalf("state save error was hidden by policy update: %v", err)
+			}
 		})
 	}
 }

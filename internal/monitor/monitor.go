@@ -388,10 +388,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return wake(store.Data.NextPollAt, err == nil), err
 	}
 	if m.SelectedExecutorID == "" {
-		if err := m.CheckDueInvitations(ctx, store, now().UTC()); err != nil {
-			return wake(store.Data.NextPollAt, false), err
+		pollAt := store.Data.NextPollAt
+		if len(m.Config.Repositories) == 0 {
+			pollAt = time.Time{}
 		}
-		return earlierWake(wake(store.Data.NextPollAt, false), initialTerminalWake), nil
+		if err := m.CheckDueInvitations(ctx, store, now().UTC()); err != nil {
+			return wake(pollAt, false), err
+		}
+		return earlierWake(wake(pollAt, false), initialTerminalWake), nil
 	}
 	if err := m.waitCapacityWithInvitations(ctx, store, &initialTerminalWake); err != nil {
 		return wake(store.Data.NextPollAt, false), err
@@ -995,7 +999,7 @@ func earlierWake(next, invitation time.Time) time.Time {
 	return next
 }
 
-// CheckDueInvitations accepts due repository invitations without running jobs.
+// CheckDueInvitations processes due repository invitations without running jobs.
 func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
 	var due bool
 	_ = store.WithLock(func() error {
@@ -1019,6 +1023,7 @@ func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, a
 		m.afterInvitationCheck()
 	}
 	saveErr := store.WithLock(func() error {
+		configUpdatePending = configUpdatePending && store.Data.Accepted == nil
 		if len(deferred) != 0 {
 			if store.Data.RepositoryCursors == nil {
 				store.Data.RepositoryCursors = make(map[string]time.Time)
@@ -1037,10 +1042,13 @@ func (m *Monitor) CheckDueInvitations(ctx context.Context, store *state.Store, a
 		}
 		return store.Save()
 	})
-	if configUpdatePending {
-		return errors.Join(err, saveErr)
+	if saveErr != nil {
+		return saveErr
 	}
-	return saveErr
+	if configUpdatePending {
+		return err
+	}
+	return nil
 }
 
 // Consume an update only while no action is accepted.

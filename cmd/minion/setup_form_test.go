@@ -48,6 +48,24 @@ func TestLoadSetupConfigRejectsOversizedFile(t *testing.T) {
 	}
 }
 
+func TestRemoveInvitationOwnerFromMixedCaseConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"bot_login":"bot","github":{"token":"test-token"},"invitation_owners":["Acme","other"],"invitation_owner_ids":{"Acme":42,"other":7}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error { return removeInvitationOwner(cfg, "acme") }); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(saved.InvitationOwners, []string{"other"}) || len(saved.InvitationOwnerIDs) != 1 || saved.InvitationOwnerIDs["other"] != 7 {
+		t.Fatalf("owner removal left a stale pin: owners=%v IDs=%v", saved.InvitationOwners, saved.InvitationOwnerIDs)
+	}
+}
+
 func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	initial := config.Config{Admin: &config.AdminConfig{
@@ -319,6 +337,28 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	cfg, err = config.Load(path)
 	if err != nil || len(cfg.Repositories) != 2 || cfg.Repositories[1].Name != "example/other" || cfg.Repositories[1].ID != 43 {
 		t.Fatalf("second repository was not appended: repositories=%+v error=%v", cfg.Repositories, err)
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.InvitationOwners = []string{"acme"}
+		cfg.InvitationOwnerIDs = map[string]int64{"acme": 91}
+		cfg.Commands = map[string]config.CommandMapping{}
+		for i := range cfg.Repositories {
+			cfg.Repositories[i].Actions = nil
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if !strings.Contains(home.Body.String(), "Setup is incomplete") || strings.Contains(home.Body.String(), "Setup saved") {
+		t.Fatalf("repository without commands appeared ready: %s", home.Body.String())
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error { cfg.Repositories = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "Add an available command") {
+		t.Fatalf("invitation-only setup omitted command guidance: %s", home.Body.String())
 	}
 }
 

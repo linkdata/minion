@@ -21,6 +21,15 @@ type firstInvitationGitHub struct {
 	onList   func()
 }
 
+type invitationCleanupProbe struct{ calls int }
+
+func (*invitationCleanupProbe) Execute(context.Context, monitor.Job) error { return nil }
+
+func (p *invitationCleanupProbe) PrunePrivateRecords(context.Context, *state.Store, time.Time) error {
+	p.calls++
+	return nil
+}
+
 func (g *firstInvitationGitHub) ListRepositoryInvitations(context.Context) ([]github.Invitation, error) {
 	if g.onList != nil {
 		onList := g.onList
@@ -116,5 +125,20 @@ func TestInvitationOnlyAppliesOwnerRemovalBeforeInvitationAction(t *testing.T) {
 	}
 	if gh.accepted != 0 || gh.declined != 7 || len(saved.Repositories) != 0 || len(live.current().InvitationOwners) != 1 || live.current().InvitationOwners[0] != "other" {
 		t.Fatalf("owner removal did not fence invitation: accepted=%d declined=%d repos=%v active=%v", gh.accepted, gh.declined, saved.Repositories, live.current().InvitationOwners)
+	}
+}
+
+func TestInvitationOnlyRunsMonitorCleanup(t *testing.T) {
+	now := time.Now().UTC()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	store.Data.NextInviteCheckAt = now.Add(time.Hour)
+	handler := &invitationCleanupProbe{}
+	watcher := &monitor.Monitor{Handler: handler}
+	if code := runInvitationOnly(t.Context(), watcher, store, false, log.New(os.Stderr, "", 0), nil); code != 0 || handler.calls != 1 {
+		t.Fatalf("invitation-only monitor cleanup: code=%d calls=%d", code, handler.calls)
 	}
 }

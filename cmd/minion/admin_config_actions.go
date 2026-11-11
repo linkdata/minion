@@ -212,7 +212,7 @@ func registerAdminConfigActions(mux *http.ServeMux, live *adminLiveConfig, owner
 		}
 		return live.save(func(cfg *config.Config) error {
 			if len(cfg.Repositories) <= 1 {
-				return errors.New("At least one repository is required")
+				return errors.New("To remove the last repository, edit Configuration and restart Minion")
 			}
 			for i, repo := range cfg.Repositories {
 				if strings.EqualFold(repo.Name, name) {
