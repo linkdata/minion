@@ -220,7 +220,11 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	mux.HandleFunc("POST /admin/stop", func(w http.ResponseWriter, r *http.Request) {
 		access.stop(w, r, owner)
 	})
-	dashboard := adminDashboardHandler(jw, owner)
+	var live *adminLiveConfig
+	if len(liveConfigs) != 0 && liveConfigs[0] != nil {
+		live = liveConfigs[0]
+	}
+	dashboard := adminDashboardHandler(jw, owner, live)
 	home := jw.SessionMiddleware(http.HandlerFunc(access.homePage))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		sess := jw.GetSession(r)
@@ -246,8 +250,8 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	mux.Handle("GET /admin/usage.json", adminUsageHandler(jw, owner, true))
 	if len(liveConfigs) != 0 && liveConfigs[0] != nil {
 		live := liveConfigs[0]
-		mux.Handle("GET /admin/status", adminStatusHandler(jw, owner, live.current, false))
-		mux.Handle("POST /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
+		mux.Handle("GET /admin/status", adminStatusHandler(jw, owner, live, false))
+		mux.Handle("POST /admin/status/check", adminStatusHandler(jw, owner, live, true))
 		for _, page := range []string{"users", "repositories", "skills"} {
 			mux.Handle("GET /admin/"+page, adminConfigurationHandler(jw, live, page))
 		}

@@ -29,7 +29,7 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 		AlwaysOnSkills: []string{"builtin://anti-prompt-injection", "https://github.com/a/b/tree/main/skills/caveman"},
 		Commands:       map[string]config.CommandMapping{"review": {Skills: []string{"https://github.com/a/b/tree/main/skills/caveman", "https://github.com/a/b/tree/main/skills/review"}}},
 	}
-	view := statusView(&action.Orchestrator{BotLogin: cfg.BotLogin, BotID: 42}, cfg)
+	view := statusView(&action.Orchestrator{BotLogin: cfg.BotLogin, BotID: 42}, cfg, false)
 	if view.Requesters != 1 || view.OpenRepositories != 0 || view.Repositories != 1 || view.Skills != 3 || view.Main.Provider != "codex" || view.Critic.Provider != "claude" {
 		t.Fatalf("status summary = %+v", view)
 	}
@@ -51,6 +51,41 @@ func TestAdminStatusSummaryKeepsSecretsOut(t *testing.T) {
 		if strings.Contains(body.String(), secret) {
 			t.Fatalf("status page exposed %q", secret)
 		}
+	}
+}
+
+func TestAdminStatusShowsInvitationAndFirstRepositoryState(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "token"},
+		InvitationOwners: []string{"acme", "alice"}}
+	for _, tc := range []struct {
+		name     string
+		saved    bool
+		want     string
+		unwanted string
+	}{
+		{name: "waiting for invitation", want: "Waiting for repository invitations", unwanted: "restart Minion"},
+		{name: "first repository saved", saved: true, want: "First repository saved; restart Minion to begin monitoring.", unwanted: "Waiting for repository invitations"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			view := statusView(&action.Orchestrator{BotLogin: "bot"}, cfg, tc.saved)
+			var page struct {
+				Dot                adminStatusView
+				HeadHTML, TailHTML template.HTML
+			}
+			page.Dot = view
+			var body bytes.Buffer
+			if err := adminStatusHTML.ExecuteTemplate(&body, "admin status", page); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{"Monitored: 0", "Approved owners: 2", tc.want} {
+				if !strings.Contains(body.String(), want) {
+					t.Fatalf("status page missing %q: %s", want, body.String())
+				}
+			}
+			if strings.Contains(body.String(), tc.unwanted) {
+				t.Fatalf("status page incorrectly shows %q: %s", tc.unwanted, body.String())
+			}
+		})
 	}
 }
 
@@ -102,7 +137,7 @@ func TestAdminStatusCountsOpenRepositories(t *testing.T) {
 		{Name: "owner/empty", AllowedActors: []string{}},
 		{Name: "owner/closed", DenyAllActors: true},
 	}}
-	view := statusView(&action.Orchestrator{}, cfg)
+	view := statusView(&action.Orchestrator{}, cfg, false)
 	if view.OpenRepositories != 2 || view.Repositories != 3 {
 		t.Fatalf("open repository count = %+v", view)
 	}
@@ -113,7 +148,7 @@ func TestAdminStatusCountsRequestersByGitHubID(t *testing.T) {
 		{Name: "owner/first", AllowedActors: []string{"old-login"}, AllowedActorIDs: map[string]int64{"old-login": 7}},
 		{Name: "owner/second", AllowedActors: []string{"new-login", "other"}, AllowedActorIDs: map[string]int64{"new-login": 7, "other": 8}},
 	}}
-	view := statusView(&action.Orchestrator{}, cfg)
+	view := statusView(&action.Orchestrator{}, cfg, false)
 	if view.Requesters != 2 || view.OpenRepositories != 0 {
 		t.Fatalf("named requester count = %+v", view)
 	}

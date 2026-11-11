@@ -527,6 +527,49 @@ func TestAdvancedConfigFirstRepositoryWakesInvitationLoop(t *testing.T) {
 	}
 }
 
+func TestAdvancedConfigOwnerOnlyLiveEditNeedsNoRestart(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		return addInvitationOwner(next, "owner", "2")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.RestartRequired || live.restartRequired {
+		t.Fatal("live owner edit showed a restart notice with no repositories")
+	}
+}
+
+func TestAdvancedConfigInvitationSavedFirstRepositoryNeedsRestart(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/invited", ID: 1, OwnerID: 2, Actions: []string{"review"}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, view.JSON); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired || !live.firstRepositorySaved {
+		t.Fatal("unchanged Advanced save hid the invited first repository's restart notice")
+	}
+}
+
 func TestAdvancedConfigCanRemoveAdminBlock(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
