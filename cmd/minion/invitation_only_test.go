@@ -322,17 +322,21 @@ func TestInvitationOnlyStopsPollingWhenAdminAddsFirstRepository(t *testing.T) {
 		case <-ticker.C:
 		}
 	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = []config.Repository{{Name: "other/first", ID: 90, OwnerID: 91, Actions: []string{"review"}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.WithLock(func() error {
 		store.Data.NextInviteCheckAt = time.Time{}
 		return store.Save()
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := live.save(func(next *config.Config) error {
-		next.Repositories = []config.Repository{{Name: "other/first", ID: 90, OwnerID: 91, Actions: []string{"review"}}}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+	select {
+	case live.updates <- struct{}{}:
+	default:
 	}
 	probe := time.NewTimer(500 * time.Millisecond)
 	defer probe.Stop()

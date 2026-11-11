@@ -146,12 +146,13 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	}
 	if page.live != nil {
 		cfg := page.live.current()
-		if len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != "" &&
-			snapshot.Worker.Kind == "" && snapshot.InProgress == 0 {
+		if len(cfg.Repositories) == 0 && snapshot.Worker.Kind == "" && snapshot.InProgress == 0 {
 			if page.live.firstRepositoryNeedsRestart() {
 				snapshot.Worker.Readiness = "waiting for restart to monitor first repository"
-			} else {
+			} else if len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != "" {
 				snapshot.Worker.Readiness = "waiting for repository invitations"
+			} else {
+				snapshot.Worker.Readiness = "setup incomplete"
 			}
 			snapshot.Worker.State = "no worker needed"
 		}

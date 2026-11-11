@@ -60,14 +60,20 @@ func TestAdminDashboardShowsOwnerOnlyState(t *testing.T) {
 	live := &adminLiveConfig{active: cfg}
 	page := &adminDashboardPage{owner: &action.Orchestrator{Store: store}, live: live}
 	for _, tc := range []struct {
-		name  string
-		saved bool
-		want  string
+		name, want string
+		saved      bool
+		noOwner    bool
 	}{
 		{name: "waiting for invitation", want: "waiting for repository invitations"},
 		{name: "first repository saved", saved: true, want: "waiting for restart to monitor first repository"},
+		{name: "no approved owner", noOwner: true, want: "setup incomplete"},
+		{name: "first repository saved after owner removed", saved: true, noOwner: true, want: "waiting for restart to monitor first repository"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			live.active.InvitationOwners = cfg.InvitationOwners
+			if tc.noOwner {
+				live.active.InvitationOwners = nil
+			}
 			live.firstRepositorySaved = tc.saved
 			view := page.View()
 			if view.Unavailable || view.Snapshot.Worker.Readiness != tc.want || view.Snapshot.Worker.State != "no worker needed" {
