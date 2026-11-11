@@ -56,7 +56,6 @@ var adminAdvancedHTML = template.Must(template.New("admin advanced").Parse(headH
 
 func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string, live *adminLiveConfig, runtime config.AdminConfig) {
 	configPage := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		view, err := advancedConfigView(path, live, runtime)
 		if err != nil {
@@ -74,7 +73,6 @@ func registerAdminAdvancedRoutes(mux *http.ServeMux, jw *jaws.Jaws, path string,
 		w.Header().Set("Cache-Control", "no-store")
 		r.Body = http.MaxBytesReader(w, r.Body, 4*maxAdvancedConfig)
 		parseErr := r.ParseForm()
-		closeUnreadAdminBody(w, r)
 		if parseErr != nil || len(r.PostForm) != 2 || len(r.PostForm["version"]) != 1 || len(r.PostForm["config"]) != 1 {
 			http.Error(w, "Invalid configuration form", http.StatusBadRequest)
 			return

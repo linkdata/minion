@@ -118,7 +118,6 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 	}
 	page := jw.SessionMiddleware(http.HandlerFunc(a.loginPage))
 	a.mux.Handle("GET /auth/login", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		a.admissionMu.Lock()
 		defer a.admissionMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
@@ -133,10 +132,7 @@ func newOAuthAccess(jw *jaws.Jaws, cfg config.AdminConfig, statePath string, cli
 			return nil, err
 		}
 		a.mux.Handle("GET /auth/preferences", a.oauthErrors(http.HandlerFunc(a.preferencePage)))
-		// The preference form must be read before its body can be closed.
-		a.mux.Handle("POST /auth/preferences", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			a.savePreferences(&oauthErrorWriter{ResponseWriter: w, oauth: a, request: r}, r)
-		}))
+		a.mux.Handle("POST /auth/preferences", a.oauthErrors(http.HandlerFunc(a.savePreferences)))
 	}
 	if c := cfg.GitHubOAuth; c != nil {
 		if err := a.addProvider("github", "https://github.com", "github.com", &jawsauth.Config{
@@ -264,7 +260,6 @@ func userUsageReturnTarget(raw string) string {
 }
 
 func (a *oauthAccess) loginPage(w http.ResponseWriter, r *http.Request) {
-	closeUnreadAdminBody(w, r)
 	sess := a.jaws.GetSession(r)
 	account, provider := a.currentUser(sess)
 	if account == "" && sess.Get(adminSessionKey) == nil && len(sess.Requests()) >= maxGuestPageRequests {
@@ -321,7 +316,6 @@ func (w *oauthErrorWriter) Write(body []byte) (int, error) {
 }
 
 func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, status int) {
-	closeUnreadAdminBody(w, r)
 	w.Header().Del("Strict-Transport-Security")
 	w.Header().Del("Content-Type")
 	w.Header().Del("Content-Length")
@@ -354,7 +348,6 @@ func (a *oauthAccess) browserError(w http.ResponseWriter, r *http.Request, statu
 
 func (a *oauthAccess) oauthErrors(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		handler.ServeHTTP(&oauthErrorWriter{ResponseWriter: w, oauth: a, request: r}, r)
 	})
 }

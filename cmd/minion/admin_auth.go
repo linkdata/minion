@@ -94,7 +94,6 @@ const (
 type adminIdentity string
 
 func headPublicPage(w http.ResponseWriter, r *http.Request) {
-	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 }
@@ -178,17 +177,11 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		guestMu = &oauth.admissionMu
 	}
 	mux := http.NewServeMux()
-	if err := jw.Setup(func(pattern string, handler http.Handler) {
-		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			closeUnreadAdminBody(w, r)
-			handler.ServeHTTP(w, r)
-		}))
-	}, "/static", jawsboot.Setup); err != nil {
+	if err := jw.Setup(mux.Handle, "/static", jawsboot.Setup); err != nil {
 		return nil, err
 	}
 	loginPage := jw.SessionMiddleware(http.HandlerFunc(access.loginPage))
 	mux.HandleFunc("GET /admin/login", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if oauth != nil && jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestAdmissionSessions {
@@ -199,7 +192,6 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 	})
 	mux.HandleFunc("HEAD /admin/login", headPublicPage)
 	mux.HandleFunc("GET /admin/login.js", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		if r.Method == http.MethodGet {
@@ -224,7 +216,6 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 			dashboard.ServeHTTP(w, r)
 			return
 		}
-		closeUnreadAdminBody(w, r)
 		guestMu.Lock()
 		defer guestMu.Unlock()
 		if jw.GetSession(r) == nil && jw.SessionCount() >= maxGuestPageSessions {
@@ -264,16 +255,10 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		mux.Handle("/auth/", oauth.mux)
 		mux.Handle("GET /user/usage", oauth.usageHandler(owner))
 	}
-	// Pinned JaWS endpoints ignore HTTP bodies. Revisit this if JaWS adds a
-	// body-reading callback, which must not inherit an immediate read deadline.
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
-		jw.ServeHTTP(w, r)
-	})
+	mux.Handle("/", jw)
 	crossOrigin := http.NewCrossOriginProtection()
 	return jw.SecureHeadersMiddleware(access.browserErrors(adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if crossSchemeAdminOrigin(r, jw.TrustForwardedHeaders) || crossOrigin.Check(r) != nil {
-			closeUnreadAdminBody(w, r)
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -287,18 +272,15 @@ func (a *adminAccess) stop(w http.ResponseWriter, r *http.Request, owner *action
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, 1024)
 	if err := r.ParseForm(); err != nil {
-		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid stop request", http.StatusBadRequest)
 		return
 	}
 	jobID, attemptID := r.PostForm.Get("job_id"), r.PostForm.Get("attempt_id")
 	if len(r.PostForm["job_id"]) != 1 || len(r.PostForm["attempt_id"]) != 1 ||
 		!workspace.ValidIdentitySegment(jobID) || !workspace.ValidIdentitySegment(attemptID) {
-		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid stop request", http.StatusBadRequest)
 		return
 	}
-	closeUnreadAdminBody(w, r)
 	if owner == nil || owner.Store == nil {
 		http.Error(w, "Orchestrator state unavailable", http.StatusServiceUnavailable)
 		return
@@ -497,13 +479,11 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 	// A 64-code-point password can expand to 768 URL-encoded bytes.
 	r.Body = http.MaxBytesReader(w, r.Body, 2<<10)
 	if err := r.ParseForm(); err != nil {
-		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
 	password := r.PostForm.Get("password")
 	if len(r.PostForm) != 1 || len(r.PostForm["password"]) != 1 || !config.ValidAdminPassword(password) {
-		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid login request", http.StatusBadRequest)
 		return
 	}
@@ -546,7 +526,6 @@ func (a *adminAccess) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *adminAccess) logout(w http.ResponseWriter, r *http.Request) {
-	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	if a.oauth != nil {
 		a.oauth.linkMu.Lock()

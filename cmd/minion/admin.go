@@ -315,22 +315,11 @@ func adminGuard(next http.Handler, allowed func(*http.Request) bool) http.Handle
 		// JaWS's year-long HSTS policy includes subdomains and could affect other services.
 		w.Header().Del("Strict-Transport-Security")
 		if allowed == nil || !allowed(r) {
-			closeUnreadAdminBody(w, r)
-			controller := http.NewResponseController(w)
-			_ = controller.SetWriteDeadline(time.Now().Add(30 * time.Second))
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// Go's HTTP/1 server otherwise waits to drain an unread request body before
-// writing the response, even when a handler has already rejected the request.
-func closeUnreadAdminBody(w http.ResponseWriter, r *http.Request) {
-	if r.ProtoMajor == 1 && r.ContentLength != 0 {
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now())
-	}
 }
 
 func (a *adminServer) Close() error {

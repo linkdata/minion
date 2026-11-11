@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,6 +24,37 @@ import (
 	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/skills"
 )
+
+func TestAdminConfigPostKeepsContextForGitHubLookup(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(backend.Close)
+	handler := adminConfigPost("/", []string{"url"}, "", func(ctx context.Context, _ url.Values) error {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, backend.URL, nil)
+		if err != nil {
+			return err
+		}
+		response, err := backend.Client().Do(request)
+		if err != nil {
+			return err
+		}
+		return response.Body.Close()
+	})
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+	client := server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.PostForm(server.URL, url.Values{"url": {"https://github.com/owner/repo"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusSeeOther {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("form status=%d body=%q, want 303", response.StatusCode, body)
+	}
+}
 
 func TestAdminConfigActionsUpdateRequestersRepositoriesAndSkills(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")

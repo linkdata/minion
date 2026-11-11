@@ -339,7 +339,6 @@ func adminConfigPost(back string, fields []string, repeated string, action func(
 		w.Header().Set("Cache-Control", "no-store")
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		parseErr := r.ParseForm()
-		closeUnreadAdminBody(w, r)
 		want := len(fields)
 		if repeated != "" && len(r.PostForm[repeated]) != 0 {
 			want++

@@ -154,7 +154,6 @@ var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(utcTe
 
 func adminDashboardHandler(jw *jaws.Jaws, owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		filter, err := parseAdminDashboardFilter(r.URL.RawQuery)
 		if err != nil {
 			http.Error(w, "Invalid dashboard filter", http.StatusBadRequest)

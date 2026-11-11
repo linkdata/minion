@@ -81,7 +81,6 @@ func preferenceField(name, label string, choices []config.RoleModelConfig, saved
 }
 
 func (a *oauthAccess) preferencePage(w http.ResponseWriter, r *http.Request) {
-	closeUnreadAdminBody(w, r)
 	w.Header().Set("Cache-Control", "no-store")
 	account, _ := a.currentUser(a.jaws.GetSession(r))
 	if account == "" {
@@ -120,11 +119,9 @@ func (a *oauthAccess) savePreferences(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := r.ParseForm(); err != nil || len(r.PostForm["identity"]) != 1 {
-		closeUnreadAdminBody(w, r)
 		http.Error(w, "Invalid preferences", http.StatusBadRequest)
 		return
 	}
-	closeUnreadAdminBody(w, r)
 	a.linkMu.Lock()
 	defer a.linkMu.Unlock()
 	account, _ := a.currentUser(a.jaws.GetSession(r))

@@ -50,7 +50,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, remote-execute, or hash")
 	oneshot := flag.Bool("oneshot", false, "run one polling pass, then exit; default is a continuous service")
-	check := flag.Bool("check", false, "verify Git, GitHub, repositories, selected AI tools or remote TLS, and admin TLS files, then exit")
+	check := flag.Bool("check", false, "run available preflight checks, then exit; report incomplete setup if no repositories are configured")
 	installSkills := flag.Bool("install-skills", false, "install configured skills for Codex and Claude, then exit")
 	address := flag.String("address", "", "webserv listen address for the admin UI")
 	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
@@ -310,6 +310,24 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			}
 		}
 		return true
+	}
+	if *check && len(cfg.Repositories) == 0 {
+		if !preflight() {
+			return 1
+		}
+		if cfg.BotLogin == "" || cfg.GitHub.Token == "" {
+			logger.Print("GitHub identity not checked: bot_login and github.token are not both set")
+		} else if !authenticateGitHub() {
+			return 1
+		} else {
+			logger.Printf("GitHub identity verified as @%s", user.Login)
+		}
+		logCommandSkills(cfg, logger)
+		if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
+			logger.Print(claudeUnixSocketWarning)
+		}
+		logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
+		return 0
 	}
 	startRecoverySetup := func() int {
 		logger.Print("starting admin recovery UI; no jobs run until Minion restarts")
@@ -816,9 +834,6 @@ func checkModels(ctx context.Context, cfg *config.Config, logger *log.Logger) (e
 }
 
 func checkRepositories(ctx context.Context, client *github.Client, cfg config.Config, logger *log.Logger) error {
-	if len(cfg.Repositories) == 0 {
-		return errors.New("no repositories configured")
-	}
 	var problems []error
 	for _, repo := range cfg.Repositories {
 		if _, _, err := client.ListRepositoryNotifications(ctx, repo.Name, time.Now().UTC()); err != nil {

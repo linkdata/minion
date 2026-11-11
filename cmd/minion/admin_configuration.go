@@ -181,7 +181,6 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
 func adminConfigurationHandler(jw *jaws.Jaws, snapshot func() adminConfigSnapshot, page string) http.Handler {
 	name := "admin " + page
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		ui.Handler(jw, name, configurationView(snapshot())).ServeHTTP(w, r)
 	})

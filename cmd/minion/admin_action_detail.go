@@ -85,7 +85,6 @@ func (v actionDetailView) JawsConnect(rq *jaws.Request) error {
 
 func adminActionDetailHandler(jw *jaws.Jaws, owner *action.Orchestrator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		closeUnreadAdminBody(w, r)
 		w.Header().Set("Cache-Control", "no-store")
 		if !workspace.ValidIdentitySegment(r.PathValue("attempt")) {
 			http.Error(w, "Invalid attempt ID", http.StatusBadRequest)

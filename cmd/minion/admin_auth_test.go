@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -1053,99 +1052,6 @@ func TestAdminServerLoginOnLoopbackHTTP(t *testing.T) {
 	}
 	if page.StatusCode != http.StatusOK || !strings.Contains(string(pageBody), "Signed in") {
 		t.Fatalf("authenticated loopback page: status=%d signedIn=%t", page.StatusCode, strings.Contains(string(pageBody), "Signed in"))
-	}
-}
-
-func TestAdminUnreadBodiesCloseWithoutWaiting(t *testing.T) {
-	admin, err := startAdminServer(t.Context(), config.AdminConfig{
-		Listen: "127.0.0.1:0", Administrators: []config.AdminAccount{testAdminAccount()},
-		GitHubOAuth: &config.OAuthClient{ClientID: "app", ClientSecret: "secret", RedirectURL: "http://127.0.0.1/auth/github/callback"},
-	}, nil, filepath.Join(t.TempDir(), "state.json"), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close() })
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, _ := adminNetworkLogin(t, client, "http://"+admin.listener.Addr().String(),
-		url.Values{"password": {"correct-password"}})
-	response.Body.Close()
-	if response.StatusCode != http.StatusSeeOther || len(response.Cookies()) != 1 {
-		t.Fatalf("login: status=%d cookieCount=%d", response.StatusCode, len(response.Cookies()))
-	}
-	page := adminResponse(admin.server.Handler, http.MethodGet, "/admin/login", nil, nil, "")
-	if page.Code != http.StatusOK {
-		t.Fatalf("Bootstrap entry page: status=%d", page.Code)
-	}
-	cssPath := bootstrapAssetPath(t, page.Body.String(), ".css")
-	cookie := response.Cookies()[0]
-	oauthPage, err := client.Get("http://" + admin.listener.Addr().String() + "/auth/login")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer oauthPage.Body.Close()
-	if oauthPage.StatusCode != http.StatusOK || len(oauthPage.Cookies()) != 1 {
-		t.Fatalf("OAuth login page: status=%d cookies=%v", oauthPage.StatusCode, oauthPage.Cookies())
-	}
-	oauthCookie := oauthPage.Cookies()[0]
-	for _, tc := range []struct {
-		name, method, path, headers string
-		want                        int
-		location                    string
-	}{
-		{name: "public GET", method: http.MethodGet, path: "/admin/login", want: http.StatusOK},
-		{name: "OAuth callback", method: http.MethodGet, path: "/auth/github/callback?state=wrong",
-			headers: "Cookie: " + oauthCookie.Name + "=" + oauthCookie.Value + "\r\n", want: http.StatusSeeOther,
-			location: "/auth/login?error=request"},
-		{name: "cross-origin login", method: http.MethodPost, path: "/admin/login",
-			headers: "Origin: http://other.example\r\n", want: http.StatusForbidden},
-		{name: "unsupported login body", method: http.MethodPost, path: "/admin/login",
-			headers: "Content-Type: text/plain\r\n", want: http.StatusBadRequest},
-		{name: "authenticated JaWS rejection", method: http.MethodPost, path: "/jaws/.ping",
-			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
-		{name: "authenticated dashboard", method: http.MethodGet, path: "/",
-			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
-		{name: "authenticated stylesheet", method: http.MethodGet, path: cssPath,
-			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusOK},
-		{name: "authenticated usage page", method: http.MethodGet, path: "/admin/usage",
-			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusServiceUnavailable},
-		{name: "authenticated usage export", method: http.MethodGet, path: "/admin/usage.json",
-			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusServiceUnavailable},
-		{name: "cross-origin logout", method: http.MethodPost, path: "/admin/logout",
-			headers: "Origin: http://other.example\r\nCookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusForbidden},
-		{name: "logout", method: http.MethodPost, path: "/admin/logout",
-			headers: "Cookie: " + cookie.Name + "=" + cookie.Value + "\r\n", want: http.StatusSeeOther},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			conn, err := net.DialTimeout("tcp", admin.listener.Addr().String(), time.Second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer conn.Close()
-			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
-				t.Fatal(err)
-			}
-			request := tc.method + " " + tc.path + " HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n" + tc.headers + "\r\n"
-			if _, err := io.WriteString(conn, request); err != nil {
-				t.Fatal(err)
-			}
-			resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: tc.method})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != tc.want || !resp.Close {
-				t.Fatalf("incomplete body: status=%d close=%t, want %d and close", resp.StatusCode, resp.Close, tc.want)
-			}
-			if tc.location != "" && resp.Header.Get("Location") != tc.location {
-				t.Fatalf("redirect location=%q, want %q", resp.Header.Get("Location"), tc.location)
-			}
-			if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := conn.Read(make([]byte, 1)); err != io.EOF {
-				t.Fatalf("server kept incomplete request open: %v", err)
-			}
-		})
 	}
 }
 
