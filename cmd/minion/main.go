@@ -205,7 +205,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 2
 	}
 	waitingForInvitation := len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != ""
-	if *oneshot && len(cfg.Repositories) == 0 && !waitingForInvitation {
+	if !*check && !*installSkills && (*oneshot || cfg.Admin == nil) && len(cfg.Repositories) == 0 && !waitingForInvitation {
 		logger.Print("no repositories configured; approved owners also need bot_login and github.token")
 		return 1
 	}

@@ -17,12 +17,13 @@ import (
 
 type firstInvitationGitHub struct {
 	monitor.GitHub
-	accepted  int64
-	declined  int64
-	onList    func()
-	listErr   error
-	empty     bool
-	listCalls int
+	accepted   int64
+	declined   int64
+	onList     func()
+	listErr    error
+	empty      bool
+	emptyFirst bool
+	listCalls  int
 }
 
 type invitationCleanupProbe struct{ calls int }
@@ -44,7 +45,7 @@ func (g *firstInvitationGitHub) ListRepositoryInvitations(context.Context) ([]gi
 	if g.listErr != nil {
 		return nil, g.listErr
 	}
-	if g.empty {
+	if g.empty || g.emptyFirst && g.listCalls == 1 {
 		return nil, nil
 	}
 	return []github.Invitation{{ID: 7, Repository: github.Repository{ID: 50, FullName: "acme/repo", Owner: github.User{Login: "acme", ID: 42}}, Invitee: github.User{Login: "bot"}, Permissions: "write"}}, nil
@@ -162,6 +163,37 @@ func TestInvitationOnlyAppliesOwnerRemovalBeforeInvitationAction(t *testing.T) {
 	}
 }
 
+func TestInvitationOnlyFencesFirstRepositorySavedDuringListing(t *testing.T) {
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(cfg.StatePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gh := &firstInvitationGitHub{onList: func() {
+		if err := live.save(func(next *config.Config) error {
+			next.Repositories = []config.Repository{{Name: "other/first", ID: 90, OwnerID: 91, Actions: []string{"review"}}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: live.admit}
+	if code := runInvitationOnly(t.Context(), watcher, store, false, log.New(os.Stderr, "", 0), live); code != 0 {
+		t.Fatalf("invitation-only pass returned %d", code)
+	}
+	if gh.accepted != 0 || gh.declined != 0 || !live.snapshot().RestartRequired {
+		t.Fatalf("first-repository save did not fence invitation: accepted=%d declined=%d restart=%t", gh.accepted, gh.declined, live.snapshot().RestartRequired)
+	}
+}
+
 func TestInvitationOnlyRunsMonitorCleanup(t *testing.T) {
 	now := time.Now().UTC()
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), now)
@@ -239,7 +271,7 @@ func TestInvitationOnlyLoopAppliesOwnerUpdateWithoutWaitingForNextPoll(t *testin
 	}
 }
 
-func TestInvitationOnlyStopsPollingAfterFirstRepositoryUntilRestart(t *testing.T) {
+func TestInvitationOnlyStopsPollingWhenAdminAddsFirstRepository(t *testing.T) {
 	cfg, path := writeModeConfig(t, config.Config{
 		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
 		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
@@ -253,7 +285,8 @@ func TestInvitationOnlyStopsPollingAfterFirstRepositoryUntilRestart(t *testing.T
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	gh := &firstInvitationGitHub{}
+	listed := make(chan struct{})
+	gh := &firstInvitationGitHub{emptyFirst: true, onList: func() { close(listed) }}
 	watcher := &monitor.Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: live.admit}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan int, 1)
@@ -269,15 +302,25 @@ func TestInvitationOnlyStopsPollingAfterFirstRepositoryUntilRestart(t *testing.T
 	defer deadline.Stop()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
-	for !live.snapshot().RestartRequired {
+	select {
+	case <-listed:
+	case <-deadline.C:
+		t.Fatal("initial invitation check did not run")
+	}
+	for {
+		var checked bool
+		_ = store.WithLock(func() error {
+			checked = store.Data.NextInviteCheckAt.After(time.Now())
+			return nil
+		})
+		if checked {
+			break
+		}
 		select {
 		case <-deadline.C:
-			t.Fatal("first invitation was not saved")
+			t.Fatal("initial invitation check did not finish")
 		case <-ticker.C:
 		}
-	}
-	if err := live.save(func(next *config.Config) error { return removeInvitationOwner(next, "acme") }); err == nil {
-		t.Fatal("owner revocation unexpectedly succeeded without a restart")
 	}
 	if err := store.WithLock(func() error {
 		store.Data.NextInviteCheckAt = time.Time{}
@@ -285,14 +328,19 @@ func TestInvitationOnlyStopsPollingAfterFirstRepositoryUntilRestart(t *testing.T
 	}); err != nil {
 		t.Fatal(err)
 	}
-	live.updates <- struct{}{}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = []config.Repository{{Name: "other/first", ID: 90, OwnerID: 91, Actions: []string{"review"}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	probe := time.NewTimer(500 * time.Millisecond)
 	defer probe.Stop()
 	<-probe.C
 	cancel()
 	code := <-done
 	joined = true
-	if code != 0 || gh.listCalls != 1 || gh.accepted != 7 {
+	if code != 0 || gh.listCalls != 1 || gh.accepted != 0 || !live.snapshot().RestartRequired {
 		t.Fatalf("invitation checks continued before restart: code=%d lists=%d accepted=%d", code, gh.listCalls, gh.accepted)
 	}
 }

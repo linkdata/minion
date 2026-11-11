@@ -120,6 +120,10 @@ func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
 	if len(live.current().InvitationOwners) != 0 {
 		t.Fatalf("empty policy was not activated: %v", live.current().InvitationOwners)
 	}
+	select {
+	case <-live.updates:
+	default:
+	}
 	if err := live.save(func(cfg *config.Config) error {
 		cfg.Repositories = []config.Repository{{Name: "acme/project", ID: 11, OwnerID: 22, Actions: []string{"review"}}}
 		return nil
@@ -134,6 +138,15 @@ func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
 	candidate, _ = live.next()
 	if !snapshot.RestartRequired || snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(candidate.Repositories) != 0 || len(live.current().Repositories) != 0 {
 		t.Fatalf("first repository activated without restart: snapshot=%+v next=%v active=%v", snapshot, candidate.Repositories, live.current().Repositories)
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("first repository save did not wake invitation-only loop")
+	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); !errors.Is(err, monitor.ErrConfigUpdatePending) || called {
+		t.Fatalf("invitation decision passed first-repository fence: err=%v called=%t", err, called)
 	}
 }
 

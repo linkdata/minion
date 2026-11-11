@@ -221,6 +221,22 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	}
 }
 
+func TestHeadlessInvitationSetupReportsMissingBotToken(t *testing.T) {
+	cfg := config.Config{
+		BotLogin: "bot", WorkRoot: filepath.Join(t.TempDir(), "missing-work-root"),
+		InvitationOwners: []string{"approved-owner"}, InvitationOwnerIDs: map[string]int64{"approved-owner": 99},
+	}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Fatal("Git preflight ran before missing bot token was reported")
+			return nil
+		})
+	})
+	if code != 1 || !strings.Contains(output, "approved owners also need bot_login and github.token") || strings.Contains(output, "work root:") {
+		t.Fatalf("headless invitation setup: code=%d output=%q", code, output)
+	}
+}
+
 func TestCheckWithoutRepositoriesSkipsUnavailableGitHubAndState(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	t.Setenv("GH_TOKEN", "ambient-token")

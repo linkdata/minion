@@ -76,10 +76,16 @@ func (a *adminLiveConfig) admit(accept func() error) error {
 	// shortcut: invitation actions hold this lock during a 30-second API budget; narrow it if admin saves stall.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.pending || a.lastError != "" {
+	if a.pending || a.lastError != "" || a.firstRepositorySaved {
 		return monitor.ErrConfigUpdatePending
 	}
 	return accept()
+}
+
+func (a *adminLiveConfig) firstRepositoryNeedsRestart() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.firstRepositorySaved
 }
 
 func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
@@ -88,7 +94,7 @@ func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, RestartRequired: a.restartRequired, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
 }
 
-func (a *adminLiveConfig) markRestartRequired() {
+func (a *adminLiveConfig) markFirstRepositorySaved() {
 	a.mu.Lock()
 	a.restartRequired = true
 	a.firstRepositorySaved = true
@@ -275,6 +281,10 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	if restartForFirstRepository {
 		a.restartRequired = true
 		a.firstRepositorySaved = true
+		select {
+		case a.updates <- struct{}{}:
+		default:
+		}
 		return nil
 	}
 	a.disk = updated

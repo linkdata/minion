@@ -55,6 +55,7 @@ type adminConfigurationView struct {
 	Users                            []adminRequesterRepository
 	InvitationOwners                 []adminGitHubAccount
 	Repositories                     []adminRepositoryRow
+	AwaitingRestart                  []string
 	Commands                         []string
 	AllCommands                      []string
 	AlwaysOnSkills                   []adminSkillRow
@@ -148,7 +149,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
   <div class="border-bottom mb-4"><h1>Repositories</h1><p class="text-body-secondary">Monitored GitHub repositories and the commands each accepts.</p></div>
   {{with .Dot}}{{template "admin-config-notice" .}}{{if and .Remote .Repositories}}<p class="text-body-secondary">Only commands selected by the remote worker can be changed here. To add another command, edit the Minion configuration file and restart Minion and the remote worker.</p>{{end}}<fieldset class="border-0 p-0 m-0 w-100" {{if .RestartRequired}}disabled{{end}}>
   <section class="border rounded p-3 mb-3"><h2 class="h5">Repository owners allowed to invite Minion</h2>
-    <p class="text-body-secondary small">Approve a GitHub organization or personal account. Minion accepts invitations to repositories owned by approved accounts; GitHub decides who may send them.</p>
+    <p class="text-body-secondary small">Approve a GitHub organization or personal account. Minion accepts invitations to repositories owned by approved accounts; GitHub decides who may send them. Repositories added by invitation start monitoring after a restart and initially allow no requesters.</p>
     {{if .InvitationOwners}}<ul class="list-group mb-3">{{range .InvitationOwners}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><span class="me-auto">{{.Login}} <small class="text-body-secondary">(ID {{.ID}})</small></span><form method="post" action="/admin/invitation-owners/remove"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove owner {{.Login}}">Remove</button></form></li>{{end}}</ul>
     {{else}}<p>No repository owners are approved for invitations.</p>{{end}}
     <form class="d-flex flex-wrap align-items-end gap-2" method="post" action="/admin/invitation-owners/add">
@@ -172,7 +173,8 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
       <fieldset><legend class="fs-6">Allowed commands</legend>{{range .Commands}}<label class="form-check"><input class="form-check-input" type="checkbox" name="actions" value="{{.}}"><span class="form-check-label">{{.}}</span></label>{{else}}<p>No commands are configured.</p>{{end}}</fieldset>
       <div><button class="btn btn-primary" type="submit" {{if not .Commands}}disabled{{end}}>Add repository</button></div>
     </form>
-  </section></fieldset>{{end}}
+  </section></fieldset>
+  {{if .AwaitingRestart}}<section class="border rounded p-3 mt-3" role="status"><h2 class="h5">Saved for restart</h2><p>These repositories start monitoring after Minion restarts:</p><ul class="mb-0">{{range .AwaitingRestart}}<li>{{.}}</li>{{end}}</ul></section>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin skills"}}{{template "head.html" $}}<title>Skills · Minion admin</title></head>
 <body>{{template "admin-nav" $}}<main class="container py-4">
@@ -192,10 +194,28 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
 </li>{{end}}</ul>{{else}}<p class="mb-0 text-body-secondary">No skills configured.</p>{{end}}{{end}}
 `))
 
-func adminConfigurationHandler(jw *jaws.Jaws, snapshot func() adminConfigSnapshot, page string) http.Handler {
+func adminConfigurationHandler(jw *jaws.Jaws, live *adminLiveConfig, page string) http.Handler {
 	name := "admin " + page
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		ui.Handler(jw, name, configurationView(snapshot())).ServeHTTP(w, r)
+		snapshot := live.snapshot()
+		view := configurationView(snapshot)
+		if page == "repositories" {
+			var runtime config.AdminConfig
+			if snapshot.Config.Admin != nil {
+				runtime = *snapshot.Config.Admin
+			}
+			saved, err := config.LoadWithAdminRuntime(live.path, runtime)
+			if err != nil {
+				http.Error(w, "Configuration could not be loaded; check the file and reload", http.StatusConflict)
+				return
+			}
+			for _, repo := range saved.Repositories {
+				if _, active := snapshot.Config.Repository(repo.Name); !active {
+					view.AwaitingRestart = append(view.AwaitingRestart, repo.Name)
+				}
+			}
+		}
+		ui.Handler(jw, name, view).ServeHTTP(w, r)
 	})
 }

@@ -290,6 +290,13 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		} else {
 			live.restartRequired = true
 		}
+		if len(live.active.Repositories) == 0 && len(updated.Repositories) > 0 {
+			live.firstRepositorySaved = true
+			select {
+			case live.updates <- struct{}{}:
+			default:
+			}
+		}
 		if live.desired.Codex.APIKey != updated.Codex.APIKey || live.desired.Claude.APIKey != updated.Claude.APIKey {
 			live.desired.Codex.APIKey = updated.Codex.APIKey
 			live.desired.Claude.APIKey = updated.Claude.APIKey

@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"html/template"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/jaws"
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 )
 
@@ -141,5 +145,46 @@ func TestAdminConfigurationExplainsNoActiveRepositoriesDuringRestart(t *testing.
 			strings.Contains(body.String(), "A repository is saved") || strings.Contains(body.String(), "No repositories are configured.") {
 			t.Fatalf("%s misstates repository status during restart: %s", name, body.String())
 		}
+	}
+}
+
+func TestAdminRepositoriesShowsSavedInactiveRepository(t *testing.T) {
+	cfg := config.Config{
+		BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/active", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+	}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/pending", ID: 3, OwnerID: 2, Actions: []string{"review"}, DenyAllActors: true}); err != nil {
+		t.Fatal(err)
+	}
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, *cfg.Admin, &action.Orchestrator{}, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	guest := adminGuestCookie(t, handler)
+	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{"password": {"correct-password"}}, guest, "")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login: status=%d", login.Code)
+	}
+	page := adminResponse(handler, http.MethodGet, "/admin/repositories", nil, login.Result().Cookies()[0], "")
+	text := page.Body.String()
+	if page.Code != http.StatusOK || !strings.Contains(text, "owner/active") ||
+		!strings.Contains(text, "Saved for restart") || !strings.Contains(text, "owner/pending") ||
+		strings.Contains(text, `aria-label="Edit commands for owner/pending"`) ||
+		strings.Contains(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`) {
+		t.Fatalf("repositories page omitted saved inactive repository or blocked active controls: status=%d body=%s", page.Code, text)
 	}
 }

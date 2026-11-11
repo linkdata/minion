@@ -110,7 +110,16 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 	watcher.SelectedCommands = map[string]bool{}
 	logger.Print("waiting for repository invitations")
 	var applied uint64
+	waitForRestart := func() int {
+		if loop {
+			<-ctx.Done() // Keep the admin UI open without making more invitation decisions.
+		}
+		return 0
+	}
 	for {
+		if live != nil && live.firstRepositoryNeedsRestart() {
+			return waitForRestart()
+		}
 		if live != nil {
 			cfg, generation := live.next()
 			watcher.Config = cfg
@@ -143,12 +152,8 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 				return 1
 			}
 			if len(saved.Repositories) > 0 {
-				live.markRestartRequired()
-				if loop {
-					// Stop invitation decisions until a restart applies the saved repository.
-					<-ctx.Done()
-					return 0
-				}
+				live.markFirstRepositorySaved()
+				return waitForRestart()
 			}
 		}
 		if !loop {

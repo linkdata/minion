@@ -64,7 +64,7 @@ var adminHomeHTML = template.Must(template.New("home").Parse(headHTML + `{{templ
 {{if .Dot.TokenSet}}<small>Leave blank to keep the saved token.</small>{{end}}
 <button class="btn btn-primary" type="submit">Save bot credentials</button></form>
 <h2 class="h5 mt-4">Repository owners allowed to invite Minion</h2>
-<p>Approve a GitHub organization or personal account that owns a repository. GitHub decides who may invite collaborators to it. Once bot credentials are saved, invite the bot to a repository owned by an approved account.</p>
+<p>Approve a GitHub organization or personal account that owns a repository. GitHub decides who may invite collaborators to it. Once bot credentials are saved, invite the bot to a repository owned by an approved account. Repositories added by invitation start monitoring after a restart and initially allow no requesters.</p>
 {{if .Dot.InvitationOwners}}<ul class="list-group mb-3 col-lg-6">{{range .Dot.InvitationOwners}}<li class="list-group-item d-flex flex-wrap align-items-center gap-2"><span class="me-auto">{{.Login}} <small class="text-body-secondary">(ID {{.ID}})</small></span><form method="post" action="/admin/invitation-owners/remove"><input type="hidden" name="version" value="{{$.Dot.Version}}"><input type="hidden" name="login" value="{{.Login}}"><button class="btn btn-sm btn-outline-danger" type="submit" aria-label="Remove owner {{.Login}}">Remove</button></form></li>{{end}}</ul>
 {{else}}<p>No repository owners are approved for invitations.</p>{{end}}
 <form method="post" action="/admin/invitation-owners/add" class="vstack gap-3 col-lg-6">
@@ -249,7 +249,7 @@ func newAdminHandlerWithSetupPath(jw *jaws.Jaws, cfg config.AdminConfig, owner *
 		mux.Handle("GET /admin/status", adminStatusHandler(jw, owner, live.current, false))
 		mux.Handle("POST /admin/status/check", adminStatusHandler(jw, owner, live.current, true))
 		for _, page := range []string{"users", "repositories", "skills"} {
-			mux.Handle("GET /admin/"+page, adminConfigurationHandler(jw, live.snapshot, page))
+			mux.Handle("GET /admin/"+page, adminConfigurationHandler(jw, live, page))
 		}
 		mux.Handle("GET /admin/policy", adminPolicyHandler(jw, live.snapshot))
 		registerAdminConfigActions(mux, live, owner)

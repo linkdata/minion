@@ -489,6 +489,44 @@ func TestAdvancedConfigRevertClearsRestartRequired(t *testing.T) {
 	}
 }
 
+func TestAdvancedConfigFirstRepositoryWakesInvitationLoop(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		InvitationOwners: []string{"owner"}, InvitationOwnerIDs: map[string]int64{"owner": 2}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.Repositories = []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
+	data, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired || !live.firstRepositoryNeedsRestart() {
+		t.Fatal("Advanced save did not mark first repository as inactive until restart")
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("Advanced save did not wake invitation-only loop")
+	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); err == nil || called {
+		t.Fatalf("invitation decision passed Advanced first-repository fence: err=%v called=%t", err, called)
+	}
+}
+
 func TestAdvancedConfigCanRemoveAdminBlock(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
