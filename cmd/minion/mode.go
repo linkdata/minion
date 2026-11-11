@@ -141,7 +141,7 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 				return 1
 			}
 		}
-		if live != nil {
+		if err == nil && live != nil {
 			var runtime config.AdminConfig
 			if watcher.Config.Admin != nil {
 				runtime = *watcher.Config.Admin

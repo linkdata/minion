@@ -17,13 +17,15 @@ import (
 
 type firstInvitationGitHub struct {
 	monitor.GitHub
-	accepted   int64
-	declined   int64
-	onList     func()
-	listErr    error
-	empty      bool
-	emptyFirst bool
-	listCalls  int
+	accepted    int64
+	declined    int64
+	onList      func()
+	listErr     error
+	acceptErr   error
+	empty       bool
+	emptyFirst  bool
+	listCalls   int
+	acceptCalls int
 }
 
 type invitationCleanupProbe struct{ calls int }
@@ -65,6 +67,12 @@ func TestInvitationOnlyOneshotReportsInvitationFailure(t *testing.T) {
 }
 
 func (g *firstInvitationGitHub) AcceptRepositoryInvitation(_ context.Context, id int64) error {
+	g.acceptCalls++
+	if g.acceptErr != nil {
+		err := g.acceptErr
+		g.acceptErr = nil
+		return err
+	}
 	g.accepted = id
 	return nil
 }
@@ -123,6 +131,88 @@ func TestInvitationOnlyAcceptsFirstRepositoryWithoutWorker(t *testing.T) {
 	}
 	if code := runInvitationOnly(t.Context(), watcher, store, false, log.New(os.Stderr, "", 0), live); code != 0 || !live.snapshot().RestartRequired {
 		t.Fatalf("saved first repository needs a restart: code=%d snapshot=%+v", code, live.snapshot())
+	}
+}
+
+func TestInvitationOnlyRetriesFailedFirstAcceptance(t *testing.T) {
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(cfg.StatePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	listed := make(chan struct{})
+	gh := &firstInvitationGitHub{acceptErr: errors.New("HTTP 503"), onList: func() { close(listed) }}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: live.admit}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	go func() { done <- runInvitationOnly(ctx, watcher, store, true, log.New(os.Stderr, "", 0), live) }()
+	joined := false
+	defer func() {
+		cancel()
+		if !joined {
+			<-done
+		}
+	}()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	select {
+	case <-listed:
+	case <-deadline.C:
+		t.Fatal("initial invitation check did not run")
+	}
+	for {
+		var checked bool
+		if err := store.WithLock(func() error {
+			checked = store.Data.NextInviteCheckAt.After(time.Now())
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if checked {
+			break
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("failed invitation check did not finish")
+		case <-ticker.C:
+		}
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("failed acceptance did not preserve repository: repos=%v err=%v", saved.Repositories, err)
+	}
+	if err := store.WithLock(func() error {
+		store.Data.NextInviteCheckAt = time.Time{}
+		return store.Save()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case live.updates <- struct{}{}:
+	default:
+	}
+	for !live.snapshot().RestartRequired {
+		select {
+		case <-deadline.C:
+			t.Fatal("successful retry did not request restart")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	code := <-done
+	joined = true
+	if code != 0 || gh.acceptCalls != 2 || gh.accepted != 7 {
+		t.Fatalf("first invitation was not retried: code=%d accept_calls=%d accepted=%d", code, gh.acceptCalls, gh.accepted)
 	}
 }
 
