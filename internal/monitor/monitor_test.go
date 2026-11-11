@@ -1287,6 +1287,71 @@ func TestInvitationListingErrorLoggedWithPendingPolicyUpdate(t *testing.T) {
 	}
 }
 
+func TestOwnerOnlyInvitationFailureIsReturnedAfterScheduling(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		gh   fakeGitHub
+	}{
+		{name: "list", gh: fakeGitHub{inviteErr: errors.New("list invitations failed")}},
+		{name: "accept", gh: fakeGitHub{acceptErr: errors.New("accept invitation failed"), invitations: []github.Invitation{{
+			ID: 7, Repository: github.Repository{FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"}}, Permissions: "read",
+		}}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+			cfg := testConfig(t)
+			cfg.Repositories = nil
+			cfg.InvitationOwners = []string{"example-owner"}
+			cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+			m := &Monitor{Config: cfg, GitHub: &test.gh, Now: func() time.Time { return now }}
+			store := openState(t, now.Add(-time.Hour))
+			_, err := m.RunOnce(t.Context(), store)
+			if err == nil || !store.Data.NextInviteCheckAt.Equal(now.Add(15*time.Minute)) {
+				t.Fatalf("owner-only invitation error was hidden or unscheduled: err=%v next=%v", err, store.Data.NextInviteCheckAt)
+			}
+		})
+	}
+}
+
+func TestOwnerOnlyInvitationSeedsRecentCursorUnlessStartAtSet(t *testing.T) {
+	for _, explicitStart := range []bool{false, true} {
+		t.Run(fmt.Sprint(explicitStart), func(t *testing.T) {
+			now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+			old := now.Add(-30 * 24 * time.Hour)
+			cfg := testConfig(t)
+			cfg.Repositories = nil
+			cfg.InvitationOwners = []string{"example-owner"}
+			cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+			if explicitStart {
+				cfg.StartAt = old.Format(time.RFC3339)
+			}
+			path := filepath.Join(t.TempDir(), "config.json")
+			data, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			gh := &fakeGitHub{invitations: []github.Invitation{{ID: 7, Repository: github.Repository{
+				FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner"},
+			}, Permissions: "write"}}}
+			m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, Now: func() time.Time { return now }, SelectedCommands: map[string]bool{}}
+			store := openState(t, old)
+			if _, err := m.RunOnce(t.Context(), store); err != nil {
+				t.Fatal(err)
+			}
+			want := now.Add(-2 * time.Second)
+			if explicitStart {
+				want = old
+			}
+			if len(gh.accepted) != 1 || !store.Data.Cursor.Equal(want) || !store.Data.RepositoryCursors["example-owner/new-repo"].Equal(want) {
+				t.Fatalf("first repository cursor: accepted=%v cursor=%v repo=%v want=%v", gh.accepted, store.Data.Cursor, store.Data.RepositoryCursors["example-owner/new-repo"], want)
+			}
+		})
+	}
+}
+
 func TestInvitationListingErrorKeepsPartialWorkAndPollsAfterLongCheck(t *testing.T) {
 	now := time.Date(2026, 10, 9, 8, 0, 0, 0, time.UTC)
 	gh := &fakeGitHub{

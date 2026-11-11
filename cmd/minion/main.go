@@ -206,7 +206,11 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	}
 	waitingForInvitation := len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != ""
 	if *oneshot && len(cfg.Repositories) == 0 && !waitingForInvitation {
-		logger.Print("no repositories configured")
+		if len(cfg.InvitationOwners) > 0 {
+			logger.Print("bot_login and github.token are required to wait for invitations")
+		} else {
+			logger.Print("no repositories configured or approved for invitations")
+		}
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -268,7 +272,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return true
 	}
 	preflight := func() bool {
-		if waitingForInvitation {
+		if waitingForInvitation && len(cfg.Repositories) == 0 {
 			if cfg.Admin != nil && !*oneshot {
 				if err := checkAdminServerConfig(*cfg.Admin); err != nil {
 					logger.Printf("admin TLS preflight: %v", err)
@@ -331,6 +335,12 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			return 1
 		} else {
 			logger.Printf("GitHub identity verified as @%s", user.Login)
+			if waitingForInvitation {
+				if _, err := client.ListRepositoryInvitations(ctx); err != nil {
+					logger.Printf("GitHub invitation access: %v", err)
+					return 1
+				}
+			}
 		}
 		logCommandSkills(cfg, logger)
 		if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -19,6 +20,8 @@ type firstInvitationGitHub struct {
 	accepted int64
 	declined int64
 	onList   func()
+	listErr  error
+	empty    bool
 }
 
 type invitationCleanupProbe struct{ calls int }
@@ -36,7 +39,26 @@ func (g *firstInvitationGitHub) ListRepositoryInvitations(context.Context) ([]gi
 		g.onList = nil
 		onList()
 	}
+	if g.listErr != nil {
+		return nil, g.listErr
+	}
+	if g.empty {
+		return nil, nil
+	}
 	return []github.Invitation{{ID: 7, Repository: github.Repository{ID: 50, FullName: "acme/repo", Owner: github.User{Login: "acme", ID: 42}}, Invitee: github.User{Login: "bot"}, Permissions: "write"}}, nil
+}
+
+func TestInvitationOnlyOneshotReportsInvitationFailure(t *testing.T) {
+	now := time.Now().UTC()
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	watcher := &monitor.Monitor{GitHub: &firstInvitationGitHub{listErr: errors.New("invitation list failed")}}
+	if code := runInvitationOnly(t.Context(), watcher, store, false, log.New(os.Stderr, "", 0), nil); code != 1 {
+		t.Fatalf("invitation-only failure exited %d, want 1", code)
+	}
 }
 
 func (g *firstInvitationGitHub) AcceptRepositoryInvitation(_ context.Context, id int64) error {
@@ -140,5 +162,72 @@ func TestInvitationOnlyRunsMonitorCleanup(t *testing.T) {
 	watcher := &monitor.Monitor{Handler: handler}
 	if code := runInvitationOnly(t.Context(), watcher, store, false, log.New(os.Stderr, "", 0), nil); code != 0 || handler.calls != 1 {
 		t.Fatalf("invitation-only monitor cleanup: code=%d calls=%d", code, handler.calls)
+	}
+}
+
+func TestInvitationOnlyLoopAppliesOwnerUpdateWithoutWaitingForNextPoll(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"bot_login":"bot","github":{"token":"test-token"},"invitation_owners":["acme"],"invitation_owner_ids":{"acme":42},"repositories":[]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(cfg.StatePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	saved := make(chan struct{})
+	gh := &firstInvitationGitHub{empty: true, onList: func() {
+		if err := live.save(func(next *config.Config) error {
+			next.InvitationOwners = []string{"other"}
+			next.InvitationOwnerIDs = map[string]int64{"other": 99}
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+		close(saved)
+	}}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: live.admit}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	go func() { done <- runInvitationOnly(ctx, watcher, store, true, log.New(os.Stderr, "", 0), live) }()
+	joined := false
+	defer func() {
+		cancel()
+		if !joined {
+			<-done
+		}
+	}()
+	firstPass := time.NewTimer(5 * time.Second)
+	defer firstPass.Stop()
+	select {
+	case <-saved:
+	case <-firstPass.C:
+		t.Fatal("first invitation pass did not run")
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for live.snapshot().Pending {
+		select {
+		case <-deadline.C:
+			t.Fatal("owner update waited for the next invitation poll")
+		case <-ticker.C:
+		}
+	}
+	cancel()
+	code := <-done
+	joined = true
+	if code != 0 || live.current().InvitationOwners[0] != "other" {
+		t.Fatalf("owner update was not applied: code=%d owners=%v", code, live.current().InvitationOwners)
 	}
 }

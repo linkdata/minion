@@ -693,11 +693,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stopForConfigUpdate(scanIndex, ErrConfigUpdatePending)
 				}
 				retire := func() error { return retireIgnoredJob(store, job.ID, started) }
-				if m.BeforeAccept != nil {
-					err = m.BeforeAccept(retire)
-				} else {
-					err = retire()
-				}
+				err = m.runWithCurrentConfig(retire)
 				if errors.Is(err, ErrConfigUpdatePending) {
 					return stopForConfigUpdate(scanIndex, err)
 				}
@@ -843,11 +839,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return nil
 				})
 			}
-			if m.BeforeAccept != nil {
-				err = m.BeforeAccept(accept)
-			} else {
-				err = accept()
-			}
+			err = m.runWithCurrentConfig(accept)
 			if err != nil {
 				cancelPrep()
 				if errors.Is(err, ErrConfigUpdatePending) {
@@ -949,12 +941,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return store.Save()
 	}
-	var err error
-	if m.BeforeAccept != nil {
-		err = m.BeforeAccept(advanceCursor)
-	} else {
-		err = advanceCursor()
-	}
+	err := m.runWithCurrentConfig(advanceCursor)
 	if errors.Is(err, ErrConfigUpdatePending) {
 		return stopForConfigUpdate(0, err)
 	}
@@ -1001,6 +988,7 @@ func earlierWake(next, invitation time.Time) time.Time {
 
 // checkDueInvitations processes due repository invitations without running jobs.
 func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
+	noRepositories := len(m.Config.Repositories) == 0
 	var due bool
 	_ = store.WithLock(func() error {
 		due = !at.Before(store.Data.NextInviteCheckAt)
@@ -1022,8 +1010,13 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 	if m.afterInvitationCheck != nil {
 		m.afterInvitationCheck()
 	}
+	var ownerOnlyIdle bool
 	saveErr := store.WithLock(func() error {
+		ownerOnlyIdle = noRepositories && store.Data.Accepted == nil
 		configUpdatePending = configUpdatePending && store.Data.Accepted == nil
+		if recent := at.Add(-2 * time.Second); ownerOnlyIdle && m.Config.StartAt == "" && store.Data.Cursor.Before(recent) {
+			store.Data.Cursor = recent
+		}
 		if len(deferred) != 0 {
 			if store.Data.RepositoryCursors == nil {
 				store.Data.RepositoryCursors = make(map[string]time.Time)
@@ -1045,7 +1038,7 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 	if saveErr != nil {
 		return saveErr
 	}
-	if configUpdatePending {
+	if configUpdatePending || ownerOnlyIdle {
 		return err
 	}
 	return nil
@@ -2152,6 +2145,9 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if accepted.MainProvider != cmp.Or(m.Config.Main, "codex") || accepted.CriticProvider != m.Config.Adversarial {
 		m.logf("finish %s: frozen action role providers are no longer configured", job.ID)
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
+	if _, ok := m.acceptedRepository(*accepted); !ok {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
@@ -3567,7 +3563,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			failures = append(failures, fmt.Errorf("%s invitation grants %q, but configured actions require write access", fullName, invite.Permissions))
 			continue
 		}
-		err := m.invitationAction(func() error {
+		err := m.runWithCurrentConfig(func() error {
 			if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
 				// Preserve the cursor even if the config write reports an ambiguous failure.
 				deferred = append(deferred, strings.ToLower(fullName))
@@ -3609,7 +3605,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			failures = append(failures, err)
 			break
 		}
-		if err := m.invitationAction(func() error {
+		if err := m.runWithCurrentConfig(func() error {
 			return m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID)
 		}); err != nil {
 			failures = append(failures, fmt.Errorf("decline %s invitation: %w", invite.Repository.FullName, err))
@@ -3621,7 +3617,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 	return deferred, errors.Join(failures...)
 }
 
-func (m *Monitor) invitationAction(action func() error) error {
+func (m *Monitor) runWithCurrentConfig(action func() error) error {
 	if m.BeforeAccept != nil {
 		return m.BeforeAccept(action)
 	}

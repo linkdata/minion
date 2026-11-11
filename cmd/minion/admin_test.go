@@ -831,6 +831,22 @@ func TestCheckRejectsInvalidAdminTLS(t *testing.T) {
 			}
 		})
 	}
+	t.Run("invitation-only", func(t *testing.T) {
+		cfg := config.Config{
+			BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+			StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: t.TempDir(),
+			Admin: &config.AdminConfig{TLSCertFile: "missing-cert.pem", TLSKeyFile: "missing-key.pem",
+				Administrators: []config.AdminAccount{{Username: "admin"}}},
+			InvitationOwners: []string{"approved-owner"}, InvitationOwnerIDs: map[string]int64{"approved-owner": 99},
+			Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		}
+		code, output := runStartupFixtureWithRun(t, cfg, func() int {
+			return runWithGitCheck(func(context.Context, string) error { return nil })
+		}, "-check")
+		if code != 1 || !strings.Contains(output, "admin TLS preflight:") {
+			t.Fatalf("invitation-only -check code=%d, output=%q; want admin TLS failure", code, output)
+		}
+	})
 }
 
 func TestCronStartupSkipsInvalidAdminTLSPreflight(t *testing.T) {

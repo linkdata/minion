@@ -225,6 +225,9 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		activate = after
 		activate.Repositories = visibleRepositories(a.desired.Repositories, after.Repositories, added)
+		if len(a.desired.Repositories) > 0 && len(activate.Repositories) == 0 {
+			return errors.New("To remove the last active repository, edit Configuration and restart Minion")
+		}
 		restartForFirstRepository = len(a.desired.Repositories) == 0 && len(activate.Repositories) > 0
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
 		if !restartForFirstRepository && activate.RemoteExecutor != nil {

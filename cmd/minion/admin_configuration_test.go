@@ -127,7 +127,7 @@ func TestAdminRemoteRepositoryFormOnlyOffersSelectedCommands(t *testing.T) {
 	}
 }
 
-func TestAdminConfigurationShowsSavedFirstRepositoryState(t *testing.T) {
+func TestAdminConfigurationExplainsNoActiveRepositoriesDuringRestart(t *testing.T) {
 	page := struct {
 		Dot                adminConfigurationView
 		HeadHTML, TailHTML template.HTML
@@ -137,8 +137,9 @@ func TestAdminConfigurationShowsSavedFirstRepositoryState(t *testing.T) {
 		if err := adminConfigurationHTML.ExecuteTemplate(&body, name, page); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(body.String(), "A repository is saved but inactive until Minion restarts.") || strings.Contains(body.String(), "No repositories are configured.") {
-			t.Fatalf("%s hides the saved repository: %s", name, body.String())
+		if !strings.Contains(body.String(), "No repositories are active. Restart Minion to activate any saved repositories.") ||
+			strings.Contains(body.String(), "A repository is saved") || strings.Contains(body.String(), "No repositories are configured.") {
+			t.Fatalf("%s misstates repository status during restart: %s", name, body.String())
 		}
 	}
 }

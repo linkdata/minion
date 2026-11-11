@@ -113,6 +113,7 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 	certFile, keyFile, _ := remoteTestTLSFiles(t)
 	previousTransport := http.DefaultTransport
 	var requests []string
+	denyInvitationAccess := false
 	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
 		requests = append(requests, request.URL.Path)
 		if got := request.Header.Get("Authorization"); got != "Bearer configured-bot-token" {
@@ -123,6 +124,13 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 		switch request.URL.Path {
 		case "/user":
 			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		case "/user/repository_invitations":
+			if denyInvitationAccess {
+				recorder.WriteHeader(http.StatusForbidden)
+				_, _ = recorder.WriteString(`{"message":"invitation access denied"}`)
+			} else {
+				_, _ = recorder.WriteString(`[]`)
+			}
 		case "/repos/owner/repo/notifications":
 			_, _ = recorder.WriteString(`[]`)
 		case "/repos/owner/repo":
@@ -191,9 +199,17 @@ func TestGitHubStartupUsesConfiguredToken(t *testing.T) {
 		})
 	}, "-check")
 	if code != 0 || gitChecks != 0 || !strings.Contains(output, "waiting for invitations from approved repository owners") ||
-		strings.Contains(output, "setup incomplete:") || strings.Join(requests, ",") != "/user" {
+		strings.Contains(output, "setup incomplete:") || strings.Join(requests, ",") != "/user,/user/repository_invitations" {
 		t.Fatalf("approved-owner check: code=%d git_checks=%d GitHub requests=%v output=%q", code, gitChecks, requests, output)
 	}
+	denyInvitationAccess = true
+	code, output = runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error { return nil })
+	}, "-check")
+	if code != 1 || !strings.Contains(output, "GitHub invitation access:") {
+		t.Fatalf("inaccessible invitations passed owner-only check: code=%d output=%q", code, output)
+	}
+	denyInvitationAccess = false
 	cfg.BotLogin = "other"
 	requests = nil
 	code, output = runStartupFixtureWithRun(t, cfg, func() int {

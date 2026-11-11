@@ -46,6 +46,22 @@ func TestAcceptedJobDefersPendingInvitationPolicyUpdate(t *testing.T) {
 	}
 }
 
+func TestOwnerOnlyInvitationListingFailureDoesNotInterruptAcceptedJob(t *testing.T) {
+	m, store, job, gh, now, _ := selectedAbortFixture(t)
+	m.Config.Repositories = nil
+	gh.inviteErr = errors.New("list invitations failed")
+	store.Data.NextInviteCheckAt = now
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.checkDueInvitations(t.Context(), store, now); err != nil {
+		t.Fatalf("invitation listing interrupted accepted job: %v", err)
+	}
+	if store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID || !store.Data.NextInviteCheckAt.After(now) {
+		t.Fatalf("accepted job was not preserved: accepted=%+v next_invite=%v", store.Data.Accepted, store.Data.NextInviteCheckAt)
+	}
+}
+
 func TestSelectedCancelAfterAmbiguousResultSaveIsDurable(t *testing.T) {
 	for _, stage := range []string{"result marker", "terminal decision"} {
 		t.Run(stage, func(t *testing.T) {

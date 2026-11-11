@@ -159,6 +159,40 @@ func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
 	}
 }
 
+func TestAdminLiveConfigRemoteFirstRepositoryNeedsNoWorkerSelection(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(next *config.Config) error {
+		next.Repositories = nil
+		next.InvitationOwners = []string{"owner"}
+		next.InvitationOwnerIDs = map[string]int64{"owner": 22}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live.snapshot().RemoteCommands) != 0 {
+		t.Fatal("empty remote startup selected commands")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = append(next.Repositories, config.Repository{Name: "owner/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}})
+		return nil
+	}); err != nil {
+		t.Fatalf("first remote repository needs no worker selection: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("first remote repository was not saved: repositories=%v error=%v", saved.Repositories, err)
+	}
+	snapshot := live.snapshot()
+	if !snapshot.RestartRequired || snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(live.current().Repositories) != 0 {
+		t.Fatalf("first remote repository became active without a worker: snapshot=%+v active=%v", snapshot, live.current().Repositories)
+	}
+}
+
 func TestAdminLiveConfigAppliesOwnerRemovalAfterInvitationRegistration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
@@ -196,6 +230,23 @@ func TestAdminLiveConfigAppliesOwnerRemovalAfterInvitationRegistration(t *testin
 	saved, err := config.Load(path)
 	if err != nil || len(saved.Repositories) != 1 || len(saved.InvitationOwners) != 0 || len(live.current().InvitationOwners) != 0 {
 		t.Fatalf("owner removal did not activate: saved=%+v active=%+v error=%v", saved, live.current(), err)
+	}
+}
+
+func TestAdminLiveConfigRejectsRemovingLastActiveRepositoryWithInvitedRepository(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/invited", ID: 12, OwnerID: 22, Actions: []string{"review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = next.Repositories[1:]
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "last active repository") {
+		t.Fatalf("removing the only active repository was allowed: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 2 || len(live.snapshot().Config.Repositories) != 1 || live.snapshot().Pending {
+		t.Fatalf("rejected removal changed saved or active repositories: saved=%v snapshot=%+v error=%v", saved.Repositories, live.snapshot(), err)
 	}
 }
 

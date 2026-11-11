@@ -398,6 +398,49 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	}
 }
 
+func TestAdvancedConfigUnchangedSaveKeepsFirstRepositoryInactive(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = append(next.Repositories, config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, view.JSON); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired || len(live.snapshot().Config.Repositories) != 0 || len(live.current().Repositories) != 0 {
+		t.Fatal("unchanged Advanced save activated the first repository or cleared the restart notice")
+	}
+	if err := live.save(func(*config.Config) error { return nil }); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("live edit was allowed before first-repository restart: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("saved repository was lost: repositories=%v error=%v", saved.Repositories, err)
+	}
+}
+
 func TestAdvancedConfigCanRemoveAdminBlock(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
