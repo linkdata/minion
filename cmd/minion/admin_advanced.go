@@ -132,7 +132,9 @@ func advancedConfigView(path string, live *adminLiveConfig, runtime config.Admin
 	view.Setup = live == nil
 	if live != nil {
 		live.mu.RLock()
-		view.RestartRequired = live.restartRequired || !reflect.DeepEqual(verified.Repositories, live.desired.Repositories)
+		view.RestartRequired = live.restartRequired ||
+			(len(verified.Repositories) != 0 || len(live.desired.Repositories) != 0) &&
+				!reflect.DeepEqual(verified.Repositories, live.desired.Repositories)
 		view.PendingActivation, view.Error = live.pending, live.lastError
 		live.mu.RUnlock()
 	}
@@ -275,10 +277,17 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		return fmt.Errorf("configuration could not be saved: %w", err)
 	}
 	if live != nil {
+		if len(live.active.Repositories) == 0 && len(preEdit.Repositories) == 0 && len(updated.Repositories) > 0 {
+			live.firstRepositorySaved = true
+			select {
+			case live.updates <- struct{}{}:
+			default:
+			}
+		}
 		baseline := live.disk
 		// Invitations append to disk without joining the running config.
 		if !live.restartRequired && len(preEdit.Repositories) >= len(baseline.Repositories) &&
-			reflect.DeepEqual(preEdit.Repositories[:len(baseline.Repositories)], baseline.Repositories) {
+			(len(baseline.Repositories) == 0 || reflect.DeepEqual(preEdit.Repositories[:len(baseline.Repositories)], baseline.Repositories)) {
 			baseline.Repositories = preEdit.Repositories
 		}
 		baseline.Codex.APIKey, baseline.Claude.APIKey = updated.Codex.APIKey, updated.Claude.APIKey
@@ -286,7 +295,7 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		updatedJSON, _ := json.Marshal(updated)
 		if bytes.Equal(beforeJSON, updatedJSON) {
 			live.disk = updated
-			live.restartRequired = false
+			live.restartRequired = live.firstRepositorySaved
 		} else {
 			live.restartRequired = true
 		}

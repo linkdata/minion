@@ -810,8 +810,8 @@ func (c *Config) Validate(configDir string) error {
 			return fmt.Errorf("start_at must be RFC3339: %w", err)
 		}
 	}
-	if len(c.Repositories) == 0 && c.Admin == nil {
-		return fmt.Errorf("repositories must contain at least one repository")
+	if len(c.Repositories) == 0 && len(c.InvitationOwners) == 0 && c.Admin == nil {
+		return fmt.Errorf("repositories or invitation_owners must contain at least one entry")
 	}
 	ownerIDs, err := normalizeIDPins(c.InvitationOwnerIDs)
 	if err != nil {
@@ -820,7 +820,7 @@ func (c *Config) Validate(configDir string) error {
 	c.InvitationOwnerIDs = ownerIDs
 	seenOwners := map[string]bool{}
 	for i, owner := range c.InvitationOwners {
-		if len(owner) > 39 || !ownerNamePattern.MatchString(owner) {
+		if !ValidGitHubLogin(owner) {
 			return fmt.Errorf("invalid invitation owner %q", owner)
 		}
 		owner = strings.ToLower(owner)

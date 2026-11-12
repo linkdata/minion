@@ -50,7 +50,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	configPath := flag.String("config", "config.local.json", "path to JSON configuration")
 	mode := flag.String("mode", "orchestrate", "service mode: orchestrate, execute, remote-execute, or hash")
 	oneshot := flag.Bool("oneshot", false, "run one polling pass, then exit; default is a continuous service")
-	check := flag.Bool("check", false, "run available preflight checks, then exit; report incomplete setup if no repositories are configured")
+	check := flag.Bool("check", false, "run available preflight checks, then exit; report setup or invitation status without repositories")
 	installSkills := flag.Bool("install-skills", false, "install configured skills for Codex and Claude, then exit")
 	address := flag.String("address", "", "webserv listen address for the admin UI")
 	certDir := flag.String("certdir", "", "webserv certificate directory containing fullchain.pem and privkey.pem")
@@ -204,8 +204,9 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		logger.Print("webserv flags require an admin block in the config")
 		return 2
 	}
-	if *oneshot && len(cfg.Repositories) == 0 {
-		logger.Print("no repositories configured")
+	waitingForInvitation := len(cfg.Repositories) == 0 && len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != ""
+	if !*check && !*installSkills && (*oneshot || cfg.Admin == nil) && len(cfg.Repositories) == 0 && !waitingForInvitation {
+		logger.Print("no repositories configured; approved owners also need bot_login and github.token")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -226,7 +227,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return 0
 	}
 	canOfferSetup := cfg.Admin != nil && !*check && !*oneshot
-	setupIncomplete := canOfferSetup &&
+	setupIncomplete := canOfferSetup && !waitingForInvitation &&
 		(cfg.BotLogin == "" || cfg.GitHub.Token == "" || len(cfg.Repositories) == 0 ||
 			cfg.RemoteExecutor == nil && !hasRunnableLocalCommand(cfg) ||
 			cfg.RemoteExecutor != nil && !hasUnselectedCommand(nil, cfg, true))
@@ -267,6 +268,15 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 		return true
 	}
 	preflight := func() bool {
+		if waitingForInvitation && len(cfg.Repositories) == 0 {
+			if cfg.Admin != nil && !*oneshot {
+				if err := checkAdminServerConfig(*cfg.Admin); err != nil {
+					logger.Printf("admin TLS preflight: %v", err)
+					return false
+				}
+			}
+			return true
+		}
 		if err := action.CheckNativeRolePair(cfg.Main, cfg.Adversarial); err != nil {
 			logger.Printf("AI preflight: %v", err)
 			return false
@@ -321,12 +331,22 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 			return 1
 		} else {
 			logger.Printf("GitHub identity verified as @%s", user.Login)
+			if waitingForInvitation {
+				if _, err := client.ListRepositoryInvitations(ctx); err != nil {
+					logger.Printf("GitHub invitation access: %v", err)
+					return 1
+				}
+			}
 		}
 		logCommandSkills(cfg, logger)
 		if runtime.GOOS == "linux" && cfg.Claude.AllowAllUnixSockets && (cfg.Main == "claude" || cfg.Adversarial == "claude") {
 			logger.Print(claudeUnixSocketWarning)
 		}
-		logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
+		if waitingForInvitation {
+			logger.Print("waiting for invitations from approved repository owners; preflight passed")
+		} else {
+			logger.Print("setup incomplete: no repositories configured; available preflight checks passed")
+		}
 		return 0
 	}
 	startRecoverySetup := func() int {
@@ -468,7 +488,7 @@ func runWithGitCheckAt(checkGit func(context.Context, string) error, now func() 
 	bindPublicationValidation(orchestrator, watcher)
 	watcher.Config, watcher.Handler = cfg, orchestrator
 	path := ""
-	if cfg.RemoteExecutor == nil {
+	if cfg.RemoteExecutor == nil && len(cfg.Repositories) > 0 {
 		path, err = os.Executable()
 		if err != nil {
 			logger.Printf("locate executable: %v", err)

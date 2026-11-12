@@ -48,6 +48,24 @@ func TestLoadSetupConfigRejectsOversizedFile(t *testing.T) {
 	}
 }
 
+func TestRemoveInvitationOwnerFromMixedCaseConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := `{"bot_login":"bot","github":{"token":"test-token"},"invitation_owners":["Acme","other"],"invitation_owner_ids":{"Acme":42,"other":7}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error { return removeInvitationOwner(cfg, "acme") }); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(saved.InvitationOwners, []string{"other"}) || len(saved.InvitationOwnerIDs) != 1 || saved.InvitationOwnerIDs["other"] != 7 {
+		t.Fatalf("owner removal left a stale pin: owners=%v IDs=%v", saved.InvitationOwners, saved.InvitationOwnerIDs)
+	}
+}
+
 func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.local.json")
 	initial := config.Config{Admin: &config.AdminConfig{
@@ -132,10 +150,38 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	home := adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), "Save bot credentials") ||
 		!strings.Contains(home.Body.String(), `href="/admin/config"`) ||
+		!strings.Contains(home.Body.String(), `action="/admin/invitation-owners/add"`) ||
 		strings.Contains(home.Body.String(), `action="/admin/repositories/add"`) ||
 		strings.Contains(home.Body.String(), `name="repository_id"`) {
 		t.Fatalf("initial setup form status=%d body=%q", home.Code, home.Body.String())
 	}
+	ownerForm := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "login": {"Acme"}, "id": {"91"}}
+	if response := adminResponse(handler, http.MethodPost, "/admin/invitation-owners/add", ownerForm, nil, ""); response.Code != http.StatusForbidden {
+		t.Fatalf("anonymous owner approval status=%d", response.Code)
+	}
+	invalidOwner := ownerForm.Clone()
+	invalidOwner.Set("id", "0")
+	if response := adminResponse(handler, http.MethodPost, "/admin/invitation-owners/add", invalidOwner, cookie, ""); response.Code != http.StatusConflict || calls != 0 {
+		t.Fatalf("invalid owner approval status=%d GitHub calls=%d", response.Code, calls)
+	}
+	if response := adminResponse(handler, http.MethodPost, "/admin/invitation-owners/add", ownerForm, cookie, ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("offline owner approval status=%d body=%q", response.Code, response.Body.String())
+	}
+	if saved, err := config.Load(path); err != nil || len(saved.InvitationOwners) != 1 || saved.InvitationOwners[0] != "acme" || saved.InvitationOwnerIDs["acme"] != 91 || calls != 0 {
+		t.Fatalf("offline owner approval was not pinned: owners=%v IDs=%v calls=%d error=%v", saved.InvitationOwners, saved.InvitationOwnerIDs, calls, err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if !strings.Contains(home.Body.String(), `action="/admin/invitation-owners/remove"`) || !strings.Contains(home.Body.String(), "(ID 91)") {
+		t.Fatalf("approved owner not shown during setup: %s", home.Body.String())
+	}
+	removeOwner := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "login": {"acme"}}
+	if response := adminResponse(handler, http.MethodPost, "/admin/invitation-owners/remove", removeOwner, cookie, ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("offline owner removal status=%d body=%q", response.Code, response.Body.String())
+	}
+	if saved, err := config.Load(path); err != nil || len(saved.InvitationOwners) != 0 || len(saved.InvitationOwnerIDs) != 0 || calls != 0 {
+		t.Fatalf("offline owner removal failed: owners=%v IDs=%v calls=%d error=%v", saved.InvitationOwners, saved.InvitationOwnerIDs, calls, err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
 	beforeCredentials := url.Values{"version": {setupFormVersion(t, home.Body.String())}, "url": {"https://github.com/Example/Repo"}}
 	if response := adminResponse(handler, http.MethodPost, "/admin/repositories/add", beforeCredentials, cookie, ""); response.Code != http.StatusConflict ||
 		!strings.Contains(response.Body.String(), "Save the GitHub bot credentials") || calls != 0 {
@@ -164,6 +210,19 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	cfg, err := config.Load(path)
 	if err != nil || cfg.BotLogin != "mona-cat_octo" || cfg.GitHub.Token != "secret-token" || len(cfg.Repositories) != 0 {
 		t.Fatalf("saved credentials: bot=%q tokenSet=%t repositories=%d error=%v", cfg.BotLogin, cfg.GitHub.Token != "", len(cfg.Repositories), err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	ownerForm.Set("version", setupFormVersion(t, home.Body.String()))
+	if response := adminResponse(handler, http.MethodPost, "/admin/invitation-owners/add", ownerForm, cookie, ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("approve owner after credentials status=%d body=%q", response.Code, response.Body.String())
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "If a credential was rejected") || !strings.Contains(home.Body.String(), "Restart Minion to check invitations from approved owners") || calls != 0 {
+		t.Fatalf("invitation-only setup status=%d body=%q GitHub calls=%d", home.Code, home.Body.String(), calls)
+	}
+	removeOwner.Set("version", setupFormVersion(t, home.Body.String()))
+	if response := adminResponse(handler, http.MethodPost, "/admin/invitation-owners/remove", removeOwner, cookie, ""); response.Code != http.StatusSeeOther {
+		t.Fatalf("remove owner after credentials status=%d body=%q", response.Code, response.Body.String())
 	}
 	if _, err := config.Update(path, func(cfg *config.Config) error {
 		cfg.Commands = map[string]config.CommandMapping{}
@@ -278,6 +337,28 @@ func TestSetupSavesBotOfflineAndAddsRepositoriesByURL(t *testing.T) {
 	cfg, err = config.Load(path)
 	if err != nil || len(cfg.Repositories) != 2 || cfg.Repositories[1].Name != "example/other" || cfg.Repositories[1].ID != 43 {
 		t.Fatalf("second repository was not appended: repositories=%+v error=%v", cfg.Repositories, err)
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error {
+		cfg.InvitationOwners = []string{"acme"}
+		cfg.InvitationOwnerIDs = map[string]int64{"acme": 91}
+		cfg.Commands = map[string]config.CommandMapping{}
+		for i := range cfg.Repositories {
+			cfg.Repositories[i].Actions = nil
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if !strings.Contains(home.Body.String(), "Setup is incomplete") || strings.Contains(home.Body.String(), "Setup saved") {
+		t.Fatalf("repository without commands appeared ready: %s", home.Body.String())
+	}
+	if _, err := config.Update(path, func(cfg *config.Config) error { cfg.Repositories = nil; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	home = adminResponse(handler, http.MethodGet, "/", nil, cookie, "")
+	if !strings.Contains(home.Body.String(), "Setup saved") || !strings.Contains(home.Body.String(), "Add an available command") {
+		t.Fatalf("invitation-only setup omitted command guidance: %s", home.Body.String())
 	}
 }
 

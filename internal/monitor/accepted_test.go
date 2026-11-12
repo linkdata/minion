@@ -1488,6 +1488,29 @@ func TestSelectedTerminalRecoverySkipsRemoteLookupAfterLocalRevocation(t *testin
 	}
 }
 
+func TestUnassignedAcceptedRemovedRepositoryWithoutExecutorTerminalizes(t *testing.T) {
+	at := time.Now().UTC()
+	accepted := selectedAcceptance(t, at)
+	store := openState(t, at.Add(-time.Minute))
+	store.Data.Accepted = &accepted
+	store.Data.JobFailures[accepted.JobID] = failureForAccepted(accepted, state.JobFailure{Attempts: 1})
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{}
+	m := selectedMonitor(t, at, gh, selectedHandler(func(Job) error {
+		t.Fatal("removed repository dispatched work")
+		return nil
+	}))
+	m.Config.Repositories = nil
+	m.SelectedExecutorID = ""
+	m.SelectedCommands = map[string]bool{}
+	if _, err := m.RunOnce(t.Context(), store); err != nil || store.Data.Accepted != nil ||
+		store.Data.TerminalDecisions[accepted.JobID].Outcome != "failed" || store.Data.Processed[accepted.JobID].IsZero() {
+		t.Fatalf("removed repository did not terminalize: err=%v state=%+v", err, store.Data)
+	}
+}
+
 func TestSelectedTerminalRecoveryRechecksSourceAndAuthority(t *testing.T) {
 	for _, test := range []struct {
 		name         string

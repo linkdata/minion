@@ -32,7 +32,7 @@ var adminStatusHTML = template.Must(template.New("admin status").Parse(headHTML 
   </div>
   <div class="row row-cols-1 row-cols-md-3 g-3">
     <div class="col"><a class="d-block h-100 border rounded p-3 text-decoration-none" href="/admin/users"><span class="h5 d-block">Users</span>Named requesters: {{.Requesters}}{{if .OpenRepositories}} · Any writer on {{.OpenRepositories}} {{if eq .OpenRepositories 1}}repository{{else}}repositories{{end}}{{end}}</a></div>
-    <div class="col"><a class="d-block h-100 border rounded p-3 text-decoration-none" href="/admin/repositories"><span class="h5 d-block">Repositories</span>Monitored: {{.Repositories}}</a></div>
+    <div class="col"><a class="d-block h-100 border rounded p-3 text-decoration-none" href="/admin/repositories"><span class="h5 d-block">Repositories</span>Monitored: {{.Repositories}}{{if .InvitationOwners}} · Approved owners: {{.InvitationOwners}}{{end}}{{if .FirstRepositorySaved}}<span class="d-block">Repository change saved; restart Minion to apply it.</span>{{else if .WaitingForInvitations}}<span class="d-block">Waiting for repository invitations</span>{{end}}</a></div>
     <div class="col"><a class="d-block h-100 border rounded p-3 text-decoration-none" href="/admin/skills"><span class="h5 d-block">Skills</span>Configured: {{.Skills}}</a></div>
   </div>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>`))
@@ -49,24 +49,32 @@ type adminGitHubCheck struct {
 }
 
 type adminStatusView struct {
-	BotLogin                     string
-	BotID                        int64
-	Main, Critic                 adminStatusRole
-	Requesters, OpenRepositories int
-	Repositories, Skills         int
-	Check                        adminGitHubCheck
-	Unavailable                  bool
+	BotLogin                               string
+	BotID                                  int64
+	Main, Critic                           adminStatusRole
+	Requesters, OpenRepositories           int
+	Repositories, InvitationOwners, Skills int
+	WaitingForInvitations                  bool
+	FirstRepositorySaved                   bool
+	Check                                  adminGitHubCheck
+	Unavailable                            bool
 }
 
-func statusView(owner *action.Orchestrator, cfg config.Config) adminStatusView {
+func statusView(owner *action.Orchestrator, cfg config.Config, firstRepositorySaved bool) adminStatusView {
 	if owner == nil {
 		return adminStatusView{Unavailable: true}
 	}
 	view := adminStatusView{
 		BotLogin: owner.BotLogin, BotID: owner.BotID,
-		Main:         adminStatusRole{Provider: cfg.Main, Settings: cfg.RoleModelSettings(false)},
-		Critic:       adminStatusRole{Provider: cfg.Adversarial, Settings: cfg.RoleModelSettings(true)},
-		Repositories: len(cfg.Repositories),
+		Main:             adminStatusRole{Provider: cfg.Main, Settings: cfg.RoleModelSettings(false)},
+		Critic:           adminStatusRole{Provider: cfg.Adversarial, Settings: cfg.RoleModelSettings(true)},
+		Repositories:     len(cfg.Repositories),
+		InvitationOwners: len(cfg.InvitationOwners),
+	}
+	view.WaitingForInvitations = view.Repositories == 0 && view.InvitationOwners > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != ""
+	view.FirstRepositorySaved = firstRepositorySaved
+	if firstRepositorySaved {
+		view.WaitingForInvitations = false
 	}
 	requesters := make(map[int64]struct{})
 	for _, repo := range cfg.Repositories {
@@ -118,10 +126,10 @@ func checkGitHubAuth(ctx context.Context, owner *action.Orchestrator) adminGitHu
 	return result
 }
 
-func adminStatusHandler(jw *jaws.Jaws, owner *action.Orchestrator, current func() config.Config, check bool) http.Handler {
+func adminStatusHandler(jw *jaws.Jaws, owner *action.Orchestrator, live *adminLiveConfig, check bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		view := statusView(owner, current())
+		view := statusView(owner, live.current(), live.firstRepositoryNeedsRestart())
 		if check {
 			view.Check = checkGitHubAuth(r.Context(), owner)
 		}

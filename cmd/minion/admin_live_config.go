@@ -31,6 +31,7 @@ type adminLiveConfig struct {
 	generation               uint64
 	pending                  bool
 	restartRequired          bool
+	firstRepositorySaved     bool
 	lastError                string
 	updates                  chan struct{}
 }
@@ -72,18 +73,32 @@ func (a *adminLiveConfig) current() config.Config {
 
 func (a *adminLiveConfig) admit(accept func() error) error {
 	// A completed save must not be followed by a durable decision under the old policy.
+	// shortcut: invitation actions hold this lock during a 30-second API budget; narrow it if admin saves stall.
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	if a.pending || a.lastError != "" {
+	if a.pending || a.lastError != "" || a.firstRepositorySaved {
 		return monitor.ErrConfigUpdatePending
 	}
 	return accept()
+}
+
+func (a *adminLiveConfig) firstRepositoryNeedsRestart() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.firstRepositorySaved
 }
 
 func (a *adminLiveConfig) snapshot() adminConfigSnapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return adminConfigSnapshot{Config: a.desired, Pending: a.pending, RestartRequired: a.restartRequired, Error: a.lastError, Remote: a.desired.RemoteExecutor != nil, RemoteCommands: a.remoteSelected}
+}
+
+func (a *adminLiveConfig) markFirstRepositorySaved() {
+	a.mu.Lock()
+	a.restartRequired = true
+	a.firstRepositorySaved = true
+	a.mu.Unlock()
 }
 
 func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostSupported bool) {
@@ -96,6 +111,7 @@ func (a *adminLiveConfig) setRemoteSelected(selected map[string]bool, auditHostS
 func sameFixedConfig(a, b config.Config) bool {
 	a.Repositories, a.Commands, a.AlwaysOnSkills = b.Repositories, b.Commands, b.AlwaysOnSkills
 	a.RequesterPolicies, a.AIInstructions = b.RequesterPolicies, b.AIInstructions
+	a.InvitationOwners, a.InvitationOwnerIDs = b.InvitationOwners, b.InvitationOwnerIDs
 	a.CriticStopping.RequiredCleanRounds = b.CriticStopping.RequiredCleanRounds
 	left, _ := json.Marshal(a)
 	right, _ := json.Marshal(b)
@@ -178,6 +194,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		return errors.New("restart Minion before further live edits")
 	}
 	var activate config.Config
+	var restartForFirstRepository bool
 	var runtime config.AdminConfig
 	if a.active.Admin != nil {
 		runtime = *a.active.Admin
@@ -216,11 +233,12 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		}
 		activate = after
 		activate.Repositories = visibleRepositories(a.desired.Repositories, after.Repositories, added)
-		if len(activate.Repositories) == 0 {
-			return errAdminRestartRequired
+		if len(a.desired.Repositories) > 0 && len(activate.Repositories) == 0 {
+			return errors.New("To remove the last active repository, edit Configuration and restart Minion")
 		}
+		restartForFirstRepository = len(a.desired.Repositories) == 0 && len(activate.Repositories) > 0
 		selectionChanged := !sameSkillConfig(a.desired, activate) || !sameEnabledCommands(a.desired, activate)
-		if activate.RemoteExecutor != nil {
+		if !restartForFirstRepository && activate.RemoteExecutor != nil {
 			for _, repo := range activate.Repositories {
 				previous, _ := a.desired.Repository(repo.Name)
 				for _, name := range repo.Actions {
@@ -231,7 +249,7 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 				}
 			}
 		}
-		if activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
+		if !restartForFirstRepository && activate.RemoteExecutor != nil && (!sameSkillConfig(a.desired, activate) || hasUnselectedCommand(a.remoteSelected, activate, a.remoteAuditHostSupported)) {
 			return errors.New("this selection change requires editing the configuration file and restarting the remote worker and Minion")
 		}
 		if activate.RemoteExecutor == nil && selectionChanged && hasRunnableLocalCommand(a.desired) && !hasRunnableLocalCommand(activate) {
@@ -249,6 +267,9 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 		if !reflect.DeepEqual(before.RequesterPolicies, after.RequesterPolicies) {
 			raw.RequesterPolicies = after.RequesterPolicies
 		}
+		if !reflect.DeepEqual(before.InvitationOwners, after.InvitationOwners) || !reflect.DeepEqual(before.InvitationOwnerIDs, after.InvitationOwnerIDs) {
+			raw.InvitationOwners, raw.InvitationOwnerIDs = after.InvitationOwners, after.InvitationOwnerIDs
+		}
 		raw.CriticStopping.RequiredCleanRounds = after.CriticStopping.RequiredCleanRounds
 		raw.AIInstructions = after.AIInstructions
 		raw.Codex.APIKey, raw.Claude.APIKey = after.Codex.APIKey, after.Claude.APIKey
@@ -256,6 +277,15 @@ func (a *adminLiveConfig) save(edit func(*config.Config) error) error {
 	})
 	if err != nil {
 		return err
+	}
+	if restartForFirstRepository {
+		a.restartRequired = true
+		a.firstRepositorySaved = true
+		select {
+		case a.updates <- struct{}{}:
+		default:
+		}
+		return nil
 	}
 	a.disk = updated
 	applyRuntimeModels(&activate, a.active)

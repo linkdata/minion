@@ -17,24 +17,13 @@ import (
 
 func liveConfigFixture(t *testing.T, remote bool) (*adminLiveConfig, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.json")
 	cfg := config.Config{BotLogin: "bot", Adversarial: "codex", Repositories: []config.Repository{{Name: "owner/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}}}}
 	if remote {
 		cfg.RemoteExecutor = &config.RemoteExecutorConfig{ExecutorID: "worker", Listen: "127.0.0.1:9999", TLSCertFile: "cert", TLSKeyFile: "key", Token: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
 		cfg.MainSettings = config.RoleModelConfig{Model: "model", Effort: "medium"}
 		cfg.CriticSettings = config.RoleModelConfig{Model: "critic", Effort: "medium"}
 	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, cfg)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -65,13 +54,15 @@ func TestAdminLiveConfigPersistsThenAppliesAtBoundary(t *testing.T) {
 	if err := live.save(func(cfg *config.Config) error {
 		cfg.Repositories[0].AllowedActors = []string{"writer"}
 		cfg.Repositories[0].AllowedActorIDs = map[string]int64{"writer": 7}
+		cfg.InvitationOwners = []string{"acme"}
+		cfg.InvitationOwnerIDs = map[string]int64{"acme": 77}
 		cfg.CriticStopping.RequiredCleanRounds = policyRoundsForTest(2)
 		cfg.AIInstructions = "Read carefully."
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if !live.snapshot().Pending || live.current().Repositories[0].AllowedActors != nil {
+	if !live.snapshot().Pending || live.current().Repositories[0].AllowedActors != nil || len(live.current().InvitationOwners) != 0 {
 		t.Fatal("saved policy became active before the monitor boundary")
 	}
 	select {
@@ -80,13 +71,162 @@ func TestAdminLiveConfigPersistsThenAppliesAtBoundary(t *testing.T) {
 		t.Fatal("monitor was not signaled")
 	}
 	saved, err := config.Load(path)
-	if err != nil || len(saved.Repositories[0].AllowedActors) != 1 || saved.AIInstructions != "Read carefully." || saved.RequiredCleanRounds(11, 7) != 2 {
+	if err != nil || len(saved.Repositories[0].AllowedActors) != 1 || saved.InvitationOwnerIDs["acme"] != 77 || saved.AIInstructions != "Read carefully." || saved.RequiredCleanRounds(11, 7) != 2 {
 		t.Fatalf("saved config = %+v, %v", saved, err)
 	}
 	candidate, generation := live.next()
 	live.applied(candidate, generation, nil)
-	if live.snapshot().Pending || live.current().Repositories[0].AllowedActors[0] != "writer" || live.current().AIInstructions != "Read carefully." {
+	if live.snapshot().Pending || live.current().Repositories[0].AllowedActors[0] != "writer" || live.current().InvitationOwnerIDs["acme"] != 77 || live.current().AIInstructions != "Read carefully." {
 		t.Fatal("monitor boundary did not activate saved settings")
+	}
+}
+
+func TestAdminLiveConfigInvitationOnlyWithoutRepositories(t *testing.T) {
+	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 22}}
+	loaded, path := writeModeConfig(t, initial)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.InvitationOwners = append(cfg.InvitationOwners, "other")
+		cfg.InvitationOwnerIDs["other"] = 33
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.InvitationOwners) != 2 || len(live.current().InvitationOwners) != 1 {
+		t.Fatalf("invitation owners were not saved pending activation: saved=%v active=%v error=%v", saved.InvitationOwners, live.current().InvitationOwners, err)
+	}
+	candidate, generation := live.next()
+	live.applied(candidate, generation, nil)
+	if len(live.current().InvitationOwners) != 2 {
+		t.Fatalf("invitation owners were not activated: %v", live.current().InvitationOwners)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.InvitationOwners, cfg.InvitationOwnerIDs = nil, nil
+		return nil
+	}); err != nil {
+		t.Fatalf("removing the last invitation owner: %v", err)
+	}
+	saved, err = config.Load(path)
+	if err != nil || len(saved.InvitationOwners) != 0 || len(live.current().InvitationOwners) != 2 {
+		t.Fatalf("empty policy was not saved pending activation: saved=%v active=%v error=%v", saved.InvitationOwners, live.current().InvitationOwners, err)
+	}
+	candidate, generation = live.next()
+	live.applied(candidate, generation, nil)
+	if len(live.current().InvitationOwners) != 0 {
+		t.Fatalf("empty policy was not activated: %v", live.current().InvitationOwners)
+	}
+	select {
+	case <-live.updates:
+	default:
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.Repositories = []config.Repository{{Name: "acme/project", ID: 11, OwnerID: 22, Actions: []string{"review"}}}
+		return nil
+	}); err != nil {
+		t.Fatalf("adding the first repository: %v", err)
+	}
+	saved, err = config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("first repository was not saved: repositories=%v error=%v", saved.Repositories, err)
+	}
+	snapshot := live.snapshot()
+	candidate, _ = live.next()
+	if !snapshot.RestartRequired || snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(candidate.Repositories) != 0 || len(live.current().Repositories) != 0 {
+		t.Fatalf("first repository activated without restart: snapshot=%+v next=%v active=%v", snapshot, candidate.Repositories, live.current().Repositories)
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("first repository save did not wake invitation-only loop")
+	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); !errors.Is(err, monitor.ErrConfigUpdatePending) || called {
+		t.Fatalf("invitation decision passed first-repository fence: err=%v called=%t", err, called)
+	}
+}
+
+func TestAdminLiveConfigRemoteFirstRepositoryNeedsNoWorkerSelection(t *testing.T) {
+	_, path := liveConfigFixture(t, true)
+	cfg, err := config.Update(path, func(next *config.Config) error {
+		next.Repositories = nil
+		next.InvitationOwners = []string{"owner"}
+		next.InvitationOwnerIDs = map[string]int64{"owner": 22}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live.snapshot().RemoteCommands) != 0 {
+		t.Fatal("empty remote startup selected commands")
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = append(next.Repositories, config.Repository{Name: "owner/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}})
+		return nil
+	}); err != nil {
+		t.Fatalf("first remote repository needs no worker selection: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("first remote repository was not saved: repositories=%v error=%v", saved.Repositories, err)
+	}
+	snapshot := live.snapshot()
+	if !snapshot.RestartRequired || snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(live.current().Repositories) != 0 {
+		t.Fatalf("first remote repository became active without a worker: snapshot=%+v active=%v", snapshot, live.current().Repositories)
+	}
+}
+
+func TestAdminLiveConfigAppliesOwnerRemovalAfterInvitationRegistration(t *testing.T) {
+	initial := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Listen: "127.0.0.1:8377", Administrators: []config.AdminAccount{testAdminAccount()}},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 22}}
+	loaded, path := writeModeConfig(t, initial)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.AddRepositoryWithAdminRuntime(path, config.Repository{Name: "acme/repo", ID: 11, OwnerID: 22, Actions: []string{"review"}, DenyAllActors: true}, loaded.Admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(cfg *config.Config) error {
+		cfg.InvitationOwners, cfg.InvitationOwnerIDs = nil, nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := live.snapshot()
+	if snapshot.RestartRequired || !snapshot.Pending || len(snapshot.Config.Repositories) != 0 || len(snapshot.Config.InvitationOwners) != 0 {
+		t.Fatalf("owner removal was blocked by registered repository: %+v", snapshot)
+	}
+	candidate, generation := live.next()
+	live.applied(candidate, generation, nil)
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 || len(saved.InvitationOwners) != 0 || len(live.current().InvitationOwners) != 0 {
+		t.Fatalf("owner removal did not activate: saved=%+v active=%+v error=%v", saved, live.current(), err)
+	}
+}
+
+func TestAdminLiveConfigRejectsRemovingLastActiveRepositoryWithInvitedRepository(t *testing.T) {
+	live, path := liveConfigFixture(t, false)
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/invited", ID: 12, OwnerID: 22, Actions: []string{"review"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = next.Repositories[1:]
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "last active repository") {
+		t.Fatalf("removing the only active repository was allowed: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 2 || len(live.snapshot().Config.Repositories) != 1 || live.snapshot().Pending {
+		t.Fatalf("rejected removal changed saved or active repositories: saved=%v snapshot=%+v error=%v", saved.Repositories, live.snapshot(), err)
 	}
 }
 

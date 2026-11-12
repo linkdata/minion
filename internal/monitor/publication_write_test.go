@@ -974,6 +974,32 @@ func TestRunOnceReconcilesWriteAfterTaskCleanup(t *testing.T) {
 	}
 }
 
+func TestRunOnceWithoutRepositoriesReconcilesWriteAndIgnoresOldPoll(t *testing.T) {
+	now := time.Now().UTC()
+	store := openState(t, now)
+	marker := "<!-- linkdataminion:issued-job -->"
+	store.Data.Processed["issued-job"] = now
+	store.Data.PublicationWrites["issued-job"] = state.PublicationWrite{
+		AttemptID: "attempt-1", Kind: "comment", BotLogin: "bot", BotID: 8, Repository: "owner/repo", Number: 7,
+		Marker: marker, Since: now, StartedAt: now, Deadline: now.Add(time.Minute), Status: state.PublicationWritePending,
+	}
+	store.Data.NextPollAt = now.Add(-time.Minute)
+	store.Data.NextInviteCheckAt = now.Add(time.Hour)
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{items: []github.Item{{Body: "published\n\n" + marker, Author: github.User{ID: 8, Login: "bot"}, UpdatedAt: now}}}
+	probe := &retentionProbe{}
+	m := &Monitor{Config: config.Config{BotLogin: "bot"}, GitHub: gh, Handler: probe}
+	next, err := m.RunOnce(t.Context(), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Data.PublicationWrites["issued-job"].Status != state.PublicationWriteObserved || !next.After(now) || len(probe.calledAt) != 1 {
+		t.Fatalf("owner-only recovery: write=%+v next=%v retention=%v", store.Data.PublicationWrites["issued-job"], next, probe.calledAt)
+	}
+}
+
 func TestSelectedSavedReplyDefersOlderWriteUntilPublisherFinishes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		now := time.Now().UTC()

@@ -3,16 +3,21 @@ package main
 import (
 	"bytes"
 	"html/template"
+	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/linkdata/jaws"
+	"github.com/linkdata/minion/internal/action"
 	"github.com/linkdata/minion/internal/config"
 )
 
 func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 	cfg := config.Config{
 		Main: "codex", Codex: config.CodexConfig{APIKey: "secret-model-key"},
-		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
+		Admin:            &config.AdminConfig{Administrators: []config.AdminAccount{{Username: "admin", PasswordHash: "secret-password-hash"}}},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 91},
 		Repositories: []config.Repository{
 			{Name: "owner/open", ID: 1, OwnerID: 10, Actions: []string{"review"}},
 			{Name: "owner/closed", ID: 2, OwnerID: 10, DenyAllActors: true, Actions: []string{"review"}},
@@ -38,7 +43,7 @@ func TestAdminConfigurationPagesShowPoliciesAndEscapeData(t *testing.T) {
 		wants []string
 	}{
 		{"admin users", []string{"Any writer", "Nobody", "@alice", `name="repository" value="owner/limited"`, "/admin/users/add", "/admin/users/remove", "/admin/users/allow-any", "/admin/users/deny-all", "Allow nobody", `aria-label="Remove @alice from owner/limited"`, `aria-label="Add requester to owner/open"`}},
-		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", `type="url" name="url" placeholder="https://github.com/owner/repo"`, "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`}},
+		{"admin repositories", []string{"owner/open", "Repository ID 1", `value="review" checked`, "/admin/repositories/add", `type="url" name="url" placeholder="https://github.com/owner/repo"`, "/admin/repositories/remove", "/admin/repositories/actions", "The new repository starts with no allowed requesters", `aria-label="Remove repository owner/open"`, `aria-label="Edit commands for owner/open"`, `aria-label="Save commands for owner/open"`, "Repository owners allowed to invite Minion", "acme", "(ID 91)", "/admin/invitation-owners/add", "/admin/invitation-owners/remove", "gh api users/OWNER --jq .id"}},
 		{"admin skills", []string{"anti-prompt-injection", "review command", `value="command:review"`, "/admin/skills/add", "/admin/skills/remove", `aria-label="Remove anti-prompt-injection skill from always"`, "To replace a required skill", "-install-skills"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,5 +118,74 @@ func TestAdminRemoteRepositoryFormOnlyOffersSelectedCommands(t *testing.T) {
 	if !strings.Contains(body.String(), `value="audit" disabled`) || strings.Count(body.String(), `value="audit"`) != 1 ||
 		!strings.Contains(body.String(), "edit the Minion configuration file and restart Minion and the remote worker") {
 		t.Fatalf("remote form offered a restart-only command: %s", body.String())
+	}
+	cfg.Repositories = nil
+	page.Dot = configurationView(adminConfigSnapshot{Config: cfg, Remote: true})
+	body.Reset()
+	if err := adminConfigurationHTML.ExecuteTemplate(&body, "admin repositories", page); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(page.Dot.Commands, ",") != "audit,review" || strings.Contains(body.String(), `type="submit" disabled>Add repository`) ||
+		strings.Contains(body.String(), "Only commands selected by the remote worker") {
+		t.Fatalf("remote first-repository form is unavailable: commands=%v body=%s", page.Dot.Commands, body.String())
+	}
+}
+
+func TestAdminConfigurationExplainsNoActiveRepositoriesDuringRestart(t *testing.T) {
+	page := struct {
+		Dot                adminConfigurationView
+		HeadHTML, TailHTML template.HTML
+	}{Dot: configurationView(adminConfigSnapshot{RestartRequired: true})}
+	for _, name := range []string{"admin users", "admin repositories"} {
+		var body bytes.Buffer
+		if err := adminConfigurationHTML.ExecuteTemplate(&body, name, page); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(body.String(), "No repositories are active. Restart Minion to apply saved configuration.") ||
+			strings.Contains(body.String(), "A repository is saved") || strings.Contains(body.String(), "No repositories are configured.") {
+			t.Fatalf("%s misstates repository status during restart: %s", name, body.String())
+		}
+	}
+}
+
+func TestAdminRepositoriesShowsSavedInactiveRepository(t *testing.T) {
+	cfg := config.Config{
+		BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{"review": {Action: "review", Skills: []string{"builtin://anti-prompt-injection"}}}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/active", ID: 1, OwnerID: 2, Actions: []string{"review"}}},
+	}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/pending", ID: 3, OwnerID: 2, Actions: []string{"review"}, DenyAllActors: true}); err != nil {
+		t.Fatal(err)
+	}
+	jw, err := jaws.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := newAdminHandler(jw, *cfg.Admin, &action.Orchestrator{}, nil, live)
+	if err != nil {
+		jw.Close()
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { jw.Serve(); close(done) }()
+	t.Cleanup(func() { jw.Close(); <-done })
+	guest := adminGuestCookie(t, handler)
+	login := adminResponse(handler, http.MethodPost, "/admin/login", url.Values{"password": {"correct-password"}}, guest, "")
+	if login.Code != http.StatusSeeOther || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("admin login: status=%d", login.Code)
+	}
+	page := adminResponse(handler, http.MethodGet, "/admin/repositories", nil, login.Result().Cookies()[0], "")
+	text := page.Body.String()
+	if page.Code != http.StatusOK || !strings.Contains(text, "owner/active") ||
+		!strings.Contains(text, "Saved but inactive") || !strings.Contains(text, "owner/pending") ||
+		!strings.Contains(text, "Restart Minion after GitHub access is granted to begin monitoring.") ||
+		strings.Contains(text, `aria-label="Edit commands for owner/pending"`) ||
+		strings.Contains(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`) {
+		t.Fatalf("repositories page omitted saved inactive repository or blocked active controls: status=%d body=%s", page.Code, text)
 	}
 }

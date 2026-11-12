@@ -126,6 +126,7 @@ func parseAdminDashboardFilter(rawQuery string) (adminDashboardFilter, error) {
 
 type adminDashboardPage struct {
 	owner  *action.Orchestrator
+	live   *adminLiveConfig
 	Filter adminDashboardFilter
 }
 
@@ -143,6 +144,19 @@ func (page *adminDashboardPage) View() adminDashboardView {
 	if err != nil {
 		return adminDashboardView{Unavailable: true}
 	}
+	if page.live != nil {
+		cfg := page.live.current()
+		if len(cfg.Repositories) == 0 && snapshot.Worker.Kind == "" && snapshot.InProgress == 0 {
+			if page.live.firstRepositoryNeedsRestart() {
+				snapshot.Worker.Readiness = "waiting for restart to apply repository changes"
+			} else if len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != "" {
+				snapshot.Worker.Readiness = "waiting for repository invitations"
+			} else {
+				snapshot.Worker.Readiness = "setup incomplete"
+			}
+			snapshot.Worker.State = "no worker needed"
+		}
+	}
 	view := adminDashboardView{Snapshot: snapshot}
 	if page.Filter.matches(snapshot.Action) {
 		view.Action = snapshot.Action
@@ -152,13 +166,13 @@ func (page *adminDashboardPage) View() adminDashboardView {
 
 var adminDashboardTemplate = template.Must(template.New("dashboard").Funcs(utcTemplateFuncs).Parse(headHTML + adminNavHTML + adminDashboardHTML))
 
-func adminDashboardHandler(jw *jaws.Jaws, owner *action.Orchestrator) http.Handler {
+func adminDashboardHandler(jw *jaws.Jaws, owner *action.Orchestrator, live *adminLiveConfig) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		filter, err := parseAdminDashboardFilter(r.URL.RawQuery)
 		if err != nil {
 			http.Error(w, "Invalid dashboard filter", http.StatusBadRequest)
 			return
 		}
-		ui.Handler(jw, "dashboard", &adminDashboardPage{owner: owner, Filter: filter}).ServeHTTP(w, r)
+		ui.Handler(jw, "dashboard", &adminDashboardPage{owner: owner, live: live, Filter: filter}).ServeHTTP(w, r)
 	})
 }

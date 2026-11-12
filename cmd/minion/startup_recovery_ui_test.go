@@ -169,6 +169,85 @@ func TestOneShotRejectsEmptyRepositoriesBeforePreflight(t *testing.T) {
 	}
 }
 
+func TestApprovedOwnerWithoutRepositoriesStartsOperationalUI(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	address := occupiedAdminAddress(t)
+	previousTransport := http.DefaultTransport
+	var requests []string
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.Path)
+		if request.URL.Path != "/user" || request.Header.Get("Authorization") != "Bearer configured-token" {
+			t.Errorf("unexpected GitHub request: %s", request.URL)
+		}
+		recorder := httptest.NewRecorder()
+		_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+		StatePath: filepath.Join(t.TempDir(), "state.json"), WorkRoot: filepath.Join(t.TempDir(), "missing-work-root"),
+		Admin:    &config.AdminConfig{Listen: address, Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		InvitationOwners: []string{"approved-owner"}, InvitationOwnerIDs: map[string]int64{"approved-owner": 99}}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Fatal("waiting for an invitation checked Git")
+			return nil
+		})
+	})
+	if code != 1 || !strings.Contains(output, "admin dashboard:") || strings.Contains(output, "setup UI:") ||
+		strings.Contains(output, "AI preflight:") || strings.Contains(output, "work root:") || strings.Join(requests, ",") != "/user" {
+		t.Fatalf("approved-owner startup: code=%d requests=%v log=%q", code, requests, output)
+	}
+}
+
+func TestOneShotChecksInvitationsWithoutRepositoriesOrWorker(t *testing.T) {
+	isolateHostPaths(t, t.TempDir())
+	previousTransport := http.DefaultTransport
+	var requests []string
+	http.DefaultTransport = startupTransport(func(request *http.Request) (*http.Response, error) {
+		requests = append(requests, request.URL.Path)
+		if request.Header.Get("Authorization") != "Bearer configured-token" {
+			t.Errorf("unexpected GitHub credential: %s", request.Header.Get("Authorization"))
+		}
+		recorder := httptest.NewRecorder()
+		recorder.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/user":
+			_, _ = recorder.WriteString(`{"id":8,"login":"bot"}`)
+		case "/user/repository_invitations":
+			_, _ = recorder.WriteString(`[]`)
+		default:
+			t.Errorf("unexpected GitHub request: %s", request.URL)
+		}
+		return recorder.Result(), nil
+	})
+	t.Cleanup(func() { http.DefaultTransport = previousTransport })
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "configured-token"},
+		StatePath: statePath, WorkRoot: filepath.Join(t.TempDir(), "missing-work-root"),
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		InvitationOwners: []string{"approved-owner"}, InvitationOwnerIDs: map[string]int64{"approved-owner": 99}}
+	code, output := runStartupFixtureWithRun(t, cfg, func() int {
+		return runWithGitCheck(func(context.Context, string) error {
+			t.Fatal("invitation-only mode checked Git")
+			return nil
+		})
+	}, "-oneshot")
+	if code != 0 || !strings.Contains(output, "waiting for repository invitations") ||
+		strings.Contains(output, "start selected worker:") || strings.Join(requests, ",") != "/user,/user/repository_invitations" {
+		t.Fatalf("invitation-only one-shot: code=%d requests=%v log=%q", code, requests, output)
+	}
+	store, err := state.Open(statePath, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.Data.NextInviteCheckAt.IsZero() {
+		t.Fatal("one-shot did not persist the next invitation check")
+	}
+}
+
 func TestServiceOffersRecoveryUIAfterAIPreflightFailure(t *testing.T) {
 	isolateHostPaths(t, t.TempDir())
 	address := occupiedAdminAddress(t)

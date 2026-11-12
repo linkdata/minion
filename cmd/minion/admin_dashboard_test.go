@@ -50,6 +50,52 @@ func dashboardTestAccepted(at time.Time) *state.AcceptedAction {
 		CommandName: "comment", Action: "comment", AcceptedAt: at, Deadline: at.Add(7 * time.Minute)}
 }
 
+func TestAdminDashboardShowsOwnerOnlyState(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.json"), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "token"}, InvitationOwners: []string{"acme"}}
+	live := &adminLiveConfig{active: cfg}
+	page := &adminDashboardPage{owner: &action.Orchestrator{Store: store}, live: live}
+	for _, tc := range []struct {
+		name, want string
+		saved      bool
+		noOwner    bool
+	}{
+		{name: "waiting for invitation", want: "waiting for repository invitations"},
+		{name: "first repository saved", saved: true, want: "waiting for restart to apply repository changes"},
+		{name: "no approved owner", noOwner: true, want: "setup incomplete"},
+		{name: "first repository saved after owner removed", saved: true, noOwner: true, want: "waiting for restart to apply repository changes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live.active.InvitationOwners = cfg.InvitationOwners
+			if tc.noOwner {
+				live.active.InvitationOwners = nil
+			}
+			live.firstRepositorySaved = tc.saved
+			view := page.View()
+			if view.Unavailable || view.Snapshot.Worker.Readiness != tc.want || view.Snapshot.Worker.State != "no worker needed" {
+				t.Fatalf("owner-only dashboard = %+v", view)
+			}
+			var render struct {
+				Auth struct{ IsAdmin bool }
+				Dot  struct{ View adminDashboardView }
+			}
+			render.Auth.IsAdmin = true
+			render.Dot.View = view
+			var body bytes.Buffer
+			if err := adminDashboardTemplate.ExecuteTemplate(&body, "dashboard-live", render); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(body.String(), tc.want) || strings.Contains(body.String(), "<dt>Readiness</dt><dd>starting</dd>") {
+				t.Fatalf("owner-only dashboard content: %s", body.String())
+			}
+		})
+	}
+}
+
 func dashboardTestCookie(t *testing.T, handler http.Handler) *http.Cookie {
 	t.Helper()
 	response := adminResponse(handler, http.MethodPost, "/admin/login",

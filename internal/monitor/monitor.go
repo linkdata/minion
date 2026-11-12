@@ -129,8 +129,9 @@ type Monitor struct {
 	Handler                ActionHandler
 	Logger                 *log.Logger
 	Now                    func() time.Time
-	SelectedCommands       map[string]bool                                  // Non-nil freezes discovery to the selected worker's commands.
-	SelectedExecutorID     string                                           // Nonempty only while a selected worker owns actions.
+	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
+	SelectedExecutorID     string          // Nonempty only while a selected worker owns actions.
+	AcceptedNewRepository  bool
 	ConfigUpdates          <-chan struct{}                                  // Optional signal to leave an idle capacity wait.
 	BeforeAccept           func(func() error) error                         // Fences durable decisions and cursor advancement against saved config updates.
 	UserPreferences        func(int64) (config.UserModelPreferences, error) // Optional proven GitHub requester lookup.
@@ -388,10 +389,14 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		return wake(store.Data.NextPollAt, err == nil), err
 	}
 	if m.SelectedExecutorID == "" {
-		if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
-			return wake(store.Data.NextPollAt, false), err
+		pollAt := store.Data.NextPollAt
+		if len(m.Config.Repositories) == 0 {
+			pollAt = time.Time{}
 		}
-		return earlierWake(wake(store.Data.NextPollAt, false), initialTerminalWake), nil
+		if err := m.checkDueInvitations(ctx, store, now().UTC()); err != nil {
+			return wake(pollAt, false), err
+		}
+		return earlierWake(wake(pollAt, false), initialTerminalWake), nil
 	}
 	if err := m.waitCapacityWithInvitations(ctx, store, &initialTerminalWake); err != nil {
 		return wake(store.Data.NextPollAt, false), err
@@ -689,11 +694,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return stopForConfigUpdate(scanIndex, ErrConfigUpdatePending)
 				}
 				retire := func() error { return retireIgnoredJob(store, job.ID, started) }
-				if m.BeforeAccept != nil {
-					err = m.BeforeAccept(retire)
-				} else {
-					err = retire()
-				}
+				err = m.runWithCurrentConfig(retire)
 				if errors.Is(err, ErrConfigUpdatePending) {
 					return stopForConfigUpdate(scanIndex, err)
 				}
@@ -839,11 +840,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 					return nil
 				})
 			}
-			if m.BeforeAccept != nil {
-				err = m.BeforeAccept(accept)
-			} else {
-				err = accept()
-			}
+			err = m.runWithCurrentConfig(accept)
 			if err != nil {
 				cancelPrep()
 				if errors.Is(err, ErrConfigUpdatePending) {
@@ -945,12 +942,7 @@ func (m *Monitor) RunOnce(ctx context.Context, store *state.Store) (time.Time, e
 		}
 		return store.Save()
 	}
-	var err error
-	if m.BeforeAccept != nil {
-		err = m.BeforeAccept(advanceCursor)
-	} else {
-		err = advanceCursor()
-	}
+	err := m.runWithCurrentConfig(advanceCursor)
 	if errors.Is(err, ErrConfigUpdatePending) {
 		return stopForConfigUpdate(0, err)
 	}
@@ -995,7 +987,9 @@ func earlierWake(next, invitation time.Time) time.Time {
 	return next
 }
 
+// checkDueInvitations processes due repository invitations without running jobs.
 func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, at time.Time) error {
+	noRepositories := len(m.Config.Repositories) == 0
 	var due bool
 	_ = store.WithLock(func() error {
 		due = !at.Before(store.Data.NextInviteCheckAt)
@@ -1005,6 +999,7 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 		return nil
 	}
 	deferred, err := m.acceptWhitelistedInvitations(ctx)
+	configUpdatePending := errors.Is(err, ErrConfigUpdatePending)
 	if err != nil {
 		// Invitation failures should be visible, but should not stop scans of
 		// repositories for which this account already has access.
@@ -1016,7 +1011,13 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 	if m.afterInvitationCheck != nil {
 		m.afterInvitationCheck()
 	}
-	return store.WithLock(func() error {
+	var ownerOnlyIdle bool
+	saveErr := store.WithLock(func() error {
+		ownerOnlyIdle = noRepositories && store.Data.Accepted == nil
+		configUpdatePending = configUpdatePending && store.Data.Accepted == nil
+		if recent := at.Add(-2 * time.Second); ownerOnlyIdle && m.Config.StartAt == "" && store.Data.Cursor.Before(recent) {
+			store.Data.Cursor = recent
+		}
 		if len(deferred) != 0 {
 			if store.Data.RepositoryCursors == nil {
 				store.Data.RepositoryCursors = make(map[string]time.Time)
@@ -1027,12 +1028,21 @@ func (m *Monitor) checkDueInvitations(ctx context.Context, store *state.Store, a
 				}
 			}
 		}
-		if checkedAt := m.now().UTC(); checkedAt.After(at) {
-			at = checkedAt
+		if !configUpdatePending {
+			if checkedAt := m.now().UTC(); checkedAt.After(at) {
+				at = checkedAt
+			}
+			store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
 		}
-		store.Data.NextInviteCheckAt = at.Add(15 * time.Minute)
 		return store.Save()
 	})
+	if saveErr != nil {
+		return saveErr
+	}
+	if configUpdatePending || ownerOnlyIdle {
+		return err
+	}
+	return nil
 }
 
 // Consume an update only while no action is accepted.
@@ -2136,6 +2146,9 @@ func (m *Monitor) recoverAccepted(ctx context.Context, store *state.Store) error
 	}
 	if accepted.MainProvider != cmp.Or(m.Config.Main, "codex") || accepted.CriticProvider != m.Config.Adversarial {
 		m.logf("finish %s: frozen action role providers are no longer configured", job.ID)
+		return m.terminalAccepted(ctx, store, job, failure)
+	}
+	if _, ok := m.acceptedRepository(*accepted); !ok {
 		return m.terminalAccepted(ctx, store, job, failure)
 	}
 	if m.SelectedExecutorID == "" || m.SelectedExecutorID != accepted.ExecutorID {
@@ -3551,28 +3564,39 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			failures = append(failures, fmt.Errorf("%s invitation grants %q, but configured actions require write access", fullName, invite.Permissions))
 			continue
 		}
-		if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
-			// Preserve the cursor even if the config write reports an ambiguous failure.
-			deferred = append(deferred, strings.ToLower(fullName))
-			actions := m.Config.CommandNames()
-			// Persist first: an accepted invitation disappears and cannot recover a failed config write.
-			repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions}, m.Config.Admin)
-			if err != nil {
-				failures = append(failures, fmt.Errorf("register %s invitation: %w", fullName, err))
-				continue
+		err := m.runWithCurrentConfig(func() error {
+			registered := false
+			if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
+				// Preserve the cursor even if the config write reports an ambiguous failure.
+				deferred = append(deferred, strings.ToLower(fullName))
+				actions := m.Config.CommandNames()
+				// Persist first: an accepted invitation disappears and cannot recover a failed config write.
+				repo, err := config.AddRepositoryWithAdminRuntime(m.ConfigPath, config.Repository{Name: fullName, ID: invite.Repository.ID, OwnerID: invite.Repository.Owner.ID, Actions: actions, DenyAllActors: true}, m.Config.Admin)
+				if err != nil {
+					return fmt.Errorf("register %s invitation: %w", fullName, err)
+				}
+				if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
+					return fmt.Errorf("%s identity changed while registering invitation", fullName)
+				}
+				registered = true
+				if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
+					m.Config.Repositories = append(m.Config.Repositories, repo)
+					m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
+				} else {
+					m.logf("saved %s in %s; restart Minion to monitor", repo.Name, m.ConfigPath)
+				}
 			}
-			if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
-				failures = append(failures, fmt.Errorf("%s identity changed while registering invitation", fullName))
-				continue
+			if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
+				return fmt.Errorf("accept %s invitation: %w", fullName, err)
 			}
-			if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
-				m.Config.Repositories = append(m.Config.Repositories, repo)
+			if registered {
+				m.AcceptedNewRepository = true
 			}
-			m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
-		}
-		if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
-			failures = append(failures, fmt.Errorf("accept %s invitation: %w", fullName, err))
-			if invitationActionsBlocked(err) {
+			return nil
+		})
+		if err != nil {
+			failures = append(failures, err)
+			if errors.Is(err, ErrConfigUpdatePending) || invitationActionsBlocked(err) {
 				return deferred, errors.Join(failures...)
 			}
 			continue
@@ -3587,14 +3611,23 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			failures = append(failures, err)
 			break
 		}
-		if err := m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID); err != nil {
+		if err := m.runWithCurrentConfig(func() error {
+			return m.GitHub.DeclineRepositoryInvitation(actionCtx, invite.ID)
+		}); err != nil {
 			failures = append(failures, fmt.Errorf("decline %s invitation: %w", invite.Repository.FullName, err))
-			if invitationActionsBlocked(err) {
+			if errors.Is(err, ErrConfigUpdatePending) || invitationActionsBlocked(err) {
 				break
 			}
 		}
 	}
 	return deferred, errors.Join(failures...)
+}
+
+func (m *Monitor) runWithCurrentConfig(action func() error) error {
+	if m.BeforeAccept != nil {
+		return m.BeforeAccept(action)
+	}
+	return action()
 }
 
 func invitationActionsBlocked(err error) bool {

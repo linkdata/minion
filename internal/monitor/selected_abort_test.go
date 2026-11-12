@@ -9,6 +9,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/linkdata/minion/internal/github"
 	"github.com/linkdata/minion/internal/state"
 )
 
@@ -23,6 +24,42 @@ func selectedAbortFixture(t *testing.T) (*Monitor, *state.Store, Job, *fakeGitHu
 	store.Data.JobFailures[job.ID] = state.JobFailure{Attempts: 1, AcceptedAt: now, Deadline: job.Deadline}
 	m.Now = time.Now
 	return m, store, job, gh, now, path
+}
+
+func TestAcceptedJobDefersPendingInvitationPolicyUpdate(t *testing.T) {
+	m, store, job, gh, now, _ := selectedAbortFixture(t)
+	m.Config.InvitationOwners = []string{"example-owner"}
+	m.Config.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	m.BeforeAccept = func(func() error) error { return ErrConfigUpdatePending }
+	gh.invitations = []github.Invitation{{ID: 7, Repository: github.Repository{
+		ID: 9, FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner", ID: 2},
+	}, Invitee: github.User{Login: m.Config.BotLogin}, Permissions: "write"}}
+	store.Data.NextInviteCheckAt = now
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.checkDueInvitations(t.Context(), store, now); err != nil {
+		t.Fatalf("pending invitation policy interrupted active job: %v", err)
+	}
+	if store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID || !store.Data.NextInviteCheckAt.After(now) || len(gh.accepted) != 0 {
+		t.Fatalf("active job was not preserved: accepted=%+v next_invite=%v invitations=%v", store.Data.Accepted, store.Data.NextInviteCheckAt, gh.accepted)
+	}
+}
+
+func TestOwnerOnlyInvitationListingFailureDoesNotInterruptAcceptedJob(t *testing.T) {
+	m, store, job, gh, now, _ := selectedAbortFixture(t)
+	m.Config.Repositories = nil
+	gh.inviteErr = errors.New("list invitations failed")
+	store.Data.NextInviteCheckAt = now
+	if err := store.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.checkDueInvitations(t.Context(), store, now); err != nil {
+		t.Fatalf("invitation listing interrupted accepted job: %v", err)
+	}
+	if store.Data.Accepted == nil || store.Data.Accepted.JobID != job.ID || !store.Data.NextInviteCheckAt.After(now) {
+		t.Fatalf("accepted job was not preserved: accepted=%+v next_invite=%v", store.Data.Accepted, store.Data.NextInviteCheckAt)
+	}
 }
 
 func TestSelectedCancelAfterAmbiguousResultSaveIsDurable(t *testing.T) {

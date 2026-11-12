@@ -337,18 +337,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
 		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
 		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := config.Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	loaded, path := writeModeConfig(t, cfg)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
 		t.Fatal(err)
@@ -368,7 +357,7 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	edited.Codex.APIKey = "new-key1"
-	data, err = json.Marshal(edited)
+	data, err := json.Marshal(edited)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,6 +384,192 @@ func TestAdvancedConfigKeyOnlyNeedsNoRestart(t *testing.T) {
 		len(restored.Repositories) != 2 ||
 		live.desired.Codex.APIKey != loaded.Codex.APIKey {
 		t.Fatalf("rejected Advanced key survived or lost another edit: saved=%+v error=%v", restored, err)
+	}
+}
+
+func TestAdvancedConfigUnchangedSaveKeepsFirstRepositoryInactive(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		next.Repositories = append(next.Repositories, config.Repository{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, view.JSON); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired || len(live.snapshot().Config.Repositories) != 0 || len(live.current().Repositories) != 0 {
+		t.Fatal("unchanged Advanced save activated the first repository or cleared the restart notice")
+	}
+	if err := live.save(func(*config.Config) error { return nil }); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("live edit was allowed before first-repository restart: %v", err)
+	}
+	saved, err := config.Load(path)
+	if err != nil || len(saved.Repositories) != 1 {
+		t.Fatalf("saved repository was lost: repositories=%v error=%v", saved.Repositories, err)
+	}
+	view, err = advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.Repositories = nil
+	data, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired {
+		t.Fatal("removing the saved repository hid the restart required to resume invitations")
+	}
+}
+
+func TestAdvancedConfigRevertClearsRestartRequired(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		Commands: map[string]config.CommandMapping{}, AlwaysOnSkills: []string{},
+		Repositories: []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.PollIntervalSeconds = loaded.PollIntervalSeconds + 60
+	data, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired {
+		t.Fatal("restart-only edit did not require restart")
+	}
+	view, err = advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.PollIntervalSeconds = loaded.PollIntervalSeconds
+	data, err = json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if live.snapshot().RestartRequired {
+		t.Fatal("reverted edit still requires restart")
+	}
+	if err := live.save(func(next *config.Config) error { next.AIInstructions = "updated"; return nil }); err != nil {
+		t.Fatalf("live edit stayed blocked after revert: %v", err)
+	}
+}
+
+func TestAdvancedConfigFirstRepositoryWakesInvitationLoop(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}},
+		InvitationOwners: []string{"owner"}, InvitationOwnerIDs: map[string]int64{"owner": 2}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var edited config.Config
+	if err := json.Unmarshal([]byte(view.JSON), &edited); err != nil {
+		t.Fatal(err)
+	}
+	edited.Repositories = []config.Repository{{Name: "owner/repo", ID: 1, OwnerID: 2, Actions: []string{"review"}}}
+	data, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, string(data)); err != nil {
+		t.Fatal(err)
+	}
+	if !live.snapshot().RestartRequired || !live.firstRepositoryNeedsRestart() {
+		t.Fatal("Advanced save did not mark first repository as inactive until restart")
+	}
+	select {
+	case <-live.updates:
+	default:
+		t.Fatal("Advanced save did not wake invitation-only loop")
+	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); err == nil || called {
+		t.Fatalf("invitation decision passed Advanced first-repository fence: err=%v called=%t", err, called)
+	}
+}
+
+func TestAdvancedConfigOwnerOnlyLiveEditNeedsNoRestart(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.save(func(next *config.Config) error {
+		return addInvitationOwner(next, "owner", "2")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.RestartRequired || live.restartRequired {
+		t.Fatal("live owner edit showed a restart notice with no repositories")
+	}
+}
+
+func TestAdvancedConfigUnchangedSaveDoesNotStopPendingInvitation(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"owner"}, InvitationOwnerIDs: map[string]int64{"owner": 2},
+		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+	loaded, path := writeModeConfig(t, cfg)
+	live, err := newAdminLiveConfig(path, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.AddRepository(path, config.Repository{Name: "owner/invited", ID: 1, OwnerID: 2, Actions: []string{"review"}}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := advancedConfigView(path, live, *loaded.Admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, view.JSON); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); live.snapshot().RestartRequired || live.firstRepositorySaved || err != nil || !called {
+		t.Fatal("unchanged Advanced save stopped a pending invitation retry")
 	}
 }
 

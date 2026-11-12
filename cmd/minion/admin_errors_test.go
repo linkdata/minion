@@ -29,7 +29,7 @@ func TestAdminConfigConflictNoticeShowsReason(t *testing.T) {
 	t.Cleanup(func() { jw.Close(); <-done })
 	cookie := dashboardTestCookie(t, handler)
 	response := adminResponse(handler, http.MethodPost, "/admin/repositories/remove", url.Values{"name": {"owner/repo"}}, cookie, "https://admin.example")
-	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "At least one repository is required") {
+	if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "To remove the last repository, edit Configuration and restart Minion") {
 		t.Fatalf("admin conflict notice: status=%d body=%q", response.Code, response.Body.String())
 	}
 }

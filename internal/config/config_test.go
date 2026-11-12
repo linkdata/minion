@@ -460,6 +460,7 @@ func TestInvitationOwnersAreNormalizedAndValidated(t *testing.T) {
 		{"slash", []string{"example-owner/other"}, map[string]int64{"example-owner/other": 2}, "invalid invitation owner"},
 		{"leading hyphen", []string{"-bad"}, map[string]int64{"-bad": 2}, "invalid invitation owner"},
 		{"trailing hyphen", []string{"bad-"}, map[string]int64{"bad-": 2}, "invalid invitation owner"},
+		{"consecutive hyphens", []string{"bad--name"}, map[string]int64{"bad--name": 2}, "invalid invitation owner"},
 		{"empty", []string{""}, map[string]int64{"": 2}, "invalid invitation owner"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -470,6 +471,19 @@ func TestInvitationOwnersAreNormalizedAndValidated(t *testing.T) {
 				t.Errorf("invalid invitation owners %v: %v; want %q", test.owners, err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestInvitationOwnerAllowsNoRepositories(t *testing.T) {
+	cfg := Config{BotLogin: "bot", InvitationOwners: []string{"Acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42}}
+	if err := cfg.Validate(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.InvitationOwners[0] != "acme" {
+		t.Fatalf("owner login was not normalized: %v", cfg.InvitationOwners)
+	}
+	if err := (&Config{BotLogin: "bot"}).Validate(t.TempDir()); err == nil {
+		t.Fatal("accepted a headless config with neither repositories nor approved owners")
 	}
 }
 
