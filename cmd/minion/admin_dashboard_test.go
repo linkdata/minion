@@ -65,9 +65,9 @@ func TestAdminDashboardShowsOwnerOnlyState(t *testing.T) {
 		noOwner    bool
 	}{
 		{name: "waiting for invitation", want: "waiting for repository invitations"},
-		{name: "first repository saved", saved: true, want: "waiting for restart to monitor first repository"},
+		{name: "first repository saved", saved: true, want: "waiting for restart to apply repository changes"},
 		{name: "no approved owner", noOwner: true, want: "setup incomplete"},
-		{name: "first repository saved after owner removed", saved: true, noOwner: true, want: "waiting for restart to monitor first repository"},
+		{name: "first repository saved after owner removed", saved: true, noOwner: true, want: "waiting for restart to apply repository changes"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			live.active.InvitationOwners = cfg.InvitationOwners

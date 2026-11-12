@@ -148,7 +148,7 @@ func (page *adminDashboardPage) View() adminDashboardView {
 		cfg := page.live.current()
 		if len(cfg.Repositories) == 0 && snapshot.Worker.Kind == "" && snapshot.InProgress == 0 {
 			if page.live.firstRepositoryNeedsRestart() {
-				snapshot.Worker.Readiness = "waiting for restart to monitor first repository"
+				snapshot.Worker.Readiness = "waiting for restart to apply repository changes"
 			} else if len(cfg.InvitationOwners) > 0 && cfg.BotLogin != "" && cfg.GitHub.Token != "" {
 				snapshot.Worker.Readiness = "waiting for repository invitations"
 			} else {

@@ -182,7 +182,8 @@ func TestAdminRepositoriesShowsSavedInactiveRepository(t *testing.T) {
 	page := adminResponse(handler, http.MethodGet, "/admin/repositories", nil, login.Result().Cookies()[0], "")
 	text := page.Body.String()
 	if page.Code != http.StatusOK || !strings.Contains(text, "owner/active") ||
-		!strings.Contains(text, "Saved for restart") || !strings.Contains(text, "owner/pending") ||
+		!strings.Contains(text, "Saved but inactive") || !strings.Contains(text, "owner/pending") ||
+		!strings.Contains(text, "Restart Minion after GitHub access is granted to begin monitoring.") ||
 		strings.Contains(text, `aria-label="Edit commands for owner/pending"`) ||
 		strings.Contains(text, `<fieldset class="border-0 p-0 m-0 w-100" disabled>`) {
 		t.Fatalf("repositories page omitted saved inactive repository or blocked active controls: status=%d body=%s", page.Code, text)

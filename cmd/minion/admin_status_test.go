@@ -64,7 +64,7 @@ func TestAdminStatusShowsInvitationAndFirstRepositoryState(t *testing.T) {
 		unwanted string
 	}{
 		{name: "waiting for invitation", want: "Waiting for repository invitations", unwanted: "restart Minion"},
-		{name: "first repository saved", saved: true, want: "First repository saved; restart Minion to begin monitoring.", unwanted: "Waiting for repository invitations"},
+		{name: "first repository saved", saved: true, want: "Repository change saved; restart Minion to apply it.", unwanted: "Waiting for repository invitations"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			view := statusView(&action.Orchestrator{BotLogin: "bot"}, cfg, tc.saved)

@@ -548,8 +548,10 @@ func TestAdvancedConfigOwnerOnlyLiveEditNeedsNoRestart(t *testing.T) {
 	}
 }
 
-func TestAdvancedConfigInvitationSavedFirstRepositoryNeedsRestart(t *testing.T) {
-	cfg := config.Config{BotLogin: "bot", Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
+func TestAdvancedConfigUnchangedSaveDoesNotStopPendingInvitation(t *testing.T) {
+	cfg := config.Config{BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"owner"}, InvitationOwnerIDs: map[string]int64{"owner": 2},
+		Admin: &config.AdminConfig{Administrators: []config.AdminAccount{testAdminAccount()}}}
 	loaded, path := writeModeConfig(t, cfg)
 	live, err := newAdminLiveConfig(path, loaded)
 	if err != nil {
@@ -565,8 +567,9 @@ func TestAdvancedConfigInvitationSavedFirstRepositoryNeedsRestart(t *testing.T) 
 	if err := saveAdvancedConfig(path, live, *loaded.Admin, view.Version, view.JSON); err != nil {
 		t.Fatal(err)
 	}
-	if !live.snapshot().RestartRequired || !live.firstRepositorySaved {
-		t.Fatal("unchanged Advanced save hid the invited first repository's restart notice")
+	called := false
+	if err := live.admit(func() error { called = true; return nil }); live.snapshot().RestartRequired || live.firstRepositorySaved || err != nil || !called {
+		t.Fatal("unchanged Advanced save stopped a pending invitation retry")
 	}
 }
 

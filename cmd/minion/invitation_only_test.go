@@ -122,8 +122,8 @@ func TestInvitationOnlyAcceptsFirstRepositoryWithoutWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo, ok := saved.Repository("acme/repo")
-	if gh.accepted != 7 || !ok || !repo.DenyAllActors || len(watcher.Config.Repositories) != 0 || store.Data.RepositoryCursors["acme/repo"].IsZero() {
-		t.Fatalf("first invitation: accepted=%d repo=%+v exists=%t active=%v cursors=%v", gh.accepted, repo, ok, watcher.Config.Repositories, store.Data.RepositoryCursors)
+	if gh.accepted != 7 || !watcher.AcceptedNewRepository || !ok || !repo.DenyAllActors || len(watcher.Config.Repositories) != 0 || store.Data.RepositoryCursors["acme/repo"].IsZero() {
+		t.Fatalf("first invitation: accepted=%d confirmed=%t repo=%+v exists=%t active=%v cursors=%v", gh.accepted, watcher.AcceptedNewRepository, repo, ok, watcher.Config.Repositories, store.Data.RepositoryCursors)
 	}
 	live, err := newAdminLiveConfig(path, cfg)
 	if err != nil {
@@ -131,6 +131,31 @@ func TestInvitationOnlyAcceptsFirstRepositoryWithoutWorker(t *testing.T) {
 	}
 	if code := runInvitationOnly(t.Context(), watcher, store, false, log.New(os.Stderr, "", 0), live); code != 0 || !live.snapshot().RestartRequired {
 		t.Fatalf("saved first repository needs a restart: code=%d snapshot=%+v", code, live.snapshot())
+	}
+}
+
+func TestInvitationOnlyDoesNotPauseBeforeFirstAcceptance(t *testing.T) {
+	cfg, path := writeModeConfig(t, config.Config{
+		BotLogin: "bot", GitHub: config.GitHubConfig{Token: "test-token"},
+		InvitationOwners: []string{"acme"}, InvitationOwnerIDs: map[string]int64{"acme": 42},
+	})
+	live, err := newAdminLiveConfig(path, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(cfg.StatePath, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	gh := &firstInvitationGitHub{acceptErr: errors.New("HTTP 503")}
+	watcher := &monitor.Monitor{Config: cfg, ConfigPath: path, GitHub: gh, BeforeAccept: live.admit}
+	logger := log.New(os.Stderr, "", 0)
+	if code := runInvitationOnly(t.Context(), watcher, store, false, logger, live); code != 1 || watcher.AcceptedNewRepository {
+		t.Fatalf("failed acceptance: code=%d confirmed=%t", code, watcher.AcceptedNewRepository)
+	}
+	if code := runInvitationOnly(t.Context(), watcher, store, false, logger, live); code != 0 || live.snapshot().RestartRequired || gh.acceptCalls != 1 {
+		t.Fatalf("no-due pass stopped retry: code=%d restart=%t accepts=%d", code, live.snapshot().RestartRequired, gh.acceptCalls)
 	}
 }
 

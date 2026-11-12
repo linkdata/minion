@@ -277,7 +277,7 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		return fmt.Errorf("configuration could not be saved: %w", err)
 	}
 	if live != nil {
-		if len(live.active.Repositories) == 0 && len(updated.Repositories) > 0 {
+		if len(live.active.Repositories) == 0 && len(preEdit.Repositories) == 0 && len(updated.Repositories) > 0 {
 			live.firstRepositorySaved = true
 			select {
 			case live.updates <- struct{}{}:
@@ -287,7 +287,7 @@ func saveAdvancedConfig(path string, live *adminLiveConfig, runtime config.Admin
 		baseline := live.disk
 		// Invitations append to disk without joining the running config.
 		if !live.restartRequired && len(preEdit.Repositories) >= len(baseline.Repositories) &&
-			reflect.DeepEqual(preEdit.Repositories[:len(baseline.Repositories)], baseline.Repositories) {
+			(len(baseline.Repositories) == 0 || reflect.DeepEqual(preEdit.Repositories[:len(baseline.Repositories)], baseline.Repositories)) {
 			baseline.Repositories = preEdit.Repositories
 		}
 		baseline.Codex.APIKey, baseline.Claude.APIKey = updated.Codex.APIKey, updated.Claude.APIKey

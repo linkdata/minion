@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/linkdata/minion/internal/action"
-	"github.com/linkdata/minion/internal/config"
 	"github.com/linkdata/minion/internal/monitor"
 	"github.com/linkdata/minion/internal/state"
 )
@@ -117,6 +116,12 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 		return 0
 	}
 	for {
+		if watcher.AcceptedNewRepository {
+			if live != nil {
+				live.markFirstRepositorySaved()
+			}
+			return waitForRestart()
+		}
 		if live != nil && live.firstRepositoryNeedsRestart() {
 			return waitForRestart()
 		}
@@ -141,23 +146,11 @@ func runInvitationOnly(ctx context.Context, watcher *monitor.Monitor, store *sta
 				return 1
 			}
 		}
-		if err == nil && live != nil {
-			var runtime config.AdminConfig
-			if watcher.Config.Admin != nil {
-				runtime = *watcher.Config.Admin
-			}
-			saved, err := config.LoadWithAdminRuntime(watcher.ConfigPath, runtime)
-			if err != nil {
-				logger.Printf("check invited repositories: %s", monitor.InertLogText(err.Error()))
-				return 1
-			}
-			if len(saved.Repositories) > 0 {
-				live.markFirstRepositorySaved()
-				return waitForRestart()
-			}
-		}
 		if !loop {
 			return 0
+		}
+		if watcher.AcceptedNewRepository {
+			continue
 		}
 		wait := time.Until(next)
 		if wait < time.Second {

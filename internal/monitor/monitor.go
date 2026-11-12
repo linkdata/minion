@@ -129,8 +129,9 @@ type Monitor struct {
 	Handler                ActionHandler
 	Logger                 *log.Logger
 	Now                    func() time.Time
-	SelectedCommands       map[string]bool                                  // Non-nil freezes discovery to the selected worker's commands.
-	SelectedExecutorID     string                                           // Nonempty only while a selected worker owns actions.
+	SelectedCommands       map[string]bool // Non-nil freezes discovery to the selected worker's commands.
+	SelectedExecutorID     string          // Nonempty only while a selected worker owns actions.
+	AcceptedNewRepository  bool
 	ConfigUpdates          <-chan struct{}                                  // Optional signal to leave an idle capacity wait.
 	BeforeAccept           func(func() error) error                         // Fences durable decisions and cursor advancement against saved config updates.
 	UserPreferences        func(int64) (config.UserModelPreferences, error) // Optional proven GitHub requester lookup.
@@ -3564,6 +3565,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			continue
 		}
 		err := m.runWithCurrentConfig(func() error {
+			registered := false
 			if !monitored && (invite.Permissions == "write" || invite.Permissions == "maintain" || invite.Permissions == "admin") {
 				// Preserve the cursor even if the config write reports an ambiguous failure.
 				deferred = append(deferred, strings.ToLower(fullName))
@@ -3576,6 +3578,7 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 				if !repo.MatchesIdentity(invite.Repository.ID, invite.Repository.Owner.ID) {
 					return fmt.Errorf("%s identity changed while registering invitation", fullName)
 				}
+				registered = true
 				if m.SelectedExecutorID == "" && m.SelectedCommands == nil {
 					m.Config.Repositories = append(m.Config.Repositories, repo)
 					m.logf("added %s to monitored repositories in %s", repo.Name, m.ConfigPath)
@@ -3585,6 +3588,9 @@ func (m *Monitor) acceptWhitelistedInvitations(ctx context.Context) ([]string, e
 			}
 			if err := m.GitHub.AcceptRepositoryInvitation(actionCtx, invite.ID); err != nil {
 				return fmt.Errorf("accept %s invitation: %w", fullName, err)
+			}
+			if registered {
+				m.AcceptedNewRepository = true
 			}
 			return nil
 		})

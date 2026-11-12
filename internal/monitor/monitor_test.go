@@ -1547,6 +1547,30 @@ func TestInvitationSavedForRestartIsLoggedAsPending(t *testing.T) {
 	}
 }
 
+func TestAcceptedFirstInvitationSurvivesLaterDeclineError(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Repositories = nil
+	cfg.InvitationOwners = []string{"example-owner"}
+	cfg.InvitationOwnerIDs = map[string]int64{"example-owner": 2}
+	path := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gh := &fakeGitHub{invitations: []github.Invitation{
+		{ID: 1, Repository: github.Repository{ID: 10, FullName: "example-owner/new-repo", Owner: github.User{Login: "example-owner", ID: 2}}, Permissions: "write"},
+		{ID: 2, Repository: github.Repository{ID: 20, FullName: "outsider/repo", Owner: github.User{Login: "outsider", ID: 3}}, Permissions: "write"},
+	}, declineErr: errors.New("HTTP 502")}
+	m := &Monitor{Config: cfg, ConfigPath: path, GitHub: gh, SelectedCommands: map[string]bool{}}
+	if _, err := m.acceptWhitelistedInvitations(t.Context()); err == nil || !m.AcceptedNewRepository ||
+		len(gh.accepted) != 1 || gh.accepted[0] != 1 || len(gh.declined) != 1 {
+		t.Fatalf("accepted first invitation was lost after decline failure: err=%v confirmed=%t accepted=%v declined=%v", err, m.AcceptedNewRepository, gh.accepted, gh.declined)
+	}
+}
+
 func TestInvitationRegistrationRetriesWithoutLosingOrDuplicatingRepository(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.InvitationOwners = []string{"example-owner"}

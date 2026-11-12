@@ -174,7 +174,7 @@ var adminConfigurationHTML = template.Must(template.New("admin config").Funcs(te
       <div><button class="btn btn-primary" type="submit" {{if not .Commands}}disabled{{end}}>Add repository</button></div>
     </form>
   </section></fieldset>
-  {{if .AwaitingRestart}}<section class="border rounded p-3 mt-3" role="status"><h2 class="h5">Saved for restart</h2><p>These repositories start monitoring after Minion restarts. Invitation checks pause until then in owner-only mode.</p><ul class="mb-0">{{range .AwaitingRestart}}<li>{{.}}</li>{{end}}</ul></section>{{end}}{{end}}
+  {{if .AwaitingRestart}}<section class="border rounded p-3 mt-3" role="status"><h2 class="h5">Saved but inactive</h2><p>Restart Minion after GitHub access is granted to begin monitoring.</p><ul class="mb-0">{{range .AwaitingRestart}}<li>{{.}}</li>{{end}}</ul></section>{{end}}{{end}}
 </main>{{$.TailHTML}}</body></html>{{end}}
 {{define "admin skills"}}{{template "head.html" $}}<title>Skills · Minion admin</title></head>
 <body>{{template "admin-nav" $}}<main class="container py-4">
